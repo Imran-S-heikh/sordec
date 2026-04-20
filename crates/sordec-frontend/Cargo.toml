@@ -1,0 +1,16 @@
+[package]
+name = "sordec-frontend"
+description = "WASM parser and Soroban metadata decoder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+sordec-common.workspace = true
+sordec-ir.workspace = true
+wasmparser.workspace = true
+soroban-spec.workspace = true
+soroban-meta.workspace = true
+stellar-xdr.workspace = true

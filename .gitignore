@@ -1,0 +1,25 @@
+# Cargo / Rust build artifacts
+/target/
+**/target/
+Cargo.lock.bak
+*.rs.bk
+
+# Legacy (old AI-generated code kept as reference only)
+/_legacy/
+
+# Learning experiments' build artifacts
+/learning/**/target/
+
+# CLI output defaults
+/out/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

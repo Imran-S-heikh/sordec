@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sordec-common",
+    "crates/sordec-ir",
+    "crates/sordec-frontend",
+    "crates/sordec-passes",
+    "crates/sordec-backend",
+    "crates/sordec-driver",
+    "crates/sordec-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["Imran Shaikh"]
+repository = "https://github.com/Imran-S-heikh/sordec"
+description = "Soroban WASM-to-Rust decompiler"
+
+[workspace.dependencies]
+# Internal crates — referenced by path within the workspace
+sordec-common   = { path = "crates/sordec-common" }
+sordec-ir       = { path = "crates/sordec-ir" }
+sordec-frontend = { path = "crates/sordec-frontend" }
+sordec-passes   = { path = "crates/sordec-passes" }
+sordec-backend  = { path = "crates/sordec-backend" }
+sordec-driver   = { path = "crates/sordec-driver" }
+
+# External crates — pinned to exact versions we've validated
+wasmparser    = "0.240"
+wasmprinter   = "0.240"
+waffle        = "0.2.0"
+soroban-spec  = "25.3.0"
+soroban-meta  = "25.3.0"
+stellar-xdr   = { version = "=25.0.0", default-features = false, features = ["curr", "std"] }
+syn           = { version = "2.0", features = ["full"] }
+quote         = "1.0"
+proc-macro2   = "1.0"
+prettyplease  = "0.2"
+thiserror     = "2.0"
+serde         = { version = "1.0", features = ["derive"] }
+serde_json    = "1.0"
+clap          = { version = "4.5", features = ["derive"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3

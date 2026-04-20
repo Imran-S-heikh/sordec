@@ -1,0 +1,16 @@
+[package]
+name = "sordec-cli"
+description = "Command-line interface for sordec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "sordec"
+path = "src/main.rs"
+
+[dependencies]
+sordec-driver.workspace = true
+clap.workspace = true

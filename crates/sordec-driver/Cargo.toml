@@ -1,0 +1,15 @@
+[package]
+name = "sordec-driver"
+description = "Pipeline orchestration and pass manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+sordec-common.workspace = true
+sordec-ir.workspace = true
+sordec-frontend.workspace = true
+sordec-passes.workspace = true
+sordec-backend.workspace = true

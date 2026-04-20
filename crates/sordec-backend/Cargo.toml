@@ -1,0 +1,17 @@
+[package]
+name = "sordec-backend"
+description = "Code emitters (annotated WAT and compilable Rust)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+sordec-common.workspace = true
+sordec-ir.workspace = true
+wasmprinter.workspace = true
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
+prettyplease.workspace = true

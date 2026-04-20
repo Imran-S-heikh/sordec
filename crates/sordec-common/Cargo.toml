@@ -1,0 +1,16 @@
+[package]
+name = "sordec-common"
+description = "Shared types: errors, identifiers, confidence, provenance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]

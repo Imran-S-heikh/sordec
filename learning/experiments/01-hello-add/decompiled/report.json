@@ -1,0 +1,2998 @@
+{
+  "wasm_facts": {
+    "section_spans": [
+      {
+        "section": "type",
+        "span": {
+          "start": 10,
+          "end": 30
+        }
+      },
+      {
+        "section": "import",
+        "span": {
+          "start": 32,
+          "end": 45
+        }
+      },
+      {
+        "section": "function",
+        "span": {
+          "start": 47,
+          "end": 53
+        }
+      },
+      {
+        "section": "memory",
+        "span": {
+          "start": 55,
+          "end": 58
+        }
+      },
+      {
+        "section": "global",
+        "span": {
+          "start": 60,
+          "end": 85
+        }
+      },
+      {
+        "section": "export",
+        "span": {
+          "start": 87,
+          "end": 134
+        }
+      },
+      {
+        "section": "code",
+        "span": {
+          "start": 137,
+          "end": 407
+        }
+      },
+      {
+        "section": "custom:contractspecv0",
+        "span": {
+          "start": 409,
+          "end": 484
+        }
+      },
+      {
+        "section": "custom:contractenvmetav0",
+        "span": {
+          "start": 486,
+          "end": 516
+        }
+      },
+      {
+        "section": "custom:contractmetav0",
+        "span": {
+          "start": 518,
+          "end": 629
+        }
+      }
+    ],
+    "imports": [
+      {
+        "index": 0,
+        "module": "i",
+        "name": "0",
+        "kind": "func(type=0)"
+      },
+      {
+        "index": 1,
+        "module": "i",
+        "name": "_",
+        "kind": "func(type=0)"
+      }
+    ],
+    "exports": [
+      {
+        "name": "memory",
+        "kind": "Memory",
+        "index": 0
+      },
+      {
+        "name": "add",
+        "kind": "Func",
+        "index": 3
+      },
+      {
+        "name": "_",
+        "kind": "Func",
+        "index": 6
+      },
+      {
+        "name": "__data_end",
+        "kind": "Global",
+        "index": 1
+      },
+      {
+        "name": "__heap_base",
+        "kind": "Global",
+        "index": 2
+      }
+    ],
+    "function_type_indices": [
+      1,
+      2,
+      3,
+      3,
+      3
+    ],
+    "function_body_spans": [
+      {
+        "start": 139,
+        "end": 232
+      },
+      {
+        "start": 234,
+        "end": 390
+      },
+      {
+        "start": 391,
+        "end": 400
+      },
+      {
+        "start": 401,
+        "end": 404
+      },
+      {
+        "start": 405,
+        "end": 407
+      }
+    ],
+    "custom_sections": [
+      {
+        "name": "contractspecv0",
+        "span": {
+          "start": 409,
+          "end": 484
+        },
+        "bytes": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          3,
+          97,
+          100,
+          100,
+          0,
+          0,
+          0,
+          0,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          97,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          98,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          6
+        ]
+      },
+      {
+        "name": "contractenvmetav0",
+        "span": {
+          "start": 486,
+          "end": 516
+        },
+        "bytes": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          21,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "name": "contractmetav0",
+        "span": {
+          "start": 518,
+          "end": 629
+        },
+        "bytes": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          5,
+          114,
+          115,
+          118,
+          101,
+          114,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          6,
+          49,
+          46,
+          57,
+          49,
+          46,
+          49,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          8,
+          114,
+          115,
+          115,
+          100,
+          107,
+          118,
+          101,
+          114,
+          0,
+          0,
+          0,
+          47,
+          50,
+          49,
+          46,
+          55,
+          46,
+          55,
+          35,
+          53,
+          100,
+          97,
+          55,
+          56,
+          57,
+          99,
+          53,
+          48,
+          98,
+          49,
+          56,
+          97,
+          52,
+          99,
+          50,
+          98,
+          101,
+          53,
+          51,
+          51,
+          57,
+          52,
+          49,
+          51,
+          56,
+          50,
+          49,
+          50,
+          102,
+          101,
+          100,
+          53,
+          54,
+          102,
+          48,
+          100,
+          102,
+          99,
+          52,
+          0
+        ]
+      }
+    ]
+  },
+  "soroban_facts": {
+    "spec_entries": [
+      {
+        "name": "add",
+        "kind": "Function"
+      }
+    ],
+    "functions": {
+      "add": {
+        "name": "add",
+        "inputs": [
+          {
+            "name": "a",
+            "type_name": "u64"
+          },
+          {
+            "name": "b",
+            "type_name": "u64"
+          }
+        ],
+        "outputs": [
+          "u64"
+        ]
+      }
+    },
+    "types": {
+      "structs": {},
+      "unions": {},
+      "enums": {},
+      "errors": {},
+      "events": {}
+    },
+    "contract_meta": {
+      "rssdkver": "21.7.7#5da789c50b18a4c2be53394138212fed56f0dfc4",
+      "rsver": "1.91.1"
+    },
+    "env_meta": {
+      "protocol": "21",
+      "pre_release": "0"
+    }
+  },
+  "lifted_ir": {
+    "functions": [
+      {
+        "id": "func0",
+        "display_name": "func0",
+        "params": [
+          {
+            "name": "v0",
+            "type_name": "i32"
+          },
+          {
+            "name": "v1",
+            "type_name": "i64"
+          }
+        ],
+        "outputs": [],
+        "blocks": [
+          {
+            "id": "block0",
+            "params": [
+              {
+                "name": "v0",
+                "type_name": "i32"
+              },
+              {
+                "name": "v1",
+                "type_name": "i64"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v2",
+                "opcode": "I32WrapI64",
+                "args": [
+                  "v1"
+                ],
+                "immediates": [],
+                "result": "v2",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v3",
+                "opcode": "I32Const",
+                "args": [],
+                "immediates": [
+                  "255"
+                ],
+                "result": "v3",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v4",
+                "opcode": "I32And",
+                "args": [
+                  "v2",
+                  "v3"
+                ],
+                "immediates": [],
+                "result": "v4",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v5",
+                "opcode": "I32Const",
+                "args": [],
+                "immediates": [
+                  "64"
+                ],
+                "result": "v5",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v6",
+                "opcode": "I32Eq",
+                "args": [
+                  "v4",
+                  "v5"
+                ],
+                "immediates": [],
+                "result": "v6",
+                "result_types": [
+                  "i32"
+                ]
+              }
+            ],
+            "terminator": {
+              "kind": "if",
+              "args": [
+                "v6"
+              ],
+              "targets": [
+                {
+                  "block": "block3",
+                  "args": [
+                    "v0",
+                    "v1"
+                  ]
+                },
+                {
+                  "block": "block4",
+                  "args": [
+                    "v4",
+                    "v0",
+                    "v1"
+                  ]
+                }
+              ]
+            },
+            "successors": [
+              "block3",
+              "block4"
+            ]
+          },
+          {
+            "id": "block1",
+            "params": [],
+            "instructions": [],
+            "terminator": {
+              "kind": "return",
+              "args": [],
+              "targets": []
+            },
+            "successors": []
+          },
+          {
+            "id": "block2",
+            "params": [
+              {
+                "name": "v20",
+                "type_name": "i32"
+              },
+              {
+                "name": "v25",
+                "type_name": "i64"
+              },
+              {
+                "name": "v27",
+                "type_name": "i64"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v26",
+                "opcode": "I64Store",
+                "args": [
+                  "v20",
+                  "v25"
+                ],
+                "immediates": [
+                  "memory0",
+                  "align=3",
+                  "offset=0"
+                ],
+                "result": null,
+                "result_types": []
+              },
+              {
+                "value_id": "v28",
+                "opcode": "I64Store",
+                "args": [
+                  "v20",
+                  "v27"
+                ],
+                "immediates": [
+                  "memory0",
+                  "align=3",
+                  "offset=8"
+                ],
+                "result": null,
+                "result_types": []
+              }
+            ],
+            "terminator": {
+              "kind": "br",
+              "args": [],
+              "targets": [
+                {
+                  "block": "block1",
+                  "args": []
+                }
+              ]
+            },
+            "successors": [
+              "block1"
+            ]
+          },
+          {
+            "id": "block3",
+            "params": [
+              {
+                "name": "v29",
+                "type_name": "i32"
+              },
+              {
+                "name": "v30",
+                "type_name": "i64"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v17",
+                "opcode": "I64Const",
+                "args": [],
+                "immediates": [
+                  "0"
+                ],
+                "result": "v17",
+                "result_types": [
+                  "i64"
+                ]
+              },
+              {
+                "value_id": "v19",
+                "opcode": "Call",
+                "args": [
+                  "v30"
+                ],
+                "immediates": [
+                  "i::0"
+                ],
+                "result": "v19",
+                "result_types": [
+                  "i64"
+                ]
+              }
+            ],
+            "terminator": {
+              "kind": "br",
+              "args": [],
+              "targets": [
+                {
+                  "block": "block2",
+                  "args": [
+                    "v29",
+                    "v17",
+                    "v19"
+                  ]
+                }
+              ]
+            },
+            "successors": [
+              "block2"
+            ]
+          },
+          {
+            "id": "block4",
+            "params": [
+              {
+                "name": "v31",
+                "type_name": "i32"
+              },
+              {
+                "name": "v33",
+                "type_name": "i32"
+              },
+              {
+                "name": "v35",
+                "type_name": "i64"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v8",
+                "opcode": "I32Const",
+                "args": [],
+                "immediates": [
+                  "6"
+                ],
+                "result": "v8",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v9",
+                "opcode": "I32Eq",
+                "args": [
+                  "v31",
+                  "v8"
+                ],
+                "immediates": [],
+                "result": "v9",
+                "result_types": [
+                  "i32"
+                ]
+              }
+            ],
+            "terminator": {
+              "kind": "if",
+              "args": [
+                "v9"
+              ],
+              "targets": [
+                {
+                  "block": "block5",
+                  "args": [
+                    "v33",
+                    "v35"
+                  ]
+                },
+                {
+                  "block": "block6",
+                  "args": [
+                    "v33"
+                  ]
+                }
+              ]
+            },
+            "successors": [
+              "block5",
+              "block6"
+            ]
+          },
+          {
+            "id": "block5",
+            "params": [
+              {
+                "name": "v32",
+                "type_name": "i32"
+              },
+              {
+                "name": "v34",
+                "type_name": "i64"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v14",
+                "opcode": "I64Const",
+                "args": [],
+                "immediates": [
+                  "8"
+                ],
+                "result": "v14",
+                "result_types": [
+                  "i64"
+                ]
+              },
+              {
+                "value_id": "v15",
+                "opcode": "I64ShrU",
+                "args": [
+                  "v34",
+                  "v14"
+                ],
+                "immediates": [],
+                "result": "v15",
+                "result_types": [
+                  "i64"
+                ]
+              },
+              {
+                "value_id": "v16",
+                "opcode": "I64Const",
+                "args": [],
+                "immediates": [
+                  "0"
+                ],
+                "result": "v16",
+                "result_types": [
+                  "i64"
+                ]
+              }
+            ],
+            "terminator": {
+              "kind": "br",
+              "args": [],
+              "targets": [
+                {
+                  "block": "block2",
+                  "args": [
+                    "v32",
+                    "v16",
+                    "v15"
+                  ]
+                }
+              ]
+            },
+            "successors": [
+              "block2"
+            ]
+          },
+          {
+            "id": "block6",
+            "params": [
+              {
+                "name": "v36",
+                "type_name": "i32"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v10",
+                "opcode": "I64Const",
+                "args": [],
+                "immediates": [
+                  "1"
+                ],
+                "result": "v10",
+                "result_types": [
+                  "i64"
+                ]
+              },
+              {
+                "value_id": "v11",
+                "opcode": "I64Const",
+                "args": [],
+                "immediates": [
+                  "34359740419"
+                ],
+                "result": "v11",
+                "result_types": [
+                  "i64"
+                ]
+              }
+            ],
+            "terminator": {
+              "kind": "br",
+              "args": [],
+              "targets": [
+                {
+                  "block": "block2",
+                  "args": [
+                    "v36",
+                    "v10",
+                    "v11"
+                  ]
+                }
+              ]
+            },
+            "successors": [
+              "block2"
+            ]
+          }
+        ],
+        "call_targets": [
+          {
+            "function_index": 0,
+            "imported": true,
+            "module": "i",
+            "name": "0",
+            "target": "i::0"
+          }
+        ],
+        "cfg": {
+          "entry_block": "block0",
+          "predecessors": {
+            "block0": [],
+            "block1": [
+              "block2"
+            ],
+            "block2": [
+              "block3",
+              "block5",
+              "block6"
+            ],
+            "block3": [
+              "block0"
+            ],
+            "block4": [
+              "block0"
+            ],
+            "block5": [
+              "block4"
+            ],
+            "block6": [
+              "block4"
+            ]
+          },
+          "dominators": {
+            "block0": [
+              "block0"
+            ],
+            "block1": [
+              "block0",
+              "block1",
+              "block2"
+            ],
+            "block2": [
+              "block0",
+              "block2"
+            ],
+            "block3": [
+              "block0",
+              "block3"
+            ],
+            "block4": [
+              "block0",
+              "block4"
+            ],
+            "block5": [
+              "block0",
+              "block4",
+              "block5"
+            ],
+            "block6": [
+              "block0",
+              "block4",
+              "block6"
+            ]
+          },
+          "post_dominators": {
+            "block0": [
+              "block0",
+              "block1",
+              "block2"
+            ],
+            "block1": [
+              "block1"
+            ],
+            "block2": [
+              "block1",
+              "block2"
+            ],
+            "block3": [
+              "block1",
+              "block2",
+              "block3"
+            ],
+            "block4": [
+              "block1",
+              "block2",
+              "block4"
+            ],
+            "block5": [
+              "block1",
+              "block2",
+              "block5"
+            ],
+            "block6": [
+              "block1",
+              "block2",
+              "block6"
+            ]
+          },
+          "merge_blocks": {
+            "block0": "block2",
+            "block4": "block2"
+          },
+          "loop_headers": [],
+          "back_edges": []
+        }
+      },
+      {
+        "id": "func1",
+        "display_name": "add",
+        "params": [
+          {
+            "name": "v0",
+            "type_name": "i64"
+          },
+          {
+            "name": "v1",
+            "type_name": "i64"
+          }
+        ],
+        "outputs": [
+          "i64"
+        ],
+        "blocks": [
+          {
+            "id": "block0",
+            "params": [
+              {
+                "name": "v1",
+                "type_name": "i64"
+              },
+              {
+                "name": "v2",
+                "type_name": "i64"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v3",
+                "opcode": "GlobalGet",
+                "args": [],
+                "immediates": [
+                  "global0"
+                ],
+                "result": "v3",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v4",
+                "opcode": "I32Const",
+                "args": [],
+                "immediates": [
+                  "16"
+                ],
+                "result": "v4",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v5",
+                "opcode": "I32Sub",
+                "args": [
+                  "v3",
+                  "v4"
+                ],
+                "immediates": [],
+                "result": "v5",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v6",
+                "opcode": "GlobalSet",
+                "args": [
+                  "v5"
+                ],
+                "immediates": [
+                  "global0"
+                ],
+                "result": null,
+                "result_types": []
+              },
+              {
+                "value_id": "v7",
+                "opcode": "Call",
+                "args": [
+                  "v5",
+                  "v1"
+                ],
+                "immediates": [
+                  "func0"
+                ],
+                "result": null,
+                "result_types": []
+              },
+              {
+                "value_id": "v8",
+                "opcode": "I32Load",
+                "args": [
+                  "v5"
+                ],
+                "immediates": [
+                  "memory0",
+                  "align=2",
+                  "offset=0"
+                ],
+                "result": "v8",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v9",
+                "opcode": "I32Const",
+                "args": [],
+                "immediates": [
+                  "1"
+                ],
+                "result": "v9",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v10",
+                "opcode": "I32Eq",
+                "args": [
+                  "v8",
+                  "v9"
+                ],
+                "immediates": [],
+                "result": "v10",
+                "result_types": [
+                  "i32"
+                ]
+              }
+            ],
+            "terminator": {
+              "kind": "if",
+              "args": [
+                "v10"
+              ],
+              "targets": [
+                {
+                  "block": "block3",
+                  "args": []
+                },
+                {
+                  "block": "block4",
+                  "args": [
+                    "v2",
+                    "v5"
+                  ]
+                }
+              ]
+            },
+            "successors": [
+              "block3",
+              "block4"
+            ]
+          },
+          {
+            "id": "block1",
+            "params": [
+              {
+                "name": "v0",
+                "type_name": "i64"
+              }
+            ],
+            "instructions": [],
+            "terminator": {
+              "kind": "none",
+              "args": [],
+              "targets": []
+            },
+            "successors": []
+          },
+          {
+            "id": "block2",
+            "params": [],
+            "instructions": [
+              {
+                "value_id": "v41",
+                "opcode": "Call",
+                "args": [],
+                "immediates": [
+                  "func2"
+                ],
+                "result": null,
+                "result_types": []
+              }
+            ],
+            "terminator": {
+              "kind": "unreachable",
+              "args": [],
+              "targets": []
+            },
+            "successors": []
+          },
+          {
+            "id": "block3",
+            "params": [],
+            "instructions": [],
+            "terminator": {
+              "kind": "unreachable",
+              "args": [],
+              "targets": []
+            },
+            "successors": []
+          },
+          {
+            "id": "block4",
+            "params": [
+              {
+                "name": "v42",
+                "type_name": "i64"
+              },
+              {
+                "name": "v43",
+                "type_name": "i32"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v12",
+                "opcode": "I64Load",
+                "args": [
+                  "v43"
+                ],
+                "immediates": [
+                  "memory0",
+                  "align=3",
+                  "offset=8"
+                ],
+                "result": "v12",
+                "result_types": [
+                  "i64"
+                ]
+              },
+              {
+                "value_id": "v14",
+                "opcode": "Call",
+                "args": [
+                  "v43",
+                  "v42"
+                ],
+                "immediates": [
+                  "func0"
+                ],
+                "result": null,
+                "result_types": []
+              },
+              {
+                "value_id": "v15",
+                "opcode": "I32Load",
+                "args": [
+                  "v43"
+                ],
+                "immediates": [
+                  "memory0",
+                  "align=2",
+                  "offset=0"
+                ],
+                "result": "v15",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v16",
+                "opcode": "I32Const",
+                "args": [],
+                "immediates": [
+                  "1"
+                ],
+                "result": "v16",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v17",
+                "opcode": "I32Eq",
+                "args": [
+                  "v15",
+                  "v16"
+                ],
+                "immediates": [],
+                "result": "v17",
+                "result_types": [
+                  "i32"
+                ]
+              }
+            ],
+            "terminator": {
+              "kind": "if",
+              "args": [
+                "v17"
+              ],
+              "targets": [
+                {
+                  "block": "block3",
+                  "args": []
+                },
+                {
+                  "block": "block5",
+                  "args": [
+                    "v43",
+                    "v12"
+                  ]
+                }
+              ]
+            },
+            "successors": [
+              "block3",
+              "block5"
+            ]
+          },
+          {
+            "id": "block5",
+            "params": [
+              {
+                "name": "v44",
+                "type_name": "i32"
+              },
+              {
+                "name": "v45",
+                "type_name": "i64"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v19",
+                "opcode": "I64Load",
+                "args": [
+                  "v44"
+                ],
+                "immediates": [
+                  "memory0",
+                  "align=3",
+                  "offset=8"
+                ],
+                "result": "v19",
+                "result_types": [
+                  "i64"
+                ]
+              },
+              {
+                "value_id": "v21",
+                "opcode": "I64Add",
+                "args": [
+                  "v19",
+                  "v45"
+                ],
+                "immediates": [],
+                "result": "v21",
+                "result_types": [
+                  "i64"
+                ]
+              },
+              {
+                "value_id": "v22",
+                "opcode": "I64LtU",
+                "args": [
+                  "v21",
+                  "v19"
+                ],
+                "immediates": [],
+                "result": "v22",
+                "result_types": [
+                  "i32"
+                ]
+              }
+            ],
+            "terminator": {
+              "kind": "if",
+              "args": [
+                "v22"
+              ],
+              "targets": [
+                {
+                  "block": "block2",
+                  "args": []
+                },
+                {
+                  "block": "block6",
+                  "args": [
+                    "v21",
+                    "v44"
+                  ]
+                }
+              ]
+            },
+            "successors": [
+              "block2",
+              "block6"
+            ]
+          },
+          {
+            "id": "block6",
+            "params": [
+              {
+                "name": "v46",
+                "type_name": "i64"
+              },
+              {
+                "name": "v48",
+                "type_name": "i32"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v24",
+                "opcode": "I64Const",
+                "args": [],
+                "immediates": [
+                  "72057594037927935"
+                ],
+                "result": "v24",
+                "result_types": [
+                  "i64"
+                ]
+              },
+              {
+                "value_id": "v25",
+                "opcode": "I64GtU",
+                "args": [
+                  "v46",
+                  "v24"
+                ],
+                "immediates": [],
+                "result": "v25",
+                "result_types": [
+                  "i32"
+                ]
+              }
+            ],
+            "terminator": {
+              "kind": "if",
+              "args": [
+                "v25"
+              ],
+              "targets": [
+                {
+                  "block": "block8",
+                  "args": [
+                    "v48",
+                    "v46"
+                  ]
+                },
+                {
+                  "block": "block9",
+                  "args": [
+                    "v48",
+                    "v46"
+                  ]
+                }
+              ]
+            },
+            "successors": [
+              "block8",
+              "block9"
+            ]
+          },
+          {
+            "id": "block7",
+            "params": [
+              {
+                "name": "v33",
+                "type_name": "i32"
+              },
+              {
+                "name": "v40",
+                "type_name": "i64"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v37",
+                "opcode": "I32Const",
+                "args": [],
+                "immediates": [
+                  "16"
+                ],
+                "result": "v37",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v38",
+                "opcode": "I32Add",
+                "args": [
+                  "v33",
+                  "v37"
+                ],
+                "immediates": [],
+                "result": "v38",
+                "result_types": [
+                  "i32"
+                ]
+              },
+              {
+                "value_id": "v39",
+                "opcode": "GlobalSet",
+                "args": [
+                  "v38"
+                ],
+                "immediates": [
+                  "global0"
+                ],
+                "result": null,
+                "result_types": []
+              }
+            ],
+            "terminator": {
+              "kind": "return",
+              "args": [
+                "v40"
+              ],
+              "targets": []
+            },
+            "successors": []
+          },
+          {
+            "id": "block8",
+            "params": [
+              {
+                "name": "v47",
+                "type_name": "i32"
+              },
+              {
+                "name": "v49",
+                "type_name": "i64"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v32",
+                "opcode": "Call",
+                "args": [
+                  "v49"
+                ],
+                "immediates": [
+                  "i::_"
+                ],
+                "result": "v32",
+                "result_types": [
+                  "i64"
+                ]
+              }
+            ],
+            "terminator": {
+              "kind": "br",
+              "args": [],
+              "targets": [
+                {
+                  "block": "block7",
+                  "args": [
+                    "v47",
+                    "v32"
+                  ]
+                }
+              ]
+            },
+            "successors": [
+              "block7"
+            ]
+          },
+          {
+            "id": "block9",
+            "params": [
+              {
+                "name": "v50",
+                "type_name": "i32"
+              },
+              {
+                "name": "v51",
+                "type_name": "i64"
+              }
+            ],
+            "instructions": [
+              {
+                "value_id": "v27",
+                "opcode": "I64Const",
+                "args": [],
+                "immediates": [
+                  "8"
+                ],
+                "result": "v27",
+                "result_types": [
+                  "i64"
+                ]
+              },
+              {
+                "value_id": "v28",
+                "opcode": "I64Shl",
+                "args": [
+                  "v51",
+                  "v27"
+                ],
+                "immediates": [],
+                "result": "v28",
+                "result_types": [
+                  "i64"
+                ]
+              },
+              {
+                "value_id": "v29",
+                "opcode": "I64Const",
+                "args": [],
+                "immediates": [
+                  "6"
+                ],
+                "result": "v29",
+                "result_types": [
+                  "i64"
+                ]
+              },
+              {
+                "value_id": "v30",
+                "opcode": "I64Or",
+                "args": [
+                  "v28",
+                  "v29"
+                ],
+                "immediates": [],
+                "result": "v30",
+                "result_types": [
+                  "i64"
+                ]
+              }
+            ],
+            "terminator": {
+              "kind": "br",
+              "args": [],
+              "targets": [
+                {
+                  "block": "block7",
+                  "args": [
+                    "v50",
+                    "v30"
+                  ]
+                }
+              ]
+            },
+            "successors": [
+              "block7"
+            ]
+          }
+        ],
+        "call_targets": [
+          {
+            "function_index": 2,
+            "imported": false,
+            "module": null,
+            "name": null,
+            "target": "func0"
+          },
+          {
+            "function_index": 4,
+            "imported": false,
+            "module": null,
+            "name": null,
+            "target": "func2"
+          },
+          {
+            "function_index": 1,
+            "imported": true,
+            "module": "i",
+            "name": "_",
+            "target": "i::_"
+          }
+        ],
+        "cfg": {
+          "entry_block": "block0",
+          "predecessors": {
+            "block0": [],
+            "block1": [],
+            "block2": [
+              "block5"
+            ],
+            "block3": [
+              "block0",
+              "block4"
+            ],
+            "block4": [
+              "block0"
+            ],
+            "block5": [
+              "block4"
+            ],
+            "block6": [
+              "block5"
+            ],
+            "block7": [
+              "block8",
+              "block9"
+            ],
+            "block8": [
+              "block6"
+            ],
+            "block9": [
+              "block6"
+            ]
+          },
+          "dominators": {
+            "block0": [
+              "block0"
+            ],
+            "block1": [
+              "block0",
+              "block1",
+              "block2",
+              "block3",
+              "block4",
+              "block5",
+              "block6",
+              "block7",
+              "block8",
+              "block9"
+            ],
+            "block2": [
+              "block0",
+              "block2",
+              "block4",
+              "block5"
+            ],
+            "block3": [
+              "block0",
+              "block3"
+            ],
+            "block4": [
+              "block0",
+              "block4"
+            ],
+            "block5": [
+              "block0",
+              "block4",
+              "block5"
+            ],
+            "block6": [
+              "block0",
+              "block4",
+              "block5",
+              "block6"
+            ],
+            "block7": [
+              "block0",
+              "block4",
+              "block5",
+              "block6",
+              "block7"
+            ],
+            "block8": [
+              "block0",
+              "block4",
+              "block5",
+              "block6",
+              "block8"
+            ],
+            "block9": [
+              "block0",
+              "block4",
+              "block5",
+              "block6",
+              "block9"
+            ]
+          },
+          "post_dominators": {
+            "block0": [
+              "block0"
+            ],
+            "block1": [
+              "block1"
+            ],
+            "block2": [
+              "block2"
+            ],
+            "block3": [
+              "block3"
+            ],
+            "block4": [
+              "block4"
+            ],
+            "block5": [
+              "block5"
+            ],
+            "block6": [
+              "block6",
+              "block7"
+            ],
+            "block7": [
+              "block7"
+            ],
+            "block8": [
+              "block7",
+              "block8"
+            ],
+            "block9": [
+              "block7",
+              "block9"
+            ]
+          },
+          "merge_blocks": {
+            "block6": "block7"
+          },
+          "loop_headers": [],
+          "back_edges": []
+        }
+      },
+      {
+        "id": "func2",
+        "display_name": "func2",
+        "params": [],
+        "outputs": [],
+        "blocks": [
+          {
+            "id": "block0",
+            "params": [],
+            "instructions": [
+              {
+                "value_id": "v0",
+                "opcode": "Call",
+                "args": [],
+                "immediates": [
+                  "func3"
+                ],
+                "result": null,
+                "result_types": []
+              }
+            ],
+            "terminator": {
+              "kind": "unreachable",
+              "args": [],
+              "targets": []
+            },
+            "successors": []
+          },
+          {
+            "id": "block1",
+            "params": [],
+            "instructions": [],
+            "terminator": {
+              "kind": "none",
+              "args": [],
+              "targets": []
+            },
+            "successors": []
+          }
+        ],
+        "call_targets": [
+          {
+            "function_index": 5,
+            "imported": false,
+            "module": null,
+            "name": null,
+            "target": "func3"
+          }
+        ],
+        "cfg": {
+          "entry_block": "block0",
+          "predecessors": {
+            "block0": [],
+            "block1": []
+          },
+          "dominators": {
+            "block0": [
+              "block0"
+            ],
+            "block1": [
+              "block0",
+              "block1"
+            ]
+          },
+          "post_dominators": {
+            "block0": [
+              "block0"
+            ],
+            "block1": [
+              "block1"
+            ]
+          },
+          "merge_blocks": {},
+          "loop_headers": [],
+          "back_edges": []
+        }
+      },
+      {
+        "id": "func3",
+        "display_name": "func3",
+        "params": [],
+        "outputs": [],
+        "blocks": [
+          {
+            "id": "block0",
+            "params": [],
+            "instructions": [],
+            "terminator": {
+              "kind": "unreachable",
+              "args": [],
+              "targets": []
+            },
+            "successors": []
+          },
+          {
+            "id": "block1",
+            "params": [],
+            "instructions": [],
+            "terminator": {
+              "kind": "none",
+              "args": [],
+              "targets": []
+            },
+            "successors": []
+          }
+        ],
+        "call_targets": [],
+        "cfg": {
+          "entry_block": "block0",
+          "predecessors": {
+            "block0": [],
+            "block1": []
+          },
+          "dominators": {
+            "block0": [
+              "block0"
+            ],
+            "block1": [
+              "block0",
+              "block1"
+            ]
+          },
+          "post_dominators": {
+            "block0": [
+              "block0"
+            ],
+            "block1": [
+              "block1"
+            ]
+          },
+          "merge_blocks": {},
+          "loop_headers": [],
+          "back_edges": []
+        }
+      },
+      {
+        "id": "func4",
+        "display_name": "_",
+        "params": [],
+        "outputs": [],
+        "blocks": [
+          {
+            "id": "block0",
+            "params": [],
+            "instructions": [],
+            "terminator": {
+              "kind": "br",
+              "args": [],
+              "targets": [
+                {
+                  "block": "block1",
+                  "args": []
+                }
+              ]
+            },
+            "successors": [
+              "block1"
+            ]
+          },
+          {
+            "id": "block1",
+            "params": [],
+            "instructions": [],
+            "terminator": {
+              "kind": "return",
+              "args": [],
+              "targets": []
+            },
+            "successors": []
+          }
+        ],
+        "call_targets": [],
+        "cfg": {
+          "entry_block": "block0",
+          "predecessors": {
+            "block0": [],
+            "block1": [
+              "block0"
+            ]
+          },
+          "dominators": {
+            "block0": [
+              "block0"
+            ],
+            "block1": [
+              "block0",
+              "block1"
+            ]
+          },
+          "post_dominators": {
+            "block0": [
+              "block0",
+              "block1"
+            ],
+            "block1": [
+              "block1"
+            ]
+          },
+          "merge_blocks": {},
+          "loop_headers": [],
+          "back_edges": []
+        }
+      }
+    ]
+  },
+  "semantic_module": {
+    "functions": [
+      {
+        "function_id": "func0",
+        "export_names": [],
+        "operations": [
+          {
+            "kind": "TryFromVal",
+            "detail": "int::obj_to_u64"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "and"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "shr"
+          },
+          {
+            "kind": "ComparisonOp",
+            "detail": "eq"
+          }
+        ],
+        "bindings": [
+          {
+            "value_id": "v4",
+            "op": {
+              "kind": "ArithmeticOp",
+              "detail": "and"
+            }
+          },
+          {
+            "value_id": "v6",
+            "op": {
+              "kind": "ComparisonOp",
+              "detail": "eq"
+            }
+          },
+          {
+            "value_id": "v19",
+            "op": {
+              "kind": "TryFromVal",
+              "detail": "int::obj_to_u64"
+            }
+          },
+          {
+            "value_id": "v9",
+            "op": {
+              "kind": "ComparisonOp",
+              "detail": "eq"
+            }
+          },
+          {
+            "value_id": "v15",
+            "op": {
+              "kind": "ArithmeticOp",
+              "detail": "shr"
+            }
+          }
+        ]
+      },
+      {
+        "function_id": "func1",
+        "export_names": [
+          "add"
+        ],
+        "operations": [
+          {
+            "kind": "EntryPoint",
+            "detail": "Contract entry point `add`"
+          },
+          {
+            "kind": "IntoVal",
+            "detail": "int::obj_from_u64"
+          },
+          {
+            "kind": "TryFromVal",
+            "detail": "int::obj_to_u64"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "add"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "and"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "or"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "shl"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "shr"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "sub"
+          },
+          {
+            "kind": "ComparisonOp",
+            "detail": "eq"
+          },
+          {
+            "kind": "ComparisonOp",
+            "detail": "gt"
+          },
+          {
+            "kind": "ComparisonOp",
+            "detail": "lt"
+          }
+        ],
+        "bindings": [
+          {
+            "value_id": "v5",
+            "op": {
+              "kind": "ArithmeticOp",
+              "detail": "sub"
+            }
+          },
+          {
+            "value_id": "v10",
+            "op": {
+              "kind": "ComparisonOp",
+              "detail": "eq"
+            }
+          },
+          {
+            "value_id": "v17",
+            "op": {
+              "kind": "ComparisonOp",
+              "detail": "eq"
+            }
+          },
+          {
+            "value_id": "v21",
+            "op": {
+              "kind": "ArithmeticOp",
+              "detail": "add"
+            }
+          },
+          {
+            "value_id": "v22",
+            "op": {
+              "kind": "ComparisonOp",
+              "detail": "lt"
+            }
+          },
+          {
+            "value_id": "v25",
+            "op": {
+              "kind": "ComparisonOp",
+              "detail": "gt"
+            }
+          },
+          {
+            "value_id": "v38",
+            "op": {
+              "kind": "ArithmeticOp",
+              "detail": "add"
+            }
+          },
+          {
+            "value_id": "v32",
+            "op": {
+              "kind": "IntoVal",
+              "detail": "int::obj_from_u64"
+            }
+          },
+          {
+            "value_id": "v28",
+            "op": {
+              "kind": "ArithmeticOp",
+              "detail": "shl"
+            }
+          },
+          {
+            "value_id": "v30",
+            "op": {
+              "kind": "ArithmeticOp",
+              "detail": "or"
+            }
+          }
+        ]
+      },
+      {
+        "function_id": "func2",
+        "export_names": [],
+        "operations": [],
+        "bindings": []
+      },
+      {
+        "function_id": "func3",
+        "export_names": [],
+        "operations": [],
+        "bindings": []
+      },
+      {
+        "function_id": "func4",
+        "export_names": [
+          "_"
+        ],
+        "operations": [
+          {
+            "kind": "Dispatcher",
+            "detail": "Contract dispatch entry point"
+          }
+        ],
+        "bindings": []
+      }
+    ]
+  },
+  "high_ir": {
+    "functions": [
+      {
+        "name": "add",
+        "params": [
+          {
+            "name": "a",
+            "type_name": "u64"
+          },
+          {
+            "name": "b",
+            "type_name": "u64"
+          }
+        ],
+        "outputs": [
+          "u64"
+        ],
+        "entry_block": "block0",
+        "blocks": [
+          {
+            "id": "block0",
+            "params": [
+              {
+                "name": "v1",
+                "type_name": "i64"
+              },
+              {
+                "name": "v2",
+                "type_name": "i64"
+              }
+            ],
+            "bindings": [
+              {
+                "name": "v3",
+                "ty": {
+                  "name": "i32"
+                },
+                "expr": {
+                  "GlobalGet": {
+                    "global": "global0"
+                  }
+                }
+              },
+              {
+                "name": "v4",
+                "ty": {
+                  "name": "i32"
+                },
+                "expr": {
+                  "Literal": {
+                    "value": "16"
+                  }
+                }
+              },
+              {
+                "name": "v5",
+                "ty": {
+                  "name": "u64"
+                },
+                "expr": {
+                  "Binary": {
+                    "op": "sub",
+                    "lhs": "v3",
+                    "rhs": "v4"
+                  }
+                }
+              },
+              {
+                "name": "v6",
+                "ty": {
+                  "name": "Val"
+                },
+                "expr": {
+                  "Semantic": {
+                    "kind": "LedgerAccess",
+                    "detail": "GlobalSet [\"global0\"]"
+                  }
+                }
+              },
+              {
+                "name": "v7",
+                "ty": {
+                  "name": "u64"
+                },
+                "expr": {
+                  "Call": {
+                    "target": "func0",
+                    "args": [
+                      "v5",
+                      "v1"
+                    ]
+                  }
+                }
+              },
+              {
+                "name": "v8",
+                "ty": {
+                  "name": "i32"
+                },
+                "expr": {
+                  "Load": {
+                    "op": "I32Load",
+                    "memory": "memory0",
+                    "offset": "0",
+                    "addr": "v5"
+                  }
+                }
+              },
+              {
+                "name": "v9",
+                "ty": {
+                  "name": "i32"
+                },
+                "expr": {
+                  "Literal": {
+                    "value": "1"
+                  }
+                }
+              },
+              {
+                "name": "v10",
+                "ty": {
+                  "name": "bool"
+                },
+                "expr": {
+                  "Compare": {
+                    "op": "eq",
+                    "lhs": "v8",
+                    "rhs": "v9"
+                  }
+                }
+              },
+              {
+                "name": "summary_8_into_val",
+                "ty": {
+                  "name": "Val"
+                },
+                "expr": {
+                  "HostCall": {
+                    "kind": "IntoVal",
+                    "detail": "int::obj_from_u64",
+                    "args": [
+                      "a"
+                    ]
+                  }
+                }
+              },
+              {
+                "name": "summary_9_try_from_val",
+                "ty": {
+                  "name": "u64"
+                },
+                "expr": {
+                  "HostCall": {
+                    "kind": "TryFromVal",
+                    "detail": "int::obj_to_u64",
+                    "args": [
+                      "a"
+                    ]
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "CondBr": {
+                "cond": "v10",
+                "if_true": {
+                  "block": "block3",
+                  "args": []
+                },
+                "if_false": {
+                  "block": "block4",
+                  "args": [
+                    "v2",
+                    "v5"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": "block1",
+            "params": [
+              {
+                "name": "v0",
+                "type_name": "i64"
+              }
+            ],
+            "bindings": [],
+            "terminator": "None"
+          },
+          {
+            "id": "block2",
+            "params": [],
+            "bindings": [
+              {
+                "name": "v41",
+                "ty": {
+                  "name": "u64"
+                },
+                "expr": {
+                  "Call": {
+                    "target": "func2",
+                    "args": []
+                  }
+                }
+              }
+            ],
+            "terminator": "Unreachable"
+          },
+          {
+            "id": "block3",
+            "params": [],
+            "bindings": [],
+            "terminator": "Unreachable"
+          },
+          {
+            "id": "block4",
+            "params": [
+              {
+                "name": "v42",
+                "type_name": "i64"
+              },
+              {
+                "name": "v43",
+                "type_name": "u64"
+              }
+            ],
+            "bindings": [
+              {
+                "name": "v12",
+                "ty": {
+                  "name": "i64"
+                },
+                "expr": {
+                  "Load": {
+                    "op": "I64Load",
+                    "memory": "memory0",
+                    "offset": "8",
+                    "addr": "v43"
+                  }
+                }
+              },
+              {
+                "name": "v14",
+                "ty": {
+                  "name": "u64"
+                },
+                "expr": {
+                  "Call": {
+                    "target": "func0",
+                    "args": [
+                      "v43",
+                      "v42"
+                    ]
+                  }
+                }
+              },
+              {
+                "name": "v15",
+                "ty": {
+                  "name": "i32"
+                },
+                "expr": {
+                  "Load": {
+                    "op": "I32Load",
+                    "memory": "memory0",
+                    "offset": "0",
+                    "addr": "v43"
+                  }
+                }
+              },
+              {
+                "name": "v16",
+                "ty": {
+                  "name": "i32"
+                },
+                "expr": {
+                  "Literal": {
+                    "value": "1"
+                  }
+                }
+              },
+              {
+                "name": "v17",
+                "ty": {
+                  "name": "bool"
+                },
+                "expr": {
+                  "Compare": {
+                    "op": "eq",
+                    "lhs": "v15",
+                    "rhs": "v16"
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "CondBr": {
+                "cond": "v17",
+                "if_true": {
+                  "block": "block3",
+                  "args": []
+                },
+                "if_false": {
+                  "block": "block5",
+                  "args": [
+                    "v43",
+                    "v12"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": "block5",
+            "params": [
+              {
+                "name": "v44",
+                "type_name": "u64"
+              },
+              {
+                "name": "v45",
+                "type_name": "i64"
+              }
+            ],
+            "bindings": [
+              {
+                "name": "v19",
+                "ty": {
+                  "name": "i64"
+                },
+                "expr": {
+                  "Load": {
+                    "op": "I64Load",
+                    "memory": "memory0",
+                    "offset": "8",
+                    "addr": "v44"
+                  }
+                }
+              },
+              {
+                "name": "v21",
+                "ty": {
+                  "name": "u64"
+                },
+                "expr": {
+                  "Binary": {
+                    "op": "add",
+                    "lhs": "v19",
+                    "rhs": "v45"
+                  }
+                }
+              },
+              {
+                "name": "v22",
+                "ty": {
+                  "name": "bool"
+                },
+                "expr": {
+                  "Compare": {
+                    "op": "lt",
+                    "lhs": "v21",
+                    "rhs": "v19"
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "CondBr": {
+                "cond": "v22",
+                "if_true": {
+                  "block": "block2",
+                  "args": []
+                },
+                "if_false": {
+                  "block": "block6",
+                  "args": [
+                    "v21",
+                    "v44"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": "block6",
+            "params": [
+              {
+                "name": "v46",
+                "type_name": "u64"
+              },
+              {
+                "name": "v48",
+                "type_name": "u64"
+              }
+            ],
+            "bindings": [
+              {
+                "name": "v24",
+                "ty": {
+                  "name": "i64"
+                },
+                "expr": {
+                  "Literal": {
+                    "value": "72057594037927935"
+                  }
+                }
+              },
+              {
+                "name": "v25",
+                "ty": {
+                  "name": "bool"
+                },
+                "expr": {
+                  "Compare": {
+                    "op": "gt",
+                    "lhs": "v46",
+                    "rhs": "v24"
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "CondBr": {
+                "cond": "v25",
+                "if_true": {
+                  "block": "block8",
+                  "args": [
+                    "v48",
+                    "v46"
+                  ]
+                },
+                "if_false": {
+                  "block": "block9",
+                  "args": [
+                    "v48",
+                    "v46"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": "block7",
+            "params": [
+              {
+                "name": "v33",
+                "type_name": "u64"
+              },
+              {
+                "name": "v40",
+                "type_name": "u64"
+              }
+            ],
+            "bindings": [
+              {
+                "name": "v37",
+                "ty": {
+                  "name": "i32"
+                },
+                "expr": {
+                  "Literal": {
+                    "value": "16"
+                  }
+                }
+              },
+              {
+                "name": "v38",
+                "ty": {
+                  "name": "u64"
+                },
+                "expr": {
+                  "Binary": {
+                    "op": "add",
+                    "lhs": "v33",
+                    "rhs": "v37"
+                  }
+                }
+              },
+              {
+                "name": "v39",
+                "ty": {
+                  "name": "Val"
+                },
+                "expr": {
+                  "Semantic": {
+                    "kind": "LedgerAccess",
+                    "detail": "GlobalSet [\"global0\"]"
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Return": {
+                "values": [
+                  "v40"
+                ]
+              }
+            }
+          },
+          {
+            "id": "block8",
+            "params": [
+              {
+                "name": "v47",
+                "type_name": "u64"
+              },
+              {
+                "name": "v49",
+                "type_name": "u64"
+              }
+            ],
+            "bindings": [
+              {
+                "name": "v32",
+                "ty": {
+                  "name": "Val"
+                },
+                "expr": {
+                  "HostCall": {
+                    "kind": "IntoVal",
+                    "detail": "int::obj_from_u64",
+                    "args": [
+                      "v49"
+                    ]
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Br": {
+                "target": {
+                  "block": "block7",
+                  "args": [
+                    "v47",
+                    "v32"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": "block9",
+            "params": [
+              {
+                "name": "v50",
+                "type_name": "u64"
+              },
+              {
+                "name": "v51",
+                "type_name": "u64"
+              }
+            ],
+            "bindings": [
+              {
+                "name": "v27",
+                "ty": {
+                  "name": "i64"
+                },
+                "expr": {
+                  "Literal": {
+                    "value": "8"
+                  }
+                }
+              },
+              {
+                "name": "v28",
+                "ty": {
+                  "name": "u64"
+                },
+                "expr": {
+                  "Binary": {
+                    "op": "shl",
+                    "lhs": "v51",
+                    "rhs": "v27"
+                  }
+                }
+              },
+              {
+                "name": "v29",
+                "ty": {
+                  "name": "i64"
+                },
+                "expr": {
+                  "Literal": {
+                    "value": "6"
+                  }
+                }
+              },
+              {
+                "name": "v30",
+                "ty": {
+                  "name": "u64"
+                },
+                "expr": {
+                  "Binary": {
+                    "op": "or",
+                    "lhs": "v28",
+                    "rhs": "v29"
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Br": {
+                "target": {
+                  "block": "block7",
+                  "args": [
+                    "v50",
+                    "v30"
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "body": {
+          "Sequence": [
+            {
+              "Block": {
+                "block": "block0",
+                "args": []
+              }
+            },
+            {
+              "IfElse": {
+                "cond": "v10",
+                "then_region": {
+                  "Sequence": [
+                    {
+                      "Block": {
+                        "block": "block3",
+                        "args": []
+                      }
+                    },
+                    "Unreachable"
+                  ]
+                },
+                "else_region": {
+                  "Sequence": [
+                    {
+                      "Block": {
+                        "block": "block4",
+                        "args": [
+                          "v2",
+                          "v5"
+                        ]
+                      }
+                    },
+                    {
+                      "IfElse": {
+                        "cond": "v17",
+                        "then_region": {
+                          "Sequence": [
+                            {
+                              "Block": {
+                                "block": "block3",
+                                "args": []
+                              }
+                            },
+                            "Unreachable"
+                          ]
+                        },
+                        "else_region": {
+                          "Sequence": [
+                            {
+                              "Block": {
+                                "block": "block5",
+                                "args": [
+                                  "v43",
+                                  "v12"
+                                ]
+                              }
+                            },
+                            {
+                              "IfElse": {
+                                "cond": "v22",
+                                "then_region": {
+                                  "Sequence": [
+                                    {
+                                      "Block": {
+                                        "block": "block2",
+                                        "args": []
+                                      }
+                                    },
+                                    "Unreachable"
+                                  ]
+                                },
+                                "else_region": {
+                                  "Sequence": [
+                                    {
+                                      "Block": {
+                                        "block": "block6",
+                                        "args": [
+                                          "v21",
+                                          "v44"
+                                        ]
+                                      }
+                                    },
+                                    {
+                                      "IfElse": {
+                                        "cond": "v25",
+                                        "then_region": {
+                                          "Sequence": [
+                                            {
+                                              "Block": {
+                                                "block": "block8",
+                                                "args": [
+                                                  "v48",
+                                                  "v46"
+                                                ]
+                                              }
+                                            },
+                                            {
+                                              "Jump": {
+                                                "block": "block7",
+                                                "args": [
+                                                  "v47",
+                                                  "v32"
+                                                ]
+                                              }
+                                            }
+                                          ]
+                                        },
+                                        "else_region": {
+                                          "Sequence": [
+                                            {
+                                              "Block": {
+                                                "block": "block9",
+                                                "args": [
+                                                  "v48",
+                                                  "v46"
+                                                ]
+                                              }
+                                            },
+                                            {
+                                              "Jump": {
+                                                "block": "block7",
+                                                "args": [
+                                                  "v50",
+                                                  "v30"
+                                                ]
+                                              }
+                                            }
+                                          ]
+                                        }
+                                      }
+                                    },
+                                    {
+                                      "Block": {
+                                        "block": "block7",
+                                        "args": []
+                                      }
+                                    },
+                                    {
+                                      "Return": {
+                                        "values": [
+                                          "v40"
+                                        ]
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "summary_ops": [
+          {
+            "kind": "EntryPoint",
+            "detail": "Contract entry point `add`"
+          },
+          {
+            "kind": "IntoVal",
+            "detail": "int::obj_from_u64"
+          },
+          {
+            "kind": "TryFromVal",
+            "detail": "int::obj_to_u64"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "add"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "and"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "or"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "shl"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "shr"
+          },
+          {
+            "kind": "ArithmeticOp",
+            "detail": "sub"
+          },
+          {
+            "kind": "ComparisonOp",
+            "detail": "eq"
+          },
+          {
+            "kind": "ComparisonOp",
+            "detail": "gt"
+          },
+          {
+            "kind": "ComparisonOp",
+            "detail": "lt"
+          }
+        ]
+      }
+    ]
+  },
+  "outputs": {
+    "annotated_wat": ";; Soroban Annotated WAT\n;; sections\n;; type [10..30]\n;; import [32..45]\n;; function [47..53]\n;; memory [55..58]\n;; global [60..85]\n;; export [87..134]\n;; code [137..407]\n;; custom:contractspecv0 [409..484]\n;; custom:contractenvmetav0 [486..516]\n;; custom:contractmetav0 [518..629]\n;; imports\n;; #0 i::0 func(type=0)\n;; #1 i::_ func(type=0)\n;; exports\n;; memory -> Memory#0\n;; add -> Func#3\n;; _ -> Func#6\n;; __data_end -> Global#1\n;; __heap_base -> Global#2\n;; interface\n;; fn add(a: u64, b: u64) -> u64\n;; contract metadata\n;; rssdkver = 21.7.7#5da789c50b18a4c2be53394138212fed56f0dfc4\n;; rsver = 1.91.1\n;; environment: protocol=Some(\"21\"), pre_release=Some(\"0\")\n\n(module\n  (type (;0;) (func (param i64) (result i64)))\n  (type (;1;) (func (param i32 i64)))\n  (type (;2;) (func (param i64 i64) (result i64)))\n  (type (;3;) (func))\n  (import \"i\" \"0\" (func (;0;) (type 0)))\n  (import \"i\" \"_\" (func (;1;) (type 0)))\n  (memory (;0;) 16)\n  (global (;0;) (mut i32) i32.const 1048576)\n  (global (;1;) i32 i32.const 1048576)\n  (global (;2;) i32 i32.const 1048576)\n  (export \"memory\" (memory 0))\n  (export \"add\" (func 3))\n  (export \"_\" (func 6))\n  (export \"__data_end\" (global 1))\n  (export \"__heap_base\" (global 2))\n  (func (;2;) (type 1) (param i32 i64)\n    (local i32 i64)\n    block ;; label = @1\n      block ;; label = @2\n        local.get 1\n        i32.wrap_i64\n        i32.const 255\n        i32.and\n        local.tee 2\n        i32.const 64\n        i32.eq\n        br_if 0 (;@2;)\n        block ;; label = @3\n          local.get 2\n          i32.const 6\n          i32.eq\n          br_if 0 (;@3;)\n          i64.const 1\n          local.set 3\n          i64.const 34359740419\n          local.set 1\n          br 2 (;@1;)\n        end\n        local.get 1\n        i64.const 8\n        i64.shr_u\n        local.set 1\n        i64.const 0\n        local.set 3\n        br 1 (;@1;)\n      end\n      i64.const 0\n      local.set 3\n      local.get 1\n      call 0\n      local.set 1\n    end\n    local.get 0\n    local.get 3\n    i64.store\n    local.get 0\n    local.get 1\n    i64.store offset=8\n  )\n  (func (;3;) (type 2) (param i64 i64) (result i64)\n    (local i32)\n    global.get 0\n    i32.const 16\n    i32.sub\n    local.tee 2\n    global.set 0\n    local.get 2\n    local.get 0\n    call 2\n    block ;; label = @1\n      block ;; label = @2\n        local.get 2\n        i32.load\n        i32.const 1\n        i32.eq\n        br_if 0 (;@2;)\n        local.get 2\n        i64.load offset=8\n        local.set 0\n        local.get 2\n        local.get 1\n        call 2\n        local.get 2\n        i32.load\n        i32.const 1\n        i32.eq\n        br_if 0 (;@2;)\n        local.get 2\n        i64.load offset=8\n        local.tee 1\n        local.get 0\n        i64.add\n        local.tee 0\n        local.get 1\n        i64.lt_u\n        br_if 1 (;@1;)\n        block ;; label = @3\n          block ;; label = @4\n            local.get 0\n            i64.const 72057594037927935\n            i64.gt_u\n            br_if 0 (;@4;)\n            local.get 0\n            i64.const 8\n            i64.shl\n            i64.const 6\n            i64.or\n            local.set 0\n            br 1 (;@3;)\n          end\n          local.get 0\n          call 1\n          local.set 0\n        end\n        local.get 2\n        i32.const 16\n        i32.add\n        global.set 0\n        local.get 0\n        return\n      end\n      unreachable\n    end\n    call 4\n    unreachable\n  )\n  (func (;4;) (type 3)\n    call 5\n    unreachable\n  )\n  (func (;5;) (type 3)\n    unreachable\n  )\n  (func (;6;) (type 3))\n  (@custom \"contractspecv0\" (after code) \"\\00\\00\\00\\00\\00\\00\\00\\00\\00\\00\\00\\03add\\00\\00\\00\\00\\02\\00\\00\\00\\00\\00\\00\\00\\01a\\00\\00\\00\\00\\00\\00\\06\\00\\00\\00\\00\\00\\00\\00\\01b\\00\\00\\00\\00\\00\\00\\06\\00\\00\\00\\01\\00\\00\\00\\06\")\n  (@custom \"contractenvmetav0\" (after code) \"\\00\\00\\00\\00\\00\\00\\00\\15\\00\\00\\00\\00\")\n  (@custom \"contractmetav0\" (after code) \"\\00\\00\\00\\00\\00\\00\\00\\05rsver\\00\\00\\00\\00\\00\\00\\061.91.1\\00\\00\\00\\00\\00\\00\\00\\00\\00\\08rssdkver\\00\\00\\00/21.7.7#5da789c50b18a4c2be53394138212fed56f0dfc4\\00\")\n)\n\n;; lifted analysis\n;; func func0 (; func0 ;)\n;;   param v0: i32\n;;   param v1: i64\n;;   semantic TryFromVal: int::obj_to_u64\n;;   semantic ArithmeticOp: and\n;;   semantic ArithmeticOp: shr\n;;   semantic ComparisonOp: eq\n;;   calls\n;;   i::0 -> i::0\n;;   block block0\n;;     param v0: i32\n;;     param v1: i64\n;;     v2 = I32WrapI64 v1\n;;     v3 = I32Const [\"255\"]\n;;     v4 = I32And v2, v3\n;;       semantic ArithmeticOp: and\n;;     v5 = I32Const [\"64\"]\n;;     v6 = I32Eq v4, v5\n;;       semantic ComparisonOp: eq\n;;     successors: block3, block4\n;;     terminator: if v6 then block3(v0, v1) else block4(v4, v0, v1)\n;;   block block1\n;;     terminator: return\n;;   block block2\n;;     param v20: i32\n;;     param v25: i64\n;;     param v27: i64\n;;     I64Store v20, v25 [\"memory0\", \"align=3\", \"offset=0\"]\n;;     I64Store v20, v27 [\"memory0\", \"align=3\", \"offset=8\"]\n;;     successors: block1\n;;     terminator: br block1\n;;   block block3\n;;     param v29: i32\n;;     param v30: i64\n;;     v17 = I64Const [\"0\"]\n;;     v19 = Call v30 [\"i::0\"]\n;;       semantic TryFromVal: int::obj_to_u64\n;;     successors: block2\n;;     terminator: br block2(v29, v17, v19)\n;;   block block4\n;;     param v31: i32\n;;     param v33: i32\n;;     param v35: i64\n;;     v8 = I32Const [\"6\"]\n;;     v9 = I32Eq v31, v8\n;;       semantic ComparisonOp: eq\n;;     successors: block5, block6\n;;     terminator: if v9 then block5(v33, v35) else block6(v33)\n;;   block block5\n;;     param v32: i32\n;;     param v34: i64\n;;     v14 = I64Const [\"8\"]\n;;     v15 = I64ShrU v34, v14\n;;       semantic ArithmeticOp: shr\n;;     v16 = I64Const [\"0\"]\n;;     successors: block2\n;;     terminator: br block2(v32, v16, v15)\n;;   block block6\n;;     param v36: i32\n;;     v10 = I64Const [\"1\"]\n;;     v11 = I64Const [\"34359740419\"]\n;;     successors: block2\n;;     terminator: br block2(v36, v10, v11)\n\n;; func add (; func1 ;)\n;;   export: add\n;;   param a: u64\n;;   param b: u64\n;;   result u64\n;;   semantic EntryPoint: Contract entry point `add`\n;;   semantic IntoVal: int::obj_from_u64\n;;   semantic TryFromVal: int::obj_to_u64\n;;   semantic ArithmeticOp: add\n;;   semantic ArithmeticOp: and\n;;   semantic ArithmeticOp: or\n;;   semantic ArithmeticOp: shl\n;;   semantic ArithmeticOp: shr\n;;   semantic ArithmeticOp: sub\n;;   semantic ComparisonOp: eq\n;;   semantic ComparisonOp: gt\n;;   semantic ComparisonOp: lt\n;;   calls\n;;   func0 -> func0\n;;   func2 -> func2\n;;   i::_ -> i::_\n;;   block block0\n;;     param v1: i64\n;;     param v2: i64\n;;     v3 = GlobalGet [\"global0\"]\n;;     v4 = I32Const [\"16\"]\n;;     v5 = I32Sub v3, v4\n;;       semantic ArithmeticOp: sub\n;;     GlobalSet v5 [\"global0\"]\n;;     Call v5, v1 [\"func0\"]\n;;     v8 = I32Load v5 [\"memory0\", \"align=2\", \"offset=0\"]\n;;     v9 = I32Const [\"1\"]\n;;     v10 = I32Eq v8, v9\n;;       semantic ComparisonOp: eq\n;;     successors: block3, block4\n;;     terminator: if v10 then block3 else block4(v2, v5)\n;;   block block1\n;;     param v0: i64\n;;     terminator: none\n;;   block block2\n;;     Call [\"func2\"]\n;;     terminator: unreachable\n;;   block block3\n;;     terminator: unreachable\n;;   block block4\n;;     param v42: i64\n;;     param v43: i32\n;;     v12 = I64Load v43 [\"memory0\", \"align=3\", \"offset=8\"]\n;;     Call v43, v42 [\"func0\"]\n;;     v15 = I32Load v43 [\"memory0\", \"align=2\", \"offset=0\"]\n;;     v16 = I32Const [\"1\"]\n;;     v17 = I32Eq v15, v16\n;;       semantic ComparisonOp: eq\n;;     successors: block3, block5\n;;     terminator: if v17 then block3 else block5(v43, v12)\n;;   block block5\n;;     param v44: i32\n;;     param v45: i64\n;;     v19 = I64Load v44 [\"memory0\", \"align=3\", \"offset=8\"]\n;;     v21 = I64Add v19, v45\n;;       semantic ArithmeticOp: add\n;;     v22 = I64LtU v21, v19\n;;       semantic ComparisonOp: lt\n;;     successors: block2, block6\n;;     terminator: if v22 then block2 else block6(v21, v44)\n;;   block block6\n;;     param v46: i64\n;;     param v48: i32\n;;     v24 = I64Const [\"72057594037927935\"]\n;;     v25 = I64GtU v46, v24\n;;       semantic ComparisonOp: gt\n;;     successors: block8, block9\n;;     terminator: if v25 then block8(v48, v46) else block9(v48, v46)\n;;   block block7\n;;     param v33: i32\n;;     param v40: i64\n;;     v37 = I32Const [\"16\"]\n;;     v38 = I32Add v33, v37\n;;       semantic ArithmeticOp: add\n;;     GlobalSet v38 [\"global0\"]\n;;     terminator: return v40\n;;   block block8\n;;     param v47: i32\n;;     param v49: i64\n;;     v32 = Call v49 [\"i::_\"]\n;;       semantic IntoVal: int::obj_from_u64\n;;     successors: block7\n;;     terminator: br block7(v47, v32)\n;;   block block9\n;;     param v50: i32\n;;     param v51: i64\n;;     v27 = I64Const [\"8\"]\n;;     v28 = I64Shl v51, v27\n;;       semantic ArithmeticOp: shl\n;;     v29 = I64Const [\"6\"]\n;;     v30 = I64Or v28, v29\n;;       semantic ArithmeticOp: or\n;;     successors: block7\n;;     terminator: br block7(v50, v30)\n\n;; func func2 (; func2 ;)\n;;   calls\n;;   func3 -> func3\n;;   block block0\n;;     Call [\"func3\"]\n;;     terminator: unreachable\n;;   block block1\n;;     terminator: none\n\n;; func func3 (; func3 ;)\n;;   block block0\n;;     terminator: unreachable\n;;   block block1\n;;     terminator: none\n\n;; func _ (; func4 ;)\n;;   export: _\n;;   semantic Dispatcher: Contract dispatch entry point\n;;   block block0\n;;     successors: block1\n;;     terminator: br block1\n;;   block block1\n;;     terminator: return\n\n",
+    "rust_source": "#![no_std]\nuse soroban_sdk::{contract, contractimpl, contractmeta};\ncontractmeta!(key = \"rssdkver\", val = \"21.7.7#5da789c50b18a4c2be53394138212fed56f0dfc4\");\ncontractmeta!(key = \"rsver\", val = \"1.91.1\");\n#[contract]\npub struct Contract;\n#[contractimpl]\nimpl Contract {\n    pub fn add(a: u64, b: u64) -> u64 {\n        a + b\n    }\n}\n"
+  },
+  "evaluation": null
+}
