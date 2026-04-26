@@ -5,16 +5,28 @@
 //! sequenced operation. It owns nothing except references and pipeline
 //! structures; per-run state lives on the IR values it threads through.
 //!
-//! Phase 1.2 ships the [`Driver`] structure and constructor. The
-//! [`Driver::run`] method is a `todo!()` stub: the frontend, lifting
-//! pass, and backend that it would call do not yet exist as functions.
-//! Tasks 1.3 (pass infrastructure now done), 1.4 (frontend), 1.5
-//! (waffle integration), and the eventual backend will fill in the
-//! body. The signature is locked in now so downstream code can target
-//! it.
+//! ## Pipeline progress
+//!
+//! As of Task 1.5, [`Driver::run`] now:
+//!
+//! 1. Calls `sordec_frontend::parse(wasm)` to produce typed
+//!    [`sordec_ir::WasmFacts`] (Task 1.4).
+//! 2. Calls `sordec_passes::lift_with_waffle(wasm, &facts)` to produce
+//!    [`sordec_ir::LiftedIr`] (Task 1.5).
+//! 3. Runs `self.lifted_pipeline.run(&mut lifted)` — this currently
+//!    runs zero passes because semantic recovery lives in Phase 2.
+//! 4. Returns [`DriverError::NotYetWired`] when it would otherwise
+//!    invoke the boundary lowering: no [`sordec_passes::LoweringStep`]
+//!    implementor exists yet, and the [`sordec_backend`] emitters
+//!    likewise have not been written.
+//!
+//! After Task 1.5, the front half of the pipeline runs end-to-end on a
+//! real contract; the back half (lowering, high-IR passes, emit) lands
+//! in subsequent tasks.
 
+use sordec_frontend::FrontendError;
 use sordec_ir::{HighIr, LiftedIr};
-use sordec_passes::{LoweringError, LoweringStep, Pipeline, PipelineReport};
+use sordec_passes::{LiftError, LoweringError, LoweringStep, Pipeline, PipelineReport};
 
 /// End-to-end decompilation driver.
 ///
@@ -43,27 +55,46 @@ impl Driver {
 
     /// Decompile a WASM module from raw bytes.
     ///
-    /// Sequence (will be wired up across tasks 1.4/1.5 and the
-    /// eventual backend):
+    /// # Sequence
     ///
-    /// 1. `sordec_frontend::parse(wasm)` → [`WasmFacts`].
-    /// 2. Lifting pass: [`WasmFacts`] → [`LiftedIr`] (waffle adapter).
-    /// 3. `self.lifted_pipeline.run(&mut lifted)` (lifted-IR passes).
-    /// 4. `self.lower.lower(lifted)` → [`HighIr`] (phase boundary).
-    /// 5. `self.high_pipeline.run(&mut high)` (high-IR passes).
-    /// 6. `sordec_backend::emit(&high)` → [`DecompileOutput`].
+    /// 1. `sordec_frontend::parse(wasm)` → [`sordec_ir::WasmFacts`]
+    ///    (implemented).
+    /// 2. `sordec_passes::lift_with_waffle(wasm, &facts)` →
+    ///    [`LiftedIr`] (implemented).
+    /// 3. `self.lifted_pipeline.run(&mut lifted)` — lifted-IR passes
+    ///    (currently empty; Phase 2 fills them in).
+    /// 4. `self.lower.lower(lifted)` → [`HighIr`] — **not yet wired**;
+    ///    surfaces [`DriverError::NotYetWired`].
+    /// 5. `self.high_pipeline.run(&mut high)` — high-IR passes (Phase
+    ///    2-3).
+    /// 6. `sordec_backend::emit(&high)` → [`DecompileOutput`] (Phase
+    ///    3-4).
     ///
     /// # Errors
     ///
-    /// Returns a [`DriverError`] if any stage fails. The current stub
-    /// always returns `Err(DriverError::NotYetWired)`; once the
-    /// frontend and backend land, this will instead surface their
-    /// errors.
-    pub fn run(&self, _wasm: &[u8]) -> Result<DecompileOutput, DriverError> {
-        // Phase 1.2 ships only the type signature. The body is
-        // intentionally a stub; implementation lands in subsequent
-        // tasks. Surrounding tests / callers should not yet rely on
-        // a successful return.
+    /// - [`DriverError::Frontend`] when `wasmparser` rejects the input
+    ///   or Soroban metadata fails to decode.
+    /// - [`DriverError::Lift`] when `waffle` rejects the input or our
+    ///   IR-shape invariants are violated post-SSA.
+    /// - [`DriverError::NotYetWired`] when the front half completes
+    ///   successfully but the back half is not yet implemented.
+    /// - [`DriverError::Lowering`] (future) once a [`LoweringStep`]
+    ///   implementor exists.
+    pub fn run(&self, wasm: &[u8]) -> Result<DecompileOutput, DriverError> {
+        // Stage 1: parse WASM + decode Soroban metadata.
+        let facts = sordec_frontend::parse(wasm)?;
+
+        // Stage 2: lift to typed SSA + CFG.
+        let mut lifted = sordec_passes::lift_with_waffle(wasm, &facts)?;
+
+        // Stage 3: run the lifted-IR pipeline. With zero passes
+        // registered today, this is a no-op; the call is preserved so
+        // the wiring stays exercised when real passes land.
+        let _lifted_report = self.lifted_pipeline.run(&mut lifted);
+
+        // Stages 4-6 require a `LoweringStep` implementor and a
+        // backend, neither of which exist yet. Surface a typed error
+        // rather than silently producing an empty output.
         Err(DriverError::NotYetWired)
     }
 
@@ -92,9 +123,8 @@ impl Driver {
 
 /// Output of a successful [`Driver::run`].
 ///
-/// Phase 1.2 leaves this as a placeholder struct: the backend that
-/// populates these fields does not yet exist. Concrete fields land
-/// alongside the WAT and Rust emitters.
+/// Currently a placeholder. The backend that populates these fields
+/// does not yet exist.
 #[derive(Debug, Default, Clone)]
 pub struct DecompileOutput {
     /// Annotated WebAssembly Text. Empty until the WAT emitter lands.
@@ -118,18 +148,39 @@ pub struct DriverReport {
 
 /// Reason a [`Driver::run`] invocation failed.
 ///
-/// `#[non_exhaustive]` so future stages (frontend, backend) can add
-/// their own variants without breaking matchers.
+/// `#[non_exhaustive]` so future stages (backend, structuring failures)
+/// can add their own variants without breaking matchers.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum DriverError {
-    /// The driver's body is still a stub. Phase 1.2 ships the
-    /// signature only; remove this variant once Tasks 1.4/1.5/backend
-    /// fill in the body.
+    /// The frontend (parser + Soroban metadata decoder) reported an
+    /// error.
+    Frontend(FrontendError),
+
+    /// The lifter (`waffle` integration) reported an error.
+    Lift(LiftError),
+
+    /// The driver successfully completed everything that is
+    /// implemented (parse, lift, lifted-pipeline) but the rest of the
+    /// pipeline (lowering, high-pipeline, emit) is not yet wired.
     NotYetWired,
 
-    /// The phase-boundary lowering reported an error.
+    /// The phase-boundary lowering reported an error. Reachable only
+    /// once a [`LoweringStep`] implementor exists; today this variant
+    /// is unreachable from [`Driver::run`].
     Lowering(LoweringError),
+}
+
+impl From<FrontendError> for DriverError {
+    fn from(err: FrontendError) -> Self {
+        Self::Frontend(err)
+    }
+}
+
+impl From<LiftError> for DriverError {
+    fn from(err: LiftError) -> Self {
+        Self::Lift(err)
+    }
 }
 
 impl From<LoweringError> for DriverError {

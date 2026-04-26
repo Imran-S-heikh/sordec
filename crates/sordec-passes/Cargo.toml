@@ -11,6 +11,10 @@ repository.workspace = true
 sordec-common.workspace = true
 sordec-ir.workspace = true
 waffle.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+sordec-frontend.workspace = true
 
 [lints]
 workspace = true

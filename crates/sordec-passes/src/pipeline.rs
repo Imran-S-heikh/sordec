@@ -225,7 +225,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "duplicate pass name")]
     fn duplicate_pass_name_panics_at_construction() {
-        Pipeline::<u32>::new(
+        let _ = Pipeline::<u32>::new(
             vec![
                 Box::new(CountUp {
                     name: "shared",
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "exceeds pass count")]
     fn out_of_bounds_fixpoint_group_panics() {
-        Pipeline::<u32>::new(
+        let _ = Pipeline::<u32>::new(
             vec![Box::new(CountUp {
                 name: "only",
                 target: 0,
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "overlap")]
     fn overlapping_fixpoint_groups_panic() {
-        Pipeline::<u32>::new(
+        let _ = Pipeline::<u32>::new(
             vec![
                 Box::new(CountUp {
                     name: "a",

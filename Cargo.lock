@@ -1162,7 +1162,9 @@ name = "sordec-passes"
 version = "0.1.0"
 dependencies = [
  "sordec-common",
+ "sordec-frontend",
  "sordec-ir",
+ "thiserror 2.0.18",
  "waffle",
 ]
 
