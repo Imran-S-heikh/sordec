@@ -47,3 +47,27 @@ clap          = { version = "4.5", features = ["derive"] }
 lto = true
 codegen-units = 1
 opt-level = 3
+
+# Workspace-wide lint policy.
+#
+# Locked-in conventions for sordec — see docs/architecture.md §11 and the
+# Task 1.2 plan. Every member crate inherits these via `[lints] workspace = true`.
+[workspace.lints.rust]
+# We never need raw unsafe; if we ever do, an explicit `#[allow(unsafe_code)]`
+# at the call site forces a code-review checkpoint.
+unsafe_code = "deny"
+# Public items must be documented. Type-only crates without doc comments are
+# unreviewable; this turns each `///` into a contract.
+missing_docs = "deny"
+
+[workspace.lints.clippy]
+# `dbg!` printing in release code is always a mistake. Forbidden so that
+# the legacy `format!("{op:?}").split(...)` style of opcode-name extraction
+# can never sneak back in via debug formatting.
+dbg_macro = "deny"
+# `print!`/`println!`/`eprintln!` go through the project's diagnostic
+# infrastructure (later); raw stdout in library crates is a smell.
+print_stdout = "warn"
+print_stderr = "warn"
+# `todo!()` is fine in scaffolding but should never reach a release.
+todo = "warn"

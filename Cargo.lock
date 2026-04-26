@@ -1151,7 +1151,9 @@ dependencies = [
 name = "sordec-ir"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "sordec-common",
+ "waffle",
 ]
 
 [[package]]

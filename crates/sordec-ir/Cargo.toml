@@ -9,3 +9,12 @@ repository.workspace = true
 
 [dependencies]
 sordec-common.workspace = true
+waffle.workspace = true
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+serde = ["dep:serde", "sordec-common/serde"]
+
+[lints]
+workspace = true

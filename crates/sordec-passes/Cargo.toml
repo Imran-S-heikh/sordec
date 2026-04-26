@@ -11,3 +11,6 @@ repository.workspace = true
 sordec-common.workspace = true
 sordec-ir.workspace = true
 waffle.workspace = true
+
+[lints]
+workspace = true
