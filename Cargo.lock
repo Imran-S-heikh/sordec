@@ -1144,6 +1144,7 @@ dependencies = [
  "soroban-meta",
  "soroban-spec",
  "stellar-xdr",
+ "thiserror 2.0.18",
  "wasmparser 0.240.0",
 ]
 

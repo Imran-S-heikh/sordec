@@ -14,6 +14,7 @@ wasmparser.workspace = true
 soroban-spec.workspace = true
 soroban-meta.workspace = true
 stellar-xdr.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

@@ -114,6 +114,10 @@ pub enum ExportKind {
     Table,
     /// Exported global (e.g. `"__data_end"`, `"__heap_base"`).
     Global,
+    /// Exported exception tag. Soroban contracts do not use these, but
+    /// non-Soroban WASM may; we preserve the kind so the frontend never
+    /// has to silently mis-classify a tag as a function.
+    Tag,
 }
 
 /// One custom section from the WASM module.
