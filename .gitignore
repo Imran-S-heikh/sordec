@@ -7,6 +7,10 @@ Cargo.lock.bak
 # Legacy (old AI-generated code kept as reference only)
 /_legacy/
 
+# Internal docs and planning (not for public repo)
+/docs/
+/plan/
+
 # Learning experiments' build artifacts
 /learning/**/target/
 
