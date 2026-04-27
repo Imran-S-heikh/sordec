@@ -9,6 +9,13 @@ members = [
     "crates/sordec-driver",
     "crates/sordec-cli",
 ]
+# Vendored fixture sources under `samples/contracts/<name>/source/` are
+# self-contained crates pinned to specific soroban-sdk + rustc versions for
+# reproducible WASM. They are NOT part of our build — `cargo build --workspace`
+# must skip them, and a `cargo` invocation from inside a fixture's `source/`
+# directory must not adopt this workspace as its parent. The exclude here is
+# belt-and-braces with each fixture's own empty `[workspace]` declaration.
+exclude = ["samples"]
 
 [workspace.package]
 version = "0.1.0"

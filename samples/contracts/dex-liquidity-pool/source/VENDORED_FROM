@@ -1,0 +1,8 @@
+upstream_url=https://github.com/stellar/soroban-examples
+upstream_commit=b46f4e0c9dccc9e51980b559915f52d8b94e9236
+upstream_tag=v23.0.0
+upstream_path=liquidity_pool
+license=Apache-2.0
+vendored_on=2026-04-26
+vendored_by=Imran Shaikh <imransheikhsadi@gmail.com>
+notes=Vendored verbatim. The only modification is appending an empty [workspace] table to Cargo.toml to opt out of any parent workspace discovery. The fixture name `dex-liquidity-pool` matches upstream rather than the originally-planned `dex-soroswap`: the Soroswap repo is genuinely multi-contract (factory + library + pair + router + token), and bringing up just the AMM `pair` contract was not tractable inside the Task 1.6 time-box. Soroswap remains a Phase 2 expansion target. soroban-examples liquidity_pool exercises the same AMM patterns (swap + LP-share mint/burn + fee accumulation) as a single self-contained contract.

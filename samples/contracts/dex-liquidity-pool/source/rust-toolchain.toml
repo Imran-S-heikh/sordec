@@ -1,0 +1,5 @@
+# Pinned to match upstream soroban-examples v23.0.0's root rust-toolchain.toml.
+[toolchain]
+channel = "1.89"
+targets = ["wasm32v1-none"]
+components = ["rustc", "cargo"]

@@ -1,0 +1,8 @@
+# Pinned to match upstream soroban-examples v23.0.0's root rust-toolchain.toml.
+# This is the toolchain the upstream release was tested against; pinning it
+# here means a `cargo build` from this directory will install rustc 1.89 on
+# demand via rustup, regardless of what the developer's default toolchain is.
+[toolchain]
+channel = "1.89"
+targets = ["wasm32v1-none"]
+components = ["rustc", "cargo"]

@@ -15,6 +15,9 @@ use sordec_common::IrId;
 use sordec_ir::{LiftedTerminator, LiftedValueDef, WasmOpcodeKind};
 use sordec_passes::lift_with_waffle;
 
+mod common;
+use common::assert_invariants_hold;
+
 /// Canonical `add(u64, u64) -> u64` contract.
 const HELLO_ADD_WASM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -145,79 +148,8 @@ fn hello_add_add_function_has_arithmetic_return() {
 }
 
 // ---------------------------------------------------------------------
-// Invariant checks (2)
+// Invariant checks (2) — `assert_invariants_hold` lives in `common/mod.rs`
 // ---------------------------------------------------------------------
-
-/// Manually re-derives the post-lift invariants on the public IR
-/// surface. The crate-internal `validate_lifted_function` is also
-/// invoked via `debug_assert!` from inside `lift_with_waffle`; this
-/// integration test repeats the checks from outside the crate to
-/// guarantee they hold for callers (not just for the lifter itself).
-fn assert_invariants_hold(lifted: &sordec_ir::LiftedIr) {
-    for func in &lifted.functions {
-        // Entry block resolves.
-        assert!(
-            func.blocks.get(func.entry).is_some(),
-            "function {} entry {} does not resolve",
-            func.id,
-            func.entry
-        );
-
-        let block_count = func.blocks.len() as u32;
-        let value_count = func.values.len() as u32;
-
-        let resolves_block = |b: sordec_common::BlockId| b.index() < block_count;
-        let resolves_value = |v: sordec_common::ValueId| v.index() < value_count;
-
-        for (_block_id, block) in func.blocks.iter() {
-            for &v in &block.params {
-                assert!(resolves_value(v), "block param {} dangles in {}", v, func.id);
-            }
-            for &v in &block.instructions {
-                assert!(
-                    resolves_value(v),
-                    "instruction {} dangles in {}",
-                    v,
-                    func.id
-                );
-            }
-            match &block.terminator {
-                LiftedTerminator::Branch(t) => {
-                    assert!(resolves_block(t.block));
-                    for &v in &t.args {
-                        assert!(resolves_value(v));
-                    }
-                }
-                LiftedTerminator::BranchIf {
-                    cond,
-                    if_true,
-                    if_false,
-                } => {
-                    assert!(resolves_value(*cond));
-                    assert!(resolves_block(if_true.block));
-                    assert!(resolves_block(if_false.block));
-                }
-                LiftedTerminator::Switch {
-                    index,
-                    targets,
-                    default,
-                } => {
-                    assert!(resolves_value(*index));
-                    for t in targets {
-                        assert!(resolves_block(t.block));
-                    }
-                    assert!(resolves_block(default.block));
-                }
-                LiftedTerminator::Return { values } => {
-                    for &v in values {
-                        assert!(resolves_value(v));
-                    }
-                }
-                LiftedTerminator::Unreachable => {}
-            }
-        }
-    }
-}
 
 #[test]
 fn invariants_hold_for_hello_add() {

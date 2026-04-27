@@ -1,0 +1,8 @@
+upstream_url=https://github.com/stellar/soroban-examples
+upstream_commit=b46f4e0c9dccc9e51980b559915f52d8b94e9236
+upstream_tag=v23.0.0
+upstream_path=token
+license=Apache-2.0
+vendored_on=2026-04-26
+vendored_by=Imran Shaikh <imransheikhsadi@gmail.com>
+notes=Identical source to samples/contracts/token-v23/. The difference between the two fixtures is post-build: this fixture's build.sh additionally runs `wasm-tools strip --all` to remove every custom section from the compiled WASM (including contractmetav0/contractspecv0/name/producers), simulating a mainnet-deployed contract that has been through `stellar contract optimize`. Source duplicated rather than referenced so each fixture remains self-contained.

@@ -1,0 +1,9 @@
+# Upstream soroban-examples v22.0.1 pinned `channel = "stable"` which is not
+# reproducible (latest stable changes over time). We pin to a specific
+# version that we've verified builds the v22 source. The wasm32-unknown-unknown
+# target matches v22-era production reality (stellar CLI did not yet default
+# to wasm32v1-none in the v22 era).
+[toolchain]
+channel = "1.91"
+targets = ["wasm32-unknown-unknown"]
+components = ["rustc", "cargo"]

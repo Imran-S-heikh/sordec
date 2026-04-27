@@ -1,0 +1,5 @@
+# WASM bytes are binary and shouldn't be diffed line-by-line. The sha256
+# sidecar is what actually verifies they're unchanged; git can use its
+# internal binary detection without forcing line endings or text munging.
+*.wasm binary
+*.wasm.sha256 text eol=lf

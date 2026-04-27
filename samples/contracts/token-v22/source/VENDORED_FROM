@@ -1,0 +1,8 @@
+upstream_url=https://github.com/stellar/soroban-examples
+upstream_commit=7da05b2dd50e88f25eb7f865c279709c0cbf9cd8
+upstream_tag=v22.0.1
+upstream_path=token
+license=Apache-2.0
+vendored_on=2026-04-26
+vendored_by=Imran Shaikh <imransheikhsadi@gmail.com>
+notes=Modifications from upstream: (1) appended an empty [workspace] table to Cargo.toml to opt out of any parent workspace; (2) replaced rust-toolchain.toml's channel from "stable" (not reproducible) to a pinned 1.91 that we verified builds this source; (3) Cargo.lock was vendored verbatim but is now divergent from upstream — upstream's lockfile pinned soroban-sdk 22.0.0 while their Cargo.toml requires "22.0.1" (^22.0.1), an inconsistency in the upstream release. Cargo silently resolved to 22.0.11 (latest matching patch in the v22 series) on first build. Our committed lockfile reflects the resolved state, which is reproducible going forward.
