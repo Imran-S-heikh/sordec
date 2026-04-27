@@ -14,7 +14,15 @@ path = "src/main.rs"
 [dependencies]
 sordec-common.workspace = true
 sordec-driver.workspace = true
+sordec-frontend = { workspace = true, features = ["serde"] }
+sordec-ir = { workspace = true, features = ["serde"] }
+sordec-passes.workspace = true
 clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
 
 [lints]
 workspace = true

@@ -50,6 +50,9 @@ pub mod error;
 mod metadata;
 mod wasm;
 
+#[cfg(feature = "serde")]
+use serde::Serialize;
+
 pub use error::{FrontendError, FrontendResult};
 
 // Re-export the IR types the frontend produces so most callers do not
@@ -73,7 +76,14 @@ pub use sordec_common::{Diagnostic, DiagnosticCode, MetadataDiagnosticCode, Seve
 /// `soroban_facts` is `None` for non-Soroban WASM and for stripped
 /// contracts. `diagnostics` is a `Vec` of structured warning/info events
 /// — empty for clean inputs.
+///
+/// Serializable as JSON when the `serde` feature is enabled — used by
+/// `sordec dump-facts`. The serialised form is **inspection-grade, not
+/// a stable interchange format**: `WasmOp` values inside the IR layer
+/// embed `waffle::Operator`'s `Debug` representation, which can change
+/// across `waffle` releases.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct ParseOutput {
     /// WASM-level structure: imports, exports, function-type-indices,
     /// custom sections.

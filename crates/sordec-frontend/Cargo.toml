@@ -15,6 +15,16 @@ soroban-spec.workspace = true
 soroban-meta.workspace = true
 stellar-xdr.workspace = true
 thiserror.workspace = true
+serde = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enable JSON serialisation of the types `parse()` returns. Pulls in
+# `serde` directly (for the `Serialize` derive on `ParseOutput`) and
+# propagates to `sordec-ir` + `sordec-common` so that `WasmFacts` /
+# `SorobanFacts` / `Diagnostic` get their derives too. The CLI's
+# `dump-facts` subcommand requires this feature.
+serde = ["dep:serde", "sordec-ir/serde", "sordec-common/serde"]
 
 [lints]
 workspace = true
