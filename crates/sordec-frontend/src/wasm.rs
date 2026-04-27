@@ -117,7 +117,6 @@ pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
         exports,
         function_type_indices,
         custom_sections,
-        metadata: None,
     })
 }
 

@@ -1,15 +1,22 @@
 //! Error type returned by the frontend's [`crate::parse`] function.
 //!
-//! All variants surface specific failure modes; the frontend deliberately
-//! refuses to "unwrap_or_default" on malformed sections (the legacy
-//! decompiler did, and silently corrupted output downstream).
+//! All variants surface fatal failure modes — situations where the
+//! frontend cannot produce a usable [`crate::ParseOutput`]. Recoverable
+//! conditions (unresolved type references, duplicate names, malformed
+//! contractmetav0) become [`sordec_common::Diagnostic`]s in
+//! `ParseOutput.diagnostics` instead of error returns. See the
+//! [diagnostic module documentation](sordec_common::diagnostic) for the
+//! migration principle.
 
-/// All error modes the frontend can surface.
+/// All fatal error modes the frontend can surface.
 ///
 /// Every variant carries enough context to diagnose the failure without
 /// re-running the parser. The wrapping types use `String` rather than
 /// `#[from]` on upstream errors (e.g., `stellar_xdr::Error`) to keep
 /// `FrontendError` stable across upstream feature flags.
+///
+/// `#[non_exhaustive]` — adding a new variant is API-additive.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum FrontendError {
     /// Input byte slice is empty.
@@ -21,38 +28,16 @@ pub enum FrontendError {
     InvalidWasm(#[from] wasmparser::BinaryReaderError),
 
     /// The `contractspecv0` custom section bytes failed to decode.
+    /// Stays a fatal error because every later pass keys off the spec;
+    /// we cannot proceed past a corrupt one.
     #[error("malformed contractspecv0 section: {0}")]
     MalformedSpec(String),
 
     /// The `contractenvmetav0` custom section bytes failed to decode.
+    /// Stays a fatal error because the protocol-version pinning it
+    /// carries is needed for downstream compatibility checks.
     #[error("malformed contractenvmetav0 section: {0}")]
     MalformedEnvMeta(String),
-
-    /// The `contractmetav0` custom section bytes failed to decode.
-    #[error("malformed contractmetav0 section: {0}")]
-    MalformedContractMeta(String),
-
-    /// A type reference inside `contractspecv0` named a UDT not declared
-    /// elsewhere in the spec.
-    #[error("contractspecv0 references undefined type {name:?}")]
-    UnresolvedTypeReference {
-        /// Name of the missing type.
-        name: String,
-    },
-
-    /// `contractspecv0` declared the same UDT name twice.
-    #[error("contractspecv0 declares duplicate type {name:?}")]
-    DuplicateTypeName {
-        /// Conflicting name.
-        name: String,
-    },
-
-    /// `contractspecv0` declared the same function name twice.
-    #[error("contractspecv0 declares duplicate function {name:?}")]
-    DuplicateFunctionName {
-        /// Conflicting name.
-        name: String,
-    },
 
     /// A `Symbol` or `StringM<N>` field in the spec was not valid UTF-8.
     /// Soroban-sdk requires identifiers to be valid Rust idents at compile

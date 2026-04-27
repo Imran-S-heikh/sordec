@@ -24,7 +24,7 @@ pub use terminator::{BlockTarget, LiftedTerminator};
 
 use sordec_common::{Arena, BlockId, FuncId, IrId, ValueId};
 
-use crate::WasmFacts;
+use crate::{SorobanFacts, WasmFacts};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -43,8 +43,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct LiftedIr {
-    /// Frontend-decoded facts about the original module.
+    /// Frontend-decoded facts about the original WASM module.
     pub facts: WasmFacts,
+
+    /// Decoded Soroban metadata, threaded through from the frontend.
+    /// `None` for modules without a `contractspecv0` custom section
+    /// (generic WASM, or contracts that have been stripped). Pattern
+    /// recovery passes that need spec-driven type information consult
+    /// this field.
+    pub soroban_facts: Option<SorobanFacts>,
 
     /// Local (non-imported) functions in module order. Each is keyed by
     /// its [`FuncId`]; function index `i` lives at position `i` in the

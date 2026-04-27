@@ -15,17 +15,23 @@
 
 use std::collections::BTreeMap;
 
-use sordec_common::TypeId;
+use sordec_common::{TypeId, UnknownReason};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-/// Top-level facts extracted from a Soroban WASM module.
+/// Top-level facts extracted from a Soroban WASM module — the WASM-level
+/// structure only.
 ///
 /// Constructed by `sordec-frontend`. Consumed (read-only) by the lifter
 /// and pattern passes — every later IR layer keeps a reference back to
 /// the originating `WasmFacts` for export-name lookups, type resolution,
 /// and emit-time annotations.
+///
+/// Soroban-specific decoded metadata lives in [`SorobanFacts`], which is
+/// returned alongside `WasmFacts` from the frontend's `parse` function.
+/// They are peer types, not nested — `WasmFacts` describes generic WASM
+/// structure; `SorobanFacts` describes the Soroban contract surface.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct WasmFacts {
@@ -43,10 +49,6 @@ pub struct WasmFacts {
     /// Custom sections in declaration order. Soroban contracts contain at
     /// least one (`contractspecv0`); generic WASM may have none.
     pub custom_sections: Vec<CustomSection>,
-
-    /// Decoded Soroban metadata, or `None` if this WASM module is not a
-    /// Soroban contract (no `contractspecv0` section, or decoding failed).
-    pub metadata: Option<SorobanMetadata>,
 }
 
 /// One imported item from the WASM `import` section.
@@ -124,7 +126,7 @@ pub enum ExportKind {
 ///
 /// We retain the raw bytes so passes that did not anticipate a particular
 /// section can still inspect it. Soroban-recognised sections are also
-/// decoded into [`SorobanMetadata`].
+/// decoded into [`SorobanFacts`].
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct CustomSection {
@@ -158,7 +160,7 @@ pub struct ByteRange {
 /// All cross-references between user-defined types use [`TypeId`].
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct SorobanMetadata {
+pub struct SorobanFacts {
     /// Function signatures keyed by their exported name.
     // JUSTIFY: Map keys are user-supplied export names, not symbols we
     // assign ids to. A typed key would force a separate name registry
@@ -219,7 +221,15 @@ pub struct FunctionParam {
     pub ty: TypeRef,
 }
 
-/// A type reference: a primitive, a composite, or a user-defined type by id.
+/// A type reference: a primitive, a composite, a user-defined type by id,
+/// or a recovery placeholder when the spec referenced something we couldn't
+/// resolve.
+///
+/// The `Unknown` variant is the minimum-viable degradation for an
+/// `UnresolvedTypeReference` warning — it preserves "a type was here, we
+/// don't know which" so downstream emit doesn't drop the whole containing
+/// declaration. Carriers of this variant always pair it with an
+/// [`UnknownReason`] so the cause is auditable.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum TypeRef {
@@ -229,6 +239,10 @@ pub enum TypeRef {
     Composite(CompositeType),
     /// A user-defined struct/union/enum/error/event by id.
     UserDefined(TypeId),
+    /// Recovery placeholder: the spec referenced a type we couldn't
+    /// resolve. The `UnknownReason` records why; the diagnostic emitted
+    /// at the same site carries the human-readable context.
+    Unknown(UnknownReason),
 }
 
 /// Soroban primitive types.

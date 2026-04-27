@@ -50,31 +50,56 @@
 use std::collections::HashMap;
 
 use sordec_common::{Arena, BlockId, FuncId, IrId, ValueId};
+use sordec_common::Diagnostic;
 use sordec_ir::{
     BlockTarget, LiftedBlock, LiftedFunction, LiftedIr, LiftedTerminator, LiftedType, LiftedValue,
-    LiftedValueDef, WasmFacts, WasmOp,
+    LiftedValueDef, SorobanFacts, WasmFacts, WasmOp,
 };
 use waffle::entity::EntityRef;
 use waffle::{FuncDecl, FunctionBody, ValueDef};
 
 use crate::error::{LiftError, LiftResult};
 
+/// Output of [`lift_with_waffle`]: the lifted IR plus any non-fatal
+/// diagnostics surfaced during lifting.
+///
+/// `diagnostics` is empty in v0 — `LiftDiagnosticCode` has no variants
+/// yet (per the plan's Step 3, the lifter currently surfaces every
+/// recoverable situation through hard errors or through the existing
+/// `LiftedTerminator::Unreachable` fallback). Phase 2's pattern recovery
+/// passes will be the first to populate this field.
+#[derive(Debug, Clone)]
+pub struct LiftOutput {
+    /// The lifted intermediate representation.
+    pub lifted: LiftedIr,
+    /// Non-fatal diagnostics surfaced during lifting. Empty in v0.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
 /// Lift a WASM module to our typed [`LiftedIr`].
 ///
-/// Takes raw `wasm` bytes and a pre-decoded [`WasmFacts`] (produced by
-/// `sordec-frontend`). Returns the populated [`LiftedIr`] with one
-/// [`LiftedFunction`] per local (non-imported) function.
+/// Takes raw `wasm` bytes, the WASM-level [`WasmFacts`] produced by
+/// `sordec-frontend::parse`, and the optional Soroban metadata
+/// [`SorobanFacts`] from the same parse. Returns a [`LiftOutput`]
+/// containing the populated [`LiftedIr`] (one [`LiftedFunction`] per
+/// local non-imported function) plus any non-fatal diagnostics
+/// (currently always empty — see [`LiftOutput`]).
 ///
-/// `facts` is borrowed and cloned into the returned `LiftedIr.facts`.
-/// Cloning is preferred over consuming so the caller can inspect facts
-/// before deciding whether to lift.
+/// `facts` is borrowed and cloned into the returned `LiftedIr.facts`;
+/// `soroban_facts` is borrowed and cloned into
+/// `LiftedIr.soroban_facts`. Cloning is preferred over consuming so the
+/// caller can inspect facts before deciding whether to lift.
 ///
 /// # Errors
 ///
 /// See [`LiftError`]. The most common failure is
 /// [`LiftError::WaffleParseFailed`], which wraps the `anyhow::Error`
 /// from `waffle::Module::from_wasm_bytes` as text.
-pub fn lift_with_waffle(wasm: &[u8], facts: &WasmFacts) -> LiftResult<LiftedIr> {
+pub fn lift_with_waffle(
+    wasm: &[u8],
+    facts: &WasmFacts,
+    soroban_facts: Option<&SorobanFacts>,
+) -> LiftResult<LiftOutput> {
     // 1. Parse the WASM with waffle. Stringify the upstream anyhow error
     //    so our public surface stays clean.
     let mut module = waffle::Module::from_wasm_bytes(wasm, &waffle::FrontendOptions::default())
@@ -125,9 +150,16 @@ pub fn lift_with_waffle(wasm: &[u8], facts: &WasmFacts) -> LiftResult<LiftedIr> 
         functions.push(lifted);
     }
 
-    Ok(LiftedIr {
+    let lifted = LiftedIr {
         facts: facts.clone(),
+        soroban_facts: soroban_facts.cloned(),
         functions,
+    };
+    // `diagnostics` is intentionally empty in v0 — see `LiftOutput`'s
+    // doc-comment. Phase 2 pattern passes will populate it.
+    Ok(LiftOutput {
+        lifted,
+        diagnostics: Vec::new(),
     })
 }
 

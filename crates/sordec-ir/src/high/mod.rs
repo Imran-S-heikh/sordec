@@ -29,7 +29,7 @@ pub use ty::{IrType, KnownType};
 
 use sordec_common::{Arena, BlockId, FuncId, IrId, Provenance, ValueId};
 
-use crate::{FunctionSignature, WasmFacts};
+use crate::{FunctionSignature, SorobanFacts, WasmFacts};
 
 #[cfg(feature = "serde")]
 use serde::Serialize;
@@ -51,8 +51,14 @@ use serde::Serialize;
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct HighIr {
-    /// Frontend-decoded facts about the original module.
+    /// Frontend-decoded facts about the original WASM module.
     pub facts: WasmFacts,
+
+    /// Decoded Soroban metadata, threaded through from the lift step.
+    /// `None` for modules without a `contractspecv0` custom section.
+    /// The Rust emitter consults this for type-name reconstruction and
+    /// `#[contracttype]` placement.
+    pub soroban_facts: Option<SorobanFacts>,
 
     /// Local (non-imported) functions in module order.
     pub functions: Vec<HighFunction>,

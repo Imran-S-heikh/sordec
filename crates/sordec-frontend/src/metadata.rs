@@ -2,20 +2,22 @@
 //!
 //! Reads the three custom sections — `contractspecv0`, `contractenvmetav0`,
 //! `contractmetav0` — from a [`crate::WasmFacts`] and produces a typed
-//! [`SorobanMetadata`].
+//! [`SorobanFacts`].
 //!
 //! The most interesting work happens in the spec decoder ([`decode_spec`],
 //! added in step 4): two-pass [`TypeId`] resolution. Helpers and the
 //! simpler env/contract-meta decoders live in this step (3); spec
 //! decoding lands in step 4.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
-use sordec_common::{IrId, TypeId};
+use sordec_common::{
+    Diagnostic, IrId, Location, MetadataDiagnosticCode, TypeId, UnknownReason,
+};
 use sordec_ir::{
     CompositeType, CustomSection, EnumCase, EnumDef, EnvCompatibility, EventDef, EventParam,
-    EventParamLocation, FunctionParam, FunctionSignature, PrimitiveType, SorobanMetadata,
+    EventParamLocation, FunctionParam, FunctionSignature, PrimitiveType, SorobanFacts,
     StructDef, StructField, TypeRef, TypeRegistry, UnionCase, UnionDef,
 };
 use stellar_xdr::curr::{
@@ -72,6 +74,7 @@ pub(super) fn stringm_to_string<const N: u32>(value: &StringM<N>) -> FrontendRes
 pub(super) fn spec_type_to_typeref(
     ty: &ScSpecTypeDef,
     name_to_id: &BTreeMap<String, TypeId>,
+    diagnostics: &mut Vec<Diagnostic>,
 ) -> FrontendResult<TypeRef> {
     let typeref = match ty {
         // ---- Primitives ----
@@ -97,37 +100,60 @@ pub(super) fn spec_type_to_typeref(
 
         // ---- Composites ----
         ScSpecTypeDef::Option(inner) => TypeRef::Composite(CompositeType::Option(Box::new(
-            spec_type_to_typeref(&inner.value_type, name_to_id)?,
+            spec_type_to_typeref(&inner.value_type, name_to_id, diagnostics)?,
         ))),
         ScSpecTypeDef::Result(inner) => TypeRef::Composite(CompositeType::Result(
-            Box::new(spec_type_to_typeref(&inner.ok_type, name_to_id)?),
-            Box::new(spec_type_to_typeref(&inner.error_type, name_to_id)?),
+            Box::new(spec_type_to_typeref(&inner.ok_type, name_to_id, diagnostics)?),
+            Box::new(spec_type_to_typeref(
+                &inner.error_type,
+                name_to_id,
+                diagnostics,
+            )?),
         )),
         ScSpecTypeDef::Vec(inner) => TypeRef::Composite(CompositeType::Vec(Box::new(
-            spec_type_to_typeref(&inner.element_type, name_to_id)?,
+            spec_type_to_typeref(&inner.element_type, name_to_id, diagnostics)?,
         ))),
         ScSpecTypeDef::Map(inner) => TypeRef::Composite(CompositeType::Map(
-            Box::new(spec_type_to_typeref(&inner.key_type, name_to_id)?),
-            Box::new(spec_type_to_typeref(&inner.value_type, name_to_id)?),
+            Box::new(spec_type_to_typeref(&inner.key_type, name_to_id, diagnostics)?),
+            Box::new(spec_type_to_typeref(
+                &inner.value_type,
+                name_to_id,
+                diagnostics,
+            )?),
         )),
         ScSpecTypeDef::Tuple(inner) => {
             let inner_types = inner
                 .value_types
                 .iter()
-                .map(|t| spec_type_to_typeref(t, name_to_id))
+                .map(|t| spec_type_to_typeref(t, name_to_id, diagnostics))
                 .collect::<FrontendResult<Vec<_>>>()?;
             TypeRef::Composite(CompositeType::Tuple(inner_types))
         }
         ScSpecTypeDef::BytesN(bytes_n) => TypeRef::Composite(CompositeType::BytesN(bytes_n.n)),
 
         // ---- User-defined ----
+        //
+        // If the spec references a UDT name we never saw declared, emit a
+        // Warning diagnostic and fall back to `TypeRef::Unknown` rather
+        // than failing the whole parse. The contract author wrote a
+        // broken spec; we recover what we can.
         ScSpecTypeDef::Udt(udt) => {
             let name = stringm_to_string(&udt.name)?;
-            let id = name_to_id
-                .get(&name)
-                .copied()
-                .ok_or(FrontendError::UnresolvedTypeReference { name })?;
-            TypeRef::UserDefined(id)
+            match name_to_id.get(&name).copied() {
+                Some(id) => TypeRef::UserDefined(id),
+                None => {
+                    diagnostics.push(
+                        Diagnostic::warning(
+                            MetadataDiagnosticCode::UnresolvedTypeReference { name: name.clone() },
+                            String::new(),
+                        )
+                        .at(Location::CustomSection {
+                            name: "contractspecv0".to_string(),
+                        }),
+                    );
+                    TypeRef::Unknown(UnknownReason::NoMetadata)
+                }
+            }
         }
     };
     Ok(typeref)
@@ -170,16 +196,34 @@ pub(super) fn decode_env_meta(bytes: &[u8]) -> FrontendResult<EnvCompatibility> 
 /// concatenate the bytes in declaration order before passing them here;
 /// this function decodes the concatenated stream.
 ///
-/// Returns an empty map when `bytes` is empty. Returns
-/// [`FrontendError::MalformedContractMeta`] when bytes are present but
-/// cannot be decoded.
-pub(super) fn decode_contract_meta(bytes: &[u8]) -> FrontendResult<BTreeMap<String, String>> {
+/// Returns an empty map when `bytes` is empty. If the payload cannot be
+/// decoded, emits a Warning diagnostic and returns an empty map — the
+/// contract metadata is just SDK version strings, so loss is recoverable.
+pub(super) fn decode_contract_meta(
+    bytes: &[u8],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> FrontendResult<BTreeMap<String, String>> {
     if bytes.is_empty() {
         return Ok(BTreeMap::new());
     }
 
-    let entries = soroban_meta::read::parse_raw(bytes)
-        .map_err(|err| FrontendError::MalformedContractMeta(err.to_string()))?;
+    let entries = match soroban_meta::read::parse_raw(bytes) {
+        Ok(entries) => entries,
+        Err(err) => {
+            diagnostics.push(
+                Diagnostic::warning(
+                    MetadataDiagnosticCode::MalformedContractMeta {
+                        reason: err.to_string(),
+                    },
+                    String::new(),
+                )
+                .at(Location::CustomSection {
+                    name: "contractmetav0".to_string(),
+                }),
+            );
+            return Ok(BTreeMap::new());
+        }
+    };
     let mut out = BTreeMap::<String, String>::new();
     for entry in entries {
         let ScMetaEntry::ScMetaV0(v0) = entry;
@@ -239,11 +283,15 @@ pub(super) fn concat_sections_named(sections: &[CustomSection], name: &str) -> V
 /// Returns the populated function map and type registry.
 fn decode_spec(
     bytes: &[u8],
+    diagnostics: &mut Vec<Diagnostic>,
 ) -> FrontendResult<(BTreeMap<String, FunctionSignature>, TypeRegistry)> {
     let entries = soroban_spec::read::parse_raw(bytes)
         .map_err(|err| FrontendError::MalformedSpec(err.to_string()))?;
 
     // Pass 1: allocate TypeIds for every UDT entry, build name → TypeId map.
+    //
+    // Duplicate names emit a Warning diagnostic and the second declaration
+    // is dropped; the first declaration retains the TypeId (first-wins).
     let mut name_to_id = BTreeMap::<String, TypeId>::new();
     let mut next_id: u32 = 0;
     for entry in &entries {
@@ -256,7 +304,16 @@ fn decode_spec(
             ScSpecEntry::EventV0(e) => symbol_to_string(&e.name)?,
         };
         if name_to_id.contains_key(&name) {
-            return Err(FrontendError::DuplicateTypeName { name });
+            diagnostics.push(
+                Diagnostic::warning(
+                    MetadataDiagnosticCode::DuplicateTypeName { name: name.clone() },
+                    String::new(),
+                )
+                .at(Location::CustomSection {
+                    name: "contractspecv0".to_string(),
+                }),
+            );
+            continue;
         }
         // No real contract has more than a handful of types; this assertion
         // exists purely to surface a u32 overflow as a panic in dev rather
@@ -269,9 +326,15 @@ fn decode_spec(
         next_id = next_id.saturating_add(1);
     }
 
-    // Pass 2: decode each entry's body, resolving Udt references through the map.
+    // Pass 2: decode each entry's body, resolving Udt references through
+    // the map. Duplicates were diagnosed in pass 1 (or are diagnosed
+    // below for functions) — pass 2 must skip second-and-later
+    // occurrences so the registry does not collect ghost entries with
+    // colliding TypeIds. We track UDT names we've already processed in
+    // `processed_udts`.
     let mut functions = BTreeMap::<String, FunctionSignature>::new();
     let mut types = TypeRegistry::default();
+    let mut processed_udts: BTreeSet<String> = BTreeSet::new();
 
     for entry in entries {
         match entry {
@@ -283,35 +346,57 @@ fn decode_spec(
                     .map(|input| {
                         Ok(FunctionParam {
                             name: stringm_to_string(&input.name)?,
-                            ty: spec_type_to_typeref(&input.type_, &name_to_id)?,
+                            ty: spec_type_to_typeref(&input.type_, &name_to_id, diagnostics)?,
                         })
                     })
                     .collect::<FrontendResult<Vec<_>>>()?;
                 let outputs = f
                     .outputs
                     .iter()
-                    .map(|t| spec_type_to_typeref(t, &name_to_id))
+                    .map(|t| spec_type_to_typeref(t, &name_to_id, diagnostics))
                     .collect::<FrontendResult<Vec<_>>>()?;
                 let signature = FunctionSignature {
                     name: name.clone(),
                     inputs,
                     outputs,
                 };
-                if functions.insert(name.clone(), signature).is_some() {
-                    return Err(FrontendError::DuplicateFunctionName { name });
+                // First-wins on duplicate function names. The first
+                // declaration is already in `functions`; emit a Warning
+                // for the duplicate and skip the rebind.
+                use std::collections::btree_map::Entry;
+                match functions.entry(name.clone()) {
+                    Entry::Vacant(slot) => {
+                        slot.insert(signature);
+                    }
+                    Entry::Occupied(_) => {
+                        diagnostics.push(
+                            Diagnostic::warning(
+                                MetadataDiagnosticCode::DuplicateFunctionName { name },
+                                String::new(),
+                            )
+                            .at(Location::CustomSection {
+                                name: "contractspecv0".to_string(),
+                            }),
+                        );
+                    }
                 }
             }
 
             ScSpecEntry::UdtStructV0(s) => {
                 let name = stringm_to_string(&s.name)?;
-                let id = name_to_id[&name];
+                if !processed_udts.insert(name.clone()) {
+                    continue;
+                }
+                let id = name_to_id.get(&name).copied().expect(
+                    "pass 1 invariant: every non-duplicate name has a TypeId in name_to_id",
+                );
                 let fields = s
                     .fields
                     .iter()
                     .map(|f| {
                         Ok(StructField {
                             name: stringm_to_string(&f.name)?,
-                            ty: spec_type_to_typeref(&f.type_, &name_to_id)?,
+                            ty: spec_type_to_typeref(&f.type_, &name_to_id, diagnostics)?,
                         })
                     })
                     .collect::<FrontendResult<Vec<_>>>()?;
@@ -320,7 +405,12 @@ fn decode_spec(
 
             ScSpecEntry::UdtUnionV0(u) => {
                 let name = stringm_to_string(&u.name)?;
-                let id = name_to_id[&name];
+                if !processed_udts.insert(name.clone()) {
+                    continue;
+                }
+                let id = name_to_id.get(&name).copied().expect(
+                    "pass 1 invariant: every non-duplicate name has a TypeId in name_to_id",
+                );
                 let cases = u
                     .cases
                     .iter()
@@ -333,7 +423,7 @@ fn decode_spec(
                             let fields = t
                                 .type_
                                 .iter()
-                                .map(|ty| spec_type_to_typeref(ty, &name_to_id))
+                                .map(|ty| spec_type_to_typeref(ty, &name_to_id, diagnostics))
                                 .collect::<FrontendResult<Vec<_>>>()?;
                             Ok(UnionCase {
                                 name: stringm_to_string(&t.name)?,
@@ -347,7 +437,12 @@ fn decode_spec(
 
             ScSpecEntry::UdtEnumV0(e) => {
                 let name = stringm_to_string(&e.name)?;
-                let id = name_to_id[&name];
+                if !processed_udts.insert(name.clone()) {
+                    continue;
+                }
+                let id = name_to_id.get(&name).copied().expect(
+                    "pass 1 invariant: every non-duplicate name has a TypeId in name_to_id",
+                );
                 let cases = e
                     .cases
                     .iter()
@@ -363,7 +458,12 @@ fn decode_spec(
 
             ScSpecEntry::UdtErrorEnumV0(e) => {
                 let name = stringm_to_string(&e.name)?;
-                let id = name_to_id[&name];
+                if !processed_udts.insert(name.clone()) {
+                    continue;
+                }
+                let id = name_to_id.get(&name).copied().expect(
+                    "pass 1 invariant: every non-duplicate name has a TypeId in name_to_id",
+                );
                 let cases = e
                     .cases
                     .iter()
@@ -379,7 +479,12 @@ fn decode_spec(
 
             ScSpecEntry::EventV0(e) => {
                 let name = symbol_to_string(&e.name)?;
-                let id = name_to_id[&name];
+                if !processed_udts.insert(name.clone()) {
+                    continue;
+                }
+                let id = name_to_id.get(&name).copied().expect(
+                    "pass 1 invariant: every non-duplicate name has a TypeId in name_to_id",
+                );
                 let prefix_topics = e
                     .prefix_topics
                     .iter()
@@ -391,7 +496,7 @@ fn decode_spec(
                     .map(|param| {
                         Ok(EventParam {
                             name: stringm_to_string(&param.name)?,
-                            ty: spec_type_to_typeref(&param.type_, &name_to_id)?,
+                            ty: spec_type_to_typeref(&param.type_, &name_to_id, diagnostics)?,
                             location: match param.location {
                                 ScSpecEventParamLocationV0::Data => EventParamLocation::Data,
                                 ScSpecEventParamLocationV0::TopicList => EventParamLocation::Topic,
@@ -418,21 +523,24 @@ fn decode_spec(
 // ---------------------------------------------------------------------
 
 /// Decode the three Soroban custom sections from a parsed module's
-/// custom-section list.
+/// custom-section list, accumulating non-fatal warnings into
+/// `diagnostics`.
 ///
 /// Returns `Ok(None)` for generic WASM (no `contractspecv0` section).
-/// Returns `Ok(Some(SorobanMetadata { ... }))` when the spec is present
-/// and decoded successfully. Errors only when *some* metadata is present
-/// but malformed.
+/// Returns `Ok(Some(SorobanFacts { ... }))` when the spec is present
+/// and decoded — possibly with degraded fidelity, in which case the
+/// degradations are recorded in `diagnostics`. Errors only when the
+/// spec section itself is malformed beyond recovery.
 pub(crate) fn decode_metadata(
     sections: &[CustomSection],
-) -> FrontendResult<Option<SorobanMetadata>> {
+    diagnostics: &mut Vec<Diagnostic>,
+) -> FrontendResult<Option<SorobanFacts>> {
     let Some(spec_bytes) = find_section_named(sections, "contractspecv0") else {
         // Not a Soroban contract — produce no metadata, do not error.
         return Ok(None);
     };
 
-    let (functions, types) = decode_spec(spec_bytes)?;
+    let (functions, types) = decode_spec(spec_bytes, diagnostics)?;
 
     // contractenvmetav0: at most one section.
     let env_meta = match find_section_named(sections, "contractenvmetav0") {
@@ -443,12 +551,85 @@ pub(crate) fn decode_metadata(
     // contractmetav0: multiple sections legitimately exist; concatenate
     // their bytes in declaration order before decoding.
     let contract_meta_bytes = concat_sections_named(sections, "contractmetav0");
-    let contract_meta = decode_contract_meta(&contract_meta_bytes)?;
+    let contract_meta = decode_contract_meta(&contract_meta_bytes, diagnostics)?;
 
-    Ok(Some(SorobanMetadata {
+    Ok(Some(SorobanFacts {
         functions,
         types,
         contract_meta,
         env_meta,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sordec_common::Severity;
+    use std::str::FromStr;
+    use stellar_xdr::curr::{ScSpecTypeUdt, StringM};
+
+    #[test]
+    fn unresolved_udt_emits_warning_and_returns_unknown_placeholder() {
+        let mut diags: Vec<Diagnostic> = Vec::new();
+        let name_to_id: BTreeMap<String, TypeId> = BTreeMap::new();
+        let udt = ScSpecTypeDef::Udt(ScSpecTypeUdt {
+            name: StringM::<60>::from_str("MissingType").expect("valid identifier"),
+        });
+
+        let typeref = spec_type_to_typeref(&udt, &name_to_id, &mut diags)
+            .expect("returns Ok with placeholder, not Err");
+
+        assert!(
+            matches!(typeref, TypeRef::Unknown(UnknownReason::NoMetadata)),
+            "expected TypeRef::Unknown(NoMetadata); got {typeref:?}"
+        );
+        assert_eq!(diags.len(), 1, "exactly one diagnostic emitted");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert!(matches!(
+            &diags[0].code,
+            sordec_common::DiagnosticCode::Metadata(
+                MetadataDiagnosticCode::UnresolvedTypeReference { name }
+            ) if name == "MissingType"
+        ));
+        assert!(matches!(
+            &diags[0].location,
+            Some(Location::CustomSection { name }) if name == "contractspecv0"
+        ));
+    }
+
+    #[test]
+    fn malformed_contract_meta_bytes_emit_warning_and_return_empty_map() {
+        let mut diags: Vec<Diagnostic> = Vec::new();
+        // Garbage bytes that the soroban_meta XDR decoder will reject.
+        let garbage = vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8];
+
+        let result =
+            decode_contract_meta(&garbage, &mut diags).expect("returns Ok with empty map");
+
+        assert!(result.is_empty(), "fell back to empty map; got {result:?}");
+        assert_eq!(diags.len(), 1, "exactly one diagnostic emitted");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert!(matches!(
+            &diags[0].code,
+            sordec_common::DiagnosticCode::Metadata(
+                MetadataDiagnosticCode::MalformedContractMeta { .. }
+            )
+        ));
+        assert!(matches!(
+            &diags[0].location,
+            Some(Location::CustomSection { name }) if name == "contractmetav0"
+        ));
+    }
+
+    #[test]
+    fn empty_contract_meta_bytes_emit_no_diagnostic() {
+        let mut diags: Vec<Diagnostic> = Vec::new();
+        let result = decode_contract_meta(&[], &mut diags).expect("returns Ok");
+        assert!(result.is_empty());
+        assert!(
+            diags.is_empty(),
+            "empty contractmetav0 is legal — no diagnostic; got {diags:?}"
+        );
+    }
+}
+

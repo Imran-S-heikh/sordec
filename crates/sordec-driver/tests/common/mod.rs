@@ -95,12 +95,42 @@ pub fn assert_invariants_hold(lifted: &LiftedIr) {
 /// immediately identifiable.
 pub fn assert_corpus_fixture(wasm: &[u8], fixture_name: &str) {
     // 1. Frontend parses.
-    let facts = sordec_frontend::parse(wasm)
+    let parse_output = sordec_frontend::parse(wasm)
         .unwrap_or_else(|e| panic!("[{fixture_name}] frontend parse failed: {e}"));
 
-    // 2. Lifter accepts the WASM.
-    let mut lifted = lift_with_waffle(wasm, &facts)
-        .unwrap_or_else(|e| panic!("[{fixture_name}] lifter failed: {e}"));
+    // 2. Diagnostic-severity gate (D12): no Error-severity diagnostics
+    //    are tolerated by default. Warning and Info are allowed; if a
+    //    fixture surfaces a real Warning that's a per-pass concern, not
+    //    a corpus-test failure.
+    if let Some(err_diag) = parse_output
+        .diagnostics
+        .iter()
+        .find(|d| d.severity == sordec_common::Severity::Error)
+    {
+        panic!(
+            "[{fixture_name}] frontend emitted an Error-severity diagnostic: {err_diag}"
+        );
+    }
+
+    // 3. Lifter accepts the WASM.
+    let lift_output = lift_with_waffle(
+        wasm,
+        &parse_output.wasm_facts,
+        parse_output.soroban_facts.as_ref(),
+    )
+    .unwrap_or_else(|e| panic!("[{fixture_name}] lifter failed: {e}"));
+
+    // 4. Lifter must not emit Error-severity diagnostics either.
+    if let Some(err_diag) = lift_output
+        .diagnostics
+        .iter()
+        .find(|d| d.severity == sordec_common::Severity::Error)
+    {
+        panic!("[{fixture_name}] lifter emitted an Error-severity diagnostic: {err_diag}");
+    }
+
+    let mut lifted = lift_output.lifted;
+    let facts = &parse_output.wasm_facts;
 
     // 3. Lifted-vs-frontend agreement on local function count.
     assert_eq!(

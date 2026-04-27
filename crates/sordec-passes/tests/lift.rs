@@ -37,8 +37,14 @@ const COUNTER_WASM: &[u8] = include_bytes!(concat!(
 
 #[test]
 fn lifts_hello_add_smoke() {
-    let facts = sordec_frontend::parse(HELLO_ADD_WASM).expect("frontend parses hello_add");
-    let lifted = lift_with_waffle(HELLO_ADD_WASM, &facts).expect("lifter accepts hello_add");
+    let sordec_frontend::ParseOutput {
+        wasm_facts: facts,
+        soroban_facts,
+        ..
+    } = sordec_frontend::parse(HELLO_ADD_WASM).expect("frontend parses hello_add");
+    let lifted = lift_with_waffle(HELLO_ADD_WASM, &facts, soroban_facts.as_ref())
+        .expect("lifter accepts hello_add")
+        .lifted;
 
     // Local-function count should match the number of bodies the
     // frontend tagged with type indices.
@@ -63,8 +69,14 @@ fn lifts_hello_add_smoke() {
 
 #[test]
 fn lifts_counter_smoke() {
-    let facts = sordec_frontend::parse(COUNTER_WASM).expect("frontend parses counter");
-    let lifted = lift_with_waffle(COUNTER_WASM, &facts).expect("lifter accepts counter");
+    let sordec_frontend::ParseOutput {
+        wasm_facts: facts,
+        soroban_facts,
+        ..
+    } = sordec_frontend::parse(COUNTER_WASM).expect("frontend parses counter");
+    let lifted = lift_with_waffle(COUNTER_WASM, &facts, soroban_facts.as_ref())
+        .expect("lifter accepts counter")
+        .lifted;
 
     assert_eq!(
         lifted.functions.len(),
@@ -87,8 +99,14 @@ fn lifts_counter_smoke() {
 
 #[test]
 fn hello_add_add_function_has_arithmetic_return() {
-    let facts = sordec_frontend::parse(HELLO_ADD_WASM).expect("frontend parses hello_add");
-    let lifted = lift_with_waffle(HELLO_ADD_WASM, &facts).expect("lifter accepts hello_add");
+    let sordec_frontend::ParseOutput {
+        wasm_facts: facts,
+        soroban_facts,
+        ..
+    } = sordec_frontend::parse(HELLO_ADD_WASM).expect("frontend parses hello_add");
+    let lifted = lift_with_waffle(HELLO_ADD_WASM, &facts, soroban_facts.as_ref())
+        .expect("lifter accepts hello_add")
+        .lifted;
 
     // The frontend records the `add` export's WASM function index. We
     // map it to a local FuncId by subtracting the imported-function
@@ -153,14 +171,26 @@ fn hello_add_add_function_has_arithmetic_return() {
 
 #[test]
 fn invariants_hold_for_hello_add() {
-    let facts = sordec_frontend::parse(HELLO_ADD_WASM).expect("frontend parses hello_add");
-    let lifted = lift_with_waffle(HELLO_ADD_WASM, &facts).expect("lifter accepts hello_add");
+    let sordec_frontend::ParseOutput {
+        wasm_facts: facts,
+        soroban_facts,
+        ..
+    } = sordec_frontend::parse(HELLO_ADD_WASM).expect("frontend parses hello_add");
+    let lifted = lift_with_waffle(HELLO_ADD_WASM, &facts, soroban_facts.as_ref())
+        .expect("lifter accepts hello_add")
+        .lifted;
     assert_invariants_hold(&lifted);
 }
 
 #[test]
 fn invariants_hold_for_counter() {
-    let facts = sordec_frontend::parse(COUNTER_WASM).expect("frontend parses counter");
-    let lifted = lift_with_waffle(COUNTER_WASM, &facts).expect("lifter accepts counter");
+    let sordec_frontend::ParseOutput {
+        wasm_facts: facts,
+        soroban_facts,
+        ..
+    } = sordec_frontend::parse(COUNTER_WASM).expect("frontend parses counter");
+    let lifted = lift_with_waffle(COUNTER_WASM, &facts, soroban_facts.as_ref())
+        .expect("lifter accepts counter")
+        .lifted;
     assert_invariants_hold(&lifted);
 }

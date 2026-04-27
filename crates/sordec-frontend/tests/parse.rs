@@ -32,7 +32,9 @@ const COUNTER_WASM: &[u8] = include_bytes!(concat!(
 
 #[test]
 fn hello_add_imports_are_typed_func_imports_from_int_module() {
-    let facts = parse(HELLO_ADD_WASM).expect("hello_add.wasm should parse");
+    let facts = parse(HELLO_ADD_WASM)
+        .expect("hello_add.wasm should parse")
+        .wasm_facts;
 
     // hello-add imports two host functions from module `"i"` (the Soroban
     // int module): `obj_to_u64` and `obj_from_u64`. Both are functions.
@@ -49,7 +51,9 @@ fn hello_add_imports_are_typed_func_imports_from_int_module() {
 
 #[test]
 fn hello_add_exports_include_named_function_memory_and_dispatcher() {
-    let facts = parse(HELLO_ADD_WASM).expect("hello_add.wasm should parse");
+    let facts = parse(HELLO_ADD_WASM)
+        .expect("hello_add.wasm should parse")
+        .wasm_facts;
 
     // Required exports for any Soroban contract built by the SDK.
     let add = facts
@@ -77,7 +81,9 @@ fn hello_add_exports_include_named_function_memory_and_dispatcher() {
 
 #[test]
 fn hello_add_has_local_function_type_indices() {
-    let facts = parse(HELLO_ADD_WASM).expect("hello_add.wasm should parse");
+    let facts = parse(HELLO_ADD_WASM)
+        .expect("hello_add.wasm should parse")
+        .wasm_facts;
 
     // hello-add has at least one local (non-imported) function.
     assert!(
@@ -88,9 +94,11 @@ fn hello_add_has_local_function_type_indices() {
 
 #[test]
 fn hello_add_metadata_includes_add_with_typed_u64_signature() {
-    let facts = parse(HELLO_ADD_WASM).expect("hello_add.wasm should parse");
+    let soroban_facts = parse(HELLO_ADD_WASM)
+        .expect("hello_add.wasm should parse")
+        .soroban_facts;
 
-    let metadata = facts.metadata.expect("hello_add is a Soroban contract");
+    let metadata = soroban_facts.expect("hello_add is a Soroban contract");
 
     let add = metadata
         .functions
@@ -122,8 +130,10 @@ fn hello_add_metadata_includes_add_with_typed_u64_signature() {
 
 #[test]
 fn hello_add_contract_meta_records_sdk_and_compiler_versions() {
-    let facts = parse(HELLO_ADD_WASM).expect("hello_add.wasm should parse");
-    let metadata = facts.metadata.expect("hello_add is a Soroban contract");
+    let soroban_facts = parse(HELLO_ADD_WASM)
+        .expect("hello_add.wasm should parse")
+        .soroban_facts;
+    let metadata = soroban_facts.expect("hello_add is a Soroban contract");
 
     assert!(
         metadata.contract_meta.contains_key("rsver"),
@@ -145,7 +155,9 @@ fn hello_add_contract_meta_records_sdk_and_compiler_versions() {
 
 #[test]
 fn counter_has_multiple_imports_and_exports() {
-    let facts = parse(COUNTER_WASM).expect("counter.wasm should parse");
+    let facts = parse(COUNTER_WASM)
+        .expect("counter.wasm should parse")
+        .wasm_facts;
 
     assert!(
         facts.imports.len() >= 4,
@@ -161,8 +173,10 @@ fn counter_has_multiple_imports_and_exports() {
 
 #[test]
 fn counter_metadata_lists_all_four_contract_functions() {
-    let facts = parse(COUNTER_WASM).expect("counter.wasm should parse");
-    let metadata = facts.metadata.expect("counter is a Soroban contract");
+    let soroban_facts = parse(COUNTER_WASM)
+        .expect("counter.wasm should parse")
+        .soroban_facts;
+    let metadata = soroban_facts.expect("counter is a Soroban contract");
 
     for fname in [
         "__constructor",
@@ -180,8 +194,10 @@ fn counter_metadata_lists_all_four_contract_functions() {
 
 #[test]
 fn counter_data_key_union_is_typed_with_address_payload() {
-    let facts = parse(COUNTER_WASM).expect("counter.wasm should parse");
-    let metadata = facts.metadata.expect("counter is a Soroban contract");
+    let soroban_facts = parse(COUNTER_WASM)
+        .expect("counter.wasm should parse")
+        .soroban_facts;
+    let metadata = soroban_facts.expect("counter is a Soroban contract");
 
     let data_key = metadata
         .types
@@ -216,8 +232,10 @@ fn counter_data_key_union_is_typed_with_address_payload() {
 
 #[test]
 fn counter_env_meta_records_protocol() {
-    let facts = parse(COUNTER_WASM).expect("counter.wasm should parse");
-    let metadata = facts.metadata.expect("counter is a Soroban contract");
+    let soroban_facts = parse(COUNTER_WASM)
+        .expect("counter.wasm should parse")
+        .soroban_facts;
+    let metadata = soroban_facts.expect("counter is a Soroban contract");
     assert!(
         metadata.env_meta.protocol.is_some(),
         "counter env_meta protocol must be populated"

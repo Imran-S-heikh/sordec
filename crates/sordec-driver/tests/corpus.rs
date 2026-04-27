@@ -100,3 +100,44 @@ fn corpus_timelock() {
 fn corpus_dex_liquidity_pool() {
     assert_corpus_fixture(DEX_LIQUIDITY_POOL_WASM, "dex-liquidity-pool");
 }
+
+// ---------------------------------------------------------------------
+// Diagnostics-clean assertions for canonical fixtures
+//
+// The corpus's primary assert_corpus_fixture helper rejects only
+// Error-severity diagnostics. These tests strengthen that for the
+// canonical clean fixture: token-v23 (a fresh build of the upstream
+// SEP-41 token) should produce ZERO diagnostics of any severity. If
+// this regresses, either we introduced a real diagnostic in code or
+// the upstream contract source changed in a way we should investigate.
+// ---------------------------------------------------------------------
+
+#[test]
+fn corpus_token_v23_emits_no_diagnostics() {
+    let parse_output =
+        sordec_frontend::parse(TOKEN_V23_WASM).expect("token-v23 parses");
+    assert!(
+        parse_output.diagnostics.is_empty(),
+        "token-v23 (canonical clean fixture) emitted {} diagnostic(s): {:?}",
+        parse_output.diagnostics.len(),
+        parse_output.diagnostics,
+    );
+}
+
+#[test]
+fn corpus_token_v23_stripped_has_no_soroban_facts_and_no_diagnostics() {
+    // A stripped contract has no contractspecv0, so soroban_facts is
+    // None — and the metadata-decoder code path that emits diagnostics
+    // is never entered. Therefore: zero diagnostics expected.
+    let parse_output = sordec_frontend::parse(TOKEN_V23_STRIPPED_WASM)
+        .expect("token-v23-stripped parses");
+    assert!(
+        parse_output.soroban_facts.is_none(),
+        "stripped fixture should report no SorobanFacts"
+    );
+    assert!(
+        parse_output.diagnostics.is_empty(),
+        "stripped fixture should not emit diagnostics; got {:?}",
+        parse_output.diagnostics,
+    );
+}

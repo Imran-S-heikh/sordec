@@ -19,7 +19,7 @@ pub mod pass;
 pub mod pipeline;
 
 pub use error::{LiftError, LiftResult};
-pub use lift::lift_with_waffle;
+pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LoweringError, LoweringStep};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};

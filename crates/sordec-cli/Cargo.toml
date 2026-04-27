@@ -12,6 +12,7 @@ name = "sordec"
 path = "src/main.rs"
 
 [dependencies]
+sordec-common.workspace = true
 sordec-driver.workspace = true
 clap.workspace = true
 

@@ -24,6 +24,7 @@
 //! real contract; the back half (lowering, high-IR passes, emit) lands
 //! in subsequent tasks.
 
+use sordec_common::Diagnostic;
 use sordec_frontend::FrontendError;
 use sordec_ir::{HighIr, LiftedIr};
 use sordec_passes::{LiftError, LoweringError, LoweringStep, Pipeline, PipelineReport};
@@ -82,10 +83,15 @@ impl Driver {
     ///   implementor exists.
     pub fn run(&self, wasm: &[u8]) -> Result<DecompileOutput, DriverError> {
         // Stage 1: parse WASM + decode Soroban metadata.
-        let facts = sordec_frontend::parse(wasm)?;
+        let parse_output = sordec_frontend::parse(wasm)?;
 
         // Stage 2: lift to typed SSA + CFG.
-        let mut lifted = sordec_passes::lift_with_waffle(wasm, &facts)?;
+        let lift_output = sordec_passes::lift_with_waffle(
+            wasm,
+            &parse_output.wasm_facts,
+            parse_output.soroban_facts.as_ref(),
+        )?;
+        let mut lifted = lift_output.lifted;
 
         // Stage 3: run the lifted-IR pipeline. With zero passes
         // registered today, this is a no-op; the call is preserved so
@@ -95,6 +101,18 @@ impl Driver {
         // Stages 4-6 require a `LoweringStep` implementor and a
         // backend, neither of which exist yet. Surface a typed error
         // rather than silently producing an empty output.
+        //
+        // Diagnostics gap (acknowledged, not yet fixed): stages 1 and 2
+        // produce `parse_output.diagnostics` and `lift_output.diagnostics`,
+        // which we don't surface to the caller because we error out
+        // here. `DriverReport` already has a `diagnostics` field for
+        // when this changes — when the back half of the pipeline lands
+        // and `run` can return `Ok`, populate it as
+        // `parse_output.diagnostics.into_iter().chain(lift_output.diagnostics).collect()`.
+        // Until then, callers who need diagnostics should call
+        // `sordec_frontend::parse` and `sordec_passes::lift_with_waffle`
+        // directly — the CLI's `dump-facts` / `dump-ir` subcommands will
+        // do exactly that in the next sub-task.
         Err(DriverError::NotYetWired)
     }
 
@@ -140,6 +158,10 @@ pub struct DecompileOutput {
 /// Per-run diagnostics combining both pipelines and the lowering step.
 #[derive(Debug, Default, Clone)]
 pub struct DriverReport {
+    /// Non-fatal diagnostics surfaced by the frontend, lifter, and
+    /// passes during this run. Concatenated in declaration order so
+    /// callers can print them sequentially.
+    pub diagnostics: Vec<Diagnostic>,
     /// Report from the lifted-IR pipeline.
     pub lifted: Option<PipelineReport>,
     /// Report from the high-IR pipeline.

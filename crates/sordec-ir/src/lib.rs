@@ -34,6 +34,6 @@ pub use validate::{validate_high, validate_lifted, Validate, ValidateError};
 pub use wasm_facts::{
     ByteRange, CompositeType, CustomSection, EnumCase, EnumDef, EnvCompatibility, EventDef,
     EventParam, EventParamLocation, Export, ExportKind, FunctionParam, FunctionSignature, Import,
-    ImportKind, PrimitiveType, SorobanMetadata, StructDef, StructField, TypeRef, TypeRegistry,
+    ImportKind, PrimitiveType, SorobanFacts, StructDef, StructField, TypeRef, TypeRegistry,
     UnionCase, UnionDef, WasmFacts,
 };
