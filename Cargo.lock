@@ -1192,6 +1192,7 @@ dependencies = [
  "assert_cmd",
  "clap 4.6.1",
  "predicates",
+ "serde",
  "serde_json",
  "sordec-common",
  "sordec-driver",

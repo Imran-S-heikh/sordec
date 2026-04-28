@@ -1,11 +1,14 @@
 //! `sordec` — command-line interface to the Soroban decompiler.
 //!
-//! Two inspection subcommands ship in the Phase 1 closeout:
+//! Three inspection subcommands ship in the Phase 1 closeout:
 //!
 //! - `sordec dump-facts <wasm>` — parse a WASM module and emit
 //!   `WasmFacts` + `SorobanFacts` + diagnostics as JSON on stdout.
 //! - `sordec dump-ir <wasm>` — parse + lift, then emit a waffle-style
 //!   text rendering of the CFG/SSA IR on stdout.
+//! - `sordec coverage <wasm>` — parse + lift, then emit a coverage
+//!   report (host-call recognition %, lift completeness, parse +
+//!   metadata health) as text or `--json`.
 //!
 //! Output convention (Unix-standard):
 //!
@@ -22,12 +25,13 @@
 //! - **2** — usage error (clap's default for argv-parse failure)
 //! - **3** — I/O error (couldn't read input file)
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod coverage;
 mod diagnostics;
 mod pretty;
 
@@ -56,6 +60,8 @@ enum Command {
     DumpFacts(DumpFactsArgs),
     /// Lift a WASM module and emit the waffle-style CFG/SSA IR as text.
     DumpIr(DumpIrArgs),
+    /// Report how much of a contract this pipeline currently understands.
+    Coverage(CoverageArgs),
 }
 
 #[derive(clap::Args)]
@@ -75,6 +81,18 @@ struct DumpIrArgs {
     with_header: bool,
 }
 
+#[derive(clap::Args)]
+struct CoverageArgs {
+    /// Path to the WASM module to inspect.
+    wasm: PathBuf,
+
+    /// Emit machine-readable JSON instead of the human-readable text
+    /// report. Schema is append-only across releases — see
+    /// `coverage.rs` module docs.
+    #[arg(long)]
+    json: bool,
+}
+
 // ---------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------
@@ -84,6 +102,7 @@ fn main() -> ExitCode {
     let exit = match cli.command {
         Command::DumpFacts(args) => run_dump_facts(&args),
         Command::DumpIr(args) => run_dump_ir(&args),
+        Command::Coverage(args) => run_coverage(&args),
     };
     ExitCode::from(exit)
 }
@@ -186,6 +205,78 @@ fn run_dump_ir(args: &DumpIrArgs) -> u8 {
     // 5. Diagnostics from BOTH parse and lift on stderr, in pipeline
     //    order (parse first, then lift). Concatenated into a single
     //    pass so a downstream piping caller sees them together.
+    let mut combined = parse_output.diagnostics;
+    combined.extend(lift_output.diagnostics);
+    diagnostics::print_diagnostics(&combined);
+
+    EXIT_OK
+}
+
+fn run_coverage(args: &CoverageArgs) -> u8 {
+    // 1. Read the input file.
+    let bytes = match std::fs::read(&args.wasm) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "sordec: could not read {}: {e}",
+                args.wasm.display()
+            );
+            return EXIT_IO_ERR;
+        }
+    };
+
+    // 2. Parse.
+    let parse_output = match sordec_frontend::parse(&bytes) {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "sordec: parse failed: {e}");
+            return EXIT_PIPELINE_ERR;
+        }
+    };
+
+    // 3. Lift.
+    let lift_output = match sordec_passes::lift_with_waffle(
+        &bytes,
+        &parse_output.wasm_facts,
+        parse_output.soroban_facts.as_ref(),
+    ) {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "sordec: lift failed: {e}");
+            return EXIT_PIPELINE_ERR;
+        }
+    };
+
+    // 4. Compute the report. Pure — no failure modes.
+    let report = coverage::compute_coverage(
+        &args.wasm,
+        &parse_output.diagnostics,
+        parse_output.soroban_facts.is_some(),
+        &lift_output.lifted,
+        &lift_output.diagnostics,
+    );
+
+    // 5. Render to stdout in the requested format. Lock stdout to
+    //    avoid interleaving with anything else this process writes.
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let render_result: io::Result<()> = if args.json {
+        match coverage::render_json(&mut out, &report) {
+            Ok(()) => writeln!(out),
+            Err(e) => Err(io::Error::other(e)),
+        }
+    } else {
+        coverage::render_text(&mut out, &report)
+    };
+    if let Err(e) = render_result {
+        let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
+        return EXIT_IO_ERR;
+    }
+
+    // 6. Diagnostics from BOTH parse and lift on stderr, same pattern
+    //    as `dump-ir`. Goes after stdout so a piping caller sees them
+    //    together on the terminal.
     let mut combined = parse_output.diagnostics;
     combined.extend(lift_output.diagnostics);
     diagnostics::print_diagnostics(&combined);

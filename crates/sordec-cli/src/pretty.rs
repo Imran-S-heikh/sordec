@@ -603,8 +603,6 @@ mod tests {
 
     // --- Call rendering: imported (host) functions and local functions ---
 
-    use waffle::entity::EntityRef as _;
-
     /// Build a single-import context: function index 0 maps to the
     /// supplied (module, name) host import. Useful for testing the
     /// imported-call rendering path.
