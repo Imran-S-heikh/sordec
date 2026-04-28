@@ -152,11 +152,11 @@ fn hello_add_add_function_has_arithmetic_return() {
 
     let mut saw_arithmetic = false;
     for (_value_id, value) in add_func.values.iter() {
-        if let LiftedValueDef::Operator { op, .. } = &value.def {
-            if matches!(op.kind(), WasmOpcodeKind::Arithmetic) {
-                saw_arithmetic = true;
-                break;
-            }
+        if let LiftedValueDef::Operator { op, .. } = &value.def
+            && matches!(op.kind(), WasmOpcodeKind::Arithmetic)
+        {
+            saw_arithmetic = true;
+            break;
         }
     }
     assert!(

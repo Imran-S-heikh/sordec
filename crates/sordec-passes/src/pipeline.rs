@@ -206,6 +206,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::single_range_in_vec_init)]
     fn fixpoint_group_loops_until_no_change() {
         let pipeline = Pipeline::<u32>::new(
             vec![Box::new(CountUp {
@@ -242,6 +243,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "exceeds pass count")]
+    #[allow(clippy::single_range_in_vec_init)]
     fn out_of_bounds_fixpoint_group_panics() {
         let _ = Pipeline::<u32>::new(
             vec![Box::new(CountUp {
