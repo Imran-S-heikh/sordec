@@ -12,6 +12,12 @@ sordec-common.workspace = true
 sordec-ir.workspace = true
 waffle.workspace = true
 thiserror.workspace = true
+# `serde` + `serde_json` parse the vendored `host_calls/env.json`
+# catalog at first lookup. Non-feature-gated because the catalog is
+# unconditional — every consumer of `sordec-passes` benefits from
+# host-call resolution.
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 sordec-frontend.workspace = true

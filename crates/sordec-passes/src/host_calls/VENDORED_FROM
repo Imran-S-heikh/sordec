@@ -1,0 +1,17 @@
+upstream_url=https://github.com/stellar/rs-soroban-env
+upstream_crate=soroban-env-common
+upstream_version=26.1.2
+upstream_path=env.json
+license=Apache-2.0
+vendored_on=2026-04-28
+vendored_by=Imran Shaikh <imransheikhsadi@gmail.com>
+notes=Soroban host-function ABI registry. Treat as data — never edit
+      this file by hand. The catalog is the canonical Soroban host
+      function spec; the rest of our recognition logic depends on it.
+      The host-function ABI is append-only across protocol versions
+      (functions are added, never removed or renamed), so this 26.1.2
+      catalog automatically covers every older Soroban contract too.
+      Re-vendor procedure: `cp` env.json from a newer
+      soroban-env-common release into this directory, update the
+      `upstream_version` field above and the `CATALOG_VERSION`
+      constant in mod.rs.

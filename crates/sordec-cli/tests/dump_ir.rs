@@ -75,6 +75,21 @@ fn dump_ir_with_missing_file_exits_three() {
 }
 
 #[test]
+fn dump_ir_recognises_host_calls_in_token_v23() {
+    // Every SEP-41 token contract calls `put_contract_data` (the
+    // ledger storage write primitive — module "l", name "_") to
+    // record balance and metadata. After semantic recovery v0 the
+    // output must show that call's friendly name, not the raw
+    // `Call { function_index: ... }` Debug form.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-ir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host:l:put_contract_data"));
+}
+
+#[test]
 fn dump_ir_with_garbage_input_surfaces_invalid_wasm() {
     let tmp = std::env::temp_dir().join("sordec-test-dump-ir-garbage.wasm");
     std::fs::write(&tmp, b"definitely not WASM").expect("write tmp");

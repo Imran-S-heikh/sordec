@@ -1198,6 +1198,7 @@ dependencies = [
  "sordec-frontend",
  "sordec-ir",
  "sordec-passes",
+ "waffle",
 ]
 
 [[package]]
@@ -1246,6 +1247,8 @@ dependencies = [
 name = "sordec-passes"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "sordec-common",
  "sordec-frontend",
  "sordec-ir",
