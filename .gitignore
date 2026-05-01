@@ -11,8 +11,9 @@ Cargo.lock.bak
 /docs/
 /plan/
 
-# Learning experiments' build artifacts
-/learning/**/target/
+# Personal sandbox — kept locally for reference but not pushed.
+# Test-relevant fixtures live in `samples/contracts/` instead.
+/learning/
 
 # CLI output defaults
 /out/
