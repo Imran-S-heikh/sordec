@@ -1,23 +1,22 @@
-# Phase 1 Deliverable — Foundation Complete
+# Phase 1 — Foundation Complete
 
 **Status:** ✅ Complete  
 **Tag/cut:** `main` at commit [`a260681`](https://github.com/Imran-S-heikh/sordec/commit/a260681)  
 **Date:** May 2026
 
-This document is the SCF grant deliverable for Phase 1 of the sordec
-Build Award (#41). It describes what was promised, what landed, and how
-to verify it from a clean clone in under 5 minutes.
+This document records what Phase 1 was scoped to deliver, what landed,
+and how to verify it end-to-end from a clean clone in under 5 minutes.
 
 ---
 
-## What was promised
+## Phase 1 scope
 
 Phase 1 was scoped as **foundation work** — the typed IR, frontend,
 lifter, real-world test corpus, and an inspection CLI surface that lets
 us see what the pipeline does. **No Rust source generation in Phase 1**
 — that's Phase 3.
 
-Concretely, the Phase 1 commitments were:
+Concretely, the Phase 1 deliverables were:
 
 1. **Typed IR scaffolding** — three IR layers (`WasmFacts`,
    `LiftedIr`, `HighIr`) with newtype IDs, validation hooks, and a
@@ -41,8 +40,8 @@ Concretely, the Phase 1 commitments were:
 ## What landed
 
 Each of the items below is a real commit on `main`, in chronological
-order. The SHAs are stable references — Sala's verification recipe
-below works against any of these or against today's `main` HEAD.
+order. The SHAs are stable references — the verification recipe below
+works against any of these or against today's `main` HEAD.
 
 | Sub-task | Commit | Description |
 |---|---|---|

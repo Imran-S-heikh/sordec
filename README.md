@@ -26,7 +26,7 @@ What's coming next:
 - **Phase 3** — control-flow structuring (`if`/`while`/`match` reconstruction) + Rust source emit
 - **Phase 4** — accuracy framework, multi-version protocol catalog, polish
 
-No promises on dates; the public roadmap follows the SCF Build Award milestones.
+Each phase ships when it's ready and verified end-to-end (see `PHASE_N.md` per phase). Phase 2 is the next deliverable.
 
 ## Quick start
 
@@ -153,16 +153,11 @@ bash tools/verify-fixtures.sh                                # 6/6 sha256 OK
 All gates green at every commit on `main`. No CI workflow yet; the
 verification recipe is the contract.
 
-## Phase 1 deliverable
+## Phase 1 status
 
-For SCF grant verification, see [PHASE_1.md](PHASE_1.md). It pins the
-exact commits, lists what was promised vs. what landed, and gives a
-five-minute reproduction recipe Sala (or anyone) can run from a clean
-clone.
-
-## Funding
-
-Built with support from the Stellar Community Fund (SCF Build Award #41).
+See [PHASE_1.md](PHASE_1.md) for the Phase 1 scope, the verification
+recipe (≤ 5 min from a clean clone), and the acceptance evidence
+(110 tests, 6 fixtures, 100% host-call recognition across the corpus).
 
 ## License
 
