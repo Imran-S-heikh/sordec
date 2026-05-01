@@ -28,12 +28,12 @@ fixture ships with:
 
 ```
 <fixture>/
-├── source/                      # vendored Rust source — self-contained crate
+├── source/                      # Rust source — self-contained crate
 │   ├── Cargo.toml               # [workspace] empty → opts out of any parent
 │   ├── Cargo.lock               # committed: pins crate graph
 │   ├── rust-toolchain.toml      # pins rustc channel
-│   ├── VENDORED_FROM            # machine-readable upstream provenance
-│   ├── LICENSE                  # upstream LICENSE (Apache-2.0 § 4(b) compliance)
+│   ├── VENDORED_FROM            # machine-readable upstream provenance (vendored only)
+│   ├── LICENSE                  # upstream LICENSE (vendored only — § 4(b) compliance)
 │   └── src/                     # contract source
 ├── BUILD.md                     # human-readable recipe + expected sha256
 ├── README.md                    # what features this fixture exercises
@@ -41,6 +41,11 @@ fixture ships with:
 ├── <fixture>.wasm               # the committed bytes
 └── <fixture>.wasm.sha256        # checksum
 ```
+
+`VENDORED_FROM` and `LICENSE` inside `source/` apply to **vendored**
+fixtures (sourced from `stellar/soroban-examples` etc.). First-party
+fixtures (`hello-add/`) omit both — they're covered by the repo root
+[LICENSE](../../LICENSE).
 
 ## Verifying the corpus
 
@@ -69,20 +74,12 @@ fixtures that exercise it.
 
 | Fixture | SDK | Stripped | Storage | Auth | Events | Errors | Cross-call | AMM math | Notes |
 |---------|-----|:--------:|:-------:|:----:|:------:|:------:|:----------:|:-------:|-------|
+| `hello-add/`           | =21.0.0  | – | – | – | – | – | – | – | First-party, smallest realistic Soroban contract (`add(u64, u64) -> u64`) |
 | `token-v22/`           | =22.0.11 | – | ✓ | ✓ | ✓ | ✓ | ✓ | – | SEP-41 token, older SDK + wasm32-unknown-unknown target |
 | `token-v23/`           | =23.0.1  | – | ✓ | ✓ | ✓ | ✓ | ✓ | – | SEP-41 token, canonical (latest soroban-examples release) |
 | `token-v23-stripped/`  | =23.0.1  | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | – | Same as token-v23, custom sections removed |
 | `timelock/`            | =23.0.1  | – | ✓ | ✓ | – | – | ✓ | – | Time-bounded claimable balance (cross-contract token calls) |
 | `dex-liquidity-pool/`  | =23.0.1  | – | ✓ | ✓ | – | – | ✓ | ✓ | Constant-product AMM (largest fixture, AMM math + LP shares) |
-
-**Existing fixtures** in `learning/experiments/` (referenced by tests, not
-re-vendored here):
-
-| Fixture | SDK | Notes |
-|---------|-----|-------|
-| `01-hello-add`     | – | Minimal `add(u64, u64) -> u64` |
-| `02-counter`       | =21.0.0 | Auth + storage, older SDK |
-| `02-counter-v26`   | =26.0.0-rc.1 | Same logic, newer SDK |
 
 ## Adding a new fixture
 

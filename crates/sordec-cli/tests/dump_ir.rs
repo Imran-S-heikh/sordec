@@ -10,7 +10,7 @@ use predicates::prelude::*;
 
 const HELLO_ADD: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../learning/experiments/01-hello-add/target/wasm32-unknown-unknown/release/hello_add.wasm"
+    "/../../samples/contracts/hello-add/hello-add.wasm"
 );
 
 const TOKEN_V23: &str = concat!(

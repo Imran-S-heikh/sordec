@@ -1,0 +1,7 @@
+# First-party fixture pinned to a stable toolchain known to build with
+# soroban-sdk 21.0.0. Bump this only when re-building the canonical
+# `hello-add.wasm` (which then requires a new sha256 sidecar).
+[toolchain]
+channel = "1.91"
+targets = ["wasm32-unknown-unknown"]
+components = ["rustc", "cargo"]
