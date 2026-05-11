@@ -79,10 +79,10 @@ pub struct CoverageReport {
 /// Parse-stage health.
 ///
 /// `ok` is `true` iff no parse-level diagnostics were surfaced. In v0
-/// the parser does not emit diagnostics (no `Parse(...)` variant in
-/// [`DiagnosticCode`]), so `ok` is effectively always `true`; the
-/// field is reserved for symmetry with [`MetadataHealth`] and for the
-/// Phase 4 dashboard.
+/// [`DiagnosticCode::Parse`] exists as an explicit artifact slot but is
+/// uninhabited, so `ok` is effectively always `true`; the field is
+/// reserved for symmetry with [`MetadataHealth`] and for the Phase 4
+/// dashboard.
 #[derive(Debug, Clone, Serialize)]
 pub struct ParseHealth {
     /// `true` when `diagnostics == 0`.
@@ -177,12 +177,12 @@ pub struct OperatorBreakdown {
 /// Compute a [`CoverageReport`] from a successfully parsed + lifted
 /// contract.
 ///
-/// `front_diagnostics` is the combined diagnostics list from
+/// `front_diagnostics` is borrowed from
 /// `sordec_frontend::ParseOutput.diagnostics` — it is partitioned
 /// internally into parse vs metadata buckets by [`DiagnosticCode`]
 /// variant.
 ///
-/// `lift_diagnostics` is the corresponding list from
+/// `lift_diagnostics` is borrowed from
 /// `sordec_passes::LiftOutput.diagnostics` (always empty in v0; see
 /// the module-level note).
 ///
@@ -199,7 +199,7 @@ pub fn compute_coverage(
 ) -> CoverageReport {
     let metadata_diag_count = front_diagnostics
         .iter()
-        .filter(|d| matches!(d.code, DiagnosticCode::Metadata(_)))
+        .filter(|d| matches!(&d.code, DiagnosticCode::Metadata(_)))
         .count();
     let parse_diag_count = front_diagnostics.len() - metadata_diag_count;
 

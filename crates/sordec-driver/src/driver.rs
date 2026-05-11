@@ -108,7 +108,8 @@ impl Driver {
         // here. `DriverReport` already has a `diagnostics` field for
         // when this changes — when the back half of the pipeline lands
         // and `run` can return `Ok`, populate it as
-        // `parse_output.diagnostics.into_iter().chain(lift_output.diagnostics).collect()`.
+        // `parse_output.diagnostics.into_vec()` chained with
+        // `lift_output.diagnostics.into_vec()`.
         // Until then, callers who need diagnostics should call
         // `sordec_frontend::parse` and `sordec_passes::lift_with_waffle`
         // directly — the CLI's `dump-facts` / `dump-ir` subcommands will

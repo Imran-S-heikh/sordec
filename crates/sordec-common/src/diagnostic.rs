@@ -132,6 +132,30 @@ impl fmt::Display for Location {
 // Per-layer code enums
 // ---------------------------------------------------------------------
 
+/// Codes for diagnostics emitted while parsing raw WASM structure.
+///
+/// No variants are defined yet — the Phase 1 parser still treats
+/// malformed WASM as a fatal frontend error and has not migrated any
+/// recoverable parser conditions into diagnostics. The empty enum is
+/// intentional: it reserves the parse-layer taxonomy slot so
+/// [`DiagnosticCode::Parse`] can exist as a stable public artifact.
+///
+/// RFP artifact note: an empty enum here is not a missing parser
+/// diagnostic implementation. It records that Phase 1 has a concrete
+/// parse diagnostic taxonomy slot, even though no recoverable
+/// parse-level conditions exist yet.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum ParseDiagnosticCode {}
+
+impl fmt::Display for ParseDiagnosticCode {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Uninhabited — match against `&self` is exhaustive with no arms.
+        match *self {}
+    }
+}
+
 /// Codes for diagnostics emitted while decoding Soroban metadata custom
 /// sections (`contractspecv0`, `contractmetav0`, `contractenvmetav0`).
 ///
@@ -222,14 +246,13 @@ impl fmt::Display for LiftDiagnosticCode {
 // ---------------------------------------------------------------------
 
 /// All diagnostic codes the pipeline can emit, namespaced by layer.
-///
-/// `Parse(...)` is intentionally absent today — the WASM-section parser
-/// has no migrated diagnostics yet. The enum is `#[non_exhaustive]`, so
-/// adding a `Parse(ParseDiagnosticCode)` variant later is API-additive.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum DiagnosticCode {
+    /// A diagnostic emitted while parsing raw WASM structure. Currently
+    /// uninhabited; reserved for future recoverable parser conditions.
+    Parse(ParseDiagnosticCode),
     /// A diagnostic emitted while decoding Soroban metadata custom
     /// sections.
     Metadata(MetadataDiagnosticCode),
@@ -241,9 +264,16 @@ pub enum DiagnosticCode {
 impl fmt::Display for DiagnosticCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Parse(c) => c.fmt(f),
             Self::Metadata(c) => c.fmt(f),
             Self::Lift(c) => c.fmt(f),
         }
+    }
+}
+
+impl From<ParseDiagnosticCode> for DiagnosticCode {
+    fn from(c: ParseDiagnosticCode) -> Self {
+        Self::Parse(c)
     }
 }
 
@@ -330,6 +360,196 @@ impl fmt::Display for Diagnostic {
             write!(f, " ({loc})")?;
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------
+// Diagnostic artifact wrappers
+// ---------------------------------------------------------------------
+
+/// Frontend diagnostic artifact returned by `sordec-frontend`.
+///
+/// This is intentionally a thin wrapper around a shared stream of typed
+/// [`Diagnostic`] events. Phase 1 metadata warnings also live here and
+/// are distinguished by [`DiagnosticCode::Metadata`]; raw parser
+/// diagnostics will use [`DiagnosticCode::Parse`] when recoverable
+/// parser conditions exist.
+///
+/// RFP artifact note: this is the concrete `ParseDiagnostics` artifact.
+/// It deliberately does not split metadata and parse events into
+/// separate storage yet; the typed [`DiagnosticCode`] namespace is the
+/// Phase 1 separation boundary. Keep it thin unless future diagnostics
+/// need phase-specific fields.
+///
+/// Serialization note: `serde(transparent)` keeps existing JSON as a
+/// plain diagnostics array (`[]` for clean inputs), not an object wrapper.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
+pub struct ParseDiagnostics(Vec<Diagnostic>);
+
+impl ParseDiagnostics {
+    /// Create an empty parse diagnostic collection.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Wrap an existing vector of diagnostic events.
+    #[must_use]
+    pub fn from_vec(events: Vec<Diagnostic>) -> Self {
+        Self(events)
+    }
+
+    /// Borrow the diagnostic events as a slice.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Diagnostic] {
+        &self.0
+    }
+
+    /// Consume the wrapper and return the underlying vector.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<Diagnostic> {
+        self.0
+    }
+
+    /// Iterate over diagnostic events.
+    pub fn iter(&self) -> std::slice::Iter<'_, Diagnostic> {
+        self.0.iter()
+    }
+
+    /// Return the number of diagnostic events.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Return `true` when no diagnostic events were emitted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<Vec<Diagnostic>> for ParseDiagnostics {
+    fn from(events: Vec<Diagnostic>) -> Self {
+        Self::from_vec(events)
+    }
+}
+
+impl AsRef<[Diagnostic]> for ParseDiagnostics {
+    fn as_ref(&self) -> &[Diagnostic] {
+        self.as_slice()
+    }
+}
+
+impl IntoIterator for ParseDiagnostics {
+    type Item = Diagnostic;
+    type IntoIter = std::vec::IntoIter<Diagnostic>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ParseDiagnostics {
+    type Item = &'a Diagnostic;
+    type IntoIter = std::slice::Iter<'a, Diagnostic>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Lifter diagnostic artifact returned by `sordec-passes`.
+///
+/// The collection is intentionally empty in Phase 1 because
+/// [`LiftDiagnosticCode`] has no variants yet. Keeping this as a named
+/// artifact makes the lift-layer output explicit while leaving room for
+/// Phase 2 recovery passes to add non-fatal events.
+///
+/// RFP artifact note: this is the concrete `LiftDiagnostics` artifact.
+/// Empty output in Phase 1 is expected, not a placeholder failure: the
+/// lifter currently reports unrecoverable invariant violations as
+/// `LiftError` and has no recoverable lift warning cases yet.
+///
+/// Serialization note: `serde(transparent)` preserves the same array
+/// shape if lift diagnostics are serialized by future callers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(transparent))]
+pub struct LiftDiagnostics(Vec<Diagnostic>);
+
+impl LiftDiagnostics {
+    /// Create an empty lift diagnostic collection.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Wrap an existing vector of diagnostic events.
+    #[must_use]
+    pub fn from_vec(events: Vec<Diagnostic>) -> Self {
+        Self(events)
+    }
+
+    /// Borrow the diagnostic events as a slice.
+    #[must_use]
+    pub fn as_slice(&self) -> &[Diagnostic] {
+        &self.0
+    }
+
+    /// Consume the wrapper and return the underlying vector.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<Diagnostic> {
+        self.0
+    }
+
+    /// Iterate over diagnostic events.
+    pub fn iter(&self) -> std::slice::Iter<'_, Diagnostic> {
+        self.0.iter()
+    }
+
+    /// Return the number of diagnostic events.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Return `true` when no diagnostic events were emitted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<Vec<Diagnostic>> for LiftDiagnostics {
+    fn from(events: Vec<Diagnostic>) -> Self {
+        Self::from_vec(events)
+    }
+}
+
+impl AsRef<[Diagnostic]> for LiftDiagnostics {
+    fn as_ref(&self) -> &[Diagnostic] {
+        self.as_slice()
+    }
+}
+
+impl IntoIterator for LiftDiagnostics {
+    type Item = Diagnostic;
+    type IntoIter = std::vec::IntoIter<Diagnostic>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a LiftDiagnostics {
+    type Item = &'a Diagnostic;
+    type IntoIter = std::slice::Iter<'a, Diagnostic>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -433,6 +653,54 @@ mod tests {
         };
         let outer: DiagnosticCode = inner.clone().into();
         assert_eq!(outer, DiagnosticCode::Metadata(inner));
+    }
+
+    #[test]
+    fn parse_diagnostics_new_is_empty() {
+        let diagnostics = ParseDiagnostics::new();
+        assert!(diagnostics.is_empty());
+        assert_eq!(diagnostics.len(), 0);
+        assert!(diagnostics.as_slice().is_empty());
+    }
+
+    #[test]
+    fn parse_diagnostics_from_vec_preserves_events() {
+        let event = Diagnostic::warning(
+            MetadataDiagnosticCode::DuplicateFunctionName {
+                name: "mint".to_string(),
+            },
+            "first declaration kept",
+        );
+        let diagnostics = ParseDiagnostics::from_vec(vec![event.clone()]);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics.as_slice(), std::slice::from_ref(&event));
+        assert_eq!(diagnostics.iter().count(), 1);
+        assert_eq!(diagnostics.into_vec(), vec![event]);
+    }
+
+    #[test]
+    fn lift_diagnostics_new_is_empty() {
+        let diagnostics = LiftDiagnostics::new();
+        assert!(diagnostics.is_empty());
+        assert_eq!(diagnostics.len(), 0);
+        assert!(diagnostics.as_slice().is_empty());
+    }
+
+    #[test]
+    fn lift_diagnostics_from_vec_preserves_events() {
+        let event = Diagnostic::info(
+            MetadataDiagnosticCode::MalformedContractMeta {
+                reason: "test".to_string(),
+            },
+            "metadata map left empty",
+        );
+        let diagnostics = LiftDiagnostics::from_vec(vec![event.clone()]);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics.as_slice(), std::slice::from_ref(&event));
+        assert_eq!((&diagnostics).into_iter().count(), 1);
+        assert_eq!(diagnostics.into_vec(), vec![event]);
     }
 
     // A full serde round-trip test would require a serializer crate as a

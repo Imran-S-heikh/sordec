@@ -150,7 +150,7 @@ fn run_dump_facts(args: &DumpFactsArgs) -> u8 {
     // 4. Print non-fatal diagnostics to stderr (warnings/info). Goes
     //    AFTER the stdout payload so a caller piping stdout to a file
     //    sees the diagnostics immediately on the terminal.
-    diagnostics::print_diagnostics(&parse_output.diagnostics);
+    diagnostics::print_diagnostics(parse_output.diagnostics.as_slice());
 
     EXIT_OK
 }
@@ -205,8 +205,8 @@ fn run_dump_ir(args: &DumpIrArgs) -> u8 {
     // 5. Diagnostics from BOTH parse and lift on stderr, in pipeline
     //    order (parse first, then lift). Concatenated into a single
     //    pass so a downstream piping caller sees them together.
-    let mut combined = parse_output.diagnostics;
-    combined.extend(lift_output.diagnostics);
+    let mut combined = parse_output.diagnostics.into_vec();
+    combined.extend(lift_output.diagnostics.into_vec());
     diagnostics::print_diagnostics(&combined);
 
     EXIT_OK
@@ -251,10 +251,10 @@ fn run_coverage(args: &CoverageArgs) -> u8 {
     // 4. Compute the report. Pure — no failure modes.
     let report = coverage::compute_coverage(
         &args.wasm,
-        &parse_output.diagnostics,
+        parse_output.diagnostics.as_slice(),
         parse_output.soroban_facts.is_some(),
         &lift_output.lifted,
-        &lift_output.diagnostics,
+        lift_output.diagnostics.as_slice(),
     );
 
     // 5. Render to stdout in the requested format. Lock stdout to
@@ -277,8 +277,8 @@ fn run_coverage(args: &CoverageArgs) -> u8 {
     // 6. Diagnostics from BOTH parse and lift on stderr, same pattern
     //    as `dump-ir`. Goes after stdout so a piping caller sees them
     //    together on the terminal.
-    let mut combined = parse_output.diagnostics;
-    combined.extend(lift_output.diagnostics);
+    let mut combined = parse_output.diagnostics.into_vec();
+    combined.extend(lift_output.diagnostics.into_vec());
     diagnostics::print_diagnostics(&combined);
 
     EXIT_OK

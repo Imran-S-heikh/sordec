@@ -32,3 +32,4 @@ pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LoweringError, LoweringStep};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
+pub use sordec_common::LiftDiagnostics;

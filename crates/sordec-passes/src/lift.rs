@@ -49,8 +49,7 @@
 
 use std::collections::HashMap;
 
-use sordec_common::{Arena, BlockId, FuncId, IrId, ValueId};
-use sordec_common::Diagnostic;
+use sordec_common::{Arena, BlockId, FuncId, IrId, LiftDiagnostics, ValueId};
 use sordec_ir::{
     BlockTarget, LiftedBlock, LiftedFunction, LiftedIr, LiftedTerminator, LiftedType, LiftedValue,
     LiftedValueDef, SorobanFacts, WasmFacts, WasmOp,
@@ -63,9 +62,10 @@ use crate::error::{LiftError, LiftResult};
 /// Output of [`lift_with_waffle`]: the lifted IR plus any non-fatal
 /// diagnostics surfaced during lifting.
 ///
-/// `diagnostics` is empty in v0 — `LiftDiagnosticCode` has no variants
-/// yet (per the plan's Step 3, the lifter currently surfaces every
-/// recoverable situation through hard errors or through the existing
+/// `diagnostics` is the explicit [`LiftDiagnostics`] artifact and is
+/// empty in v0 — `LiftDiagnosticCode` has no variants yet (per the
+/// plan's Step 3, the lifter currently surfaces every recoverable
+/// situation through hard errors or through the existing
 /// `LiftedTerminator::Unreachable` fallback). Phase 2's pattern recovery
 /// passes will be the first to populate this field.
 #[derive(Debug, Clone)]
@@ -73,7 +73,13 @@ pub struct LiftOutput {
     /// The lifted intermediate representation.
     pub lifted: LiftedIr,
     /// Non-fatal diagnostics surfaced during lifting. Empty in v0.
-    pub diagnostics: Vec<Diagnostic>,
+    ///
+    /// RFP artifact note: the field remains named `diagnostics` for
+    /// output/API consistency, but its type is the concrete
+    /// [`LiftDiagnostics`] artifact. An empty collection is the expected
+    /// Phase 1 state because `LiftDiagnosticCode` is intentionally
+    /// uninhabited.
+    pub diagnostics: LiftDiagnostics,
 }
 
 /// Lift a WASM module to our typed [`LiftedIr`].
@@ -156,10 +162,12 @@ pub fn lift_with_waffle(
         functions,
     };
     // `diagnostics` is intentionally empty in v0 — see `LiftOutput`'s
-    // doc-comment. Phase 2 pattern passes will populate it.
+    // doc-comment. The named LiftDiagnostics artifact is still returned
+    // so reviewers and future passes have a concrete lift diagnostic
+    // surface to extend.
     Ok(LiftOutput {
         lifted,
-        diagnostics: Vec::new(),
+        diagnostics: LiftDiagnostics::new(),
     })
 }
 
@@ -545,4 +553,3 @@ mod tests {
         );
     }
 }
-

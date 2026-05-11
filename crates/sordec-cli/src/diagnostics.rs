@@ -1,11 +1,11 @@
 //! Diagnostic printing for `sordec` subcommands.
 //!
-//! Pipeline outputs (`ParseOutput`, `LiftOutput`, etc.) carry a
-//! `Vec<`[`Diagnostic`]`>` of non-fatal warnings and info events. After a
-//! subcommand finishes successfully, it prints those diagnostics to
-//! stderr via [`print_diagnostics`] before exiting. stderr (not stdout)
-//! so a subcommand's primary output (JSON, IR text, etc.) on stdout
-//! stays pipe-friendly.
+//! Pipeline outputs (`ParseOutput`, `LiftOutput`, etc.) carry named
+//! diagnostic artifacts backed by slices of non-fatal warning and info
+//! [`Diagnostic`] events. After a subcommand finishes successfully, it
+//! prints those diagnostics to stderr via [`print_diagnostics`] before
+//! exiting. stderr (not stdout) keeps a subcommand's primary output
+//! (JSON, IR text, etc.) on stdout pipe-friendly.
 //!
 //! v0 keeps this minimal: one line per diagnostic, severity-prefixed,
 //! using the `Display` impl on [`Diagnostic`]. Future polish (colored

@@ -66,7 +66,10 @@ pub use sordec_ir::{
 
 // Re-export the diagnostic types so callers can match on them without
 // pulling `sordec-common` into their import lists.
-pub use sordec_common::{Diagnostic, DiagnosticCode, MetadataDiagnosticCode, Severity};
+pub use sordec_common::{
+    Diagnostic, DiagnosticCode, MetadataDiagnosticCode, ParseDiagnosticCode, ParseDiagnostics,
+    Severity,
+};
 
 /// Output of [`parse`]: WASM-level facts, optional Soroban-level facts,
 /// and the non-fatal diagnostics collected during parsing and metadata
@@ -74,8 +77,10 @@ pub use sordec_common::{Diagnostic, DiagnosticCode, MetadataDiagnosticCode, Seve
 ///
 /// All three fields are independent. `wasm_facts` is always populated.
 /// `soroban_facts` is `None` for non-Soroban WASM and for stripped
-/// contracts. `diagnostics` is a `Vec` of structured warning/info events
-/// — empty for clean inputs.
+/// contracts. `diagnostics` is the [`ParseDiagnostics`] artifact — a
+/// typed stream of structured warning/info events, empty for clean
+/// inputs. Metadata diagnostics are carried in the same artifact with
+/// [`DiagnosticCode::Metadata`] codes.
 ///
 /// Serializable as JSON when the `serde` feature is enabled — used by
 /// `sordec dump-facts`. The serialised form is **inspection-grade, not
@@ -92,9 +97,14 @@ pub struct ParseOutput {
     /// or stripped contracts.
     pub soroban_facts: Option<SorobanFacts>,
     /// Non-fatal diagnostics surfaced during parsing or metadata
-    /// decoding. Inspect `severity` to filter; `code` for typed
-    /// matching.
-    pub diagnostics: Vec<Diagnostic>,
+    /// decoding. Inspect each event's `severity` to filter; `code` for
+    /// typed matching.
+    ///
+    /// RFP artifact note: the field remains named `diagnostics` for the
+    /// stable output shape, but its type is the concrete
+    /// [`ParseDiagnostics`] artifact. Metadata warnings inside it are
+    /// separated by [`DiagnosticCode::Metadata`], not by a second vector.
+    pub diagnostics: ParseDiagnostics,
 }
 
 /// Parse a WASM module and decode its Soroban metadata.
@@ -104,8 +114,8 @@ pub struct ParseOutput {
 /// - The Soroban [`SorobanFacts`] when the input contains a
 ///   `contractspecv0` section (`None` for generic WASM and for
 ///   contracts that have been aggressively stripped).
-/// - A `Vec<`[`Diagnostic`]`>` accumulating non-fatal warnings and info
-///   surfaced during parsing or metadata decoding.
+/// - A [`ParseDiagnostics`] artifact accumulating non-fatal warnings
+///   and info surfaced during parsing or metadata decoding.
 ///
 /// # Errors
 ///
@@ -122,9 +132,12 @@ pub fn parse(wasm: &[u8]) -> FrontendResult<ParseOutput> {
     let wasm_facts = wasm::parse_module(wasm)?;
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
     let soroban_facts = metadata::decode_metadata(&wasm_facts.custom_sections, &mut diagnostics)?;
+    // Collect internally as Vec<Diagnostic> so metadata decoding stays
+    // simple; wrap only at the API boundary to expose the RFP-named
+    // ParseDiagnostics artifact without changing behavior.
     Ok(ParseOutput {
         wasm_facts,
         soroban_facts,
-        diagnostics,
+        diagnostics: ParseDiagnostics::from_vec(diagnostics),
     })
 }

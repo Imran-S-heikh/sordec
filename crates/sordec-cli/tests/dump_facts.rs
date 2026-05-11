@@ -27,7 +27,7 @@ fn dump_facts_on_canonical_fixture_emits_clean_json() {
         .stdout(predicate::str::starts_with("{"))
         .stdout(predicate::str::contains("\"wasm_facts\""))
         .stdout(predicate::str::contains("\"soroban_facts\""))
-        .stdout(predicate::str::contains("\"diagnostics\""))
+        .stdout(predicate::str::contains("\"diagnostics\": []"))
         // token-v23 is the canonical clean fixture: no diagnostics
         // means stderr is empty.
         .stderr(predicate::str::is_empty());
@@ -43,6 +43,7 @@ fn dump_facts_on_stripped_fixture_reports_no_soroban_facts() {
         // Stripped contracts have no contractspecv0 → soroban_facts is None,
         // which serde renders as `null`.
         .stdout(predicate::str::contains("\"soroban_facts\": null"))
+        .stdout(predicate::str::contains("\"diagnostics\": []"))
         // No metadata to decode, so no diagnostics emitted.
         .stderr(predicate::str::is_empty());
 }

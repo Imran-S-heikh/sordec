@@ -6,7 +6,7 @@
 //! audit-trail tracking refinements through the pipeline ([`Provenance`]),
 //! the explicit reasons why information is missing
 //! ([`UnknownReason`]), and the non-fatal warning channel
-//! ([`Diagnostic`]).
+//! ([`Diagnostic`], [`ParseDiagnostics`], [`LiftDiagnostics`]).
 //!
 //! `sordec-common` has no dependencies on other sordec crates. Every other
 //! crate depends on it, so changes here recompile the entire workspace.
@@ -26,7 +26,8 @@ pub mod unknown;
 
 pub use arena::Arena;
 pub use diagnostic::{
-    Diagnostic, DiagnosticCode, LiftDiagnosticCode, Location, MetadataDiagnosticCode, Severity,
+    Diagnostic, DiagnosticCode, LiftDiagnosticCode, LiftDiagnostics, Location,
+    MetadataDiagnosticCode, ParseDiagnosticCode, ParseDiagnostics, Severity,
 };
 pub use ids::{BlockId, FuncId, IrId, TypeId, ValueId};
 pub use provenance::{Provenance, ProvenanceSource};
