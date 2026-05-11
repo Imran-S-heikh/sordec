@@ -3,3 +3,4 @@
 # internal binary detection without forcing line endings or text munging.
 *.wasm binary
 *.wasm.sha256 text eol=lf
+*.pdf binary

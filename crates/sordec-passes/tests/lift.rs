@@ -1,11 +1,9 @@
 //! Integration tests for [`sordec_passes::lift_with_waffle`].
 //!
-//! Exercises the lifter end-to-end against the two real WASM fixtures
-//! we built in `learning/experiments`:
+//! Exercises the lifter end-to-end against committed real WASM fixtures:
 //!
-//! - `01-hello-add` — single-function `add(u64, u64) → u64`.
-//! - `02-counter` — multi-function with custom enum, storage, auth,
-//!   events.
+//! - `hello-add` — small exported `add(u64, u64) -> u64` contract.
+//! - `timelock` — multi-function contract with storage, auth, and events.
 //!
 //! Tests are split into smoke checks (does it lift at all?), structural
 //! assertions (does the `add` function look the way we expect?), and
@@ -21,14 +19,14 @@ use common::assert_invariants_hold;
 /// Canonical `add(u64, u64) -> u64` contract.
 const HELLO_ADD_WASM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../learning/experiments/01-hello-add/target/wasm32-unknown-unknown/release/hello_add.wasm"
+    "/../../samples/contracts/hello-add/hello-add.wasm"
 ));
 
-/// Counter contract — exercises a custom enum, multiple functions,
-/// storage tiers, auth, and events.
-const COUNTER_WASM: &[u8] = include_bytes!(concat!(
+/// Timelock contract — exercises multiple functions, storage tiers, auth,
+/// and events.
+const TIMELOCK_WASM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../learning/experiments/02-counter/target/wasm32-unknown-unknown/release/counter.wasm"
+    "/../../samples/contracts/timelock/timelock.wasm"
 ));
 
 // ---------------------------------------------------------------------
@@ -68,14 +66,14 @@ fn lifts_hello_add_smoke() {
 }
 
 #[test]
-fn lifts_counter_smoke() {
+fn lifts_timelock_smoke() {
     let sordec_frontend::ParseOutput {
         wasm_facts: facts,
         soroban_facts,
         ..
-    } = sordec_frontend::parse(COUNTER_WASM).expect("frontend parses counter");
-    let lifted = lift_with_waffle(COUNTER_WASM, &facts, soroban_facts.as_ref())
-        .expect("lifter accepts counter")
+    } = sordec_frontend::parse(TIMELOCK_WASM).expect("frontend parses timelock");
+    let lifted = lift_with_waffle(TIMELOCK_WASM, &facts, soroban_facts.as_ref())
+        .expect("lifter accepts timelock")
         .lifted;
 
     assert_eq!(
@@ -85,7 +83,7 @@ fn lifts_counter_smoke() {
     );
     assert!(
         lifted.functions.len() > 1,
-        "counter has multiple functions; expected >1 got {}",
+        "timelock has multiple functions; expected >1 got {}",
         lifted.functions.len()
     );
     for func in &lifted.functions {
@@ -183,14 +181,14 @@ fn invariants_hold_for_hello_add() {
 }
 
 #[test]
-fn invariants_hold_for_counter() {
+fn invariants_hold_for_timelock() {
     let sordec_frontend::ParseOutput {
         wasm_facts: facts,
         soroban_facts,
         ..
-    } = sordec_frontend::parse(COUNTER_WASM).expect("frontend parses counter");
-    let lifted = lift_with_waffle(COUNTER_WASM, &facts, soroban_facts.as_ref())
-        .expect("lifter accepts counter")
+    } = sordec_frontend::parse(TIMELOCK_WASM).expect("frontend parses timelock");
+    let lifted = lift_with_waffle(TIMELOCK_WASM, &facts, soroban_facts.as_ref())
+        .expect("lifter accepts timelock")
         .lifted;
     assert_invariants_hold(&lifted);
 }
