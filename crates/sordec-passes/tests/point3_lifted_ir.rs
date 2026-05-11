@@ -6,8 +6,10 @@
 //! on a Rust/Soroban compiler to generate fixtures.
 
 use sordec_common::IrId;
-use sordec_ir::{LiftedIr, LiftedTerminator, LiftedType, LiftedValueDef, WasmFacts, WasmOpcodeKind};
-use sordec_passes::{lift_with_waffle, LiftError, LiftOutput};
+use sordec_ir::{
+    LiftedIr, LiftedTerminator, LiftedType, LiftedValueDef, WasmFacts, WasmOpcodeKind,
+};
+use sordec_passes::{LiftError, LiftOutput, lift_with_waffle};
 use waffle::entity::EntityRef as _;
 
 mod common;
@@ -165,12 +167,18 @@ fn code_section(bodies: Vec<Vec<u8>>) -> Vec<u8> {
 }
 
 fn i32_const(value: u8) -> Vec<u8> {
-    assert!(value < 0x40, "test helper only emits small positive SLEB values");
+    assert!(
+        value < 0x40,
+        "test helper only emits small positive SLEB values"
+    );
     vec![0x41, value]
 }
 
 fn i64_const(value: u8) -> Vec<u8> {
-    assert!(value < 0x40, "test helper only emits small positive SLEB values");
+    assert!(
+        value < 0x40,
+        "test helper only emits small positive SLEB values"
+    );
     vec![0x42, value]
 }
 
@@ -260,7 +268,10 @@ fn linear_operator_matrix_wasm() -> Vec<u8> {
             func_body(Vec::new(), i64_const(7)),
             func_body(Vec::new(), f32_const(1.5)),
             func_body(Vec::new(), f64_const(2.5)),
-            func_body(Vec::new(), [i32_const(0), i32_const(1), vec![0x36, 0x02, 0x00]].concat()),
+            func_body(
+                Vec::new(),
+                [i32_const(0), i32_const(1), vec![0x36, 0x02, 0x00]].concat(),
+            ),
             func_body(Vec::new(), [i32_const(0), vec![0x28, 0x02, 0x00]].concat()),
             func_body(
                 Vec::new(),
@@ -273,9 +284,15 @@ fn linear_operator_matrix_wasm() -> Vec<u8> {
                 Vec::new(),
                 [i32_const(1), i32_const(2), i32_const(0), vec![0x1b]].concat(),
             ),
-            func_body(Vec::new(), [i32_const(1), i32_const(2), vec![0x46]].concat()),
+            func_body(
+                Vec::new(),
+                [i32_const(1), i32_const(2), vec![0x46]].concat(),
+            ),
             func_body(Vec::new(), [i32_const(1), vec![0x67]].concat()),
-            func_body(Vec::new(), [i32_const(1), i32_const(2), vec![0x71]].concat()),
+            func_body(
+                Vec::new(),
+                [i32_const(1), i32_const(2), vec![0x71]].concat(),
+            ),
             func_body(Vec::new(), [i64_const(1), vec![0xa7]].concat()),
             func_body(Vec::new(), vec![0x01]),
         ]),
@@ -349,10 +366,7 @@ fn direct_and_indirect_call_wasm() -> Vec<u8> {
 
 fn multi_result_wasm() -> Vec<u8> {
     module(vec![
-        type_section(vec![
-            func_type(&[], &[I32, I64]),
-            func_type(&[], &[I32]),
-        ]),
+        type_section(vec![func_type(&[], &[I32, I64]), func_type(&[], &[I32])]),
         function_section(&[0, 1]),
         code_section(vec![
             func_body(Vec::new(), [i32_const(7), i64_const(8)].concat()),
@@ -423,7 +437,10 @@ fn synthetic_lift_wasm(seed: u32) -> Vec<u8> {
             function_section(&[0, 1]),
             memory_section(),
             code_section(vec![
-                func_body(Vec::new(), [i32_const(0), i32_const(1), vec![0x36, 0x02, 0x00]].concat()),
+                func_body(
+                    Vec::new(),
+                    [i32_const(0), i32_const(1), vec![0x36, 0x02, 0x00]].concat(),
+                ),
                 func_body(Vec::new(), [i32_const(0), vec![0x28, 0x02, 0x00]].concat()),
             ]),
         ]),
@@ -550,7 +567,10 @@ fn direct_and_indirect_calls_preserve_call_operators() {
             )
         })
     });
-    assert!(saw_import_call, "direct call should retain raw imported function index 0");
+    assert!(
+        saw_import_call,
+        "direct call should retain raw imported function index 0"
+    );
 }
 
 #[test]

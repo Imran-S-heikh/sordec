@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
-use sordec_passes::{catalog_size, resolve_host_call, CATALOG_VERSION};
+use sordec_passes::{CATALOG_VERSION, catalog_size, resolve_host_call};
 
 const ENV_JSON: &str = include_str!("../src/host_calls/env.json");
 
@@ -60,7 +60,11 @@ fn vendored_catalog_resolves_every_env_json_entry() {
         pairs.len(),
         "catalog_size must match the vendored env.json entry count"
     );
-    assert_eq!(pairs.len(), 192, "soroban-env-common 26.1.2 has 192 host calls");
+    assert_eq!(
+        pairs.len(),
+        192,
+        "soroban-env-common 26.1.2 has 192 host calls"
+    );
 
     for (module, name, friendly_name, module_name, min_protocol) in pairs {
         let resolved = resolve_host_call(&module, &name)
@@ -120,8 +124,7 @@ fn deterministic_known_pair_matrix_resolves_repeatedly() {
     let pairs = catalog_pairs();
 
     for seed in 0..4096usize {
-        let (module, name, friendly_name, _module_name, _min_protocol) =
-            &pairs[seed % pairs.len()];
+        let (module, name, friendly_name, _module_name, _min_protocol) = &pairs[seed % pairs.len()];
         let resolved = resolve_host_call(module, name)
             .unwrap_or_else(|| panic!("seed {seed} failed to resolve {module}:{name}"));
         assert_eq!(resolved.friendly_name, friendly_name);

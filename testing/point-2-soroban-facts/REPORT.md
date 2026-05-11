@@ -31,6 +31,13 @@ Run it with:
 cargo test -p sordec-frontend --test point2_soroban_facts
 ```
 
+Executed result:
+
+```text
+running 11 tests
+test result: ok. 11 passed; 0 failed; 0 ignored
+```
+
 ## Synthetic Scenario Counts
 
 | Scenario family | Inputs | Purpose |
@@ -108,17 +115,7 @@ Point 2 is structurally complete in the codebase:
 - Fatal malformed metadata cases are typed as `FrontendError` variants.
 - The synthetic test suite exercises all implemented metadata paths.
 
-## Verification Caveat
+## Verification Result
 
-This workspace cannot run the Rust tests because the machine has no Rust
-toolchain available (`cargo`, `rustc`, and `rustup` are missing).
-
-Point 2 should be treated as **ready for verification**, not fully closed, until
-this command passes:
-
-```bash
-cargo test -p sordec-frontend --test point2_soroban_facts
-```
-
-If that command passes, Point 2 can be considered complete and the project can
-move to Point 3.
+The focused Point 2 suite passed locally. Point 2 can be considered complete
+for the implemented Tranche 1 metadata-decoding scope.

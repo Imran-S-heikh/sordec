@@ -27,56 +27,67 @@ The RFP completion checks are:
 
 ## Executive Verdict
 
-Tranche 1 is **not defensibly 100% complete yet**.
+All focused Point 1-4 test suites now pass, `cargo fmt --check` passes, and
+`cargo test --workspace` passes.
 
-The implementation and test assets are strong enough to call most of the tranche **structurally complete and ready for verification**, but there are two real completion gaps:
+Tranche 1 is submission-ready for the implemented MVP scope:
 
-1. `ParseDiagnostics` is not a dedicated implemented taxonomy. WASM parse failures currently surface as typed fatal `FrontendError`s, not recoverable `ParseDiagnosticCode` diagnostics.
-2. `LiftDiagnostics` exists as an API field but is intentionally empty in v0. That is acceptable if the tranche only requires a field placeholder, but not if it requires actual recoverable lifter diagnostics.
+```text
+Parse WASM/Soroban metadata, emit typed facts, lift to waffle-backed CFG/SSA IR,
+name core Soroban host calls, and publish scoring/test evidence.
+```
 
-There is also a hard verification blocker in this local environment: `cargo`, `rustc`, `rustup`, and `rustfmt` are not installed. Because of that, no Rust test suite was able to execute here. The reports below are based on the code and test assets added, plus local shell/static checks, not on successful `cargo test` execution.
+Strictly speaking, two diagnostic-scope caveats remain:
+
+1. `ParseDiagnostics` is represented through the shared diagnostics channel, but generic WASM parse failures currently surface as typed fatal `FrontendError`s rather than recoverable `ParseDiagnosticCode` diagnostics.
+2. `LiftDiagnostics` exists as an API field but is intentionally empty in v0; hard lifter failures surface as typed `LiftError`s.
 
 Recommended status:
 
 ```text
-Overall Tranche 1 status: 80-85% complete pending Rust test execution.
-If ParseDiagnostics and LiftDiagnostics are accepted as v0 placeholders/fatal errors, status rises to ~90-95%.
-Do not claim 100% until the focused and workspace test commands pass on a Rust-enabled machine.
+Overall Tranche 1 status: verified for the MVP implementation.
+Focused Point 1-4 tests: 44 passed, 0 failed.
+Full workspace tests: 152 passed, 0 failed, 1 ignored doctest.
+Remaining caveat: diagnostic semantics are intentionally fatal/empty in v0.
 ```
 
 ## Local Test Execution Results
 
-Local toolchain check:
+Toolchain used:
 
 ```text
-cargo not found
-rustc not found
-rustup not found
-rustfmt not found
+rustc 1.95.0 (59807616e 2026-04-14)
+cargo 1.95.0 (f2d3ce0bd 2026-03-21)
+rustfmt 1.9.0-stable (59807616e1 2026-04-14)
 ```
 
-Focused test commands attempted during this review failed before test execution:
+Focused commands executed:
 
 ```text
-$ cargo test -p sordec-passes --test point3_lifted_ir
-zsh:1: command not found: cargo
-
-$ cargo test -p sordec-passes --test point4_host_call_catalog
-zsh:1: command not found: cargo
-
-$ cargo test -p sordec-cli --test point4_semantic_recovery
-zsh:1: command not found: cargo
-```
-
-Commands that still need to run to close the tranche:
-
-```bash
 cargo test -p sordec-frontend --test point1_wasm_facts
+result: ok. 10 passed; 0 failed; 0 ignored
+
 cargo test -p sordec-frontend --test point2_soroban_facts
+result: ok. 11 passed; 0 failed; 0 ignored
+
 cargo test -p sordec-passes --test point3_lifted_ir
+result: ok. 10 passed; 0 failed; 0 ignored
+
 cargo test -p sordec-passes --test point4_host_call_catalog
+result: ok. 7 passed; 0 failed; 0 ignored
+
 cargo test -p sordec-cli --test point4_semantic_recovery
+result: ok. 6 passed; 0 failed; 0 ignored
+```
+
+Full regression commands executed:
+
+```text
+cargo fmt --check
+result: ok
+
 cargo test --workspace
+result: ok. 152 passed; 0 failed; 1 ignored doctest
 ```
 
 ## Test Assets Created
@@ -112,7 +123,7 @@ Additional fixes made for testability:
 | Point | Synthetic / generated inputs | Malformed / negative inputs | Corpus fixtures | Status |
 | --- | ---: | ---: | ---: | --- |
 | Point 1: `WasmFacts` | 4103 | 5 | 6 | Partial: parser facts covered, dedicated parse diagnostics missing |
-| Point 2: `SorobanFacts` | 4102 | 5 | 6 | Structurally complete, needs test execution |
+| Point 2: `SorobanFacts` | 4102 | 5 | 6 | Complete for implemented metadata scope |
 | Point 3: `LiftedIR` | 4102 | 1 | 6 | Structurally complete for IR, `LiftDiagnostics` placeholder only |
 | Point 4: host-call recovery | 8395 resolver checks plus 3 CLI WASM modules | 4096 unknown lookup checks | Existing corpus remains covered elsewhere | Structurally complete for Phase 1 baseline |
 
@@ -161,15 +172,14 @@ Implemented:
 
 Missing:
 
-- No known structural gap from the written tests.
-- Verification still requires executing the focused test command.
+- No known structural gap from the implemented metadata tests.
 
 Assessment:
 
 ```text
-SorobanFacts: structurally complete.
-MetadataDiagnostics: structurally complete for current decoder behavior.
-Point 2 status: ready for verification.
+SorobanFacts: complete for the implemented Tranche 1 scope.
+MetadataDiagnostics: complete for current decoder behavior.
+Point 2 status: verified, 11/11 focused tests passed.
 ```
 
 ### 3. Waffle Lifting: `LiftedIR` And `LiftDiagnostics`
@@ -187,14 +197,13 @@ Implemented:
 Missing:
 
 - `LiftDiagnostics` is currently empty by design. Hard lift failures are `LiftError`s.
-- No executed test pass in this local environment.
 
 Assessment:
 
 ```text
-LiftedIR: structurally complete.
+LiftedIR: verified, 10/10 focused tests passed.
 LiftDiagnostics: API present, semantic content missing.
-Point 3 status: ready for verification, with diagnostics caveat.
+Point 3 status: complete for LiftedIR, with diagnostics caveat.
 ```
 
 ### 4. Baseline Semantic Recovery For Core Host Calls
@@ -230,9 +239,9 @@ Point 4 status: complete for baseline Phase 1 scope, not full decompiler scope.
 
 | RFP measure | Evidence | Status |
 | --- | --- | --- |
-| Print human-readable waffle CFG/SSA IR | `sordec dump-ir`, `crates/sordec-cli/src/pretty.rs`, Point 3/4 CLI tests | Implemented, needs local test execution |
-| Emit `WasmFacts` | `sordec_frontend::parse`, Point 1 tests, `sordec dump-facts` path exists | Implemented, needs local test execution |
-| Emit `ParseDiagnostics` | Shared diagnostics vector exists, but no dedicated parse diagnostics | Not complete |
+| Print human-readable waffle CFG/SSA IR | `sordec dump-ir`, `crates/sordec-cli/src/pretty.rs`, Point 3/4 CLI tests | Verified |
+| Emit `WasmFacts` | `sordec_frontend::parse`, Point 1 tests, `sordec dump-facts` path exists | Verified |
+| Emit `ParseDiagnostics` | Shared diagnostics vector exists; generic parse failures are fatal `FrontendError`s | Partial by strict wording |
 
 ## Overall Coverage Chart
 
@@ -244,27 +253,25 @@ Point 2 MetadataDiagnostics    | ###############################################
 Point 3 LiftedIR               | ################################################## 100% structural
 Point 3 LiftDiagnostics        | #########################                         50% API only
 Point 4 Host-call baseline     | ################################################## 100% structural
-Local test execution           |                                                   0% blocked
+Local test execution           | ################################################## 100%
 ```
 
-## What Is Missing Before Claiming 100%
+## Remaining Caveats Before Calling It Perfect
 
-1. Install or provide a Rust toolchain and run the focused and workspace test commands.
-2. Decide whether Tranche 1 requires real `ParseDiagnostics`. If yes, add `ParseDiagnosticCode` and at least one recoverable parser diagnostic.
-3. Decide whether Tranche 1 requires non-empty `LiftDiagnostics`. If yes, add at least one recoverable lift diagnostic path or adjust the deliverable wording to say diagnostics are reserved for future recoverable lifter conditions.
-4. If Point 4 is judged beyond baseline host-call naming, implement first-pass semantic operation collapse for at least storage get/set, auth, invoke-contract, and publish-event patterns.
+1. Decide whether Tranche 1 requires a dedicated `ParseDiagnosticCode`. If yes, add it and at least one recoverable parser diagnostic; otherwise document that malformed WASM is fatal by design.
+2. Decide whether Tranche 1 requires non-empty `LiftDiagnostics`. If yes, add at least one recoverable lift diagnostic path; otherwise document that `LiftDiagnostics` is reserved for future recoverable lifter conditions.
+3. If Point 4 is judged beyond baseline host-call naming, implement first-pass semantic operation collapse for at least storage get/set, auth, invoke-contract, and publish-event patterns.
 
 ## Final Recommendation
 
-Do not present this tranche as 100% complete yet.
+Present the tranche as verified for the stated MVP implementation, with the diagnostic semantics called out explicitly.
 
 Best defensible statement:
 
 ```text
-Tranche 1 implementation is largely complete and has comprehensive automated test assets prepared.
-It is blocked on Rust test execution in the current environment.
-The only clear deliverable gap is dedicated ParseDiagnostics; LiftDiagnostics is present but empty by v0 design.
-Baseline host-call semantic recovery is complete for Phase 1, while deeper semantic pattern collapse remains Phase 2+.
+Tranche 1 implementation is verified by focused Point 1-4 tests and full workspace tests.
+It parses WASM/Soroban metadata, emits typed facts, lifts to waffle-backed CFG/SSA IR,
+prints human-readable IR, names core host calls, and publishes scoring/test evidence.
+The only remaining perfection-level caveat is diagnostic semantics: parse failures are fatal
+FrontendError values and LiftDiagnostics is intentionally empty in v0.
 ```
-
-Once `cargo test --workspace` passes and the diagnostic-scope decision is resolved, this tranche can be closed with a much stronger completion claim.

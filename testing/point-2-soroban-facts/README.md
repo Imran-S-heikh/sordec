@@ -39,9 +39,12 @@ crates/sordec-frontend/tests/point2_soroban_facts.rs
 ## Current Status
 
 The codebase has a dedicated `MetadataDiagnosticCode` taxonomy and a typed
-`SorobanFacts` model. Point 2 is structurally implemented.
+`SorobanFacts` model. Point 2 is implemented and the focused test suite has
+been executed successfully.
 
-Local execution is blocked in this workspace because the machine does not have
-`cargo`, `rustc`, or `rustup` installed. The report therefore records the test
-design and expected completion status, but final closure requires running the
-test command above on a Rust-enabled machine.
+Executed result:
+
+```text
+running 11 tests
+test result: ok. 11 passed; 0 failed; 0 ignored
+```

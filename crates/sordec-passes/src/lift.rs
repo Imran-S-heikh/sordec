@@ -49,8 +49,8 @@
 
 use std::collections::HashMap;
 
-use sordec_common::{Arena, BlockId, FuncId, IrId, ValueId};
 use sordec_common::Diagnostic;
+use sordec_common::{Arena, BlockId, FuncId, IrId, ValueId};
 use sordec_ir::{
     BlockTarget, LiftedBlock, LiftedFunction, LiftedIr, LiftedTerminator, LiftedType, LiftedValue,
     LiftedValueDef, SorobanFacts, WasmFacts, WasmOp,
@@ -293,13 +293,13 @@ fn lift_value(
             return Err(LiftError::PlaceholderValueAfterSsa {
                 func: func_id,
                 value_index,
-            })
+            });
         }
         ValueDef::None => {
             return Err(LiftError::UninitializedValueAfterSsa {
                 func: func_id,
                 value_index,
-            })
+            });
         }
     };
 
@@ -545,4 +545,3 @@ mod tests {
         );
     }
 }
-

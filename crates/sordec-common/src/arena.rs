@@ -223,8 +223,7 @@ mod tests {
         arena.push('b');
         arena.push('c');
 
-        let collected: Vec<(ValueId, char)> =
-            arena.iter().map(|(id, ch)| (id, *ch)).collect();
+        let collected: Vec<(ValueId, char)> = arena.iter().map(|(id, ch)| (id, *ch)).collect();
 
         assert_eq!(
             collected,

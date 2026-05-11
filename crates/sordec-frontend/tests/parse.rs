@@ -9,9 +9,7 @@
 //!
 //! Plus a short suite of error-path tests to lock the failure modes.
 
-use sordec_frontend::{
-    parse, ExportKind, FrontendError, ImportKind, PrimitiveType, TypeRef,
-};
+use sordec_frontend::{ExportKind, FrontendError, ImportKind, PrimitiveType, TypeRef, parse};
 
 /// Canonical `add(u64, u64) -> u64` contract from `samples/contracts/hello-add`.
 const HELLO_ADD_WASM: &[u8] = include_bytes!(concat!(

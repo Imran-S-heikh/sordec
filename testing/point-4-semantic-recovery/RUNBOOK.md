@@ -4,8 +4,6 @@
 
 Install a Rust toolchain with `cargo`, `rustc`, and `rustfmt`.
 
-This local machine currently does not expose those binaries, so execution is blocked here.
-
 ## Primary Verification
 
 ```bash

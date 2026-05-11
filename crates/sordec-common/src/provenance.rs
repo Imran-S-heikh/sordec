@@ -61,11 +61,7 @@ impl Provenance {
     /// argument so call sites remain terse.
     #[inline]
     #[must_use]
-    pub fn new(
-        pass: &'static str,
-        source: ProvenanceSource,
-        note: impl Into<String>,
-    ) -> Self {
+    pub fn new(pass: &'static str, source: ProvenanceSource, note: impl Into<String>) -> Self {
         Self {
             pass,
             source,

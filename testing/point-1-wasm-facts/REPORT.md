@@ -28,6 +28,13 @@ Run it with:
 cargo test -p sordec-frontend --test point1_wasm_facts
 ```
 
+Executed result:
+
+```text
+running 10 tests
+test result: ok. 10 passed; 0 failed; 0 ignored
+```
+
 ## Synthetic Scenario Counts
 
 | Scenario family | Inputs | Purpose |
@@ -107,6 +114,6 @@ Point 1 should be treated as **partially complete**:
 - Complete: typed fatal parse errors
 - Not complete: dedicated `ParseDiagnostics`
 
-Before moving to Point 2, decide whether the RFP wording requires a real
-`ParseDiagnosticCode` enum and at least one recoverable parser diagnostic. If
-yes, that should be implemented before closing Point 1.
+Before claiming strict 100% completion, decide whether the RFP wording requires
+a real `ParseDiagnosticCode` enum and at least one recoverable parser
+diagnostic. If yes, that should be implemented before closing Point 1.

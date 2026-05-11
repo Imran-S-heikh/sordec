@@ -152,7 +152,11 @@ fn render_module_header(out: &mut impl Write, lifted: &LiftedIr) -> io::Result<(
         ";;   imports: {} ({} {}, {} other)",
         f.imports.len(),
         import_funcs,
-        if import_funcs == 1 { "function" } else { "functions" },
+        if import_funcs == 1 {
+            "function"
+        } else {
+            "functions"
+        },
         f.imports.len() - import_funcs,
     )?;
     writeln!(
@@ -160,7 +164,11 @@ fn render_module_header(out: &mut impl Write, lifted: &LiftedIr) -> io::Result<(
         ";;   exports: {} ({} {}, {} other)",
         f.exports.len(),
         export_funcs,
-        if export_funcs == 1 { "function" } else { "functions" },
+        if export_funcs == 1 {
+            "function"
+        } else {
+            "functions"
+        },
         f.exports.len() - export_funcs,
     )?;
     writeln!(out, ";;   local functions: {}", lifted.functions.len())?;

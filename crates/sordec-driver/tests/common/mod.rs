@@ -32,7 +32,12 @@ pub fn assert_invariants_hold(lifted: &LiftedIr) {
 
         for (_block_id, block) in func.blocks.iter() {
             for &v in &block.params {
-                assert!(resolves_value(v), "block param {} dangles in {}", v, func.id);
+                assert!(
+                    resolves_value(v),
+                    "block param {} dangles in {}",
+                    v,
+                    func.id
+                );
             }
             for &v in &block.instructions {
                 assert!(
@@ -107,9 +112,7 @@ pub fn assert_corpus_fixture(wasm: &[u8], fixture_name: &str) {
         .iter()
         .find(|d| d.severity == sordec_common::Severity::Error)
     {
-        panic!(
-            "[{fixture_name}] frontend emitted an Error-severity diagnostic: {err_diag}"
-        );
+        panic!("[{fixture_name}] frontend emitted an Error-severity diagnostic: {err_diag}");
     }
 
     // 3. Lifter accepts the WASM.

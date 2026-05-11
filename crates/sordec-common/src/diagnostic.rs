@@ -179,16 +179,28 @@ impl fmt::Display for MetadataDiagnosticCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnresolvedTypeReference { name } => {
-                write!(f, "metadata::unresolved_type_reference: type {name:?} referenced but not declared")
+                write!(
+                    f,
+                    "metadata::unresolved_type_reference: type {name:?} referenced but not declared"
+                )
             }
             Self::DuplicateTypeName { name } => {
-                write!(f, "metadata::duplicate_type_name: type {name:?} declared more than once; first declaration kept")
+                write!(
+                    f,
+                    "metadata::duplicate_type_name: type {name:?} declared more than once; first declaration kept"
+                )
             }
             Self::DuplicateFunctionName { name } => {
-                write!(f, "metadata::duplicate_function_name: function {name:?} declared more than once; first declaration kept")
+                write!(
+                    f,
+                    "metadata::duplicate_function_name: function {name:?} declared more than once; first declaration kept"
+                )
             }
             Self::MalformedContractMeta { reason } => {
-                write!(f, "metadata::malformed_contract_meta: {reason}; contract_meta map left empty")
+                write!(
+                    f,
+                    "metadata::malformed_contract_meta: {reason}; contract_meta map left empty"
+                )
             }
         }
     }
@@ -395,7 +407,10 @@ mod tests {
 
         let s = d.to_string();
         assert!(s.starts_with("[warning]"), "got: {s}");
-        assert!(s.contains("metadata::unresolved_type_reference"), "got: {s}");
+        assert!(
+            s.contains("metadata::unresolved_type_reference"),
+            "got: {s}"
+        );
         assert!(s.contains(r#""MyEnum""#), "got: {s}");
         assert!(s.contains("contractspecv0"), "got: {s}");
     }

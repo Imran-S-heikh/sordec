@@ -35,10 +35,7 @@ impl<Ir> Pipeline<Ir> {
     ///   or overlaps another group. These would all be silent
     ///   correctness bugs at runtime.
     #[must_use]
-    pub fn new(
-        passes: Vec<Box<dyn Pass<Ir>>>,
-        fixpoint_groups: Vec<Range<usize>>,
-    ) -> Self {
+    pub fn new(passes: Vec<Box<dyn Pass<Ir>>>, fixpoint_groups: Vec<Range<usize>>) -> Self {
         // Reject duplicate pass names.
         let mut seen: HashSet<&'static str> = HashSet::with_capacity(passes.len());
         for pass in &passes {

@@ -44,9 +44,7 @@ pub fn print_diagnostics(diags: &[Diagnostic]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sordec_common::{
-        Diagnostic, DiagnosticCode, Location, MetadataDiagnosticCode, Severity,
-    };
+    use sordec_common::{Diagnostic, DiagnosticCode, Location, MetadataDiagnosticCode, Severity};
 
     #[test]
     fn write_diagnostics_emits_one_line_per_entry() {

@@ -55,7 +55,11 @@ fn lifts_hello_add_smoke() {
     // Every function should have at least one block (an entry block)
     // and its `entry` should resolve.
     for func in &lifted.functions {
-        assert!(!func.blocks.is_empty(), "function {} has no blocks", func.id);
+        assert!(
+            !func.blocks.is_empty(),
+            "function {} has no blocks",
+            func.id
+        );
         assert!(
             func.blocks.get(func.entry).is_some(),
             "function {} entry {} does not resolve",
@@ -87,7 +91,11 @@ fn lifts_timelock_smoke() {
         lifted.functions.len()
     );
     for func in &lifted.functions {
-        assert!(!func.blocks.is_empty(), "function {} has no blocks", func.id);
+        assert!(
+            !func.blocks.is_empty(),
+            "function {} has no blocks",
+            func.id
+        );
     }
 }
 
@@ -146,7 +154,10 @@ fn hello_add_add_function_has_arithmetic_return() {
             saw_return = true;
         }
     }
-    assert!(saw_return, "add function must have at least one Return terminator");
+    assert!(
+        saw_return,
+        "add function must have at least one Return terminator"
+    );
 
     let mut saw_arithmetic = false;
     for (_value_id, value) in add_func.values.iter() {

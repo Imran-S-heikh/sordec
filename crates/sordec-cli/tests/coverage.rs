@@ -126,7 +126,10 @@ fn coverage_with_json_emits_finite_ratios() {
 fn coverage_with_missing_file_exits_three() {
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
-        .args(["coverage", "/tmp/sordec-coverage-definitely-does-not-exist.wasm"])
+        .args([
+            "coverage",
+            "/tmp/sordec-coverage-definitely-does-not-exist.wasm",
+        ])
         .assert()
         .failure()
         .code(3)

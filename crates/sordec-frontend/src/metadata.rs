@@ -12,13 +12,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
-use sordec_common::{
-    Diagnostic, IrId, Location, MetadataDiagnosticCode, TypeId, UnknownReason,
-};
+use sordec_common::{Diagnostic, IrId, Location, MetadataDiagnosticCode, TypeId, UnknownReason};
 use sordec_ir::{
     CompositeType, CustomSection, EnumCase, EnumDef, EnvCompatibility, EventDef, EventParam,
-    EventParamLocation, FunctionParam, FunctionSignature, PrimitiveType, SorobanFacts,
-    StructDef, StructField, TypeRef, TypeRegistry, UnionCase, UnionDef,
+    EventParamLocation, FunctionParam, FunctionSignature, PrimitiveType, SorobanFacts, StructDef,
+    StructField, TypeRef, TypeRegistry, UnionCase, UnionDef,
 };
 use stellar_xdr::curr::{
     Limited, Limits, ReadXdr, ScEnvMetaEntry, ScMetaEntry, ScSpecEntry, ScSpecEventParamLocationV0,
@@ -103,7 +101,11 @@ pub(super) fn spec_type_to_typeref(
             spec_type_to_typeref(&inner.value_type, name_to_id, diagnostics)?,
         ))),
         ScSpecTypeDef::Result(inner) => TypeRef::Composite(CompositeType::Result(
-            Box::new(spec_type_to_typeref(&inner.ok_type, name_to_id, diagnostics)?),
+            Box::new(spec_type_to_typeref(
+                &inner.ok_type,
+                name_to_id,
+                diagnostics,
+            )?),
             Box::new(spec_type_to_typeref(
                 &inner.error_type,
                 name_to_id,
@@ -114,7 +116,11 @@ pub(super) fn spec_type_to_typeref(
             spec_type_to_typeref(&inner.element_type, name_to_id, diagnostics)?,
         ))),
         ScSpecTypeDef::Map(inner) => TypeRef::Composite(CompositeType::Map(
-            Box::new(spec_type_to_typeref(&inner.key_type, name_to_id, diagnostics)?),
+            Box::new(spec_type_to_typeref(
+                &inner.key_type,
+                name_to_id,
+                diagnostics,
+            )?),
             Box::new(spec_type_to_typeref(
                 &inner.value_type,
                 name_to_id,
@@ -603,8 +609,7 @@ mod tests {
         // Garbage bytes that the soroban_meta XDR decoder will reject.
         let garbage = vec![0xFF, 0xFE, 0xFD, 0xFC, 0xFB, 0xFA, 0xF9, 0xF8];
 
-        let result =
-            decode_contract_meta(&garbage, &mut diags).expect("returns Ok with empty map");
+        let result = decode_contract_meta(&garbage, &mut diags).expect("returns Ok with empty map");
 
         assert!(result.is_empty(), "fell back to empty map; got {result:?}");
         assert_eq!(diags.len(), 1, "exactly one diagnostic emitted");
@@ -632,4 +637,3 @@ mod tests {
         );
     }
 }
-

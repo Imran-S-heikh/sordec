@@ -27,8 +27,8 @@ pub mod pass;
 pub mod pipeline;
 
 pub use error::{LiftError, LiftResult};
-pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
-pub use lift::{lift_with_waffle, LiftOutput};
+pub use host_calls::{CATALOG_VERSION, HostCall, catalog_size, resolve as resolve_host_call};
+pub use lift::{LiftOutput, lift_with_waffle};
 pub use lowering::{LoweringError, LoweringStep};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};

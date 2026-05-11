@@ -513,10 +513,7 @@ mod tests {
     ///
     /// Each value is given an `I64` result type — irrelevant for these
     /// tests, but `LiftedValue` requires a `types` vector.
-    fn lifted_ir_with_one_function(
-        imports: Vec<Import>,
-        defs: Vec<LiftedValueDef>,
-    ) -> LiftedIr {
+    fn lifted_ir_with_one_function(imports: Vec<Import>, defs: Vec<LiftedValueDef>) -> LiftedIr {
         let mut values: Arena<ValueId, LiftedValue> = Arena::new();
         let mut instructions: Vec<ValueId> = Vec::new();
         for def in defs {
@@ -642,15 +639,11 @@ mod tests {
         // Two metadata diagnostics, no parse-level diagnostics.
         let diags = vec![
             Diagnostic::warning(
-                MetadataDiagnosticCode::DuplicateTypeName {
-                    name: "Foo".into(),
-                },
+                MetadataDiagnosticCode::DuplicateTypeName { name: "Foo".into() },
                 "",
             ),
             Diagnostic::warning(
-                MetadataDiagnosticCode::DuplicateFunctionName {
-                    name: "bar".into(),
-                },
+                MetadataDiagnosticCode::DuplicateFunctionName { name: "bar".into() },
                 "",
             ),
         ];

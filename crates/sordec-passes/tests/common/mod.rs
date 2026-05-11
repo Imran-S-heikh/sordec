@@ -36,7 +36,12 @@ pub fn assert_invariants_hold(lifted: &LiftedIr) {
 
         for (_block_id, block) in func.blocks.iter() {
             for &v in &block.params {
-                assert!(resolves_value(v), "block param {} dangles in {}", v, func.id);
+                assert!(
+                    resolves_value(v),
+                    "block param {} dangles in {}",
+                    v,
+                    func.id
+                );
             }
             for &v in &block.instructions {
                 assert!(

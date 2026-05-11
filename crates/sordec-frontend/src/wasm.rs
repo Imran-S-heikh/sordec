@@ -10,9 +10,7 @@
 //! [`ImportKind`] / [`ExportKind`] / [`CustomSection`] shape (the legacy
 //! decompiler stored these as strings, which we deliberately avoid).
 
-use sordec_ir::{
-    ByteRange, CustomSection, Export, ExportKind, Import, ImportKind, WasmFacts,
-};
+use sordec_ir::{ByteRange, CustomSection, Export, ExportKind, Import, ImportKind, WasmFacts};
 use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
 
 use crate::error::{FrontendError, FrontendResult};

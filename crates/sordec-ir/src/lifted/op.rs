@@ -42,8 +42,8 @@ impl WasmOp {
     #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn kind(&self) -> WasmOpcodeKind {
-        use waffle::Operator as W;
         use WasmOpcodeKind as K;
+        use waffle::Operator as W;
         match &self.0 {
             // Constants
             W::I32Const { .. } | W::I64Const { .. } | W::F32Const { .. } | W::F64Const { .. } => {
@@ -51,33 +51,106 @@ impl WasmOp {
             }
 
             // Integer arithmetic
-            W::I32Add | W::I32Sub | W::I32Mul | W::I32DivS | W::I32DivU | W::I32RemS
-            | W::I32RemU | W::I64Add | W::I64Sub | W::I64Mul | W::I64DivS | W::I64DivU
-            | W::I64RemS | W::I64RemU => K::Arithmetic,
+            W::I32Add
+            | W::I32Sub
+            | W::I32Mul
+            | W::I32DivS
+            | W::I32DivU
+            | W::I32RemS
+            | W::I32RemU
+            | W::I64Add
+            | W::I64Sub
+            | W::I64Mul
+            | W::I64DivS
+            | W::I64DivU
+            | W::I64RemS
+            | W::I64RemU => K::Arithmetic,
 
             // Float arithmetic
-            W::F32Add | W::F32Sub | W::F32Mul | W::F32Div | W::F64Add | W::F64Sub | W::F64Mul
+            W::F32Add
+            | W::F32Sub
+            | W::F32Mul
+            | W::F32Div
+            | W::F64Add
+            | W::F64Sub
+            | W::F64Mul
             | W::F64Div => K::Arithmetic,
 
             // Integer bitwise
-            W::I32And | W::I32Or | W::I32Xor | W::I32Shl | W::I32ShrS | W::I32ShrU | W::I32Rotl
-            | W::I32Rotr | W::I64And | W::I64Or | W::I64Xor | W::I64Shl | W::I64ShrS
-            | W::I64ShrU | W::I64Rotl | W::I64Rotr => K::Bitwise,
+            W::I32And
+            | W::I32Or
+            | W::I32Xor
+            | W::I32Shl
+            | W::I32ShrS
+            | W::I32ShrU
+            | W::I32Rotl
+            | W::I32Rotr
+            | W::I64And
+            | W::I64Or
+            | W::I64Xor
+            | W::I64Shl
+            | W::I64ShrS
+            | W::I64ShrU
+            | W::I64Rotl
+            | W::I64Rotr => K::Bitwise,
 
             // Comparisons (integer + float, including eqz)
-            W::I32Eqz | W::I64Eqz | W::I32Eq | W::I32Ne | W::I32LtS | W::I32LtU | W::I32GtS
-            | W::I32GtU | W::I32LeS | W::I32LeU | W::I32GeS | W::I32GeU | W::I64Eq | W::I64Ne
-            | W::I64LtS | W::I64LtU | W::I64GtS | W::I64GtU | W::I64LeS | W::I64LeU
-            | W::I64GeS | W::I64GeU | W::F32Eq | W::F32Ne | W::F32Lt | W::F32Gt | W::F32Le
-            | W::F32Ge | W::F64Eq | W::F64Ne | W::F64Lt | W::F64Gt | W::F64Le | W::F64Ge => {
-                K::Comparison
-            }
+            W::I32Eqz
+            | W::I64Eqz
+            | W::I32Eq
+            | W::I32Ne
+            | W::I32LtS
+            | W::I32LtU
+            | W::I32GtS
+            | W::I32GtU
+            | W::I32LeS
+            | W::I32LeU
+            | W::I32GeS
+            | W::I32GeU
+            | W::I64Eq
+            | W::I64Ne
+            | W::I64LtS
+            | W::I64LtU
+            | W::I64GtS
+            | W::I64GtU
+            | W::I64LeS
+            | W::I64LeU
+            | W::I64GeS
+            | W::I64GeU
+            | W::F32Eq
+            | W::F32Ne
+            | W::F32Lt
+            | W::F32Gt
+            | W::F32Le
+            | W::F32Ge
+            | W::F64Eq
+            | W::F64Ne
+            | W::F64Lt
+            | W::F64Gt
+            | W::F64Le
+            | W::F64Ge => K::Comparison,
 
             // Unary numeric ops
-            W::I32Clz | W::I32Ctz | W::I32Popcnt | W::I64Clz | W::I64Ctz | W::I64Popcnt
-            | W::F32Abs | W::F32Neg | W::F32Sqrt | W::F32Ceil | W::F32Floor | W::F32Trunc
-            | W::F32Nearest | W::F64Abs | W::F64Neg | W::F64Sqrt | W::F64Ceil | W::F64Floor
-            | W::F64Trunc | W::F64Nearest => K::Unary,
+            W::I32Clz
+            | W::I32Ctz
+            | W::I32Popcnt
+            | W::I64Clz
+            | W::I64Ctz
+            | W::I64Popcnt
+            | W::F32Abs
+            | W::F32Neg
+            | W::F32Sqrt
+            | W::F32Ceil
+            | W::F32Floor
+            | W::F32Trunc
+            | W::F32Nearest
+            | W::F64Abs
+            | W::F64Neg
+            | W::F64Sqrt
+            | W::F64Ceil
+            | W::F64Floor
+            | W::F64Trunc
+            | W::F64Nearest => K::Unary,
 
             // Type conversions
             W::I32WrapI64
@@ -134,9 +207,10 @@ impl WasmOp {
             | W::I64Store32 { .. } => K::Store,
 
             // Bulk memory operations
-            W::MemorySize { .. } | W::MemoryGrow { .. } | W::MemoryCopy { .. } | W::MemoryFill { .. } => {
-                K::MemoryOp
-            }
+            W::MemorySize { .. }
+            | W::MemoryGrow { .. }
+            | W::MemoryCopy { .. }
+            | W::MemoryFill { .. } => K::MemoryOp,
 
             // Globals
             W::GlobalGet { .. } => K::GlobalGet,

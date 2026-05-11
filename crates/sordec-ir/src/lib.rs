@@ -30,7 +30,7 @@ pub use lifted::{
     BlockTarget, LiftedBlock, LiftedFunction, LiftedIr, LiftedTerminator, LiftedType, LiftedValue,
     LiftedValueDef, WasmOp, WasmOpcodeKind,
 };
-pub use validate::{validate_high, validate_lifted, Validate, ValidateError};
+pub use validate::{Validate, ValidateError, validate_high, validate_lifted};
 pub use wasm_facts::{
     ByteRange, CompositeType, CustomSection, EnumCase, EnumDef, EnvCompatibility, EventDef,
     EventParam, EventParamLocation, Export, ExportKind, FunctionParam, FunctionSignature, Import,

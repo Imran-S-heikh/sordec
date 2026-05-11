@@ -144,10 +144,7 @@ fn write_temp_wasm(label: &str, wasm: &[u8]) -> PathBuf {
 }
 
 fn mixed_known_unknown_wasm() -> Vec<u8> {
-    host_call_wasm(
-        &[("l", "_"), ("a", "0"), ("zz", "?")],
-        &[0, 1, 1, 2, 2, 3],
-    )
+    host_call_wasm(&[("l", "_"), ("a", "0"), ("zz", "?")], &[0, 1, 1, 2, 2, 3])
 }
 
 fn all_core_module_examples_wasm() -> Vec<u8> {

@@ -50,7 +50,9 @@ pub enum LiftError {
     /// terminator (`Terminator::None`). After SSA conversion every
     /// block must end with a real terminator; this would indicate a
     /// `waffle` bug.
-    #[error("function {func} block {block_index} has uninitialized terminator after SSA conversion")]
+    #[error(
+        "function {func} block {block_index} has uninitialized terminator after SSA conversion"
+    )]
     UninitializedTerminator {
         /// Local function identifier of the offending block.
         func: FuncId,
@@ -80,7 +82,9 @@ pub enum LiftError {
 
     /// A terminator referenced a block id that does not exist in the
     /// enclosing function. Caught by the post-lift invariant validator.
-    #[error("function {func} block {block_index} terminator references unknown block {target_index}")]
+    #[error(
+        "function {func} block {block_index} terminator references unknown block {target_index}"
+    )]
     DanglingBlockTarget {
         /// Local function identifier.
         func: FuncId,

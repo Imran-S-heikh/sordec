@@ -262,7 +262,10 @@ mod tests {
         // versions (new modules are exceedingly rare).
         for module_letter in ["a", "b", "c", "d", "i", "l", "m", "p", "v", "x"] {
             let any_entry = CATALOG.iter().any(|hc| hc.module == module_letter);
-            assert!(any_entry, "no entries found for module letter {module_letter:?}");
+            assert!(
+                any_entry,
+                "no entries found for module letter {module_letter:?}"
+            );
         }
     }
 

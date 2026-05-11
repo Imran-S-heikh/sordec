@@ -86,15 +86,13 @@ Completion criteria:
 | Initial scoring rules published | Complete |
 | Automated synthetic and catalog test vectors added | Complete |
 | Full semantic operation collapse | Not in Phase 1 scope |
-| Focused tests executed locally | Blocked until `cargo` is available |
+| Focused tests executed locally | Complete |
 
-Local verification attempt:
+Executed results:
 
 ```text
-$ cargo test -p sordec-passes --test point4_host_call_catalog
-zsh:1: command not found: cargo
-$ cargo test -p sordec-cli --test point4_semantic_recovery
-zsh:1: command not found: cargo
+point4_host_call_catalog: 7 passed; 0 failed; 0 ignored
+point4_semantic_recovery: 6 passed; 0 failed; 0 ignored
 ```
 
 Recommended verification commands:

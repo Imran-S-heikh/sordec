@@ -4,7 +4,7 @@
 //! the generator local avoids depending on fixture compiler output when the
 //! behavior under test is the generic frontend parser.
 
-use sordec_frontend::{parse, ExportKind, FrontendError, ImportKind};
+use sordec_frontend::{ExportKind, FrontendError, ImportKind, parse};
 
 const EMPTY_WASM_MODULE: &[u8] = b"\0asm\x01\0\0\0";
 
@@ -152,7 +152,10 @@ fn table_section(count: usize) -> Vec<u8> {
 }
 
 fn memory_section(count: usize) -> Vec<u8> {
-    section(5, vec_payload((0..count).map(|_| vec![0x00, 0x01]).collect()))
+    section(
+        5,
+        vec_payload((0..count).map(|_| vec![0x00, 0x01]).collect()),
+    )
 }
 
 fn global_section(count: usize) -> Vec<u8> {
@@ -180,7 +183,11 @@ fn export_section(entries: Vec<Vec<u8>>) -> Vec<u8> {
 fn code_section(function_count: usize) -> Vec<u8> {
     section(
         10,
-        vec_payload((0..function_count).map(|_| vec![0x02, 0x00, 0x0b]).collect()),
+        vec_payload(
+            (0..function_count)
+                .map(|_| vec![0x02, 0x00, 0x0b])
+                .collect(),
+        ),
     )
 }
 
@@ -308,7 +315,9 @@ fn custom_sections_preserve_order_names_bytes_and_monotonic_ranges() {
         custom_section("empty-tail", b""),
     ]);
 
-    let facts = parse(&wasm).expect("custom-section module parses").wasm_facts;
+    let facts = parse(&wasm)
+        .expect("custom-section module parses")
+        .wasm_facts;
 
     assert_eq!(facts.custom_sections.len(), 3);
     assert_eq!(facts.custom_sections[0].name, "prelude");
@@ -351,29 +360,23 @@ fn fatal_parse_error_matrix_surfaces_typed_frontend_errors() {
     let invalid_cases: Vec<(&str, Vec<u8>)> = vec![
         ("empty", vec![]),
         ("bad magic", b"not wasm".to_vec()),
-        (
-            "truncated custom section",
-            {
-                let mut wasm = EMPTY_WASM_MODULE.to_vec();
-                wasm.extend([0x00, 0x0a, 0x01, b'x']);
-                wasm
-            },
-        ),
+        ("truncated custom section", {
+            let mut wasm = EMPTY_WASM_MODULE.to_vec();
+            wasm.extend([0x00, 0x0a, 0x01, b'x']);
+            wasm
+        }),
         (
             "duplicate type section",
             module(vec![type_section(1), type_section(1)]),
         ),
-        (
-            "invalid utf8 import name",
-            {
-                let mut bad_import_payload = Vec::new();
-                bad_import_payload.push(1); // one import
-                bad_import_payload.extend([1, 0xff]); // malformed module name
-                bad_import_payload.extend(wasm_name("thing"));
-                bad_import_payload.extend([0x00, 0x00]);
-                module(vec![type_section(1), section(2, bad_import_payload)])
-            },
-        ),
+        ("invalid utf8 import name", {
+            let mut bad_import_payload = Vec::new();
+            bad_import_payload.push(1); // one import
+            bad_import_payload.extend([1, 0xff]); // malformed module name
+            bad_import_payload.extend(wasm_name("thing"));
+            bad_import_payload.extend([0x00, 0x00]);
+            module(vec![type_section(1), section(2, bad_import_payload)])
+        }),
     ];
 
     for (name, wasm) in invalid_cases {
@@ -383,7 +386,10 @@ fn fatal_parse_error_matrix_surfaces_typed_frontend_errors() {
         };
         match name {
             "empty" => assert!(matches!(err, FrontendError::Empty)),
-            _ => assert!(matches!(err, FrontendError::InvalidWasm(_)), "{name}: {err:?}"),
+            _ => assert!(
+                matches!(err, FrontendError::InvalidWasm(_)),
+                "{name}: {err:?}"
+            ),
         }
     }
 }
@@ -402,7 +408,9 @@ fn deterministic_synthetic_matrix_covers_thousands_of_valid_wasm_shapes() {
                 ImportKind::Func(type_index) => {
                     assert!(type_index < 4, "case {case}: bad type index {type_index}");
                 }
-                ref other => panic!("case {case}: generated imports should be funcs, got {other:?}"),
+                ref other => {
+                    panic!("case {case}: generated imports should be funcs, got {other:?}")
+                }
             }
         }
 
@@ -423,7 +431,10 @@ fn deterministic_synthetic_matrix_covers_thousands_of_valid_wasm_shapes() {
         {
             assert_eq!(&actual.name, expected_name, "case {case}");
             assert_eq!(&actual.bytes, expected_bytes, "case {case}");
-            assert!(actual.byte_range.start < actual.byte_range.end, "case {case}");
+            assert!(
+                actual.byte_range.start < actual.byte_range.end,
+                "case {case}"
+            );
             assert!(actual.byte_range.end <= wasm.len() as u64, "case {case}");
         }
 
@@ -486,7 +497,10 @@ fn generated_valid_module(case: u32) -> (Vec<u8>, ExpectedModule) {
     for idx in 0..custom_count.min(2) {
         let payload = generated_payload(case, idx);
         custom_sections.push((format!("point1.pre.{case}.{idx}"), payload.clone()));
-        sections.push(custom_section(&format!("point1.pre.{case}.{idx}"), &payload));
+        sections.push(custom_section(
+            &format!("point1.pre.{case}.{idx}"),
+            &payload,
+        ));
     }
 
     sections.push(type_section(type_count));
@@ -524,7 +538,10 @@ fn generated_valid_module(case: u32) -> (Vec<u8>, ExpectedModule) {
     for idx in 2..custom_count {
         let payload = generated_payload(case, idx);
         custom_sections.push((format!("point1.post.{case}.{idx}"), payload.clone()));
-        sections.push(custom_section(&format!("point1.post.{case}.{idx}"), &payload));
+        sections.push(custom_section(
+            &format!("point1.post.{case}.{idx}"),
+            &payload,
+        ));
     }
 
     (

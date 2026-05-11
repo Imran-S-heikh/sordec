@@ -88,8 +88,7 @@ fn corpus_dex_liquidity_pool() {
 
 #[test]
 fn corpus_token_v23_emits_no_diagnostics() {
-    let parse_output =
-        sordec_frontend::parse(TOKEN_V23_WASM).expect("token-v23 parses");
+    let parse_output = sordec_frontend::parse(TOKEN_V23_WASM).expect("token-v23 parses");
     assert!(
         parse_output.diagnostics.is_empty(),
         "token-v23 (canonical clean fixture) emitted {} diagnostic(s): {:?}",
@@ -103,8 +102,8 @@ fn corpus_token_v23_stripped_has_no_soroban_facts_and_no_diagnostics() {
     // A stripped contract has no contractspecv0, so soroban_facts is
     // None — and the metadata-decoder code path that emits diagnostics
     // is never entered. Therefore: zero diagnostics expected.
-    let parse_output = sordec_frontend::parse(TOKEN_V23_STRIPPED_WASM)
-        .expect("token-v23-stripped parses");
+    let parse_output =
+        sordec_frontend::parse(TOKEN_V23_STRIPPED_WASM).expect("token-v23-stripped parses");
     assert!(
         parse_output.soroban_facts.is_none(),
         "stripped fixture should report no SorobanFacts"

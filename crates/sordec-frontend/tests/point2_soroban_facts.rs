@@ -4,17 +4,16 @@
 use std::str::FromStr;
 
 use sordec_frontend::{
-    parse, CompositeType, DiagnosticCode, EventParamLocation, FrontendError,
-    MetadataDiagnosticCode, PrimitiveType, Severity, TypeRef,
+    CompositeType, DiagnosticCode, EventParamLocation, FrontendError, MetadataDiagnosticCode,
+    PrimitiveType, Severity, TypeRef, parse,
 };
 use stellar_xdr::curr::{
-    Limits, ScEnvMetaEntry, ScEnvMetaEntryInterfaceVersion, ScMetaEntry, ScMetaV0,
-    ScSpecEntry, ScSpecEventDataFormat, ScSpecEventParamLocationV0, ScSpecEventParamV0,
-    ScSpecEventV0, ScSpecFunctionInputV0, ScSpecFunctionV0, ScSpecTypeBytesN,
-    ScSpecTypeDef, ScSpecTypeMap, ScSpecTypeOption, ScSpecTypeResult, ScSpecTypeTuple,
-    ScSpecTypeUdt, ScSpecTypeVec, ScSpecUdtEnumCaseV0, ScSpecUdtEnumV0,
-    ScSpecUdtErrorEnumCaseV0, ScSpecUdtErrorEnumV0, ScSpecUdtStructFieldV0,
-    ScSpecUdtStructV0, ScSpecUdtUnionCaseTupleV0, ScSpecUdtUnionCaseV0,
+    Limits, ScEnvMetaEntry, ScEnvMetaEntryInterfaceVersion, ScMetaEntry, ScMetaV0, ScSpecEntry,
+    ScSpecEventDataFormat, ScSpecEventParamLocationV0, ScSpecEventParamV0, ScSpecEventV0,
+    ScSpecFunctionInputV0, ScSpecFunctionV0, ScSpecTypeBytesN, ScSpecTypeDef, ScSpecTypeMap,
+    ScSpecTypeOption, ScSpecTypeResult, ScSpecTypeTuple, ScSpecTypeUdt, ScSpecTypeVec,
+    ScSpecUdtEnumCaseV0, ScSpecUdtEnumV0, ScSpecUdtErrorEnumCaseV0, ScSpecUdtErrorEnumV0,
+    ScSpecUdtStructFieldV0, ScSpecUdtStructV0, ScSpecUdtUnionCaseTupleV0, ScSpecUdtUnionCaseV0,
     ScSpecUdtUnionCaseVoidV0, ScSpecUdtUnionV0, ScSymbol, StringM, VecM, WriteXdr,
 };
 
@@ -90,7 +89,7 @@ fn string_m<const N: u32>(s: &str) -> StringM<N> {
 }
 
 fn symbol(s: &str) -> ScSymbol {
-    ScSymbol::from_str(s).expect("synthetic symbol fits ScSymbol")
+    ScSymbol(string_m(s))
 }
 
 fn vecm<T, const MAX: u32>(items: Vec<T>) -> VecM<T, MAX> {
@@ -116,7 +115,11 @@ fn meta_bytes(entries: Vec<ScMetaEntry>) -> Vec<u8> {
 fn env_meta_bytes(entries: Vec<ScEnvMetaEntry>) -> Vec<u8> {
     let mut out = Vec::new();
     for entry in entries {
-        out.extend(entry.to_xdr(Limits::none()).expect("env meta entry serializes"));
+        out.extend(
+            entry
+                .to_xdr(Limits::none())
+                .expect("env meta entry serializes"),
+        );
     }
     out
 }
@@ -129,7 +132,11 @@ fn input(name: &str, type_: ScSpecTypeDef) -> ScSpecFunctionInputV0 {
     }
 }
 
-fn function(name: &str, inputs: Vec<ScSpecFunctionInputV0>, outputs: Vec<ScSpecTypeDef>) -> ScSpecEntry {
+fn function(
+    name: &str,
+    inputs: Vec<ScSpecFunctionInputV0>,
+    outputs: Vec<ScSpecTypeDef>,
+) -> ScSpecEntry {
     ScSpecEntry::FunctionV0(ScSpecFunctionV0 {
         doc: string_m(""),
         name: symbol(name),
@@ -345,13 +352,27 @@ fn decodes_all_spec_entry_families_into_soroban_facts() {
     let config = &facts.types.structs[0];
     assert_eq!(config.name, "Config");
     assert_eq!(config.fields.len(), 2);
-    assert!(matches!(&config.fields[0].ty, TypeRef::Primitive(PrimitiveType::Address)));
-    assert!(matches!(&config.fields[1].ty, TypeRef::Primitive(PrimitiveType::U64)));
+    assert!(matches!(
+        &config.fields[0].ty,
+        TypeRef::Primitive(PrimitiveType::Address)
+    ));
+    assert!(matches!(
+        &config.fields[1].ty,
+        TypeRef::Primitive(PrimitiveType::U64)
+    ));
 
     let key = &facts.types.unions[0];
     assert_eq!(key.cases.len(), 2);
-    assert!(key.cases.iter().any(|case| case.name == "Admin" && case.fields.is_empty()));
-    assert!(key.cases.iter().any(|case| case.name == "Balance" && case.fields.len() == 2));
+    assert!(
+        key.cases
+            .iter()
+            .any(|case| case.name == "Admin" && case.fields.is_empty())
+    );
+    assert!(
+        key.cases
+            .iter()
+            .any(|case| case.name == "Balance" && case.fields.len() == 2)
+    );
 
     let event = &facts.types.events[0];
     assert_eq!(event.name, "transfer");
@@ -372,7 +393,11 @@ fn decodes_all_primitive_type_variants_in_function_signatures() {
         ("i32", ScSpecTypeDef::I32, PrimitiveType::I32),
         ("u64", ScSpecTypeDef::U64, PrimitiveType::U64),
         ("i64", ScSpecTypeDef::I64, PrimitiveType::I64),
-        ("timepoint", ScSpecTypeDef::Timepoint, PrimitiveType::Timepoint),
+        (
+            "timepoint",
+            ScSpecTypeDef::Timepoint,
+            PrimitiveType::Timepoint,
+        ),
         ("duration", ScSpecTypeDef::Duration, PrimitiveType::Duration),
         ("u128", ScSpecTypeDef::U128, PrimitiveType::U128),
         ("i128", ScSpecTypeDef::I128, PrimitiveType::I128),
@@ -382,7 +407,11 @@ fn decodes_all_primitive_type_variants_in_function_signatures() {
         ("string", ScSpecTypeDef::String, PrimitiveType::String),
         ("symbol", ScSpecTypeDef::Symbol, PrimitiveType::Symbol),
         ("address", ScSpecTypeDef::Address, PrimitiveType::Address),
-        ("muxed", ScSpecTypeDef::MuxedAddress, PrimitiveType::MuxedAddress),
+        (
+            "muxed",
+            ScSpecTypeDef::MuxedAddress,
+            PrimitiveType::MuxedAddress,
+        ),
     ];
 
     let wasm = synthetic_contract_wasm(
@@ -405,8 +434,13 @@ fn decodes_all_primitive_type_variants_in_function_signatures() {
         .expect("contractspecv0 yields facts");
 
     for (idx, (_, _, expected)) in primitive_cases.iter().enumerate() {
-        let signature = facts.functions.get(&format!("f{idx}")).expect("function exists");
-        assert!(matches!(&signature.inputs[0].ty, TypeRef::Primitive(actual) if actual == expected));
+        let signature = facts
+            .functions
+            .get(&format!("f{idx}"))
+            .expect("function exists");
+        assert!(
+            matches!(&signature.inputs[0].ty, TypeRef::Primitive(actual) if actual == expected)
+        );
         assert!(matches!(&signature.outputs[0], TypeRef::Primitive(actual) if actual == expected));
     }
 }
@@ -422,7 +456,10 @@ fn decodes_composite_types_and_udt_references() {
                 input("result", result(ScSpecTypeDef::U64, ScSpecTypeDef::Error)),
                 input("vec", vec_type(ScSpecTypeDef::Address)),
                 input("map", map_type(ScSpecTypeDef::Symbol, ScSpecTypeDef::I128)),
-                input("tuple", tuple_type(vec![ScSpecTypeDef::Bool, ScSpecTypeDef::U32])),
+                input(
+                    "tuple",
+                    tuple_type(vec![ScSpecTypeDef::Bool, ScSpecTypeDef::U32]),
+                ),
                 input("bytesn", bytes_n(32)),
                 input("config", udt("Config")),
             ],
@@ -434,14 +471,35 @@ fn decodes_composite_types_and_udt_references() {
         .expect("composite metadata parses")
         .soroban_facts
         .expect("contractspecv0 yields facts");
-    let signature = facts.functions.get("complex").expect("complex function exists");
+    let signature = facts
+        .functions
+        .get("complex")
+        .expect("complex function exists");
 
-    assert!(matches!(&signature.inputs[0].ty, TypeRef::Composite(CompositeType::Option(_))));
-    assert!(matches!(&signature.inputs[1].ty, TypeRef::Composite(CompositeType::Result(_, _))));
-    assert!(matches!(&signature.inputs[2].ty, TypeRef::Composite(CompositeType::Vec(_))));
-    assert!(matches!(&signature.inputs[3].ty, TypeRef::Composite(CompositeType::Map(_, _))));
-    assert!(matches!(&signature.inputs[4].ty, TypeRef::Composite(CompositeType::Tuple(_))));
-    assert!(matches!(&signature.inputs[5].ty, TypeRef::Composite(CompositeType::BytesN(32))));
+    assert!(matches!(
+        &signature.inputs[0].ty,
+        TypeRef::Composite(CompositeType::Option(_))
+    ));
+    assert!(matches!(
+        &signature.inputs[1].ty,
+        TypeRef::Composite(CompositeType::Result(_, _))
+    ));
+    assert!(matches!(
+        &signature.inputs[2].ty,
+        TypeRef::Composite(CompositeType::Vec(_))
+    ));
+    assert!(matches!(
+        &signature.inputs[3].ty,
+        TypeRef::Composite(CompositeType::Map(_, _))
+    ));
+    assert!(matches!(
+        &signature.inputs[4].ty,
+        TypeRef::Composite(CompositeType::Tuple(_))
+    ));
+    assert!(matches!(
+        &signature.inputs[5].ty,
+        TypeRef::Composite(CompositeType::BytesN(32))
+    ));
     assert!(matches!(&signature.inputs[6].ty, TypeRef::UserDefined(_)));
     assert!(matches!(&signature.outputs[0], TypeRef::UserDefined(_)));
 }
@@ -451,8 +509,16 @@ fn duplicate_names_emit_metadata_diagnostics_and_keep_first_declaration() {
     let wasm = synthetic_contract_wasm(vec![
         struct_entry("Config", vec![struct_field("first", ScSpecTypeDef::U32)]),
         struct_entry("Config", vec![struct_field("second", ScSpecTypeDef::I32)]),
-        function("same", vec![input("a", ScSpecTypeDef::U32)], vec![ScSpecTypeDef::U32]),
-        function("same", vec![input("b", ScSpecTypeDef::I32)], vec![ScSpecTypeDef::I32]),
+        function(
+            "same",
+            vec![input("a", ScSpecTypeDef::U32)],
+            vec![ScSpecTypeDef::U32],
+        ),
+        function(
+            "same",
+            vec![input("b", ScSpecTypeDef::I32)],
+            vec![ScSpecTypeDef::I32],
+        ),
     ]);
 
     let output = parse(&wasm).expect("duplicate metadata parses with warnings");
@@ -464,7 +530,12 @@ fn duplicate_names_emit_metadata_diagnostics_and_keep_first_declaration() {
     assert_eq!(facts.functions["same"].inputs[0].name, "a");
 
     assert_eq!(output.diagnostics.len(), 2);
-    assert!(output.diagnostics.iter().all(|diag| diag.severity == Severity::Warning));
+    assert!(
+        output
+            .diagnostics
+            .iter()
+            .all(|diag| diag.severity == Severity::Warning)
+    );
     assert!(output.diagnostics.iter().any(|diag| matches!(
         &diag.code,
         DiagnosticCode::Metadata(MetadataDiagnosticCode::DuplicateTypeName { name }) if name == "Config"
@@ -499,9 +570,18 @@ fn unresolved_udt_reference_emits_warning_and_uses_unknown_placeholder() {
 #[test]
 fn contract_meta_sections_are_concatenated_and_decoded() {
     let wasm = wasm_with_custom_sections(vec![
-        ("contractspecv0", spec_bytes(vec![function("noop", vec![], vec![ScSpecTypeDef::Void])])),
-        ("contractmetav0", meta_bytes(vec![meta_entry("rssdkver", "25.0.0")])),
-        ("contractmetav0", meta_bytes(vec![meta_entry("rsver", "1.90.0")])),
+        (
+            "contractspecv0",
+            spec_bytes(vec![function("noop", vec![], vec![ScSpecTypeDef::Void])]),
+        ),
+        (
+            "contractmetav0",
+            meta_bytes(vec![meta_entry("rssdkver", "25.0.0")]),
+        ),
+        (
+            "contractmetav0",
+            meta_bytes(vec![meta_entry("rsver", "1.90.0")]),
+        ),
     ]);
 
     let facts = parse(&wasm)
@@ -516,7 +596,10 @@ fn contract_meta_sections_are_concatenated_and_decoded() {
 #[test]
 fn env_meta_decodes_protocol_and_pre_release() {
     let wasm = wasm_with_custom_sections(vec![
-        ("contractspecv0", spec_bytes(vec![function("noop", vec![], vec![ScSpecTypeDef::Void])])),
+        (
+            "contractspecv0",
+            spec_bytes(vec![function("noop", vec![], vec![ScSpecTypeDef::Void])]),
+        ),
         (
             "contractenvmetav0",
             env_meta_bytes(vec![ScEnvMetaEntry::ScEnvMetaKindInterfaceVersion(
@@ -546,7 +629,10 @@ fn malformed_metadata_sections_surface_expected_error_or_warning() {
     ));
 
     let malformed_env = wasm_with_custom_sections(vec![
-        ("contractspecv0", spec_bytes(vec![function("noop", vec![], vec![ScSpecTypeDef::Void])])),
+        (
+            "contractspecv0",
+            spec_bytes(vec![function("noop", vec![], vec![ScSpecTypeDef::Void])]),
+        ),
         ("contractenvmetav0", vec![0xff; 8]),
     ]);
     assert!(matches!(
@@ -555,7 +641,10 @@ fn malformed_metadata_sections_surface_expected_error_or_warning() {
     ));
 
     let malformed_meta = wasm_with_custom_sections(vec![
-        ("contractspecv0", spec_bytes(vec![function("noop", vec![], vec![ScSpecTypeDef::Void])])),
+        (
+            "contractspecv0",
+            spec_bytes(vec![function("noop", vec![], vec![ScSpecTypeDef::Void])]),
+        ),
         ("contractmetav0", vec![0xff; 8]),
     ]);
     let output = parse(&malformed_meta).expect("malformed contract meta degrades with warning");
@@ -564,11 +653,13 @@ fn malformed_metadata_sections_surface_expected_error_or_warning() {
         &output.diagnostics[0].code,
         DiagnosticCode::Metadata(MetadataDiagnosticCode::MalformedContractMeta { .. })
     ));
-    assert!(output
-        .soroban_facts
-        .expect("facts still produced")
-        .contract_meta
-        .is_empty());
+    assert!(
+        output
+            .soroban_facts
+            .expect("facts still produced")
+            .contract_meta
+            .is_empty()
+    );
 }
 
 #[test]
@@ -604,7 +695,10 @@ fn deterministic_synthetic_metadata_matrix_decodes_thousands_of_function_specs()
         let output = parse(&synthetic_contract_wasm(entries))
             .unwrap_or_else(|err| panic!("metadata matrix case {case} failed: {err:?}"));
         let facts = output.soroban_facts.expect("contractspecv0 yields facts");
-        let signature = facts.functions.get("matrix").expect("matrix function exists");
+        let signature = facts
+            .functions
+            .get("matrix")
+            .expect("matrix function exists");
 
         assert_eq!(signature.inputs.len(), input_count, "case {case}");
         assert_eq!(signature.outputs.len(), 1, "case {case}");
