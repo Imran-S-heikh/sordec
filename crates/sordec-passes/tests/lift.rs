@@ -1,11 +1,11 @@
 //! Integration tests for [`sordec_passes::lift_with_waffle`].
 //!
-//! Exercises the lifter end-to-end against the two real WASM fixtures
-//! we built in `learning/experiments`:
+//! Exercises the lifter end-to-end against committed WASM fixtures
+//! under `samples/contracts`:
 //!
 //! - `01-hello-add` — single-function `add(u64, u64) → u64`.
-//! - `02-counter` — multi-function with custom enum, storage, auth,
-//!   events.
+//! - `token-v23` — multi-function SEP-41 token with storage, auth,
+//!   events, and user types.
 //!
 //! Tests are split into smoke checks (does it lift at all?), structural
 //! assertions (does the `add` function look the way we expect?), and
@@ -21,14 +21,14 @@ use common::assert_invariants_hold;
 /// Canonical `add(u64, u64) -> u64` contract.
 const HELLO_ADD_WASM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../learning/experiments/01-hello-add/target/wasm32-unknown-unknown/release/hello_add.wasm"
+    "/../../samples/contracts/hello-add/hello-add.wasm"
 ));
 
-/// Counter contract — exercises a custom enum, multiple functions,
-/// storage tiers, auth, and events.
-const COUNTER_WASM: &[u8] = include_bytes!(concat!(
+/// SEP-41 token contract — exercises multiple functions, storage tiers,
+/// auth, events, and user types.
+const TOKEN_V23_WASM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../learning/experiments/02-counter/target/wasm32-unknown-unknown/release/counter.wasm"
+    "/../../samples/contracts/token-v23/token-v23.wasm"
 ));
 
 // ---------------------------------------------------------------------
@@ -57,7 +57,11 @@ fn lifts_hello_add_smoke() {
     // Every function should have at least one block (an entry block)
     // and its `entry` should resolve.
     for func in &lifted.functions {
-        assert!(!func.blocks.is_empty(), "function {} has no blocks", func.id);
+        assert!(
+            !func.blocks.is_empty(),
+            "function {} has no blocks",
+            func.id
+        );
         assert!(
             func.blocks.get(func.entry).is_some(),
             "function {} entry {} does not resolve",
@@ -68,14 +72,14 @@ fn lifts_hello_add_smoke() {
 }
 
 #[test]
-fn lifts_counter_smoke() {
+fn lifts_token_v23_smoke() {
     let sordec_frontend::ParseOutput {
         wasm_facts: facts,
         soroban_facts,
         ..
-    } = sordec_frontend::parse(COUNTER_WASM).expect("frontend parses counter");
-    let lifted = lift_with_waffle(COUNTER_WASM, &facts, soroban_facts.as_ref())
-        .expect("lifter accepts counter")
+    } = sordec_frontend::parse(TOKEN_V23_WASM).expect("frontend parses token-v23");
+    let lifted = lift_with_waffle(TOKEN_V23_WASM, &facts, soroban_facts.as_ref())
+        .expect("lifter accepts token-v23")
         .lifted;
 
     assert_eq!(
@@ -85,11 +89,15 @@ fn lifts_counter_smoke() {
     );
     assert!(
         lifted.functions.len() > 1,
-        "counter has multiple functions; expected >1 got {}",
+        "token-v23 has multiple functions; expected >1 got {}",
         lifted.functions.len()
     );
     for func in &lifted.functions {
-        assert!(!func.blocks.is_empty(), "function {} has no blocks", func.id);
+        assert!(
+            !func.blocks.is_empty(),
+            "function {} has no blocks",
+            func.id
+        );
     }
 }
 
@@ -148,7 +156,10 @@ fn hello_add_add_function_has_arithmetic_return() {
             saw_return = true;
         }
     }
-    assert!(saw_return, "add function must have at least one Return terminator");
+    assert!(
+        saw_return,
+        "add function must have at least one Return terminator"
+    );
 
     let mut saw_arithmetic = false;
     for (_value_id, value) in add_func.values.iter() {
@@ -183,14 +194,14 @@ fn invariants_hold_for_hello_add() {
 }
 
 #[test]
-fn invariants_hold_for_counter() {
+fn invariants_hold_for_token_v23() {
     let sordec_frontend::ParseOutput {
         wasm_facts: facts,
         soroban_facts,
         ..
-    } = sordec_frontend::parse(COUNTER_WASM).expect("frontend parses counter");
-    let lifted = lift_with_waffle(COUNTER_WASM, &facts, soroban_facts.as_ref())
-        .expect("lifter accepts counter")
+    } = sordec_frontend::parse(TOKEN_V23_WASM).expect("frontend parses token-v23");
+    let lifted = lift_with_waffle(TOKEN_V23_WASM, &facts, soroban_facts.as_ref())
+        .expect("lifter accepts token-v23")
         .lifted;
     assert_invariants_hold(&lifted);
 }

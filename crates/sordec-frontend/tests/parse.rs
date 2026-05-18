@@ -1,29 +1,26 @@
 //! Integration tests for [`sordec_frontend::parse`].
 //!
-//! These exercise the public API end-to-end against the two real WASM
-//! fixtures we built in `learning/experiments`:
+//! These exercise the public API end-to-end against committed WASM
+//! fixtures in `samples/contracts`:
 //!
 //! - `01-hello-add` — simplest possible contract (one `add(u64, u64) → u64`).
-//! - `02-counter` — exercises a custom enum (`DataKey`), constructor,
-//!   storage, auth, events.
+//! - `token-v23` — exercises user types, constructor, storage, auth, events.
 //!
 //! Plus a short suite of error-path tests to lock the failure modes.
 
-use sordec_frontend::{
-    parse, ExportKind, FrontendError, ImportKind, PrimitiveType, TypeRef,
-};
+use sordec_frontend::{ExportKind, FrontendError, ImportKind, PrimitiveType, TypeRef, parse};
 
-/// Canonical `add(u64, u64) -> u64` contract from `learning/experiments/01-hello-add`.
+/// Canonical `add(u64, u64) -> u64` contract from `samples/contracts/hello-add`.
 const HELLO_ADD_WASM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../learning/experiments/01-hello-add/target/wasm32-unknown-unknown/release/hello_add.wasm"
+    "/../../samples/contracts/hello-add/hello-add.wasm"
 ));
 
-/// Counter contract from `learning/experiments/02-counter` — exercises
-/// custom enum + constructor + storage + auth + events.
-const COUNTER_WASM: &[u8] = include_bytes!(concat!(
+/// SEP-41 token contract from `samples/contracts/token-v23` — exercises
+/// user types + constructor + storage + auth + events.
+const TOKEN_V23_WASM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../learning/experiments/02-counter/target/wasm32-unknown-unknown/release/counter.wasm"
+    "/../../samples/contracts/token-v23/token-v23.wasm"
 ));
 
 // ---------------------------------------------------------------------
@@ -150,76 +147,81 @@ fn hello_add_contract_meta_records_sdk_and_compiler_versions() {
 }
 
 // ---------------------------------------------------------------------
-// counter fixture (4 tests)
+// token-v23 fixture (4 tests)
 // ---------------------------------------------------------------------
 
 #[test]
-fn counter_has_multiple_imports_and_exports() {
-    let facts = parse(COUNTER_WASM)
-        .expect("counter.wasm should parse")
+fn token_v23_has_multiple_imports_and_exports() {
+    let facts = parse(TOKEN_V23_WASM)
+        .expect("token-v23.wasm should parse")
         .wasm_facts;
 
     assert!(
         facts.imports.len() >= 4,
-        "counter should import several host functions; got {}",
+        "token-v23 should import several host functions; got {}",
         facts.imports.len()
     );
     assert!(
         facts.exports.len() >= 4,
-        "counter should export at least add, increment, get_count, get_admin, ...; got {}",
+        "token-v23 should export several contract functions; got {}",
         facts.exports.len()
     );
 }
 
 #[test]
-fn counter_metadata_lists_all_four_contract_functions() {
-    let soroban_facts = parse(COUNTER_WASM)
-        .expect("counter.wasm should parse")
+fn token_v23_metadata_lists_expected_contract_functions() {
+    let soroban_facts = parse(TOKEN_V23_WASM)
+        .expect("token-v23.wasm should parse")
         .soroban_facts;
-    let metadata = soroban_facts.expect("counter is a Soroban contract");
+    let metadata = soroban_facts.expect("token-v23 is a Soroban contract");
 
     for fname in [
         "__constructor",
-        "increment",
-        "get_count",
-        "get_admin",
+        "mint",
+        "set_admin",
+        "transfer",
+        "balance",
+        "decimals",
     ] {
         assert!(
             metadata.functions.contains_key(fname),
-            "counter metadata missing function `{fname}`; have: {:?}",
+            "token-v23 metadata missing function `{fname}`; have: {:?}",
             metadata.functions.keys().collect::<Vec<_>>()
         );
     }
 }
 
 #[test]
-fn counter_data_key_union_is_typed_with_address_payload() {
-    let soroban_facts = parse(COUNTER_WASM)
-        .expect("counter.wasm should parse")
+fn token_v23_data_key_union_is_typed_with_address_payload() {
+    let soroban_facts = parse(TOKEN_V23_WASM)
+        .expect("token-v23.wasm should parse")
         .soroban_facts;
-    let metadata = soroban_facts.expect("counter is a Soroban contract");
+    let metadata = soroban_facts.expect("token-v23 is a Soroban contract");
 
     let data_key = metadata
         .types
         .unions
         .iter()
         .find(|u| u.name == "DataKey")
-        .expect("counter defines a `DataKey` union");
-    assert_eq!(data_key.cases.len(), 2, "DataKey has Counter + Admin variants");
+        .expect("token-v23 defines a `DataKey` union");
+    assert!(
+        data_key.cases.len() >= 4,
+        "DataKey has Allowance, Balance, State, and Admin variants"
+    );
 
-    let counter_case = data_key
+    let balance_case = data_key
         .cases
         .iter()
-        .find(|c| c.name == "Counter")
-        .expect("DataKey::Counter variant missing");
-    assert_eq!(counter_case.fields.len(), 1, "Counter wraps one Address");
+        .find(|c| c.name == "Balance")
+        .expect("DataKey::Balance variant missing");
+    assert_eq!(balance_case.fields.len(), 1, "Balance wraps one Address");
     assert!(
         matches!(
-            counter_case.fields[0],
+            balance_case.fields[0],
             TypeRef::Primitive(PrimitiveType::Address)
         ),
-        "Counter payload should be Address; got {:?}",
-        counter_case.fields[0]
+        "Balance payload should be Address; got {:?}",
+        balance_case.fields[0]
     );
 
     let admin_case = data_key
@@ -231,14 +233,14 @@ fn counter_data_key_union_is_typed_with_address_payload() {
 }
 
 #[test]
-fn counter_env_meta_records_protocol() {
-    let soroban_facts = parse(COUNTER_WASM)
-        .expect("counter.wasm should parse")
+fn token_v23_env_meta_records_protocol() {
+    let soroban_facts = parse(TOKEN_V23_WASM)
+        .expect("token-v23.wasm should parse")
         .soroban_facts;
-    let metadata = soroban_facts.expect("counter is a Soroban contract");
+    let metadata = soroban_facts.expect("token-v23 is a Soroban contract");
     assert!(
         metadata.env_meta.protocol.is_some(),
-        "counter env_meta protocol must be populated"
+        "token-v23 env_meta protocol must be populated"
     );
 }
 
