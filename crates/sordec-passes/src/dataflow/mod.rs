@@ -1,0 +1,32 @@
+//! Data-flow analysis primitives for `LiftedIr`.
+//!
+//! Every Phase 2 pattern recognizer needs to answer questions like:
+//!
+//! - "Given this `ValueId`, what constant produced it?" — used to resolve
+//!   the durability arg of a storage call, the callee address of a
+//!   cross-contract call, the error code of `fail_with_error`, and so on.
+//! - "Which values use this def?" — needed for auth patterns
+//!   (`instance.get(Admin) → require_auth`) and for peephole rewrites.
+//!
+//! Rather than each recognizer re-implementing SSA traversal, this module
+//! provides the shared primitives. Utilities here are:
+//!
+//! - Pure (no I/O, no mutation).
+//! - Scoped to a single [`sordec_ir::LiftedFunction`] (no inter-procedural
+//!   analysis in Phase 2).
+//! - Return-value-based failure reporting (no diagnostic emission — the
+//!   recognizer decides whether a failure becomes a `LiftDiagnostic`).
+//!
+//! ## Public surface
+//!
+//! - [`trace_const()`] / [`trace_const_with_limit()`] — backward-fold a
+//!   `ValueId` to a concrete [`sordec_ir::Literal`] by chasing
+//!   `Alias`/`PickOutput` links until a `*Const` operator is found.
+//! - [`TraceStop`] — the closed set of stop reasons for a failed trace.
+//!
+//! Additional analyses (def-use index, fixpoint driver, expression
+//! visitor) land here as Phase 2 recognizers require them.
+
+pub mod trace_const;
+
+pub use trace_const::{trace_const, trace_const_with_limit, TraceStop, DEFAULT_MAX_DEPTH};
