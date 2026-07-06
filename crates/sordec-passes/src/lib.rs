@@ -29,7 +29,9 @@ pub mod lowering;
 pub mod pass;
 pub mod pipeline;
 
-pub use dataflow::{trace_const, trace_const_with_limit, TraceStop, DEFAULT_MAX_DEPTH};
+pub use dataflow::{
+    trace_const, trace_const_with_limit, DefUseIndex, TraceStop, UseSite, DEFAULT_MAX_DEPTH,
+};
 pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
 pub use lift::{lift_with_waffle, LiftOutput};

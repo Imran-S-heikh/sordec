@@ -23,10 +23,17 @@
 //!   `ValueId` to a concrete [`sordec_ir::Literal`] by chasing
 //!   `Alias`/`PickOutput` links until a `*Const` operator is found.
 //! - [`TraceStop`] — the closed set of stop reasons for a failed trace.
+//! - [`DefUseIndex`] — the forward direction: per-function reverse-use
+//!   map answering "who consumes this value?", with the `sole_use`
+//!   check pattern collapses hinge on.
+//! - [`UseSite`] — where a use occurs (a value's definition or a block
+//!   terminator).
 //!
-//! Additional analyses (def-use index, fixpoint driver, expression
-//! visitor) land here as Phase 2 recognizers require them.
+//! Additional analyses (fixpoint driver, expression visitor) land here
+//! as Phase 2 recognizers require them.
 
+pub mod def_use;
 pub mod trace_const;
 
+pub use def_use::{DefUseIndex, UseSite};
 pub use trace_const::{trace_const, trace_const_with_limit, TraceStop, DEFAULT_MAX_DEPTH};
