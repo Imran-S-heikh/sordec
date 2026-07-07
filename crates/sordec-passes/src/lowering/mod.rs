@@ -9,6 +9,17 @@
 //! [`Driver`](https://example.invalid). Implementations consume their
 //! input by value and return the new IR (or an error explaining why the
 //! lowering could not be performed).
+//!
+//! ## Implementors
+//!
+//! - [`LiftToHigh`] — the mechanical `LiftedIr → HighIr` boundary. Maps
+//!   every lifted value to a typed [`sordec_ir::Binding`] with
+//!   provenance, without attempting semantic recognition (that happens
+//!   in the high-IR passes that run afterward).
+
+pub mod lift_to_high;
+
+pub use lift_to_high::LiftToHigh;
 
 /// Phase-boundary IR transformation.
 ///

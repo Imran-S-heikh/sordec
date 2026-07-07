@@ -35,7 +35,7 @@ pub use dataflow::{
 pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
 pub use lift::{lift_with_waffle, LiftOutput};
-pub use lowering::{LoweringError, LoweringStep};
+pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
 pub use sordec_common::LiftDiagnostics;
