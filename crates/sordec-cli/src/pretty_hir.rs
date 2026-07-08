@@ -334,6 +334,24 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             write!(out, "{}", val_abi::addr_kind_name(*kind))?;
             render_args(out, args)
         }
+        // ---- Context (C15) + events (C14) + panic (C16-partial) ----
+        KnownOp::GetCurrentContractAddress => write!(out, "get_current_contract_address()"),
+        KnownOp::GetLedgerSequence => write!(out, "get_ledger_sequence()"),
+        KnownOp::GetLedgerTimestamp => write!(out, "get_ledger_timestamp()"),
+        KnownOp::GetLedgerProtocolVersion => write!(out, "get_ledger_protocol_version()"),
+        KnownOp::GetLedgerNetworkId => write!(out, "get_ledger_network_id()"),
+        KnownOp::GetMaxLiveUntilLedger => write!(out, "get_max_live_until_ledger()"),
+        KnownOp::PublishEvent { topics, data } => {
+            write!(out, "publish_event(")?;
+            for t in topics {
+                write!(out, "v{}, ", t.index())?;
+            }
+            write!(out, "v{})", data.index())
+        }
+        KnownOp::ValCompare { a, b } => write!(out, "val_cmp(v{}, v{})", a.index(), b.index()),
+        KnownOp::PanicWithError { error } => {
+            write!(out, "panic_with_error(v{})", error.index())
+        }
         // The remaining KnownOps get dedicated renderings when their
         // recognizers land; until then an inspection-only Debug form.
         other => write!(out, "{other:?}"),
@@ -762,5 +780,45 @@ mod tests {
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "get_id_from_muxed_address(v155)");
+    }
+
+    // --- C15 context renderings ---
+
+    #[test]
+    fn nullary_ledger_accessors_render_as_calls() {
+        for (op, expected) in [
+            (KnownOp::GetCurrentContractAddress, "get_current_contract_address()"),
+            (KnownOp::GetLedgerSequence, "get_ledger_sequence()"),
+            (KnownOp::GetLedgerTimestamp, "get_ledger_timestamp()"),
+            (KnownOp::GetMaxLiveUntilLedger, "get_max_live_until_ledger()"),
+        ] {
+            let expr = Expr::Semantic(SemanticOp::Known(op));
+            let s = render_to_string(|w| render_expr(w, &expr));
+            assert_eq!(s, expected);
+        }
+    }
+
+    #[test]
+    fn publish_event_renders_topics_and_data() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent {
+            topics: vec![v(21)],
+            data: v(33),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "publish_event(v21, v33)");
+    }
+
+    #[test]
+    fn val_compare_renders() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::ValCompare { a: v(10), b: v(12) }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "val_cmp(v10, v12)");
+    }
+
+    #[test]
+    fn panic_with_error_renders() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::PanicWithError { error: v(4) }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "panic_with_error(v4)");
     }
 }

@@ -222,6 +222,68 @@ fn dump_hir_raw_flag_preserves_raw_auth_calls() {
 }
 
 #[test]
+fn dump_hir_on_token_v23_recognizes_events_and_ledger() {
+    // The C15 context recognizer turns contract_event into publish_event
+    // and the ledger accessors into named calls.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("publish_event("))
+        .stdout(predicate::str::contains("get_ledger_sequence()"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn dump_hir_on_timelock_recognizes_context() {
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("get_current_contract_address()"))
+        .stdout(predicate::str::contains("get_ledger_timestamp()"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn dump_hir_on_dex_recognizes_val_compare() {
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", DEX])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("get_current_contract_address()"))
+        .stdout(predicate::str::contains("val_cmp("));
+}
+
+#[test]
+fn dump_hir_clears_all_x_module_calls_on_default_path() {
+    // After C15, no raw host:x:* call survives the default pipeline on
+    // any corpus fixture (none use the deferred log_from_linear_memory).
+    for wasm in [TOKEN_V23, TIMELOCK, DEX] {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-hir", wasm])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("host:x:").not());
+    }
+}
+
+#[test]
+fn dump_hir_raw_flag_preserves_raw_context_calls() {
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host:x:contract_event"))
+        .stdout(predicate::str::contains("publish_event(").not());
+}
+
+#[test]
 fn dump_hir_with_missing_file_exits_three() {
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")

@@ -15,12 +15,17 @@
 //!   calls (the `l`-module CRUD/TTL surface).
 //! - [`auth`] (C4) — authorization primitives + address conversions
 //!   (the `a`-module surface).
+//! - [`context`] (C15+C14+C16-partial) — ledger accessors, event
+//!   emission, `Val` comparison, and the `fail_with_error` panic
+//!   primitive (the `x`-module surface).
 
 pub mod auth;
+pub mod context;
 pub mod storage;
 pub mod val_encoding;
 
 pub use auth::AuthPass;
+pub use context::ContextPass;
 pub use storage::StoragePass;
 pub use val_encoding::ValEncodingPass;
 

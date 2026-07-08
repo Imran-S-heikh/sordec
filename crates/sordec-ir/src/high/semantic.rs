@@ -271,9 +271,39 @@ pub enum KnownOp {
     /// `env.ledger().timestamp()`.
     GetLedgerTimestamp,
     /// `env.ledger().protocol_version()`.
+    ///
+    /// Host import `(x, 2)` `get_ledger_version` — Soroban's "ledger
+    /// version" *is* its protocol version.
     GetLedgerProtocolVersion,
     /// `env.ledger().network_id()`.
     GetLedgerNetworkId,
+    /// `env.ledger().max_live_until_ledger()` — the maximum ledger the
+    /// current entry may live until. Host import `(x, 8)`.
+    GetMaxLiveUntilLedger,
+
+    /// Host three-way `Val` comparison — `(x, 0)` `obj_cmp(a, b)`
+    /// returning `i64` (`-1` / `0` / `1`).
+    ///
+    /// Names the comparison primitive; higher-level `Ord` / `<`
+    /// reconstruction from the surrounding branch context is a later
+    /// refinement.
+    ValCompare {
+        /// Left operand.
+        a: ValueId,
+        /// Right operand.
+        b: ValueId,
+    },
+
+    /// `panic_with_error!(env, error)` — host import `(x, 5)`
+    /// `fail_with_error(error)`.
+    ///
+    /// The host-call form of a panic. Bare `panic!()` (which compiles
+    /// to a control-flow `unreachable`) and formatted panics are the
+    /// separate panic-recovery recognizer's scope.
+    PanicWithError {
+        /// The `Error` value the contract fails with.
+        error: ValueId,
+    },
 
     // ---- Crypto ----
     /// `env.crypto().sha256(input)`.
