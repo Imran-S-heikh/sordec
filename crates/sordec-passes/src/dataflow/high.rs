@@ -1,6 +1,6 @@
 //! Constant tracing over `HighIr`.
 //!
-//! The `LiftedFunction` tracer ([`crate::dataflow::trace_const`]) walks
+//! The `LiftedFunction` tracer ([`crate::dataflow::trace_const()`]) walks
 //! `LiftedValueDef`s. Recognizers, though, run as `Pass<HighIr>` and see
 //! the `Expr` tree instead. This module is the HighIr-level counterpart.
 //!

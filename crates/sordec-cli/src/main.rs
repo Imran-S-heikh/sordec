@@ -91,6 +91,12 @@ struct DumpIrArgs {
 struct DumpHirArgs {
     /// Path to the WASM module to inspect.
     wasm: PathBuf,
+
+    /// Skip the pattern-recovery pipeline and show the raw lowered IR
+    /// (the mechanical `LiftedIr → HighIr` output with no semantic
+    /// recognition). Useful for debugging the lowering itself.
+    #[arg(long)]
+    raw: bool,
 }
 
 #[derive(clap::Args)]
@@ -263,13 +269,20 @@ fn run_dump_hir(args: &DumpHirArgs) -> u8 {
 
     // 4. Lower to HighIr (mechanical boundary step). Consumes the lifted
     //    IR by value per the `LoweringStep` contract.
-    let high = match sordec_passes::LiftToHigh.lower(lift_output.lifted) {
+    let mut high = match sordec_passes::LiftToHigh.lower(lift_output.lifted) {
         Ok(high) => high,
         Err(e) => {
             let _ = writeln!(std::io::stderr(), "sordec: lowering failed: {e:?}");
             return EXIT_PIPELINE_ERR;
         }
     };
+
+    // 4b. Run the pattern-recovery pipeline unless `--raw`. Recognizers
+    //     rewrite bindings into semantic ops in place; `--raw` preserves
+    //     the mechanical lowering view for debugging.
+    if !args.raw {
+        let _report = sordec_passes::default_high_pipeline().run(&mut high);
+    }
 
     // 5. Render to stdout.
     let stdout = std::io::stdout();

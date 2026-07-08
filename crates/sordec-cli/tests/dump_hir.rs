@@ -62,6 +62,54 @@ fn dump_hir_on_token_v23_renders_host_calls() {
 }
 
 #[test]
+fn dump_hir_on_hello_add_recognizes_val_ops() {
+    // The default path runs the C1 Val-encoding recognizer. hello-add's
+    // dispatcher + `add` exercise all four pattern families: small
+    // encode, decode, tag check, and object conversion.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", HELLO_ADD])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("val_encode<u64>"))
+        .stdout(predicate::str::contains("has_tag("))
+        .stdout(predicate::str::contains("obj_from_u64"))
+        // Provenance for a recognized bit-pattern is SdkPattern.
+        .stdout(predicate::str::contains(";; SdkPattern: val-encode"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn dump_hir_raw_flag_shows_unrecognized_lowering() {
+    // `--raw` skips the recognizer pipeline: the encode chain must show
+    // as raw `shl` / bit-or ops, and NOT as a recognized `val_encode`.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", HELLO_ADD])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("shl "))
+        .stdout(predicate::str::contains("val_encode").not())
+        .stdout(predicate::str::contains("has_tag").not())
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn dump_hir_on_token_v23_recognizes_i128_object_conversions() {
+    // token-v23's i128 codec helpers use the object-form conversions;
+    // C1 recognizes them by host-function identity (Known certainty).
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("obj_from_i128_pieces"))
+        .stdout(predicate::str::contains("obj_to_i128_hi64"))
+        .stdout(predicate::str::contains(";; HostFunctionAbi:"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
 fn dump_hir_with_missing_file_exits_three() {
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")

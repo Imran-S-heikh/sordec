@@ -31,6 +31,7 @@ pub mod lift;
 pub mod lowering;
 pub mod pass;
 pub mod pipeline;
+pub mod recognizers;
 pub mod val_abi;
 
 pub use dataflow::{
@@ -43,4 +44,20 @@ pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
+pub use recognizers::ValEncodingPass;
 pub use sordec_common::LiftDiagnostics;
+
+use sordec_ir::HighIr;
+
+/// Build the default high-IR pattern-recovery pipeline.
+///
+/// The manifest of `Pass<HighIr>` recognizers that run after the
+/// `LiftedIr → HighIr` lowering. Recognizers are registered here in the
+/// order the kickoff plan sequences them; as more land they join a
+/// fixpoint group so patterns that feed each other converge. Today it is
+/// a single pass ([`ValEncodingPass`], C1), so no fixpoint group is
+/// needed yet.
+#[must_use]
+pub fn default_high_pipeline() -> Pipeline<HighIr> {
+    Pipeline::new(vec![Box::new(ValEncodingPass)], vec![])
+}

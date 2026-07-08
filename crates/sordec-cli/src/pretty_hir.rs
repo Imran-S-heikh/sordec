@@ -30,8 +30,8 @@ use std::io::{self, Write};
 
 use sordec_common::{IrId, ProvenanceSource, ValueId};
 use sordec_ir::{
-    BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownType, Literal, Region, SemanticOp,
-    UnaryOp,
+    BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region,
+    SemanticOp, UnaryOp,
 };
 use sordec_passes::host_calls;
 
@@ -129,11 +129,7 @@ fn render_binding(out: &mut impl Write, binding: &Binding) -> io::Result<()> {
 
 fn render_expr(out: &mut impl Write, expr: &Expr) -> io::Result<()> {
     match expr {
-        Expr::Semantic(SemanticOp::Known(op)) => {
-            // No KnownOps at L1; recognizers produce these later. Debug
-            // of our own enum is acceptable for an inspection dump.
-            write!(out, "{op:?}")
-        }
+        Expr::Semantic(SemanticOp::Known(op)) => render_known_op(out, op),
         Expr::Semantic(SemanticOp::Unknown {
             host_module,
             host_fn,
@@ -197,6 +193,32 @@ fn render_expr(out: &mut impl Write, expr: &Expr) -> io::Result<()> {
             write!(out, "<unrecovered {op_kind:?}>")?;
             render_args(out, args)
         }
+    }
+}
+
+/// Render a recognized [`KnownOp`]. The four Val-encoding ops (C1) get
+/// dedicated forms; the other KnownOps keep the Debug fallback until
+/// their own recognizers land and earn a rendering.
+fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
+    use sordec_passes::val_abi;
+    match op {
+        KnownOp::ValEncodeSmall { ty, value } => {
+            write!(out, "val_encode<{}>(v{})", known_type_str(ty), value.index())
+        }
+        KnownOp::ValDecodeSmall { value } => {
+            write!(out, "val_decode(v{})", value.index())
+        }
+        KnownOp::ValTagCheck { value, tag } => {
+            let name = val_abi::tag_name(*tag).unwrap_or("?");
+            write!(out, "has_tag(v{}, {name})", value.index())
+        }
+        KnownOp::ValObject { kind, args } => {
+            write!(out, "{}", val_abi::obj_kind_name(*kind))?;
+            render_args(out, args)
+        }
+        // The remaining KnownOps get dedicated renderings when their
+        // recognizers land; until then an inspection-only Debug form.
+        other => write!(out, "{other:?}"),
     }
 }
 
@@ -461,5 +483,44 @@ mod tests {
             known_type_str(&KnownType::Vec(Box::new(IrType::Known(KnownType::I128)))),
             "Vec<i128>"
         );
+    }
+
+    // --- C1 Val-op renderings ---
+
+    #[test]
+    fn val_encode_renders_with_payload_type() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall {
+            ty: KnownType::U64,
+            value: v(51),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "val_encode<u64>(v51)");
+    }
+
+    #[test]
+    fn val_decode_renders_without_type() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value: v(34) }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "val_decode(v34)");
+    }
+
+    #[test]
+    fn val_tag_check_renders_tag_name() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+            value: v(1),
+            tag: 64,
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "has_tag(v1, U64Object)");
+    }
+
+    #[test]
+    fn val_object_renders_conversion_name_and_args() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::ValObject {
+            kind: sordec_ir::ValObjectKind::ObjFromU64,
+            args: vec![v(49)],
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "obj_from_u64(v49)");
     }
 }
