@@ -12,7 +12,7 @@ use sordec_common::{TypeId, UnknownReason};
 use serde::{Deserialize, Serialize};
 
 /// Type of a high-IR binding, with explicit certainty.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum IrType {
     /// Type was proved (e.g. directly from `contractspecv0`, or by
@@ -31,7 +31,7 @@ pub enum IrType {
 /// composite variants nest [`IrType`] (not just [`KnownType`]) because
 /// even inside a `Vec`, the element type may itself be partly unknown
 /// — and that uncertainty must propagate to the user.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum KnownType {
     // ---- Primitives ----

@@ -23,7 +23,7 @@ pub mod ty;
 
 pub use expr::{BinaryOp, Expr, Literal, UnaryOp};
 pub use region::Region;
-pub use semantic::{KnownOp, SemanticOp};
+pub use semantic::{KnownOp, SemanticOp, ValObjectKind};
 pub use storage::{KnownTier, StorageTier};
 pub use ty::{IrType, KnownType};
 

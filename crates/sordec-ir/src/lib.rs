@@ -24,7 +24,7 @@ pub mod wasm_facts;
 
 pub use high::{
     BinaryOp, Binding, Expr, HighBlock, HighFunction, HighIr, IrType, KnownOp, KnownTier,
-    KnownType, Literal, Region, SemanticOp, StorageTier, UnaryOp,
+    KnownType, Literal, Region, SemanticOp, StorageTier, UnaryOp, ValObjectKind,
 };
 pub use lifted::{
     BlockTarget, LiftedBlock, LiftedFunction, LiftedIr, LiftedTerminator, LiftedType, LiftedValue,

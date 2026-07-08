@@ -16,6 +16,9 @@
 //!   calls before tracing their arguments.
 //! - [`dataflow`] — analysis primitives (backward constant tracing,
 //!   etc.) that Phase 2 pattern-recovery passes consume.
+//! - [`val_abi`] — vendored Soroban `Val` encoding ABI (tag table, bit
+//!   layout, conversion-function mapping) consumed by the Val-encoding
+//!   recognizer.
 //!
 //! Concrete pattern-recovery passes (Val encoding, storage tier,
 //! auth chain, cross-contract clients) land in this crate during
@@ -28,9 +31,11 @@ pub mod lift;
 pub mod lowering;
 pub mod pass;
 pub mod pipeline;
+pub mod val_abi;
 
 pub use dataflow::{
-    trace_const, trace_const_with_limit, DefUseIndex, TraceStop, UseSite, DEFAULT_MAX_DEPTH,
+    resolve_use, trace_const, trace_const_with_limit, trace_literal, DefUseIndex, TraceStop,
+    UseSite, DEFAULT_MAX_DEPTH, DEFAULT_USE_DEPTH,
 };
 pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
