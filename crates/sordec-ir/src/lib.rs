@@ -19,6 +19,7 @@
 
 pub mod high;
 pub mod lifted;
+pub mod memory;
 pub mod validate;
 pub mod wasm_facts;
 
@@ -30,6 +31,7 @@ pub use lifted::{
     BlockTarget, LiftedBlock, LiftedFunction, LiftedIr, LiftedTerminator, LiftedType, LiftedValue,
     LiftedValueDef, WasmOp, WasmOpcodeKind,
 };
+pub use memory::{DataSegment, MemoryImage};
 pub use validate::{validate_high, validate_lifted, Validate, ValidateError};
 pub use wasm_facts::{
     ByteRange, CompositeType, CustomSection, EnumCase, EnumDef, EnvCompatibility, EventDef,

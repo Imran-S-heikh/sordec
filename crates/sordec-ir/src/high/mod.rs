@@ -29,7 +29,7 @@ pub use ty::{IrType, KnownType};
 
 use sordec_common::{Arena, BlockId, FuncId, IrId, Provenance, ValueId};
 
-use crate::{FunctionSignature, SorobanFacts, WasmFacts};
+use crate::{FunctionSignature, MemoryImage, SorobanFacts, WasmFacts};
 
 #[cfg(feature = "serde")]
 use serde::Serialize;
@@ -62,6 +62,13 @@ pub struct HighIr {
 
     /// Local (non-imported) functions in module order.
     pub functions: Vec<HighFunction>,
+
+    /// Initialized linear-memory image (the WASM active data segments),
+    /// threaded through unchanged from [`crate::LiftedIr`] by the boundary
+    /// lowering. Linear-memory recognizers read this module-level rodata
+    /// to resolve `(pointer, length)` literals. [`MemoryImage::empty`] for
+    /// modules with no data section.
+    pub memory: MemoryImage,
 }
 
 impl HighIr {

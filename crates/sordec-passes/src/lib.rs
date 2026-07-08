@@ -35,8 +35,8 @@ pub mod recognizers;
 pub mod val_abi;
 
 pub use dataflow::{
-    resolve_use, trace_const, trace_const_with_limit, trace_literal, DefUseIndex, TraceStop,
-    UseSite, DEFAULT_MAX_DEPTH, DEFAULT_USE_DEPTH,
+    resolve_use, trace_bytes, trace_const, trace_const_with_limit, trace_literal, trace_u32val,
+    DefUseIndex, TraceStop, UseSite, DEFAULT_MAX_DEPTH, DEFAULT_USE_DEPTH,
 };
 pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
@@ -44,7 +44,7 @@ pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
-pub use recognizers::{AuthPass, ContextPass, StoragePass, ValEncodingPass};
+pub use recognizers::{AuthPass, ContextPass, LinearMemoryPass, StoragePass, ValEncodingPass};
 pub use sordec_common::LiftDiagnostics;
 
 use sordec_ir::HighIr;
@@ -54,9 +54,12 @@ use sordec_ir::HighIr;
 /// The manifest of `Pass<HighIr>` recognizers that run after the
 /// `LiftedIr → HighIr` lowering. Recognizers are registered here in the
 /// order the kickoff plan sequences them; as more land they join a
-/// fixpoint group so patterns that feed each other converge. Today it is
-/// a single pass ([`ValEncodingPass`], C1), so no fixpoint group is
-/// needed yet.
+/// fixpoint group so patterns that feed each other converge.
+///
+/// [`LinearMemoryPass`] runs last because it consumes [`ValEncodingPass`]'s
+/// output: the `(position, length)` operands of the `*_new_from_linear_memory`
+/// constructors arrive as `U32Val`s that C1 has already collapsed into
+/// `ValEncodeSmall`, which the linear-memory tracer peels.
 #[must_use]
 pub fn default_high_pipeline() -> Pipeline<HighIr> {
     Pipeline::new(
@@ -65,6 +68,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(StoragePass),
             Box::new(AuthPass),
             Box::new(ContextPass),
+            Box::new(LinearMemoryPass),
         ],
         vec![],
     )

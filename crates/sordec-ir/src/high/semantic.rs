@@ -379,6 +379,86 @@ pub enum KnownOp {
         /// Operands in original host-call argument order.
         args: Vec<ValueId>,
     },
+
+    // ---- Linear-memory constructors (recognized by LinearMemoryPass) ----
+    /// `symbol_new_from_linear_memory(lm_pos, len)` — host import `(b, j)`,
+    /// returns a `SymbolObject`. Constructs a `Symbol` from bytes copied
+    /// out of a linear-memory slice.
+    ///
+    /// `resolved` holds the interned symbol text when `(lm_pos, len)`
+    /// trace to a constant rodata slice; it is `None` when the position or
+    /// length is not a locally-provable constant (the corpus threads them
+    /// through phi chains and helper parameters — a constant-propagation
+    /// engine fills these in later). Following the `StorageTier`
+    /// Known/Unknown honesty discipline, the op is always recognized (the
+    /// host identity proves it); only the literal contents may be Unknown.
+    SymbolNew {
+        /// Linear-memory byte offset of the symbol bytes.
+        lm_pos: ValueId,
+        /// Number of bytes.
+        len: ValueId,
+        /// Recovered symbol text, or `None` when the slice is not a
+        /// locally-provable constant.
+        // JUSTIFY: Symbol contents are arbitrary user-supplied identifiers.
+        resolved: Option<String>,
+    },
+
+    /// `string_new_from_linear_memory(lm_pos, len)` — host import `(b, i)`,
+    /// returns a `StringObject`. See [`SymbolNew`](KnownOp::SymbolNew) for
+    /// the `resolved` semantics.
+    StringNew {
+        /// Linear-memory byte offset of the string bytes.
+        lm_pos: ValueId,
+        /// Number of bytes.
+        len: ValueId,
+        /// Recovered string contents, or `None` when not a locally-provable
+        /// constant.
+        // JUSTIFY: String contents are arbitrary.
+        resolved: Option<String>,
+    },
+
+    /// `bytes_new_from_linear_memory(lm_pos, len)` — host import `(b, 3)`,
+    /// returns a `BytesObject`. See [`SymbolNew`](KnownOp::SymbolNew) for
+    /// the `resolved` semantics.
+    BytesNew {
+        /// Linear-memory byte offset of the bytes.
+        lm_pos: ValueId,
+        /// Number of bytes.
+        len: ValueId,
+        /// Recovered byte literal, or `None` when not a locally-provable
+        /// constant.
+        resolved: Option<Vec<u8>>,
+    },
+
+    /// `vec_new_from_linear_memory(vals_pos, len)` — host import `(v, g)`,
+    /// returns a `VecObject`. Builds a `Vec` from a contiguous array of
+    /// `len` `Val`s in linear memory.
+    ///
+    /// No `resolved` field: the `Val`s live in a runtime stack buffer, not
+    /// rodata, so the element contents are not literal-recoverable even
+    /// with perfect tracing. This names the constructor shape; recovering
+    /// the elements is the collections recognizer's separate scope.
+    VecNew {
+        /// Linear-memory byte offset of the `Val` array.
+        vals_pos: ValueId,
+        /// Element count (each `Val` is 8 bytes).
+        len: ValueId,
+    },
+
+    /// `map_new_from_linear_memory(keys_pos, vals_pos, len)` — host import
+    /// `(m, 9)`, returns a `MapObject`. Builds a `Map` from parallel
+    /// `keys` and `vals` arrays of `len` `Val`s each.
+    ///
+    /// No `resolved` field, for the same reason as
+    /// [`VecNew`](KnownOp::VecNew): the arrays are runtime stack data.
+    MapNew {
+        /// Linear-memory byte offset of the keys `Val` array.
+        keys_pos: ValueId,
+        /// Linear-memory byte offset of the vals `Val` array.
+        vals_pos: ValueId,
+        /// Element count of each array.
+        len: ValueId,
+    },
 }
 
 /// The complete `i`-module (`int`) host-side Val conversion surface.

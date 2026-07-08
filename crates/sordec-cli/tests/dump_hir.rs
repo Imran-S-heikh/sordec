@@ -284,6 +284,65 @@ fn dump_hir_raw_flag_preserves_raw_context_calls() {
 }
 
 #[test]
+fn dump_hir_recognizes_linear_memory_constructors() {
+    // The linear-memory pass turns symbol_new/vec_new/map_new_from_linear_memory
+    // into named constructor ops. token-v23 exercises all three.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("symbol_new("))
+        .stdout(predicate::str::contains("vec_new("))
+        .stdout(predicate::str::contains("map_new("))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn dump_hir_recognizes_symbol_new_across_corpus() {
+    // Every contract that builds a >9-char symbol uses
+    // symbol_new_from_linear_memory; the pass names it in all of them.
+    for wasm in [TOKEN_V23, TIMELOCK, DEX] {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-hir", wasm])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("symbol_new("));
+    }
+}
+
+#[test]
+fn dump_hir_clears_raw_constructor_calls_on_default_path() {
+    // After recognition, the five `*_new_from_linear_memory` host calls no
+    // longer appear as raw `host:` imports on the default path. (Other
+    // b/v/m ops — vec_get, map_unpack, symbol_index — are a separate
+    // recognizer's scope and may still appear.)
+    for wasm in [TOKEN_V23, TIMELOCK, DEX] {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-hir", wasm])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("host:b:symbol_new_from_linear_memory").not())
+            .stdout(predicate::str::contains("host:v:vec_new_from_linear_memory").not())
+            .stdout(predicate::str::contains("host:m:map_new_from_linear_memory").not());
+    }
+}
+
+#[test]
+fn dump_hir_raw_flag_preserves_raw_constructor_calls() {
+    // `--raw` skips recognition: the constructor shows as its raw host
+    // import, not the recognized `symbol_new(` form.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host:b:symbol_new_from_linear_memory"));
+}
+
+#[test]
 fn dump_hir_with_missing_file_exits_three() {
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")

@@ -24,7 +24,7 @@ pub use terminator::{BlockTarget, LiftedTerminator};
 
 use sordec_common::{Arena, BlockId, FuncId, IrId, ValueId};
 
-use crate::{SorobanFacts, WasmFacts};
+use crate::{MemoryImage, SorobanFacts, WasmFacts};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,13 @@ pub struct LiftedIr {
     /// its [`FuncId`]; function index `i` lives at position `i` in the
     /// vector. Imported functions are tracked separately on `facts`.
     pub functions: Vec<LiftedFunction>,
+
+    /// Initialized linear-memory image (the WASM active data segments),
+    /// captured by the lifter from `waffle`. Carries the module's rodata
+    /// — symbol/string/byte literals and descriptor tables — that
+    /// linear-memory recognizers resolve `(pointer, length)` pairs
+    /// against. [`MemoryImage::empty`] for modules with no data section.
+    pub memory: MemoryImage,
 }
 
 impl LiftedIr {

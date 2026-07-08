@@ -102,6 +102,43 @@ fn lifts_token_v23_smoke() {
 }
 
 // ---------------------------------------------------------------------
+// Rodata capture (1)
+// ---------------------------------------------------------------------
+
+#[test]
+fn lift_captures_token_v23_rodata() {
+    // The lifter captures the WASM active data segments into the module's
+    // `MemoryImage`. token-v23 bakes its >9-char symbol names into rodata;
+    // `expiration_ledger` (17 chars) is stored there verbatim. Finding it
+    // proves the segments flow in with correct bytes — the substrate the
+    // linear-memory recognizer resolves against.
+    let sordec_frontend::ParseOutput {
+        wasm_facts: facts,
+        soroban_facts,
+        ..
+    } = sordec_frontend::parse(TOKEN_V23_WASM).expect("frontend parses token-v23");
+    let lifted = lift_with_waffle(TOKEN_V23_WASM, &facts, soroban_facts.as_ref())
+        .expect("lifter accepts token-v23")
+        .lifted;
+
+    assert!(
+        !lifted.memory.is_empty(),
+        "token-v23 has a data section; the memory image must be non-empty"
+    );
+
+    let needle = b"expiration_ledger";
+    let found = lifted
+        .memory
+        .segments()
+        .iter()
+        .any(|seg| seg.bytes.windows(needle.len()).any(|w| w == needle));
+    assert!(
+        found,
+        "captured rodata must contain the `expiration_ledger` symbol bytes"
+    );
+}
+
+// ---------------------------------------------------------------------
 // Structural assertion (1)
 // ---------------------------------------------------------------------
 

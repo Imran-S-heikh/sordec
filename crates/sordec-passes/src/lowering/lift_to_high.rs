@@ -74,6 +74,7 @@ impl LoweringStep for LiftToHigh {
             facts,
             soroban_facts,
             functions,
+            memory,
         } = input;
 
         let high_functions = functions
@@ -81,10 +82,13 @@ impl LoweringStep for LiftToHigh {
             .map(|f| lower_function(f, &facts, soroban_facts.as_ref()))
             .collect();
 
+        // `memory` is module-level rodata; per-function lowering never
+        // touches it, so it moves through unchanged.
         Ok(HighIr {
             facts,
             soroban_facts,
             functions: high_functions,
+            memory,
         })
     }
 }
@@ -457,7 +461,7 @@ fn unary_op(w: &waffle::Operator) -> Option<UnaryOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sordec_ir::{Export, LiftedBlock, LiftedType};
+    use sordec_ir::{Export, LiftedBlock, LiftedType, MemoryImage};
 
     // --- synthetic IR builders ---
 
@@ -521,6 +525,7 @@ mod tests {
                 blocks,
                 values,
             }],
+            memory: MemoryImage::empty(),
         }
     }
 

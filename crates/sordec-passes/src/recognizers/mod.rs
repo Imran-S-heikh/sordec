@@ -18,14 +18,19 @@
 //! - [`context`] (C15+C14+C16-partial) — ledger accessors, event
 //!   emission, `Val` comparison, and the `fail_with_error` panic
 //!   primitive (the `x`-module surface).
+//! - [`linear_memory`] — the `*_new_from_linear_memory` constructors
+//!   (`Symbol`/`String`/`Bytes`/`Vec`/`Map`) across the `b`/`v`/`m`
+//!   modules, resolving literal contents against the module's rodata.
 
 pub mod auth;
 pub mod context;
+pub mod linear_memory;
 pub mod storage;
 pub mod val_encoding;
 
 pub use auth::AuthPass;
 pub use context::ContextPass;
+pub use linear_memory::LinearMemoryPass;
 pub use storage::StoragePass;
 pub use val_encoding::ValEncodingPass;
 

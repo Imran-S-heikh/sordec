@@ -489,7 +489,7 @@ mod tests {
     use sordec_common::{Arena, BlockId, FuncId, IrId, ValueId};
     use sordec_ir::{
         Import, ImportKind, LiftedBlock, LiftedFunction, LiftedTerminator, LiftedType, LiftedValue,
-        WasmFacts, WasmOp,
+        MemoryImage, WasmFacts, WasmOp,
     };
 
     /// Build a minimal `LiftedIr` with the supplied imports and no
@@ -505,6 +505,7 @@ mod tests {
             },
             soroban_facts: None,
             functions: vec![],
+            memory: MemoryImage::empty(),
         }
     }
 
@@ -549,6 +550,7 @@ mod tests {
                 blocks,
                 values,
             }],
+            memory: MemoryImage::empty(),
         }
     }
 

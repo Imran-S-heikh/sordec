@@ -51,8 +51,8 @@ use std::collections::HashMap;
 
 use sordec_common::{Arena, BlockId, FuncId, IrId, LiftDiagnostics, ValueId};
 use sordec_ir::{
-    BlockTarget, LiftedBlock, LiftedFunction, LiftedIr, LiftedTerminator, LiftedType, LiftedValue,
-    LiftedValueDef, SorobanFacts, WasmFacts, WasmOp,
+    BlockTarget, DataSegment, LiftedBlock, LiftedFunction, LiftedIr, LiftedTerminator, LiftedType,
+    LiftedValue, LiftedValueDef, MemoryImage, SorobanFacts, WasmFacts, WasmOp,
 };
 use waffle::entity::EntityRef;
 use waffle::{FuncDecl, FunctionBody, ValueDef};
@@ -156,10 +156,17 @@ pub fn lift_with_waffle(
         functions.push(lifted);
     }
 
+    // 6. Capture the module's initialized linear memory (active data
+    //    segments) as module-level IR. waffle has already resolved each
+    //    active segment's offset expression to a byte offset; recognizers
+    //    resolve `(pointer, length)` literals against this rodata.
+    let memory = capture_memory_image(&module);
+
     let lifted = LiftedIr {
         facts: facts.clone(),
         soroban_facts: soroban_facts.cloned(),
         functions,
+        memory,
     };
     // `diagnostics` is intentionally empty in v0 — see `LiftOutput`'s
     // doc-comment. The named LiftDiagnostics artifact is still returned
@@ -169,6 +176,27 @@ pub fn lift_with_waffle(
         lifted,
         diagnostics: LiftDiagnostics::new(),
     })
+}
+
+/// Capture the module's active data segments into a [`MemoryImage`].
+///
+/// `waffle` parses the WASM data section into `module.memories`, resolving
+/// each **active** segment's constant offset expression to a plain byte
+/// offset (passive segments are dropped by waffle — Soroban emits its
+/// rodata as active segments, so this is complete for our inputs). We lift
+/// those `(offset, bytes)` pairs verbatim into module-level IR; the offset
+/// fits in `u32` for any wasm32 module.
+fn capture_memory_image(module: &waffle::Module) -> MemoryImage {
+    let mut segments: Vec<DataSegment> = Vec::new();
+    for (_mem, data) in module.memories.entries() {
+        for seg in &data.segments {
+            segments.push(DataSegment {
+                offset: seg.offset as u32,
+                bytes: seg.data.clone(),
+            });
+        }
+    }
+    MemoryImage::from_segments(segments)
 }
 
 /// Translate one waffle [`waffle::FunctionBody`] into a [`LiftedFunction`].

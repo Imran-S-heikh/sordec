@@ -352,6 +352,54 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
         KnownOp::PanicWithError { error } => {
             write!(out, "panic_with_error(v{})", error.index())
         }
+        // ---- Linear-memory constructors ----
+        // Resolved literals render as the recovered value; unresolved ones
+        // show the raw (pos, len) operands the const-prop engine will later
+        // resolve.
+        KnownOp::SymbolNew {
+            lm_pos,
+            len,
+            resolved,
+        } => match resolved {
+            Some(s) => write!(out, "symbol_new({s:?})"),
+            None => write!(out, "symbol_new(v{}, v{})", lm_pos.index(), len.index()),
+        },
+        KnownOp::StringNew {
+            lm_pos,
+            len,
+            resolved,
+        } => match resolved {
+            Some(s) => write!(out, "string_new({s:?})"),
+            None => write!(out, "string_new(v{}, v{})", lm_pos.index(), len.index()),
+        },
+        KnownOp::BytesNew {
+            lm_pos,
+            len,
+            resolved,
+        } => match resolved {
+            Some(bytes) => {
+                write!(out, "bytes_new(0x")?;
+                for b in bytes {
+                    write!(out, "{b:02x}")?;
+                }
+                write!(out, ")")
+            }
+            None => write!(out, "bytes_new(v{}, v{})", lm_pos.index(), len.index()),
+        },
+        KnownOp::VecNew { vals_pos, len } => {
+            write!(out, "vec_new(v{}, v{})", vals_pos.index(), len.index())
+        }
+        KnownOp::MapNew {
+            keys_pos,
+            vals_pos,
+            len,
+        } => write!(
+            out,
+            "map_new(v{}, v{}, v{})",
+            keys_pos.index(),
+            vals_pos.index(),
+            len.index()
+        ),
         // The remaining KnownOps get dedicated renderings when their
         // recognizers land; until then an inspection-only Debug form.
         other => write!(out, "{other:?}"),
@@ -820,5 +868,83 @@ mod tests {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::PanicWithError { error: v(4) }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "panic_with_error(v4)");
+    }
+
+    // --- linear-memory constructor renderings ---
+
+    #[test]
+    fn symbol_new_resolved_renders_text() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew {
+            lm_pos: v(115),
+            len: v(131),
+            resolved: Some("transfer".to_string()),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "symbol_new(\"transfer\")");
+    }
+
+    #[test]
+    fn symbol_new_unresolved_renders_operands() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew {
+            lm_pos: v(115),
+            len: v(131),
+            resolved: None,
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "symbol_new(v115, v131)");
+    }
+
+    #[test]
+    fn string_new_resolved_renders_text() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::StringNew {
+            lm_pos: v(1),
+            len: v(2),
+            resolved: Some("hello".to_string()),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "string_new(\"hello\")");
+    }
+
+    #[test]
+    fn bytes_new_resolved_renders_hex() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::BytesNew {
+            lm_pos: v(1),
+            len: v(2),
+            resolved: Some(vec![0xde, 0xad, 0xbe, 0xef]),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "bytes_new(0xdeadbeef)");
+    }
+
+    #[test]
+    fn bytes_new_unresolved_renders_operands() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::BytesNew {
+            lm_pos: v(7),
+            len: v(8),
+            resolved: None,
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "bytes_new(v7, v8)");
+    }
+
+    #[test]
+    fn vec_new_renders_operands() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+            vals_pos: v(7),
+            len: v(12),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "vec_new(v7, v12)");
+    }
+
+    #[test]
+    fn map_new_renders_three_operands() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::MapNew {
+            keys_pos: v(3),
+            vals_pos: v(4),
+            len: v(5),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "map_new(v3, v4, v5)");
     }
 }
