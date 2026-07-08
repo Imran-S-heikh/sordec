@@ -13,10 +13,14 @@
 //!   object-conversion patterns.
 //! - [`storage`] (C2+C3) — storage tier resolution + TTL extension
 //!   calls (the `l`-module CRUD/TTL surface).
+//! - [`auth`] (C4) — authorization primitives + address conversions
+//!   (the `a`-module surface).
 
+pub mod auth;
 pub mod storage;
 pub mod val_encoding;
 
+pub use auth::AuthPass;
 pub use storage::StoragePass;
 pub use val_encoding::ValEncodingPass;
 

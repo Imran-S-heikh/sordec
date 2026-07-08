@@ -174,6 +174,53 @@ fn dump_hir_raw_flag_preserves_raw_storage_calls() {
         .stdout(predicate::str::contains("storage_set").not());
 }
 
+const DEX: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../samples/contracts/dex-liquidity-pool/dex-liquidity-pool.wasm"
+);
+
+#[test]
+fn dump_hir_recognizes_require_auth_across_corpus() {
+    // require_auth is the universal auth primitive — every fixture has
+    // it. C4 turns the opaque host call into a first-class semantic op.
+    for wasm in [TOKEN_V23, TIMELOCK, DEX] {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-hir", wasm])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("require_auth("));
+    }
+}
+
+#[test]
+fn dump_hir_on_token_v23_recognizes_muxed_address_conversions() {
+    // token-v23's `transfer` takes a MuxedAddress and decomposes it.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("get_address_from_muxed_address"))
+        .stdout(predicate::str::contains("get_id_from_muxed_address"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn dump_hir_raw_flag_preserves_raw_auth_calls() {
+    // `--raw` skips recognition: auth calls show as raw host imports,
+    // and the recognizer's provenance note is absent. (A plain
+    // `require_auth(` substring check won't do — the raw form
+    // `host:a:require_auth(...)` contains it.)
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host:a:require_auth"))
+        .stdout(predicate::str::contains("HostFunctionAbi: auth require_auth").not());
+}
+
 #[test]
 fn dump_hir_with_missing_file_exits_three() {
     Command::cargo_bin("sordec")

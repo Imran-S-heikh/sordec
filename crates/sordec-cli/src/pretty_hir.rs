@@ -318,6 +318,22 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             min_extension.index(),
             max_extension.index()
         ),
+        // ---- Auth + address (C4) ----
+        KnownOp::RequireAuth { address } => write!(out, "require_auth(v{})", address.index()),
+        KnownOp::RequireAuthForArgs { address, args } => {
+            write!(out, "require_auth_for_args(v{}", address.index())?;
+            for a in args {
+                write!(out, ", v{}", a.index())?;
+            }
+            write!(out, ")")
+        }
+        KnownOp::AuthorizeAsCurrContract { auth_entries } => {
+            write!(out, "authorize_as_curr_contract(v{})", auth_entries.index())
+        }
+        KnownOp::AddressConversion { kind, args } => {
+            write!(out, "{}", val_abi::addr_kind_name(*kind))?;
+            render_args(out, args)
+        }
         // The remaining KnownOps get dedicated renderings when their
         // recognizers land; until then an inspection-only Debug form.
         other => write!(out, "{other:?}"),
@@ -708,5 +724,43 @@ mod tests {
         ));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "extend_instance_and_code_ttl(v9, v14)");
+    }
+
+    // --- C4 auth + address renderings ---
+
+    #[test]
+    fn require_auth_renders() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::RequireAuth { address: v(6) }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "require_auth(v6)");
+    }
+
+    #[test]
+    fn require_auth_for_args_renders_address_and_vec() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::RequireAuthForArgs {
+            address: v(21),
+            args: vec![v(33)],
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "require_auth_for_args(v21, v33)");
+    }
+
+    #[test]
+    fn authorize_as_curr_contract_renders() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::AuthorizeAsCurrContract {
+            auth_entries: v(8),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "authorize_as_curr_contract(v8)");
+    }
+
+    #[test]
+    fn address_conversion_renders_name_and_args() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::AddressConversion {
+            kind: sordec_ir::AddressOpKind::GetIdFromMuxedAddress,
+            args: vec![v(155)],
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "get_id_from_muxed_address(v155)");
     }
 }

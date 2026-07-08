@@ -1,10 +1,14 @@
-//! Vendored Soroban `Val` ABI: tag table, bit layout, and the
-//! `i`-module conversion-function mapping.
+//! Vendored Soroban host-ABI tables: the `Val` tag table + bit layout,
+//! the `i`-module conversion-function mapping, and the `a`-module
+//! address conversion mapping.
 //!
 //! Soroban represents every runtime value crossing the host boundary as
 //! a tagged 64-bit integer (`Val`). This module is the decompiler's
 //! ground truth for that encoding — the constants the Val-encoding
-//! recognizer matches against.
+//! recognizer matches against — plus the per-module conversion-function
+//! lookups the storage/auth/etc. recognizers consult. It is the single
+//! home for host-ABI constant tables; new modules' tables join here as
+//! recognizers need them.
 //!
 //! ## Source of truth
 //!
@@ -37,7 +41,7 @@
 //! outside the range go through the `i`-module host calls
 //! (`obj_from_u64` etc.) and come back as object handles.
 
-use sordec_ir::{KnownType, ValObjectKind};
+use sordec_ir::{AddressOpKind, KnownType, ValObjectKind};
 
 // ---------------------------------------------------------------------
 // Bit layout
@@ -345,6 +349,69 @@ pub fn obj_kind_result_type(kind: ValObjectKind) -> KnownType {
 }
 
 // ---------------------------------------------------------------------
+// a-module address conversions
+// ---------------------------------------------------------------------
+
+/// Map an `a`-module host import `(module, name)` pair to its
+/// [`AddressOpKind`], or `None` when the function is not an address
+/// conversion (the auth calls `require_auth` / `require_auth_for_args`
+/// / `authorize_as_curr_contract` have their own `KnownOp`s) or not an
+/// `a`-module import at all.
+///
+/// Export letters verified against the vendored `host_calls/env.json`
+/// (soroban-env-common 26.1.2).
+#[must_use]
+pub fn addr_fn_kind(module: &str, name: &str) -> Option<AddressOpKind> {
+    use AddressOpKind as K;
+    if module != "a" {
+        return None;
+    }
+    Some(match name {
+        "1" => K::StrkeyToAddress,
+        "2" => K::AddressToStrkey,
+        "4" => K::GetAddressFromMuxedAddress,
+        "5" => K::GetIdFromMuxedAddress,
+        "6" => K::GetAddressExecutable,
+        "7" => K::StrkeyToMuxedAddress,
+        "8" => K::MuxedAddressToStrkey,
+        _ => return None,
+    })
+}
+
+/// Friendly (snake-case, upstream) name of an address conversion, for
+/// renderer output and provenance notes.
+#[must_use]
+pub fn addr_kind_name(kind: AddressOpKind) -> &'static str {
+    use AddressOpKind as K;
+    match kind {
+        K::StrkeyToAddress => "strkey_to_address",
+        K::AddressToStrkey => "address_to_strkey",
+        K::GetAddressFromMuxedAddress => "get_address_from_muxed_address",
+        K::GetIdFromMuxedAddress => "get_id_from_muxed_address",
+        K::GetAddressExecutable => "get_address_executable",
+        K::StrkeyToMuxedAddress => "strkey_to_muxed_address",
+        K::MuxedAddressToStrkey => "muxed_address_to_strkey",
+    }
+}
+
+/// Result type of an address conversion, per the env.json ABI
+/// signatures.
+///
+/// `get_address_executable` and `strkey_to_muxed_address` are declared
+/// `-> Val` upstream; we type them `Val` rather than guessing a richer
+/// type from the function name (a later type-recovery pass can refine).
+#[must_use]
+pub fn addr_kind_result_type(kind: AddressOpKind) -> KnownType {
+    use AddressOpKind as K;
+    match kind {
+        K::StrkeyToAddress | K::GetAddressFromMuxedAddress => KnownType::Address,
+        K::AddressToStrkey | K::MuxedAddressToStrkey => KnownType::String,
+        K::GetIdFromMuxedAddress => KnownType::U64,
+        K::GetAddressExecutable | K::StrkeyToMuxedAddress => KnownType::Val,
+    }
+}
+
+// ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
 
@@ -482,5 +549,63 @@ mod tests {
         // ...but the lower words are u64.
         assert_eq!(obj_kind_result_type(K::ObjToI128Lo64), KnownType::U64);
         assert_eq!(obj_kind_result_type(K::U256ValToBeBytes), KnownType::Bytes);
+    }
+
+    // --- a-module address conversions ---
+
+    #[test]
+    fn every_address_export_maps_and_roundtrips_name() {
+        let table = [
+            ("1", "strkey_to_address"),
+            ("2", "address_to_strkey"),
+            ("4", "get_address_from_muxed_address"),
+            ("5", "get_id_from_muxed_address"),
+            ("6", "get_address_executable"),
+            ("7", "strkey_to_muxed_address"),
+            ("8", "muxed_address_to_strkey"),
+        ];
+        for (export, expected_name) in table {
+            let kind = addr_fn_kind("a", export)
+                .unwrap_or_else(|| panic!("a.{export} must map to an AddressOpKind"));
+            assert_eq!(addr_kind_name(kind), expected_name, "for export {export:?}");
+        }
+    }
+
+    #[test]
+    fn address_table_agrees_with_vendored_catalog() {
+        // Drift guard: every address-conversion export must resolve in
+        // the vendored env.json catalog under the same friendly name.
+        for export in ["1", "2", "4", "5", "6", "7", "8"] {
+            let kind = addr_fn_kind("a", export).expect("maps");
+            let catalog_entry = crate::host_calls::resolve("a", export)
+                .unwrap_or_else(|| panic!("a.{export} must exist in the vendored catalog"));
+            assert_eq!(
+                catalog_entry.friendly_name,
+                addr_kind_name(kind),
+                "val_abi address name for a.{export} drifted from the vendored catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn address_non_conversion_inputs_return_none() {
+        // The auth exports (`_`, `0`, `3`) are not address conversions —
+        // they get their own KnownOps, not AddressConversion.
+        assert_eq!(addr_fn_kind("a", "0"), None, "require_auth is not a conversion");
+        assert_eq!(addr_fn_kind("a", "_"), None, "require_auth_for_args");
+        assert_eq!(addr_fn_kind("a", "3"), None, "authorize_as_curr_contract");
+        assert_eq!(addr_fn_kind("l", "1"), None, "wrong module");
+        assert_eq!(addr_fn_kind("a", "zz"), None, "nonexistent export");
+    }
+
+    #[test]
+    fn address_result_types_match_abi() {
+        use sordec_ir::AddressOpKind as K;
+        assert_eq!(addr_kind_result_type(K::StrkeyToAddress), KnownType::Address);
+        assert_eq!(addr_kind_result_type(K::AddressToStrkey), KnownType::String);
+        assert_eq!(addr_kind_result_type(K::GetIdFromMuxedAddress), KnownType::U64);
+        // The two `-> Val` returns are typed Val, not over-claimed.
+        assert_eq!(addr_kind_result_type(K::GetAddressExecutable), KnownType::Val);
+        assert_eq!(addr_kind_result_type(K::StrkeyToMuxedAddress), KnownType::Val);
     }
 }

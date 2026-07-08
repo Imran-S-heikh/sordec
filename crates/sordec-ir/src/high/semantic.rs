@@ -196,10 +196,40 @@ pub enum KnownOp {
     },
 
     /// `address.require_auth_for_args(args)`.
+    ///
+    /// Host import `(a, _)`. The host ABI passes a single `VecObject`
+    /// handle for the args; `args` holds that one handle. Expanding it
+    /// into the underlying argument list is the collections recognizer's
+    /// job, not this one.
     RequireAuthForArgs {
         /// Address required to authorise.
         address: ValueId,
-        /// Args tuple bound to the authorisation.
+        /// Args tuple bound to the authorisation (a single `VecObject`
+        /// handle until the collections recognizer expands it).
+        args: Vec<ValueId>,
+    },
+
+    /// `env.authorize_as_current_contract(auth_entries)` — the current
+    /// contract authorizes a set of sub-invocation entries as itself.
+    ///
+    /// Host import `(a, 3)`.
+    AuthorizeAsCurrContract {
+        /// `VecObject` handle of authorization entries.
+        auth_entries: ValueId,
+    },
+
+    /// An `a`-module address conversion / query (strkey ↔ address,
+    /// muxed-address decomposition, executable inspection).
+    ///
+    /// ABI-proven recognition — the host-function identity *is* the
+    /// semantic — so bindings carry `Known` certainty. `kind` names the
+    /// specific conversion; the `(module, export)` → kind mapping and
+    /// per-kind ABI return type live in `sordec-passes`' `val_abi`
+    /// module (this enum is IR vocabulary only).
+    AddressConversion {
+        /// Which conversion this is.
+        kind: AddressOpKind,
+        /// Operands in original host-call argument order.
         args: Vec<ValueId>,
     },
 
@@ -402,4 +432,40 @@ pub enum ValObjectKind {
     DurationObjFromU64,
     /// `(i, G)` `duration_obj_to_u64` — unwrap a `DurationObject`.
     DurationObjToU64,
+}
+
+/// The `a`-module (address) conversion / query surface, excluding the
+/// authorization calls (`require_auth`, `require_auth_for_args`,
+/// `authorize_as_curr_contract`) which have their own [`KnownOp`]
+/// variants.
+///
+/// One variant per conversion host function, each documented with its
+/// `(module, export)` import pair and protocol gate. Grouped under a
+/// single [`KnownOp::AddressConversion`] the same way `i`-module
+/// conversions group under [`ValObjectKind`]. The `(module, export) →
+/// AddressOpKind` mapping lives in `sordec-passes`' `val_abi` module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum AddressOpKind {
+    /// `(a, 1)` `strkey_to_address` — parse a strkey `Val` into an
+    /// `AddressObject`.
+    StrkeyToAddress,
+    /// `(a, 2)` `address_to_strkey` — render an address as a strkey
+    /// `StringObject`.
+    AddressToStrkey,
+    /// `(a, 4)` `get_address_from_muxed_address` — the underlying
+    /// address of a muxed address (protocol 23+).
+    GetAddressFromMuxedAddress,
+    /// `(a, 5)` `get_id_from_muxed_address` — the u64 id multiplexed
+    /// into a muxed address (protocol 23+).
+    GetIdFromMuxedAddress,
+    /// `(a, 6)` `get_address_executable` — the executable kind of an
+    /// address, as a `Val` (protocol 23+).
+    GetAddressExecutable,
+    /// `(a, 7)` `strkey_to_muxed_address` — parse a strkey into a muxed
+    /// address `Val` (protocol 26+).
+    StrkeyToMuxedAddress,
+    /// `(a, 8)` `muxed_address_to_strkey` — render a muxed address as a
+    /// strkey `StringObject` (protocol 26+).
+    MuxedAddressToStrkey,
 }
