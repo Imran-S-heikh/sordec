@@ -30,8 +30,8 @@ use std::io::{self, Write};
 
 use sordec_common::{IrId, ProvenanceSource, ValueId};
 use sordec_ir::{
-    BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region,
-    SemanticOp, UnaryOp,
+    BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownTier, KnownType, Literal,
+    Region, SemanticOp, StorageTier, UnaryOp,
 };
 use sordec_passes::host_calls;
 
@@ -216,6 +216,108 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             write!(out, "{}", val_abi::obj_kind_name(*kind))?;
             render_args(out, args)
         }
+        // ---- Storage (C2) + TTL (C3) ----
+        KnownOp::StorageGet { tier, key } => {
+            write!(out, "storage_get<{}>(v{})", tier_str(tier), key.index())
+        }
+        KnownOp::StorageSet { tier, key, value } => write!(
+            out,
+            "storage_set<{}>(v{}, v{})",
+            tier_str(tier),
+            key.index(),
+            value.index()
+        ),
+        KnownOp::StorageHas { tier, key } => {
+            write!(out, "storage_has<{}>(v{})", tier_str(tier), key.index())
+        }
+        KnownOp::StorageRemove { tier, key } => {
+            write!(out, "storage_remove<{}>(v{})", tier_str(tier), key.index())
+        }
+        KnownOp::StorageExtendTtl {
+            tier,
+            key,
+            threshold,
+            extend_to,
+        } => write!(
+            out,
+            "extend_ttl<{}>(v{}, v{}, v{})",
+            tier_str(tier),
+            key.index(),
+            threshold.index(),
+            extend_to.index()
+        ),
+        KnownOp::StorageExtendTtlV2 {
+            tier,
+            key,
+            extend_to,
+            min_extension,
+            max_extension,
+        } => write!(
+            out,
+            "extend_ttl_v2<{}>(v{}, v{}, v{}, v{})",
+            tier_str(tier),
+            key.index(),
+            extend_to.index(),
+            min_extension.index(),
+            max_extension.index()
+        ),
+        KnownOp::ExtendCurrentContractInstanceAndCodeTtl {
+            threshold,
+            extend_to,
+        } => write!(
+            out,
+            "extend_instance_and_code_ttl(v{}, v{})",
+            threshold.index(),
+            extend_to.index()
+        ),
+        KnownOp::ExtendContractInstanceAndCodeTtl {
+            contract,
+            threshold,
+            extend_to,
+        } => write!(
+            out,
+            "extend_contract_instance_and_code_ttl(v{}, v{}, v{})",
+            contract.index(),
+            threshold.index(),
+            extend_to.index()
+        ),
+        KnownOp::ExtendContractInstanceTtl {
+            contract,
+            threshold,
+            extend_to,
+        } => write!(
+            out,
+            "extend_contract_instance_ttl(v{}, v{}, v{})",
+            contract.index(),
+            threshold.index(),
+            extend_to.index()
+        ),
+        KnownOp::ExtendContractCodeTtl {
+            contract,
+            threshold,
+            extend_to,
+        } => write!(
+            out,
+            "extend_contract_code_ttl(v{}, v{}, v{})",
+            contract.index(),
+            threshold.index(),
+            extend_to.index()
+        ),
+        KnownOp::ExtendContractInstanceAndCodeTtlV2 {
+            contract,
+            extension_scope,
+            extend_to,
+            min_extension,
+            max_extension,
+        } => write!(
+            out,
+            "extend_contract_instance_and_code_ttl_v2(v{}, v{}, v{}, v{}, v{})",
+            contract.index(),
+            extension_scope.index(),
+            extend_to.index(),
+            min_extension.index(),
+            max_extension.index()
+        ),
         // The remaining KnownOps get dedicated renderings when their
         // recognizers land; until then an inspection-only Debug form.
         other => write!(out, "{other:?}"),
@@ -264,6 +366,33 @@ fn ir_type_str(ty: &IrType) -> String {
         IrType::Known(k) => known_type_str(k),
         IrType::Inferred(k) => format!("{}?", known_type_str(k)),
         IrType::Unknown(_) => "?".to_string(),
+    }
+}
+
+/// Render a storage tier with certainty: `Known` → the name,
+/// `Inferred` → `name?`, `Unknown` → `?`. Mirrors the `IrType`
+/// certainty-marker convention.
+fn tier_str(tier: &StorageTier) -> &'static str {
+    match tier {
+        StorageTier::Known(t) => known_tier_str(t),
+        StorageTier::Inferred(t) => known_tier_inferred_str(t),
+        StorageTier::Unknown(_) => "?",
+    }
+}
+
+fn known_tier_str(t: &KnownTier) -> &'static str {
+    match t {
+        KnownTier::Persistent => "persistent",
+        KnownTier::Temporary => "temporary",
+        KnownTier::Instance => "instance",
+    }
+}
+
+fn known_tier_inferred_str(t: &KnownTier) -> &'static str {
+    match t {
+        KnownTier::Persistent => "persistent?",
+        KnownTier::Temporary => "temporary?",
+        KnownTier::Instance => "instance?",
     }
 }
 
@@ -522,5 +651,62 @@ mod tests {
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "obj_from_u64(v49)");
+    }
+
+    // --- C2 storage-op renderings ---
+
+    #[test]
+    fn storage_get_renders_known_tier() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+            tier: StorageTier::Known(KnownTier::Instance),
+            key: v(92),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "storage_get<instance>(v92)");
+    }
+
+    #[test]
+    fn storage_set_renders_temporary_tier_and_two_args() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::StorageSet {
+            tier: StorageTier::Known(KnownTier::Temporary),
+            key: v(9),
+            value: v(0),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "storage_set<temporary>(v9, v0)");
+    }
+
+    #[test]
+    fn storage_has_renders_unknown_tier_as_question_mark() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::StorageHas {
+            tier: StorageTier::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            key: v(1),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "storage_has<?>(v1)");
+    }
+
+    #[test]
+    fn extend_ttl_renders_tier_and_three_args() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::StorageExtendTtl {
+            tier: StorageTier::Known(KnownTier::Persistent),
+            key: v(4),
+            threshold: v(9),
+            extend_to: v(14),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "extend_ttl<persistent>(v4, v9, v14)");
+    }
+
+    #[test]
+    fn extend_current_instance_ttl_renders_without_tier() {
+        let expr = Expr::Semantic(SemanticOp::Known(
+            KnownOp::ExtendCurrentContractInstanceAndCodeTtl {
+                threshold: v(9),
+                extend_to: v(14),
+            },
+        ));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "extend_instance_and_code_ttl(v9, v14)");
     }
 }

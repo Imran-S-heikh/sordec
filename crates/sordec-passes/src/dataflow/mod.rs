@@ -37,5 +37,5 @@ pub mod high;
 pub mod trace_const;
 
 pub use def_use::{DefUseIndex, UseSite};
-pub use high::{resolve_use, trace_literal, DEFAULT_USE_DEPTH};
+pub use high::{resolve_use, trace_int, trace_literal, DEFAULT_USE_DEPTH};
 pub use trace_const::{trace_const, trace_const_with_limit, TraceStop, DEFAULT_MAX_DEPTH};

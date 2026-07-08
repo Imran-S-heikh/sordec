@@ -39,9 +39,9 @@
 
 use std::collections::HashSet;
 
-use sordec_common::{IrId, Provenance, ProvenanceSource, ValueId};
+use sordec_common::{IrId, ProvenanceSource, ValueId};
 use sordec_ir::{
-    BinaryOp, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, SemanticOp,
+    BinaryOp, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, SemanticOp,
     WasmOpcodeKind,
 };
 
@@ -80,19 +80,7 @@ impl Pass<HighIr> for ValEncodingPass {
     }
 }
 
-/// One planned binding rewrite, collected during the read-only scan and
-/// applied afterward (scan-then-apply keeps the borrow checker happy and
-/// separates matching from mutation).
-struct Rewrite {
-    id: ValueId,
-    expr: Expr,
-    /// `None` = leave the binding's type unchanged (the decode case,
-    /// which proves no payload type).
-    ty: Option<IrType>,
-    source: ProvenanceSource,
-    note: String,
-    metric: &'static str,
-}
+use super::{apply_rewrites, is_recognized, Rewrite};
 
 /// Recognize all Val patterns in one function. Returns whether anything
 /// changed plus per-pattern metrics.
@@ -141,23 +129,9 @@ fn recognize_function(func: &mut HighFunction) -> (bool, PassMetrics) {
     for rw in &rewrites {
         metrics.increment(rw.metric, 1);
     }
-    for rw in rewrites {
-        if let Some(binding) = func.bindings.get_mut(rw.id) {
-            binding.expr = rw.expr;
-            if let Some(ty) = rw.ty {
-                binding.ty = ty;
-            }
-            binding.add_provenance(Provenance::new(PASS_NAME, rw.source, rw.note));
-        }
-    }
+    apply_rewrites(func, PASS_NAME, rewrites);
 
     (changed, metrics)
-}
-
-/// A binding already carrying a recognized semantic op — skip it (this
-/// is the idempotency guard).
-fn is_recognized(expr: &Expr) -> bool {
-    matches!(expr, Expr::Semantic(SemanticOp::Known(_)))
 }
 
 // ---------------------------------------------------------------------
@@ -339,17 +313,10 @@ fn resolved_expr(func: &HighFunction, value: ValueId) -> Option<&Expr> {
     Some(&func.bindings.get(id)?.expr)
 }
 
-/// Resolve `value` to an integer literal (across the `I32`/`I64`/`U32`/
-/// `U64` literal variants — the tag/shift/mask constants arrive as
-/// whichever WASM integer width the SDK emitted).
+/// Resolve `value` to an integer literal. Thin local alias for the
+/// shared [`crate::dataflow::trace_int`] helper.
 fn lit_int(func: &HighFunction, value: ValueId) -> Option<i128> {
-    match crate::dataflow::trace_literal(func, value)? {
-        Literal::I32(n) => Some(i128::from(n)),
-        Literal::I64(n) => Some(i128::from(n)),
-        Literal::U32(n) => Some(i128::from(n)),
-        Literal::U64(n) => Some(i128::from(n)),
-        _ => None,
-    }
+    crate::dataflow::trace_int(func, value)
 }
 
 /// Resolve `value` to a tag byte (an integer literal in `0..=255`).
@@ -365,8 +332,8 @@ fn lit_tag(func: &HighFunction, value: ValueId) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sordec_common::{Arena, BlockId, FuncId, UnknownReason};
-    use sordec_ir::{Binding, HighBlock, Region};
+    use sordec_common::{Arena, BlockId, FuncId, Provenance, UnknownReason};
+    use sordec_ir::{Binding, HighBlock, Literal, Region};
 
     /// Build a one-block `HighFunction` from a list of `Expr`s (ids
     /// 0..N, each `Unknown`-typed with a seed provenance entry).

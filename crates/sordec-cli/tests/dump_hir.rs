@@ -48,13 +48,15 @@ fn dump_hir_on_hello_add_names_the_exported_function() {
 }
 
 #[test]
-fn dump_hir_on_token_v23_renders_host_calls() {
-    // Every SEP-41 token performs host calls; at the L1 layer they
-    // render as `host:<module>:<name>` via SemanticOp::Unknown. The
-    // storage-write primitive (`l._` = put_contract_data) is universal.
+fn dump_hir_raw_renders_unrecognized_host_calls() {
+    // Under `--raw` (no recognizer pipeline), host calls render as
+    // `host:<module>:<name>` via SemanticOp::Unknown. The storage-write
+    // primitive (`l._` = put_contract_data) is universal. On the default
+    // path this is recognized as `storage_set` — see
+    // `dump_hir_raw_flag_preserves_raw_storage_calls`.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
-        .args(["dump-hir", TOKEN_V23])
+        .args(["dump-hir", "--raw", TOKEN_V23])
         .assert()
         .success()
         .stdout(predicate::str::contains("host:l:put_contract_data"))
@@ -107,6 +109,69 @@ fn dump_hir_on_token_v23_recognizes_i128_object_conversions() {
         .stdout(predicate::str::contains("obj_to_i128_hi64"))
         .stdout(predicate::str::contains(";; HostFunctionAbi:"))
         .stderr(predicate::str::is_empty());
+}
+
+const TIMELOCK: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../samples/contracts/timelock/timelock.wasm"
+);
+
+#[test]
+fn dump_hir_on_token_v23_resolves_all_three_storage_tiers() {
+    // The C2 storage recognizer resolves the durability constant into a
+    // named tier. token-v23's source uses all three: instance (admin),
+    // persistent (balances), temporary (allowances) — the exact bug the
+    // legacy hardcoded-persistent decompiler got wrong.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("storage_get<instance>"))
+        .stdout(predicate::str::contains("storage_get<persistent>"))
+        .stdout(predicate::str::contains("storage_get<temporary>"))
+        // Provenance records the tier evidence.
+        .stdout(predicate::str::contains("durability const"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn dump_hir_on_token_v23_shows_honest_unknown_tier() {
+    // rustc hoists some storage ops into helpers that take the tier as a
+    // parameter; those sites resolve to an honest `<?>` rather than a
+    // guess. This locks the no-guessing behavior.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("storage_has<?>"))
+        .stdout(predicate::str::contains("tier=unknown"));
+}
+
+#[test]
+fn dump_hir_on_timelock_recognizes_storage() {
+    // timelock uses instance storage (has(Init), balance get/set).
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("storage_"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn dump_hir_raw_flag_preserves_raw_storage_calls() {
+    // `--raw` skips recognition: storage calls show as raw host imports,
+    // not as recognized `storage_*` ops.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host:l:put_contract_data"))
+        .stdout(predicate::str::contains("storage_set").not());
 }
 
 #[test]

@@ -11,7 +11,58 @@
 //!
 //! - [`val_encoding`] (C1) — Soroban `Val` encode/decode/tag-check and
 //!   object-conversion patterns.
+//! - [`storage`] (C2+C3) — storage tier resolution + TTL extension
+//!   calls (the `l`-module CRUD/TTL surface).
 
+pub mod storage;
 pub mod val_encoding;
 
+pub use storage::StoragePass;
 pub use val_encoding::ValEncodingPass;
+
+use sordec_common::{Provenance, ProvenanceSource, ValueId};
+use sordec_ir::{Expr, HighFunction, IrType, SemanticOp};
+
+/// One planned binding rewrite, collected during a recognizer's
+/// read-only scan and applied afterward. Scan-then-apply keeps the
+/// borrow checker happy and separates matching from mutation.
+pub(crate) struct Rewrite {
+    /// Binding to rewrite.
+    pub id: ValueId,
+    /// Replacement expression (always a `Semantic(Known(_))`).
+    pub expr: Expr,
+    /// `None` = leave the binding's type unchanged (used when the
+    /// pattern proves no type).
+    pub ty: Option<IrType>,
+    /// Provenance evidence category.
+    pub source: ProvenanceSource,
+    /// Provenance note naming the pattern + evidence.
+    pub note: String,
+    /// Metric counter key to increment for this rewrite.
+    pub metric: &'static str,
+}
+
+/// A binding already carrying a recognized semantic op — recognizers
+/// skip it (the shared idempotency guard: a second run over recognized
+/// IR reports `changed: false`).
+pub(crate) fn is_recognized(expr: &Expr) -> bool {
+    matches!(expr, Expr::Semantic(SemanticOp::Known(_)))
+}
+
+/// Apply collected rewrites to a function: set the expression, upgrade
+/// the type when one is provided, and append the provenance entry.
+pub(crate) fn apply_rewrites(
+    func: &mut HighFunction,
+    pass_name: &'static str,
+    rewrites: Vec<Rewrite>,
+) {
+    for rw in rewrites {
+        if let Some(binding) = func.bindings.get_mut(rw.id) {
+            binding.expr = rw.expr;
+            if let Some(ty) = rw.ty {
+                binding.ty = ty;
+            }
+            binding.add_provenance(Provenance::new(pass_name, rw.source, rw.note));
+        }
+    }
+}

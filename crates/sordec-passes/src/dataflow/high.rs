@@ -47,6 +47,25 @@ pub fn trace_literal(func: &HighFunction, value: ValueId) -> Option<Literal> {
     }
 }
 
+/// Resolve `value` to an integer literal, across all four integer
+/// literal widths (`I32`/`I64`/`U32`/`U64` — a constant arrives as
+/// whichever width the WASM emitted).
+///
+/// The common recognizer helper for resolving tag bytes, shift
+/// amounts, and enum discriminants (e.g. the storage durability
+/// constant). Returns `None` when the value doesn't trace to an
+/// integer literal.
+#[must_use]
+pub fn trace_int(func: &HighFunction, value: ValueId) -> Option<i128> {
+    match trace_literal(func, value)? {
+        Literal::I32(n) => Some(i128::from(n)),
+        Literal::I64(n) => Some(i128::from(n)),
+        Literal::U32(n) => Some(i128::from(n)),
+        Literal::U64(n) => Some(i128::from(n)),
+        _ => None,
+    }
+}
+
 /// Follow `Expr::Use` links from `value` to the first non-`Use` binding
 /// and return that binding's id.
 ///

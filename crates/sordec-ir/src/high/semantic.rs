@@ -88,6 +88,8 @@ pub enum KnownOp {
     },
 
     /// `env.storage().<tier>().extend_ttl(&key, threshold, extend_to)`.
+    ///
+    /// Host import `(l, 7)` `extend_contract_data_ttl`.
     StorageExtendTtl {
         /// Which storage tier.
         tier: StorageTier,
@@ -97,6 +99,93 @@ pub enum KnownOp {
         threshold: ValueId,
         /// New target ledger count.
         extend_to: ValueId,
+    },
+
+    /// `env.storage().instance().extend_ttl(threshold, extend_to)` —
+    /// bumps the *current* contract's instance + code entries.
+    ///
+    /// Host import `(l, 8)` `extend_current_contract_instance_and_code_ttl`.
+    /// No key and no tier: the target is implicitly the executing
+    /// contract's instance/code ledger entries. This is the TTL call
+    /// every SEP-41 token entrypoint makes.
+    ExtendCurrentContractInstanceAndCodeTtl {
+        /// Threshold ledger count.
+        threshold: ValueId,
+        /// New target ledger count.
+        extend_to: ValueId,
+    },
+
+    /// Extend another contract's instance + code TTL.
+    ///
+    /// Host import `(l, 9)` `extend_contract_instance_and_code_ttl`.
+    ExtendContractInstanceAndCodeTtl {
+        /// Target contract address.
+        contract: ValueId,
+        /// Threshold ledger count.
+        threshold: ValueId,
+        /// New target ledger count.
+        extend_to: ValueId,
+    },
+
+    /// Extend another contract's instance TTL only.
+    ///
+    /// Host import `(l, c)` `extend_contract_instance_ttl`
+    /// (protocol 21+).
+    ExtendContractInstanceTtl {
+        /// Target contract address.
+        contract: ValueId,
+        /// Threshold ledger count.
+        threshold: ValueId,
+        /// New target ledger count.
+        extend_to: ValueId,
+    },
+
+    /// Extend another contract's code TTL only.
+    ///
+    /// Host import `(l, d)` `extend_contract_code_ttl` (protocol 21+).
+    ExtendContractCodeTtl {
+        /// Target contract address.
+        contract: ValueId,
+        /// Threshold ledger count.
+        threshold: ValueId,
+        /// New target ledger count.
+        extend_to: ValueId,
+    },
+
+    /// v2 data-entry TTL extension with explicit min/max bounds.
+    ///
+    /// Host import `(l, f)` `extend_contract_data_ttl_v2`
+    /// (protocol 26+).
+    StorageExtendTtlV2 {
+        /// Which storage tier.
+        tier: StorageTier,
+        /// Key value.
+        key: ValueId,
+        /// New target ledger count.
+        extend_to: ValueId,
+        /// Minimum extension bound.
+        min_extension: ValueId,
+        /// Maximum extension bound.
+        max_extension: ValueId,
+    },
+
+    /// v2 instance/code TTL extension with an explicit scope selector.
+    ///
+    /// Host import `(l, g)` `extend_contract_instance_and_code_ttl_v2`
+    /// (protocol 26+). `extension_scope` is a raw
+    /// `ContractTtlExtension` enum operand — decoding it to a typed
+    /// scope is deferred until a fixture exercises this call.
+    ExtendContractInstanceAndCodeTtlV2 {
+        /// Target contract address.
+        contract: ValueId,
+        /// `ContractTtlExtension` scope selector (raw operand).
+        extension_scope: ValueId,
+        /// New target ledger count.
+        extend_to: ValueId,
+        /// Minimum extension bound.
+        min_extension: ValueId,
+        /// Maximum extension bound.
+        max_extension: ValueId,
     },
 
     // ---- Authorisation ----

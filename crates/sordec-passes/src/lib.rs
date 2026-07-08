@@ -44,7 +44,7 @@ pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
-pub use recognizers::ValEncodingPass;
+pub use recognizers::{StoragePass, ValEncodingPass};
 pub use sordec_common::LiftDiagnostics;
 
 use sordec_ir::HighIr;
@@ -59,5 +59,8 @@ use sordec_ir::HighIr;
 /// needed yet.
 #[must_use]
 pub fn default_high_pipeline() -> Pipeline<HighIr> {
-    Pipeline::new(vec![Box::new(ValEncodingPass)], vec![])
+    Pipeline::new(
+        vec![Box::new(ValEncodingPass), Box::new(StoragePass)],
+        vec![],
+    )
 }
