@@ -44,7 +44,9 @@ pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
-pub use recognizers::{AuthPass, ContextPass, LinearMemoryPass, StoragePass, ValEncodingPass};
+pub use recognizers::{
+    AuthPass, CollectionsPass, ContextPass, LinearMemoryPass, StoragePass, ValEncodingPass,
+};
 pub use sordec_common::LiftDiagnostics;
 
 use sordec_ir::HighIr;
@@ -69,6 +71,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(AuthPass),
             Box::new(ContextPass),
             Box::new(LinearMemoryPass),
+            Box::new(CollectionsPass),
         ],
         vec![],
     )

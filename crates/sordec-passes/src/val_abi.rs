@@ -41,7 +41,8 @@
 //! outside the range go through the `i`-module host calls
 //! (`obj_from_u64` etc.) and come back as object handles.
 
-use sordec_ir::{AddressOpKind, KnownType, ValObjectKind};
+use sordec_common::UnknownReason;
+use sordec_ir::{AddressOpKind, BufOpKind, IrType, KnownType, MapOpKind, ValObjectKind, VecOpKind};
 
 // ---------------------------------------------------------------------
 // Bit layout
@@ -412,6 +413,323 @@ pub fn addr_kind_result_type(kind: AddressOpKind) -> KnownType {
 }
 
 // ---------------------------------------------------------------------
+// m/v/b-module collections + bytes operations
+// ---------------------------------------------------------------------
+//
+// The `(module, export) → kind` tables, per-kind ABI arity, friendly
+// name, and return type for the collections recognizer. Export letters,
+// arities, and return types transcribed from the vendored
+// `host_calls/env.json` (soroban-env-common 26.1.2) and drift-guarded
+// against it in the tests below. The five `*_new_from_linear_memory`
+// constructors — `(m, 9)`, `(v, g)`, `(b, 3)`, `(b, i)`, `(b, j)` — are
+// deliberately absent: they are the linear-memory recognizer's ops.
+
+/// `IrType::Unknown` inner for composite results whose element types the
+/// ABI does not carry (a later type-recovery pass refines them).
+fn unknown_inner() -> Box<IrType> {
+    Box::new(IrType::Unknown(UnknownReason::InsufficientEvidence))
+}
+
+/// `Map<?, ?>` — a map result with unknown key/value types.
+fn map_of_unknown() -> KnownType {
+    KnownType::Map(unknown_inner(), unknown_inner())
+}
+
+/// `Vec<?>` — a vec result with unknown element type.
+fn vec_of_unknown() -> KnownType {
+    KnownType::Vec(unknown_inner())
+}
+
+/// Map an `m`-module host import `(module, name)` pair to its
+/// [`MapOpKind`], or `None` for `map_new_from_linear_memory` (the
+/// linear-memory recognizer's op) or a non-`m` import.
+#[must_use]
+pub fn map_fn_kind(module: &str, name: &str) -> Option<MapOpKind> {
+    use MapOpKind as K;
+    if module != "m" {
+        return None;
+    }
+    Some(match name {
+        "_" => K::New,
+        "0" => K::Put,
+        "1" => K::Get,
+        "2" => K::Del,
+        "3" => K::Len,
+        "4" => K::Has,
+        "5" => K::KeyByPos,
+        "6" => K::ValByPos,
+        "7" => K::Keys,
+        "8" => K::Values,
+        "a" => K::UnpackToLinearMemory,
+        // "9" = map_new_from_linear_memory → linear-memory recognizer.
+        _ => return None,
+    })
+}
+
+/// Friendly (snake-case, upstream) name of a map operation.
+#[must_use]
+pub fn map_kind_name(kind: MapOpKind) -> &'static str {
+    use MapOpKind as K;
+    match kind {
+        K::New => "map_new",
+        K::Put => "map_put",
+        K::Get => "map_get",
+        K::Del => "map_del",
+        K::Len => "map_len",
+        K::Has => "map_has",
+        K::KeyByPos => "map_key_by_pos",
+        K::ValByPos => "map_val_by_pos",
+        K::Keys => "map_keys",
+        K::Values => "map_values",
+        K::UnpackToLinearMemory => "map_unpack_to_linear_memory",
+    }
+}
+
+/// ABI argument count of a map operation.
+#[must_use]
+pub fn map_kind_arity(kind: MapOpKind) -> usize {
+    use MapOpKind as K;
+    match kind {
+        K::New => 0,
+        K::Len | K::Keys | K::Values => 1,
+        K::Get | K::Del | K::Has | K::KeyByPos | K::ValByPos => 2,
+        K::Put => 3,
+        K::UnpackToLinearMemory => 4,
+    }
+}
+
+/// Result type of a map operation, per the env.json ABI signatures.
+#[must_use]
+pub fn map_kind_result_type(kind: MapOpKind) -> KnownType {
+    use MapOpKind as K;
+    match kind {
+        K::New | K::Put | K::Del => map_of_unknown(),
+        K::Get | K::KeyByPos | K::ValByPos => KnownType::Val,
+        K::Len => KnownType::U32,
+        K::Has => KnownType::Bool,
+        K::Keys | K::Values => vec_of_unknown(),
+        K::UnpackToLinearMemory => KnownType::Unit,
+    }
+}
+
+/// Map a `v`-module host import `(module, name)` pair to its
+/// [`VecOpKind`], or `None` for `vec_new_from_linear_memory` (the
+/// linear-memory recognizer's op) or a non-`v` import.
+#[must_use]
+pub fn vec_fn_kind(module: &str, name: &str) -> Option<VecOpKind> {
+    use VecOpKind as K;
+    if module != "v" {
+        return None;
+    }
+    Some(match name {
+        "_" => K::New,
+        "0" => K::Put,
+        "1" => K::Get,
+        "2" => K::Del,
+        "3" => K::Len,
+        "4" => K::PushFront,
+        "5" => K::PopFront,
+        "6" => K::PushBack,
+        "7" => K::PopBack,
+        "8" => K::Front,
+        "9" => K::Back,
+        "a" => K::Insert,
+        "b" => K::Append,
+        "c" => K::Slice,
+        "d" => K::FirstIndexOf,
+        "e" => K::LastIndexOf,
+        "f" => K::BinarySearch,
+        "h" => K::UnpackToLinearMemory,
+        // "g" = vec_new_from_linear_memory → linear-memory recognizer.
+        _ => return None,
+    })
+}
+
+/// Friendly (snake-case, upstream) name of a vec operation.
+#[must_use]
+pub fn vec_kind_name(kind: VecOpKind) -> &'static str {
+    use VecOpKind as K;
+    match kind {
+        K::New => "vec_new",
+        K::Put => "vec_put",
+        K::Get => "vec_get",
+        K::Del => "vec_del",
+        K::Len => "vec_len",
+        K::PushFront => "vec_push_front",
+        K::PopFront => "vec_pop_front",
+        K::PushBack => "vec_push_back",
+        K::PopBack => "vec_pop_back",
+        K::Front => "vec_front",
+        K::Back => "vec_back",
+        K::Insert => "vec_insert",
+        K::Append => "vec_append",
+        K::Slice => "vec_slice",
+        K::FirstIndexOf => "vec_first_index_of",
+        K::LastIndexOf => "vec_last_index_of",
+        K::BinarySearch => "vec_binary_search",
+        K::UnpackToLinearMemory => "vec_unpack_to_linear_memory",
+    }
+}
+
+/// ABI argument count of a vec operation.
+#[must_use]
+pub fn vec_kind_arity(kind: VecOpKind) -> usize {
+    use VecOpKind as K;
+    match kind {
+        K::New => 0,
+        K::Len | K::PopFront | K::PopBack | K::Front | K::Back => 1,
+        K::Get
+        | K::Del
+        | K::PushFront
+        | K::PushBack
+        | K::Append
+        | K::FirstIndexOf
+        | K::LastIndexOf
+        | K::BinarySearch => 2,
+        K::Put | K::Insert | K::Slice | K::UnpackToLinearMemory => 3,
+    }
+}
+
+/// Result type of a vec operation, per the env.json ABI signatures.
+///
+/// `vec_first_index_of` / `vec_last_index_of` are declared `-> Val`
+/// upstream (index or Void); `vec_binary_search` returns a **raw `u64`**
+/// (not a tagged `Val`) — high bit = found flag, low bits = index.
+#[must_use]
+pub fn vec_kind_result_type(kind: VecOpKind) -> KnownType {
+    use VecOpKind as K;
+    match kind {
+        K::New | K::Put | K::Del | K::PushFront | K::PopFront | K::PushBack | K::PopBack
+        | K::Insert | K::Append | K::Slice => vec_of_unknown(),
+        K::Get | K::Front | K::Back | K::FirstIndexOf | K::LastIndexOf => KnownType::Val,
+        K::Len => KnownType::U32,
+        K::BinarySearch => KnownType::U64,
+        K::UnpackToLinearMemory => KnownType::Unit,
+    }
+}
+
+/// Map a `b`-module host import `(module, name)` pair to its
+/// [`BufOpKind`], or `None` for the three `*_new_from_linear_memory`
+/// constructors (the linear-memory recognizer's ops) or a non-`b` import.
+#[must_use]
+pub fn buf_fn_kind(module: &str, name: &str) -> Option<BufOpKind> {
+    use BufOpKind as K;
+    if module != "b" {
+        return None;
+    }
+    Some(match name {
+        "_" => K::SerializeToBytes,
+        "0" => K::DeserializeFromBytes,
+        "1" => K::BytesCopyToLinearMemory,
+        "2" => K::BytesCopyFromLinearMemory,
+        "4" => K::BytesNewEmpty,
+        "5" => K::BytesPut,
+        "6" => K::BytesGet,
+        "7" => K::BytesDel,
+        "8" => K::BytesLen,
+        "9" => K::BytesPush,
+        "a" => K::BytesPop,
+        "b" => K::BytesFront,
+        "c" => K::BytesBack,
+        "d" => K::BytesInsert,
+        "e" => K::BytesAppend,
+        "f" => K::BytesSlice,
+        "g" => K::StringCopyToLinearMemory,
+        "h" => K::SymbolCopyToLinearMemory,
+        "k" => K::StringLen,
+        "l" => K::SymbolLen,
+        "m" => K::SymbolIndexInLinearMemory,
+        "n" => K::StringToBytes,
+        "o" => K::BytesToString,
+        // "3"/"i"/"j" = bytes/string/symbol_new_from_linear_memory →
+        // linear-memory recognizer.
+        _ => return None,
+    })
+}
+
+/// Friendly (snake-case, upstream) name of a buf operation.
+#[must_use]
+pub fn buf_kind_name(kind: BufOpKind) -> &'static str {
+    use BufOpKind as K;
+    match kind {
+        K::SerializeToBytes => "serialize_to_bytes",
+        K::DeserializeFromBytes => "deserialize_from_bytes",
+        K::BytesCopyToLinearMemory => "bytes_copy_to_linear_memory",
+        K::BytesCopyFromLinearMemory => "bytes_copy_from_linear_memory",
+        K::BytesNewEmpty => "bytes_new",
+        K::BytesPut => "bytes_put",
+        K::BytesGet => "bytes_get",
+        K::BytesDel => "bytes_del",
+        K::BytesLen => "bytes_len",
+        K::BytesPush => "bytes_push",
+        K::BytesPop => "bytes_pop",
+        K::BytesFront => "bytes_front",
+        K::BytesBack => "bytes_back",
+        K::BytesInsert => "bytes_insert",
+        K::BytesAppend => "bytes_append",
+        K::BytesSlice => "bytes_slice",
+        K::StringCopyToLinearMemory => "string_copy_to_linear_memory",
+        K::SymbolCopyToLinearMemory => "symbol_copy_to_linear_memory",
+        K::StringLen => "string_len",
+        K::SymbolLen => "symbol_len",
+        K::SymbolIndexInLinearMemory => "symbol_index_in_linear_memory",
+        K::StringToBytes => "string_to_bytes",
+        K::BytesToString => "bytes_to_string",
+    }
+}
+
+/// ABI argument count of a buf operation.
+#[must_use]
+pub fn buf_kind_arity(kind: BufOpKind) -> usize {
+    use BufOpKind as K;
+    match kind {
+        K::BytesNewEmpty => 0,
+        K::SerializeToBytes
+        | K::DeserializeFromBytes
+        | K::BytesLen
+        | K::BytesPop
+        | K::BytesFront
+        | K::BytesBack
+        | K::StringLen
+        | K::SymbolLen
+        | K::StringToBytes
+        | K::BytesToString => 1,
+        K::BytesGet | K::BytesDel | K::BytesPush | K::BytesAppend => 2,
+        K::BytesPut | K::BytesInsert | K::BytesSlice | K::SymbolIndexInLinearMemory => 3,
+        K::BytesCopyToLinearMemory
+        | K::BytesCopyFromLinearMemory
+        | K::StringCopyToLinearMemory
+        | K::SymbolCopyToLinearMemory => 4,
+    }
+}
+
+/// Result type of a buf operation, per the env.json ABI signatures.
+#[must_use]
+pub fn buf_kind_result_type(kind: BufOpKind) -> KnownType {
+    use BufOpKind as K;
+    match kind {
+        K::SerializeToBytes
+        | K::BytesCopyFromLinearMemory
+        | K::BytesNewEmpty
+        | K::BytesPut
+        | K::BytesDel
+        | K::BytesPush
+        | K::BytesPop
+        | K::BytesInsert
+        | K::BytesAppend
+        | K::BytesSlice
+        | K::StringToBytes => KnownType::Bytes,
+        K::DeserializeFromBytes => KnownType::Val,
+        K::BytesCopyToLinearMemory
+        | K::StringCopyToLinearMemory
+        | K::SymbolCopyToLinearMemory => KnownType::Unit,
+        K::BytesGet | K::BytesLen | K::BytesFront | K::BytesBack | K::StringLen | K::SymbolLen
+        | K::SymbolIndexInLinearMemory => KnownType::U32,
+        K::BytesToString => KnownType::String,
+    }
+}
+
+// ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
 
@@ -607,5 +925,115 @@ mod tests {
         // The two `-> Val` returns are typed Val, not over-claimed.
         assert_eq!(addr_kind_result_type(K::GetAddressExecutable), KnownType::Val);
         assert_eq!(addr_kind_result_type(K::StrkeyToMuxedAddress), KnownType::Val);
+    }
+
+    // --- m/v/b collections tables ---
+
+    #[test]
+    fn map_table_agrees_with_vendored_catalog() {
+        for export in ["_", "0", "1", "2", "3", "4", "5", "6", "7", "8", "a"] {
+            let kind = map_fn_kind("m", export).expect("maps");
+            let catalog_entry = crate::host_calls::resolve("m", export)
+                .unwrap_or_else(|| panic!("m.{export} must exist in the vendored catalog"));
+            assert_eq!(
+                catalog_entry.friendly_name,
+                map_kind_name(kind),
+                "val_abi map name for m.{export} drifted from the vendored catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn vec_table_agrees_with_vendored_catalog() {
+        for export in [
+            "_", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e",
+            "f", "h",
+        ] {
+            let kind = vec_fn_kind("v", export).expect("maps");
+            let catalog_entry = crate::host_calls::resolve("v", export)
+                .unwrap_or_else(|| panic!("v.{export} must exist in the vendored catalog"));
+            assert_eq!(
+                catalog_entry.friendly_name,
+                vec_kind_name(kind),
+                "val_abi vec name for v.{export} drifted from the vendored catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn buf_table_agrees_with_vendored_catalog() {
+        for export in [
+            "_", "0", "1", "2", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f",
+            "g", "h", "k", "l", "m", "n", "o",
+        ] {
+            let kind = buf_fn_kind("b", export).expect("maps");
+            let catalog_entry = crate::host_calls::resolve("b", export)
+                .unwrap_or_else(|| panic!("b.{export} must exist in the vendored catalog"));
+            assert_eq!(
+                catalog_entry.friendly_name,
+                buf_kind_name(kind),
+                "val_abi buf name for b.{export} drifted from the vendored catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn linear_memory_constructor_exports_are_excluded() {
+        // The five `*_new_from_linear_memory` constructors belong to the
+        // linear-memory recognizer, not the collections tables.
+        assert_eq!(map_fn_kind("m", "9"), None, "map_new_from_linear_memory");
+        assert_eq!(vec_fn_kind("v", "g"), None, "vec_new_from_linear_memory");
+        assert_eq!(buf_fn_kind("b", "3"), None, "bytes_new_from_linear_memory");
+        assert_eq!(buf_fn_kind("b", "i"), None, "string_new_from_linear_memory");
+        assert_eq!(buf_fn_kind("b", "j"), None, "symbol_new_from_linear_memory");
+    }
+
+    #[test]
+    fn collections_wrong_module_or_export_returns_none() {
+        assert_eq!(map_fn_kind("v", "1"), None, "wrong module");
+        assert_eq!(vec_fn_kind("m", "1"), None, "wrong module");
+        assert_eq!(buf_fn_kind("x", "_"), None, "wrong module");
+        assert_eq!(map_fn_kind("m", "zz"), None, "nonexistent export");
+        assert_eq!(vec_fn_kind("v", "zz"), None, "nonexistent export");
+        assert_eq!(buf_fn_kind("b", "zz"), None, "nonexistent export");
+    }
+
+    #[test]
+    fn collections_result_types_match_abi() {
+        assert_eq!(map_kind_result_type(MapOpKind::Has), KnownType::Bool);
+        assert_eq!(map_kind_result_type(MapOpKind::Len), KnownType::U32);
+        assert!(matches!(
+            map_kind_result_type(MapOpKind::Put),
+            KnownType::Map(_, _)
+        ));
+        assert!(matches!(
+            map_kind_result_type(MapOpKind::Keys),
+            KnownType::Vec(_)
+        ));
+        assert_eq!(
+            map_kind_result_type(MapOpKind::UnpackToLinearMemory),
+            KnownType::Unit
+        );
+        // vec_binary_search returns a raw u64, not a tagged Val.
+        assert_eq!(vec_kind_result_type(VecOpKind::BinarySearch), KnownType::U64);
+        assert_eq!(vec_kind_result_type(VecOpKind::Get), KnownType::Val);
+        assert_eq!(buf_kind_result_type(BufOpKind::BytesToString), KnownType::String);
+        assert_eq!(buf_kind_result_type(BufOpKind::StringToBytes), KnownType::Bytes);
+        assert_eq!(buf_kind_result_type(BufOpKind::DeserializeFromBytes), KnownType::Val);
+    }
+
+    #[test]
+    fn collections_arities_match_abi_for_corpus_ops() {
+        // The six corpus-exercised shapes (plus New/BytesNewEmpty nullary
+        // edges) — the rest are covered by the exhaustive dispatch tests
+        // in the recognizer.
+        assert_eq!(map_kind_arity(MapOpKind::UnpackToLinearMemory), 4);
+        assert_eq!(vec_kind_arity(VecOpKind::UnpackToLinearMemory), 3);
+        assert_eq!(vec_kind_arity(VecOpKind::Len), 1);
+        assert_eq!(vec_kind_arity(VecOpKind::Get), 2);
+        assert_eq!(vec_kind_arity(VecOpKind::FirstIndexOf), 2);
+        assert_eq!(buf_kind_arity(BufOpKind::SymbolIndexInLinearMemory), 3);
+        assert_eq!(map_kind_arity(MapOpKind::New), 0);
+        assert_eq!(buf_kind_arity(BufOpKind::BytesNewEmpty), 0);
     }
 }

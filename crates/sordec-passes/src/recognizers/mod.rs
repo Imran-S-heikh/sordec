@@ -21,14 +21,18 @@
 //! - [`linear_memory`] — the `*_new_from_linear_memory` constructors
 //!   (`Symbol`/`String`/`Bytes`/`Vec`/`Map`) across the `b`/`v`/`m`
 //!   modules, resolving literal contents against the module's rodata.
+//! - [`collections`] — the remaining `m`/`v`/`b` surface: every map,
+//!   vec, and bytes/string/symbol host operation (52 functions).
 
 pub mod auth;
+pub mod collections;
 pub mod context;
 pub mod linear_memory;
 pub mod storage;
 pub mod val_encoding;
 
 pub use auth::AuthPass;
+pub use collections::CollectionsPass;
 pub use context::ContextPass;
 pub use linear_memory::LinearMemoryPass;
 pub use storage::StoragePass;

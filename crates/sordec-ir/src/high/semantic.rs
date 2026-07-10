@@ -459,6 +459,39 @@ pub enum KnownOp {
         /// Element count of each array.
         len: ValueId,
     },
+
+    // ---- Collections / bytes (recognized by the collections pass) ----
+    /// An `m`-module (map) host operation.
+    ///
+    /// ABI-proven recognition — the host-function identity *is* the
+    /// semantic — so bindings carry `Known` certainty. `kind` names the
+    /// specific operation; the `(module, export) → MapOpKind` mapping and
+    /// per-kind ABI arity / return type live in `sordec-passes`' `val_abi`
+    /// module (this enum is IR vocabulary only).
+    MapOp {
+        /// Which map operation this is.
+        kind: MapOpKind,
+        /// Operands in original host-call argument order.
+        args: Vec<ValueId>,
+    },
+
+    /// A `v`-module (vec) host operation. Same conventions as
+    /// [`MapOp`](KnownOp::MapOp).
+    VecOp {
+        /// Which vec operation this is.
+        kind: VecOpKind,
+        /// Operands in original host-call argument order.
+        args: Vec<ValueId>,
+    },
+
+    /// A `b`-module (buf: bytes / string / symbol) host operation. Same
+    /// conventions as [`MapOp`](KnownOp::MapOp).
+    BufOp {
+        /// Which buf operation this is.
+        kind: BufOpKind,
+        /// Operands in original host-call argument order.
+        args: Vec<ValueId>,
+    },
 }
 
 /// The complete `i`-module (`int`) host-side Val conversion surface.
@@ -578,4 +611,155 @@ pub enum AddressOpKind {
     /// `(a, 8)` `muxed_address_to_strkey` — render a muxed address as a
     /// strkey `StringObject` (protocol 26+).
     MuxedAddressToStrkey,
+}
+
+/// The complete `m`-module (map) host-operation surface, excluding
+/// `map_new_from_linear_memory` `(m, 9)` — that constructor is the
+/// linear-memory recognizer's [`KnownOp::MapNew`].
+///
+/// One variant per host function, each documented with its
+/// `(module, export)` import pair from `soroban-env-common 26.1.2`'s
+/// `env.json`. Grouped under a single [`KnownOp::MapOp`] the same way
+/// `i`-module conversions group under [`ValObjectKind`]. The
+/// `(module, export) → MapOpKind` mapping, per-kind arity, and ABI return
+/// type live in `sordec-passes`' `val_abi` module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum MapOpKind {
+    /// `(m, _)` `map_new` — empty map.
+    New,
+    /// `(m, 0)` `map_put` — insert/update a key; returns the new map.
+    Put,
+    /// `(m, 1)` `map_get` — value for a key (traps if absent).
+    Get,
+    /// `(m, 2)` `map_del` — remove a key; returns the new map.
+    Del,
+    /// `(m, 3)` `map_len` — entry count.
+    Len,
+    /// `(m, 4)` `map_has` — key-presence test.
+    Has,
+    /// `(m, 5)` `map_key_by_pos` — key at a position.
+    KeyByPos,
+    /// `(m, 6)` `map_val_by_pos` — value at a position.
+    ValByPos,
+    /// `(m, 7)` `map_keys` — all keys as a vec.
+    Keys,
+    /// `(m, 8)` `map_values` — all values as a vec.
+    Values,
+    /// `(m, a)` `map_unpack_to_linear_memory` — write the map's keys and
+    /// values into two linear-memory `Val` arrays.
+    UnpackToLinearMemory,
+}
+
+/// The complete `v`-module (vec) host-operation surface, excluding
+/// `vec_new_from_linear_memory` `(v, g)` — the linear-memory recognizer's
+/// [`KnownOp::VecNew`]. Same conventions as [`MapOpKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum VecOpKind {
+    /// `(v, _)` `vec_new` — empty vec.
+    New,
+    /// `(v, 0)` `vec_put` — replace the element at an index.
+    Put,
+    /// `(v, 1)` `vec_get` — element at an index.
+    Get,
+    /// `(v, 2)` `vec_del` — remove the element at an index.
+    Del,
+    /// `(v, 3)` `vec_len` — element count.
+    Len,
+    /// `(v, 4)` `vec_push_front` — prepend an element.
+    PushFront,
+    /// `(v, 5)` `vec_pop_front` — drop the first element.
+    PopFront,
+    /// `(v, 6)` `vec_push_back` — append an element.
+    PushBack,
+    /// `(v, 7)` `vec_pop_back` — drop the last element.
+    PopBack,
+    /// `(v, 8)` `vec_front` — first element.
+    Front,
+    /// `(v, 9)` `vec_back` — last element.
+    Back,
+    /// `(v, a)` `vec_insert` — insert an element at an index.
+    Insert,
+    /// `(v, b)` `vec_append` — concatenate two vecs.
+    Append,
+    /// `(v, c)` `vec_slice` — sub-vec over `[start, end)`.
+    Slice,
+    /// `(v, d)` `vec_first_index_of` — first index of an element, or Void.
+    FirstIndexOf,
+    /// `(v, e)` `vec_last_index_of` — last index of an element, or Void.
+    LastIndexOf,
+    /// `(v, f)` `vec_binary_search` — binary search over a sorted vec.
+    /// Returns a raw `u64` (not a `Val`): high bit = found flag, low bits
+    /// = index.
+    BinarySearch,
+    /// `(v, h)` `vec_unpack_to_linear_memory` — write the vec's elements
+    /// into a linear-memory `Val` array.
+    UnpackToLinearMemory,
+}
+
+/// The complete `b`-module (buf: bytes / string / symbol) host-operation
+/// surface, excluding the three `*_new_from_linear_memory` constructors
+/// `(b, 3)` / `(b, i)` / `(b, j)` — the linear-memory recognizer's
+/// [`KnownOp::BytesNew`] / [`KnownOp::StringNew`] / [`KnownOp::SymbolNew`].
+/// Same conventions as [`MapOpKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum BufOpKind {
+    /// `(b, _)` `serialize_to_bytes` — XDR-serialize any `Val`.
+    SerializeToBytes,
+    /// `(b, 0)` `deserialize_from_bytes` — XDR-deserialize to a `Val`.
+    DeserializeFromBytes,
+    /// `(b, 1)` `bytes_copy_to_linear_memory` — copy a bytes slice out to
+    /// linear memory.
+    BytesCopyToLinearMemory,
+    /// `(b, 2)` `bytes_copy_from_linear_memory` — overwrite a bytes range
+    /// from linear memory; returns the new bytes.
+    BytesCopyFromLinearMemory,
+    /// `(b, 4)` `bytes_new` — empty bytes. Named `BytesNewEmpty` to keep
+    /// it distinct from the linear-memory constructor
+    /// [`KnownOp::BytesNew`].
+    BytesNewEmpty,
+    /// `(b, 5)` `bytes_put` — replace the byte at an index.
+    BytesPut,
+    /// `(b, 6)` `bytes_get` — byte at an index.
+    BytesGet,
+    /// `(b, 7)` `bytes_del` — remove the byte at an index.
+    BytesDel,
+    /// `(b, 8)` `bytes_len` — byte count.
+    BytesLen,
+    /// `(b, 9)` `bytes_push` — append a byte.
+    BytesPush,
+    /// `(b, a)` `bytes_pop` — drop the last byte.
+    BytesPop,
+    /// `(b, b)` `bytes_front` — first byte.
+    BytesFront,
+    /// `(b, c)` `bytes_back` — last byte.
+    BytesBack,
+    /// `(b, d)` `bytes_insert` — insert a byte at an index.
+    BytesInsert,
+    /// `(b, e)` `bytes_append` — concatenate two bytes objects.
+    BytesAppend,
+    /// `(b, f)` `bytes_slice` — sub-bytes over `[start, end)`.
+    BytesSlice,
+    /// `(b, g)` `string_copy_to_linear_memory` — copy a string slice out
+    /// to linear memory.
+    StringCopyToLinearMemory,
+    /// `(b, h)` `symbol_copy_to_linear_memory` — copy a symbol slice out
+    /// to linear memory.
+    SymbolCopyToLinearMemory,
+    /// `(b, k)` `string_len` — string byte count.
+    StringLen,
+    /// `(b, l)` `symbol_len` — symbol byte count.
+    SymbolLen,
+    /// `(b, m)` `symbol_index_in_linear_memory` — index of a `Symbol`
+    /// (bare `Symbol` arg, small or object form) within a linear-memory
+    /// table of byte-slice descriptors; the SDK's symbol-dispatch helper.
+    SymbolIndexInLinearMemory,
+    /// `(b, n)` `string_to_bytes` — reinterpret a string as bytes
+    /// (protocol 23+).
+    StringToBytes,
+    /// `(b, o)` `bytes_to_string` — reinterpret bytes as a string
+    /// (protocol 23+).
+    BytesToString,
 }

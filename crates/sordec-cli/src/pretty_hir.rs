@@ -400,6 +400,10 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             vals_pos.index(),
             len.index()
         ),
+        // ---- Collections / bytes ----
+        KnownOp::MapOp { kind, args } => render_call(out, val_abi::map_kind_name(*kind), args),
+        KnownOp::VecOp { kind, args } => render_call(out, val_abi::vec_kind_name(*kind), args),
+        KnownOp::BufOp { kind, args } => render_call(out, val_abi::buf_kind_name(*kind), args),
         // The remaining KnownOps get dedicated renderings when their
         // recognizers land; until then an inspection-only Debug form.
         other => write!(out, "{other:?}"),
@@ -418,6 +422,17 @@ fn render_args(out: &mut impl Write, args: &[ValueId]) -> io::Result<()> {
         write!(out, "v{}", arg.index())?;
     }
     write!(out, ")")
+}
+
+/// Render `name(v1, v2, …)`, keeping the parens for a nullary call —
+/// unlike [`render_args`], which omits them (its callers suffix an
+/// argument-less form onto identifiers, not calls).
+fn render_call(out: &mut impl Write, name: &str, args: &[ValueId]) -> io::Result<()> {
+    write!(out, "{name}")?;
+    if args.is_empty() {
+        return write!(out, "()");
+    }
+    render_args(out, args)
 }
 
 fn render_literal(out: &mut impl Write, lit: &Literal) -> io::Result<()> {
@@ -946,5 +961,48 @@ mod tests {
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "map_new(v3, v4, v5)");
+    }
+
+    // --- collections renderings ---
+
+    #[test]
+    fn map_op_renders_name_and_args() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::MapOp {
+            kind: sordec_ir::MapOpKind::UnpackToLinearMemory,
+            args: vec![v(1), v(2), v(3), v(4)],
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "map_unpack_to_linear_memory(v1, v2, v3, v4)");
+    }
+
+    #[test]
+    fn vec_op_renders_name_and_args() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::VecOp {
+            kind: sordec_ir::VecOpKind::Len,
+            args: vec![v(9)],
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "vec_len(v9)");
+    }
+
+    #[test]
+    fn buf_op_renders_name_and_args() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::BufOp {
+            kind: sordec_ir::BufOpKind::SymbolIndexInLinearMemory,
+            args: vec![v(1), v(2), v(3)],
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "symbol_index_in_linear_memory(v1, v2, v3)");
+    }
+
+    #[test]
+    fn nullary_collection_op_keeps_parens() {
+        // A nullary constructor still renders as a call, not a bare name.
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::MapOp {
+            kind: sordec_ir::MapOpKind::New,
+            args: vec![],
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "map_new()");
     }
 }

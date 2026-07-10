@@ -343,6 +343,66 @@ fn dump_hir_raw_flag_preserves_raw_constructor_calls() {
 }
 
 #[test]
+fn dump_hir_on_timelock_recognizes_collections_ops() {
+    // timelock is the fixture exercising the vec accessors, symbol
+    // dispatch, and map unpack — the collections recognizer names all of
+    // them.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("vec_len("))
+        .stdout(predicate::str::contains("vec_get("))
+        .stdout(predicate::str::contains("vec_first_index_of("))
+        .stdout(predicate::str::contains("symbol_index_in_linear_memory("))
+        .stdout(predicate::str::contains("map_unpack_to_linear_memory("))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn dump_hir_on_token_v23_recognizes_map_unpack() {
+    // Every token fixture decodes its metadata map via map_unpack.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("map_unpack_to_linear_memory("));
+}
+
+#[test]
+fn dump_hir_clears_all_collections_host_calls_on_default_path() {
+    // After the collections pass, no raw m/v/b host call survives the
+    // default pipeline on any corpus fixture.
+    for wasm in [TOKEN_V23, TIMELOCK, DEX] {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-hir", wasm])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("host:m:").not())
+            .stdout(predicate::str::contains("host:v:").not())
+            .stdout(predicate::str::contains("host:b:").not());
+    }
+}
+
+#[test]
+fn dump_hir_raw_flag_preserves_raw_collections_calls() {
+    // `--raw` skips recognition. (A plain `vec_len(` substring check
+    // won't do for the negative — the raw form `host:v:vec_len(...)`
+    // contains it — so assert the absence of the recognition-only
+    // provenance note instead.)
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host:v:vec_len"))
+        .stdout(predicate::str::contains("collections vec_len").not());
+}
+
+#[test]
 fn dump_hir_with_missing_file_exits_three() {
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
