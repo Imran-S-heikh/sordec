@@ -7,6 +7,13 @@
 //! reports `changed: false`), so they compose in the fixpoint pipeline
 //! group.
 //!
+//! One resident is not a recognizer: [`const_prop`] is an *upgrade*
+//! pass that deliberately bypasses the shared [`is_recognized`] skip
+//! guard — its domain is already-`Known` ops carrying an
+//! honestly-unresolved slot (`tier: Unknown`, `resolved: None`), which
+//! it refines in place. It obeys the same monotonicity and idempotency
+//! contract (a filled slot no longer matches).
+//!
 //! The C-series recognizers land here as separate modules:
 //!
 //! - [`val_encoding`] (C1) — Soroban `Val` encode/decode/tag-check and
@@ -25,9 +32,11 @@
 //!   vec, and bytes/string/symbol host operation (52 functions).
 //! - [`cross_contract`] — the `d`-module `call` / `try_call` pair
 //!   (`env.invoke_contract` / `env.try_invoke_contract`).
+//! - [`const_prop`] — the inter-procedural upgrade pass (see above).
 
 pub mod auth;
 pub mod collections;
+pub mod const_prop;
 pub mod context;
 pub mod cross_contract;
 pub mod linear_memory;
@@ -36,6 +45,7 @@ pub mod val_encoding;
 
 pub use auth::AuthPass;
 pub use collections::CollectionsPass;
+pub use const_prop::ConstPropPass;
 pub use context::ContextPass;
 pub use cross_contract::CrossContractPass;
 pub use linear_memory::LinearMemoryPass;

@@ -217,24 +217,42 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             render_args(out, args)
         }
         // ---- Storage (C2) + TTL (C3) ----
-        KnownOp::StorageGet { tier, key } => {
+        KnownOp::StorageGet {
+            tier,
+            durability: _,
+            key,
+        } => {
             write!(out, "storage_get<{}>(v{})", tier_str(tier), key.index())
         }
-        KnownOp::StorageSet { tier, key, value } => write!(
+        KnownOp::StorageSet {
+            tier,
+            durability: _,
+            key,
+            value,
+        } => write!(
             out,
             "storage_set<{}>(v{}, v{})",
             tier_str(tier),
             key.index(),
             value.index()
         ),
-        KnownOp::StorageHas { tier, key } => {
+        KnownOp::StorageHas {
+            tier,
+            durability: _,
+            key,
+        } => {
             write!(out, "storage_has<{}>(v{})", tier_str(tier), key.index())
         }
-        KnownOp::StorageRemove { tier, key } => {
+        KnownOp::StorageRemove {
+            tier,
+            durability: _,
+            key,
+        } => {
             write!(out, "storage_remove<{}>(v{})", tier_str(tier), key.index())
         }
         KnownOp::StorageExtendTtl {
             tier,
+            durability: _,
             key,
             threshold,
             extend_to,
@@ -248,6 +266,7 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
         ),
         KnownOp::StorageExtendTtlV2 {
             tier,
+            durability: _,
             key,
             extend_to,
             min_extension,
@@ -784,6 +803,7 @@ mod tests {
     fn storage_get_renders_known_tier() {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
             tier: StorageTier::Known(KnownTier::Instance),
+            durability: v(93),
             key: v(92),
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
@@ -794,6 +814,7 @@ mod tests {
     fn storage_set_renders_temporary_tier_and_two_args() {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::StorageSet {
             tier: StorageTier::Known(KnownTier::Temporary),
+            durability: v(10),
             key: v(9),
             value: v(0),
         }));
@@ -805,6 +826,7 @@ mod tests {
     fn storage_has_renders_unknown_tier_as_question_mark() {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::StorageHas {
             tier: StorageTier::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            durability: v(2),
             key: v(1),
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
@@ -815,6 +837,7 @@ mod tests {
     fn extend_ttl_renders_tier_and_three_args() {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::StorageExtendTtl {
             tier: StorageTier::Known(KnownTier::Persistent),
+            durability: v(5),
             key: v(4),
             threshold: v(9),
             extend_to: v(14),

@@ -57,6 +57,11 @@ pub enum KnownOp {
     StorageGet {
         /// Which storage tier.
         tier: StorageTier,
+        /// The raw durability operand from the original host call,
+        /// retained so the constant-propagation engine can re-resolve a
+        /// tier the intra-procedural recognizer left `Unknown` (the
+        /// value is typically a helper-function parameter).
+        durability: ValueId,
         /// Key value.
         key: ValueId,
     },
@@ -65,6 +70,11 @@ pub enum KnownOp {
     StorageSet {
         /// Which storage tier.
         tier: StorageTier,
+        /// The raw durability operand from the original host call,
+        /// retained so the constant-propagation engine can re-resolve a
+        /// tier the intra-procedural recognizer left `Unknown` (the
+        /// value is typically a helper-function parameter).
+        durability: ValueId,
         /// Key value.
         key: ValueId,
         /// Value being stored.
@@ -75,6 +85,11 @@ pub enum KnownOp {
     StorageHas {
         /// Which storage tier.
         tier: StorageTier,
+        /// The raw durability operand from the original host call,
+        /// retained so the constant-propagation engine can re-resolve a
+        /// tier the intra-procedural recognizer left `Unknown` (the
+        /// value is typically a helper-function parameter).
+        durability: ValueId,
         /// Key value.
         key: ValueId,
     },
@@ -83,6 +98,11 @@ pub enum KnownOp {
     StorageRemove {
         /// Which storage tier.
         tier: StorageTier,
+        /// The raw durability operand from the original host call,
+        /// retained so the constant-propagation engine can re-resolve a
+        /// tier the intra-procedural recognizer left `Unknown` (the
+        /// value is typically a helper-function parameter).
+        durability: ValueId,
         /// Key value.
         key: ValueId,
     },
@@ -93,6 +113,11 @@ pub enum KnownOp {
     StorageExtendTtl {
         /// Which storage tier.
         tier: StorageTier,
+        /// The raw durability operand from the original host call,
+        /// retained so the constant-propagation engine can re-resolve a
+        /// tier the intra-procedural recognizer left `Unknown` (the
+        /// value is typically a helper-function parameter).
+        durability: ValueId,
         /// Key value.
         key: ValueId,
         /// Threshold ledger count.
@@ -159,6 +184,11 @@ pub enum KnownOp {
     StorageExtendTtlV2 {
         /// Which storage tier.
         tier: StorageTier,
+        /// The raw durability operand from the original host call,
+        /// retained so the constant-propagation engine can re-resolve a
+        /// tier the intra-procedural recognizer left `Unknown` (the
+        /// value is typically a helper-function parameter).
+        durability: ValueId,
         /// Key value.
         key: ValueId,
         /// New target ledger count.

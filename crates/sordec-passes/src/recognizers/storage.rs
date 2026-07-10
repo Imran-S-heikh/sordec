@@ -162,6 +162,7 @@ fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Reco
             Some(Recognized {
                 op: KnownOp::StorageSet {
                     tier,
+                    durability: args[2],
                     key: args[0],
                     value: args[1],
                 },
@@ -174,7 +175,11 @@ fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Reco
         ("0", 2) => {
             let (tier, resolved) = resolve_tier(func, args[1]);
             Some(Recognized {
-                op: KnownOp::StorageHas { tier, key: args[0] },
+                op: KnownOp::StorageHas {
+                    tier,
+                    durability: args[1],
+                    key: args[0],
+                },
                 ty: KnownType::Bool,
                 metric: M_HAS,
                 tier_resolved: Some(resolved),
@@ -184,7 +189,11 @@ fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Reco
         ("1", 2) => {
             let (tier, resolved) = resolve_tier(func, args[1]);
             Some(Recognized {
-                op: KnownOp::StorageGet { tier, key: args[0] },
+                op: KnownOp::StorageGet {
+                    tier,
+                    durability: args[1],
+                    key: args[0],
+                },
                 ty: KnownType::Val,
                 metric: M_GET,
                 tier_resolved: Some(resolved),
@@ -194,7 +203,11 @@ fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Reco
         ("2", 2) => {
             let (tier, resolved) = resolve_tier(func, args[1]);
             Some(Recognized {
-                op: KnownOp::StorageRemove { tier, key: args[0] },
+                op: KnownOp::StorageRemove {
+                    tier,
+                    durability: args[1],
+                    key: args[0],
+                },
                 ty: KnownType::Unit,
                 metric: M_REMOVE,
                 tier_resolved: Some(resolved),
@@ -207,6 +220,7 @@ fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Reco
             Some(Recognized {
                 op: KnownOp::StorageExtendTtl {
                     tier,
+                    durability: args[1],
                     key: args[0],
                     threshold: args[2],
                     extend_to: args[3],
@@ -265,6 +279,7 @@ fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Reco
             Some(Recognized {
                 op: KnownOp::StorageExtendTtlV2 {
                     tier,
+                    durability: args[1],
                     key: args[0],
                     extend_to: args[2],
                     min_extension: args[3],
@@ -450,7 +465,12 @@ mod tests {
         assert!(changed);
         assert_eq!(metrics.get(M_SET), Some(1));
         match expr_at(&func, v(3)) {
-            Expr::Semantic(SemanticOp::Known(KnownOp::StorageSet { tier, key, value })) => {
+            Expr::Semantic(SemanticOp::Known(KnownOp::StorageSet {
+                tier,
+                durability: _,
+                key,
+                value,
+            })) => {
                 assert!(matches!(tier, StorageTier::Known(KnownTier::Persistent)));
                 assert_eq!(*key, v(0));
                 assert_eq!(*value, v(1));
@@ -539,6 +559,7 @@ mod tests {
         match expr_at(&func, v(4)) {
             Expr::Semantic(SemanticOp::Known(KnownOp::StorageExtendTtl {
                 tier,
+                durability: _,
                 key,
                 threshold,
                 extend_to,
@@ -586,6 +607,7 @@ mod tests {
         match expr_at(&func, v(5)) {
             Expr::Semantic(SemanticOp::Known(KnownOp::StorageExtendTtlV2 {
                 tier,
+                durability: _,
                 key,
                 extend_to,
                 min_extension,

@@ -46,8 +46,8 @@ pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
-    AuthPass, CollectionsPass, ContextPass, CrossContractPass, LinearMemoryPass, StoragePass,
-    ValEncodingPass,
+    AuthPass, CollectionsPass, ConstPropPass, ContextPass, CrossContractPass, LinearMemoryPass,
+    StoragePass, ValEncodingPass,
 };
 pub use sordec_common::LiftDiagnostics;
 
@@ -75,6 +75,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(LinearMemoryPass),
             Box::new(CollectionsPass),
             Box::new(CrossContractPass),
+            Box::new(ConstPropPass),
         ],
         vec![],
     )
