@@ -403,6 +403,64 @@ fn dump_hir_raw_flag_preserves_raw_collections_calls() {
 }
 
 #[test]
+fn dump_hir_recognizes_cross_contract_calls() {
+    // dex and timelock both drive token::Client calls, which compile to
+    // the d-module `call` host import.
+    for wasm in [DEX, TIMELOCK] {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-hir", wasm])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("invoke_contract("));
+    }
+}
+
+#[test]
+fn dump_hir_raw_flag_preserves_raw_cross_contract_calls() {
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", DEX])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host:d:call"))
+        .stdout(predicate::str::contains("invoke_contract(").not());
+}
+
+const TOKEN_V22: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../samples/contracts/token-v22/token-v22.wasm"
+);
+
+const TOKEN_V23_STRIPPED: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../samples/contracts/token-v23-stripped/token-v23-stripped.wasm"
+);
+
+#[test]
+fn dump_hir_recognizes_every_host_call_across_the_corpus() {
+    // The Phase 2 recognition milestone: with all seven recognizers
+    // registered, no raw `host:` call of any module survives the default
+    // pipeline on any corpus fixture — every host interaction renders as
+    // a named semantic op.
+    for wasm in [
+        HELLO_ADD,
+        TOKEN_V22,
+        TOKEN_V23,
+        TOKEN_V23_STRIPPED,
+        TIMELOCK,
+        DEX,
+    ] {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-hir", wasm])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("host:").not());
+    }
+}
+
+#[test]
 fn dump_hir_with_missing_file_exits_three() {
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")

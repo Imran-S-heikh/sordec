@@ -404,6 +404,34 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
         KnownOp::MapOp { kind, args } => render_call(out, val_abi::map_kind_name(*kind), args),
         KnownOp::VecOp { kind, args } => render_call(out, val_abi::vec_kind_name(*kind), args),
         KnownOp::BufOp { kind, args } => render_call(out, val_abi::buf_kind_name(*kind), args),
+        // ---- Cross-contract calls ----
+        KnownOp::InvokeContract {
+            contract,
+            function,
+            args,
+        } => {
+            write!(out, "invoke_contract(v{}, v{}", contract.index(), function.index())?;
+            for a in args {
+                write!(out, ", v{}", a.index())?;
+            }
+            write!(out, ")")
+        }
+        KnownOp::TryInvokeContract {
+            contract,
+            function,
+            args,
+        } => {
+            write!(
+                out,
+                "try_invoke_contract(v{}, v{}",
+                contract.index(),
+                function.index()
+            )?;
+            for a in args {
+                write!(out, ", v{}", a.index())?;
+            }
+            write!(out, ")")
+        }
         // The remaining KnownOps get dedicated renderings when their
         // recognizers land; until then an inspection-only Debug form.
         other => write!(out, "{other:?}"),
@@ -1004,5 +1032,29 @@ mod tests {
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "map_new()");
+    }
+
+    // --- cross-contract renderings ---
+
+    #[test]
+    fn invoke_contract_renders_contract_symbol_and_args_handle() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::InvokeContract {
+            contract: v(1),
+            function: v(2),
+            args: vec![v(3)],
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "invoke_contract(v1, v2, v3)");
+    }
+
+    #[test]
+    fn try_invoke_contract_renders() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::TryInvokeContract {
+            contract: v(4),
+            function: v(5),
+            args: vec![v(6)],
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "try_invoke_contract(v4, v5, v6)");
     }
 }

@@ -23,10 +23,13 @@
 //!   modules, resolving literal contents against the module's rodata.
 //! - [`collections`] — the remaining `m`/`v`/`b` surface: every map,
 //!   vec, and bytes/string/symbol host operation (52 functions).
+//! - [`cross_contract`] — the `d`-module `call` / `try_call` pair
+//!   (`env.invoke_contract` / `env.try_invoke_contract`).
 
 pub mod auth;
 pub mod collections;
 pub mod context;
+pub mod cross_contract;
 pub mod linear_memory;
 pub mod storage;
 pub mod val_encoding;
@@ -34,6 +37,7 @@ pub mod val_encoding;
 pub use auth::AuthPass;
 pub use collections::CollectionsPass;
 pub use context::ContextPass;
+pub use cross_contract::CrossContractPass;
 pub use linear_memory::LinearMemoryPass;
 pub use storage::StoragePass;
 pub use val_encoding::ValEncodingPass;
