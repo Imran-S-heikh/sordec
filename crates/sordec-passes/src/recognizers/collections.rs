@@ -191,6 +191,7 @@ mod tests {
             blocks,
             bindings,
             region: Region::Unreachable,
+            params: vec![],
         }
     }
 

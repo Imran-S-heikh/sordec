@@ -156,6 +156,16 @@ fn lower_function(
         reason: UnknownReason::UpstreamUnknown,
     };
 
+    // Function parameters = the ENTRY block's params, in order. Only the
+    // entry block's params are function parameters — loop-header block
+    // params are phi nodes, not arguments. This ordered list is what
+    // lets inter-procedural analyses bind `Call.args[i]` to param `i`.
+    let params = func
+        .blocks
+        .get(func.entry)
+        .map(|entry| entry.params.clone())
+        .unwrap_or_default();
+
     HighFunction {
         id: func.id,
         name,
@@ -163,6 +173,7 @@ fn lower_function(
         blocks,
         bindings,
         region,
+        params,
     }
 }
 

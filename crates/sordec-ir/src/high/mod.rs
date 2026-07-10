@@ -121,6 +121,16 @@ pub struct HighFunction {
 
     /// Structured control-flow root.
     pub region: Region,
+
+    /// The function's parameters, in declaration order: the binding ids
+    /// of the *entry block's* block params (each an
+    /// [`Expr::Phi`](crate::Expr::Phi) with no intra-procedural
+    /// incoming edges). Preserved from the lifted entry block by the
+    /// boundary lowering — WASM erases parameter identity otherwise —
+    /// so inter-procedural analyses can bind a caller's positional
+    /// `Call` arguments to these ids, and the emitter can name them.
+    /// Empty for a nullary function.
+    pub params: Vec<ValueId>,
 }
 
 /// One basic block in the high IR.
