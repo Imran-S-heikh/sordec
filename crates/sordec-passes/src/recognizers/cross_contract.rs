@@ -102,6 +102,9 @@ fn try_cross_contract(id: ValueId, expr: &Expr) -> Option<Rewrite> {
                 function: args[1],
                 // The single VecObject handle, pending expansion.
                 args: vec![args[2]],
+                // Filled by the const-prop engine when the symbol
+                // constant is reachable.
+                resolved_callee: None,
             },
             "call",
             M_INVOKE,
@@ -111,6 +114,7 @@ fn try_cross_contract(id: ValueId, expr: &Expr) -> Option<Rewrite> {
                 contract: args[0],
                 function: args[1],
                 args: vec![args[2]],
+                resolved_callee: None,
             },
             "try_call",
             M_TRY_INVOKE,
@@ -208,7 +212,9 @@ mod tests {
                 contract,
                 function,
                 args,
+                resolved_callee,
             })) => {
+                assert_eq!(*resolved_callee, None, "recognition never names");
                 assert_eq!(*contract, v(0));
                 assert_eq!(*function, v(1));
                 // The single VecObject handle, pending expansion.

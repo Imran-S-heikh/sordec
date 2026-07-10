@@ -270,6 +270,12 @@ pub enum KnownOp {
         contract: ValueId,
         /// Function symbol (a `Symbol` value).
         function: ValueId,
+        /// Recovered callee function name, filled by the
+        /// constant-propagation engine when `function` resolves to a
+        /// symbol constant (a tag-14 `SymbolSmall` literal or a
+        /// rodata-backed `SymbolNew`); `None` until proven.
+        // JUSTIFY: Callee names are arbitrary contract identifiers.
+        resolved_callee: Option<String>,
         /// Argument vector.
         args: Vec<ValueId>,
     },
@@ -280,6 +286,12 @@ pub enum KnownOp {
         contract: ValueId,
         /// Function symbol.
         function: ValueId,
+        /// Recovered callee function name, filled by the
+        /// constant-propagation engine when `function` resolves to a
+        /// symbol constant (a tag-14 `SymbolSmall` literal or a
+        /// rodata-backed `SymbolNew`); `None` until proven.
+        // JUSTIFY: Callee names are arbitrary contract identifiers.
+        resolved_callee: Option<String>,
         /// Argument vector.
         args: Vec<ValueId>,
     },

@@ -428,29 +428,21 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             contract,
             function,
             args,
-        } => {
-            write!(out, "invoke_contract(v{}, v{}", contract.index(), function.index())?;
-            for a in args {
-                write!(out, ", v{}", a.index())?;
-            }
-            write!(out, ")")
-        }
+            resolved_callee,
+        } => render_invoke(out, "invoke_contract", *contract, *function, args, resolved_callee),
         KnownOp::TryInvokeContract {
             contract,
             function,
             args,
-        } => {
-            write!(
-                out,
-                "try_invoke_contract(v{}, v{}",
-                contract.index(),
-                function.index()
-            )?;
-            for a in args {
-                write!(out, ", v{}", a.index())?;
-            }
-            write!(out, ")")
-        }
+            resolved_callee,
+        } => render_invoke(
+            out,
+            "try_invoke_contract",
+            *contract,
+            *function,
+            args,
+            resolved_callee,
+        ),
         // The remaining KnownOps get dedicated renderings when their
         // recognizers land; until then an inspection-only Debug form.
         other => write!(out, "{other:?}"),
@@ -480,6 +472,28 @@ fn render_call(out: &mut impl Write, name: &str, args: &[ValueId]) -> io::Result
         return write!(out, "()");
     }
     render_args(out, args)
+}
+
+/// Render a cross-contract call: the callee renders as its recovered
+/// name when the const-prop engine resolved it, else as the raw symbol
+/// operand.
+fn render_invoke(
+    out: &mut impl Write,
+    name: &str,
+    contract: ValueId,
+    function: ValueId,
+    args: &[ValueId],
+    resolved_callee: &Option<String>,
+) -> io::Result<()> {
+    write!(out, "{name}(v{}, ", contract.index())?;
+    match resolved_callee {
+        Some(callee) => write!(out, "{callee:?}")?,
+        None => write!(out, "v{}", function.index())?,
+    }
+    for a in args {
+        write!(out, ", v{}", a.index())?;
+    }
+    write!(out, ")")
 }
 
 fn render_literal(out: &mut impl Write, lit: &Literal) -> io::Result<()> {
@@ -1065,6 +1079,7 @@ mod tests {
             contract: v(1),
             function: v(2),
             args: vec![v(3)],
+            resolved_callee: None,
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "invoke_contract(v1, v2, v3)");
@@ -1076,6 +1091,7 @@ mod tests {
             contract: v(4),
             function: v(5),
             args: vec![v(6)],
+            resolved_callee: None,
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "try_invoke_contract(v4, v5, v6)");

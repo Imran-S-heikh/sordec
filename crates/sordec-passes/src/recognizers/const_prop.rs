@@ -12,6 +12,19 @@
 //! - `SymbolNew` / `StringNew` / `BytesNew` with `resolved: None` — the
 //!   `(lm_pos, len)` pair threads through phi chains / helper
 //!   parameters. Re-resolved against the module rodata: `None → Some`.
+//! - `InvokeContract` / `TryInvokeContract` with
+//!   `resolved_callee: None` — the callee symbol is a tag-14
+//!   `SymbolSmall` constant or a rodata-backed `SymbolNew`; the ABI
+//!   types that position as `Symbol`, so a valid decode names it.
+//! - **Storage-key naming**: a storage op's `key` operand whose
+//!   terminal binding is a valid tag-14 symbol literal gets that
+//!   *literal binding* rewritten `Literal::I64(bits)` →
+//!   `Literal::Symbol(text)` (the key position is ABI-typed `Val`).
+//!   The provenance note preserves the original bits. Caveat
+//!   (documented, theoretical): a binding shared between a symbol use
+//!   and an unrelated raw-integer use of identical tag-shaped bits
+//!   would be misrendered — rustc does not share constants across such
+//!   roles, and the bits stay recoverable from provenance.
 //!
 //! Both upgrade directions are exactly the monotonicity contract
 //! (`Unknown → Known`, never the reverse), and the pass is idempotent:
@@ -29,12 +42,18 @@
 //! the `is_recognized` skip guard — its entire domain is already-Known
 //! ops.
 
-use sordec_common::{FuncId, ProvenanceSource};
-use sordec_ir::{Expr, HighIr, KnownOp, KnownTier, SemanticOp, StorageTier};
+use std::collections::HashSet;
+
+use sordec_common::{FuncId, IrId, ProvenanceSource, ValueId};
+use sordec_ir::{
+    Expr, HighFunction, HighIr, IrType, KnownOp, KnownTier, KnownType, Literal, SemanticOp,
+    StorageTier,
+};
 
 use super::{apply_rewrites, Rewrite};
-use crate::dataflow::{CallIndex, Resolver};
+use crate::dataflow::{resolve_use, CallIndex, Resolver};
 use crate::pass::{Pass, PassResult};
+use crate::val_abi::decode_small_symbol;
 
 /// Pass name — also the provenance `pass` field for every rewrite.
 pub const PASS_NAME: &str = "const-prop";
@@ -42,6 +61,8 @@ pub const PASS_NAME: &str = "const-prop";
 // Metric counter keys.
 const M_TIER_UPGRADED: &str = "const_prop_tier_upgraded";
 const M_LITERAL_RESOLVED: &str = "const_prop_literal_resolved";
+const M_CALLEE_NAMED: &str = "const_prop_callee_named";
+const M_KEY_NAMED: &str = "const_prop_key_named";
 /// Upgrade attempts that stayed honestly unresolved (the engine's
 /// remaining-work signal).
 const M_UNRESOLVED: &str = "const_prop_unresolved";
@@ -65,6 +86,9 @@ impl Pass<HighIr> for ConstPropPass {
         let mut planned: Vec<(FuncId, Vec<Rewrite>)> = Vec::new();
         for func in &ir.functions {
             let mut rewrites: Vec<Rewrite> = Vec::new();
+            // Storage-key literal rewrites planned once per terminal
+            // binding, even when several ops share the key.
+            let mut named_keys: HashSet<ValueId> = HashSet::new();
             for (id, binding) in func.bindings.iter() {
                 let Expr::Semantic(SemanticOp::Known(op)) = &binding.expr else {
                     continue;
@@ -86,6 +110,9 @@ impl Pass<HighIr> for ConstPropPass {
                         result.metrics.increment(M_UNRESOLVED, 1);
                     }
                     Upgrade::NotATarget => {}
+                }
+                if let Some(rw) = try_name_storage_key(func, op, &mut named_keys) {
+                    rewrites.push(rw);
                 }
             }
             if !rewrites.is_empty() {
@@ -218,8 +245,75 @@ fn try_upgrade(resolver: &mut Resolver<'_>, func: FuncId, op: &KnownOp) -> Upgra
             None => Upgrade::StillUnresolved,
         },
 
+        // ---- Cross-contract callee naming: None → Some via the
+        // symbol constant in the ABI-typed Symbol position ----
+        KnownOp::InvokeContract {
+            resolved_callee: None,
+            function,
+            ..
+        }
+        | KnownOp::TryInvokeContract {
+            resolved_callee: None,
+            function,
+            ..
+        } => match resolver.resolve_symbol_text(func, *function) {
+            Some(callee) => {
+                let note = format!("const-prop callee={callee:?} (symbol const)");
+                let mut upgraded = op.clone();
+                match &mut upgraded {
+                    KnownOp::InvokeContract {
+                        resolved_callee, ..
+                    }
+                    | KnownOp::TryInvokeContract {
+                        resolved_callee, ..
+                    } => *resolved_callee = Some(callee),
+                    _ => unreachable!("cloned from an invoke variant"),
+                }
+                Upgrade::Rewrite(upgraded, note, M_CALLEE_NAMED)
+            }
+            None => Upgrade::StillUnresolved,
+        },
+
         _ => Upgrade::NotATarget,
     }
+}
+
+/// If a storage op's `key` operand terminates at a valid tag-14 symbol
+/// literal, plan a rewrite of that *literal binding* to
+/// `Literal::Symbol` — the key position is ABI-typed `Val`, so the
+/// decode is anchored, and the note preserves the original bits.
+fn try_name_storage_key(
+    func: &HighFunction,
+    op: &KnownOp,
+    named: &mut HashSet<ValueId>,
+) -> Option<Rewrite> {
+    let key = match op {
+        KnownOp::StorageGet { key, .. }
+        | KnownOp::StorageSet { key, .. }
+        | KnownOp::StorageHas { key, .. }
+        | KnownOp::StorageRemove { key, .. }
+        | KnownOp::StorageExtendTtl { key, .. }
+        | KnownOp::StorageExtendTtlV2 { key, .. } => *key,
+        _ => return None,
+    };
+    let terminal = resolve_use(func, key);
+    if (terminal.index() as usize) >= func.bindings.len() || !named.insert(terminal) {
+        return None;
+    }
+    let bits = match &func.bindings.get(terminal)?.expr {
+        Expr::Literal(Literal::I64(bits)) => *bits as u64,
+        Expr::Literal(Literal::U64(bits)) => *bits,
+        _ => return None,
+    };
+    let text = decode_small_symbol(bits)?;
+    Some(Rewrite {
+        id: terminal,
+        expr: Expr::Literal(Literal::Symbol(text.clone())),
+        ty: Some(IrType::Known(KnownType::Symbol)),
+        source: ProvenanceSource::DataFlow,
+        note: format!("const-prop key symbol {text:?} (decoded SymbolSmall 0x{bits:x})"),
+        metric: M_KEY_NAMED,
+    })
 }
 
 /// Resolve a durability operand to a known tier, mirroring the storage
@@ -582,6 +676,217 @@ mod tests {
         assert!(prov.note.contains("tier=temporary"), "note: {}", prov.note);
         // Append-only: the recognition-time entry is still there.
         assert!(binding.provenance().len() >= 2);
+    }
+
+    // --- callee naming ---
+
+    fn tag14_bits(text: &str) -> i64 {
+        let mut body = 0u64;
+        for c in text.bytes() {
+            let code = match c {
+                b'_' => 1,
+                b'0'..=b'9' => 2 + (c - b'0'),
+                b'A'..=b'Z' => 12 + (c - b'A'),
+                b'a'..=b'z' => 38 + (c - b'a'),
+                _ => panic!("invalid symbol char"),
+            };
+            body = (body << 6) | u64::from(code);
+        }
+        ((body << 8) | 14) as i64
+    }
+
+    fn invoke(contract: u32, function: u32, args: u32) -> Expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::InvokeContract {
+            contract: v(contract),
+            function: v(function),
+            args: vec![v(args)],
+            resolved_callee: None,
+        }))
+    }
+
+    #[test]
+    fn callee_named_from_local_symbol_constant() {
+        let mut ir = module(vec![func(
+            0,
+            None,
+            0,
+            vec![i64c(0), i64c(tag14_bits("transfer")), i64c(0), invoke(0, 1, 2)],
+        )]);
+        let result = run(&mut ir);
+        assert!(result.changed);
+        assert_eq!(result.metrics.get(M_CALLEE_NAMED), Some(1));
+        let f0 = ir.function(f(0)).unwrap();
+        match &f0.bindings.get(v(3)).unwrap().expr {
+            Expr::Semantic(SemanticOp::Known(KnownOp::InvokeContract {
+                resolved_callee, ..
+            })) => assert_eq!(resolved_callee.as_deref(), Some("transfer")),
+            other => panic!("expected named InvokeContract, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn callee_named_through_helper_parameter() {
+        // The invoke sits in an un-exported helper; the caller passes
+        // the symbol constant.
+        let mut ir = module(vec![
+            func(0, None, 3, vec![invoke(0, 1, 2)]), // params: contract, fn, args
+            func(
+                1,
+                None,
+                0,
+                vec![
+                    i64c(0),
+                    i64c(tag14_bits("balance")),
+                    i64c(0),
+                    Expr::Call {
+                        target: f(0),
+                        args: vec![v(0), v(1), v(2)],
+                    },
+                ],
+            ),
+        ]);
+        let result = run(&mut ir);
+        assert_eq!(result.metrics.get(M_CALLEE_NAMED), Some(1));
+        let helper = ir.function(f(0)).unwrap();
+        match &helper.bindings.get(v(3)).unwrap().expr {
+            Expr::Semantic(SemanticOp::Known(KnownOp::InvokeContract {
+                resolved_callee, ..
+            })) => assert_eq!(resolved_callee.as_deref(), Some("balance")),
+            other => panic!("expected named InvokeContract, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn callee_named_from_symbol_new_rederivation() {
+        // The callee traces to a SymbolNew whose (pos, len) resolve;
+        // the text re-derives from rodata regardless of its own
+        // `resolved` slot.
+        let mut ir = module(vec![func(
+            0,
+            None,
+            0,
+            vec![
+                i64c(0), // contract
+                i64c(u32val_bits(100)),
+                i64c(u32val_bits(8)),
+                Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew {
+                    lm_pos: v(1),
+                    len: v(2),
+                    resolved: None,
+                })),
+                i64c(0), // args vec handle
+                invoke(0, 3, 4),
+            ],
+        )]);
+        ir.memory = MemoryImage::from_segments(vec![DataSegment {
+            offset: 100,
+            bytes: b"transfer".to_vec(),
+        }]);
+        let result = run(&mut ir);
+        assert_eq!(result.metrics.get(M_CALLEE_NAMED), Some(1));
+        let f0 = ir.function(f(0)).unwrap();
+        match &f0.bindings.get(v(5)).unwrap().expr {
+            Expr::Semantic(SemanticOp::Known(KnownOp::InvokeContract {
+                resolved_callee, ..
+            })) => assert_eq!(resolved_callee.as_deref(), Some("transfer")),
+            other => panic!("expected named InvokeContract, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn callee_with_invalid_bits_stays_unnamed() {
+        // A non-tag-14 constant in the callee slot must not produce a
+        // garbled name.
+        let mut ir = module(vec![func(
+            0,
+            None,
+            0,
+            vec![i64c(0), i64c(12345), i64c(0), invoke(0, 1, 2)],
+        )]);
+        let result = run(&mut ir);
+        assert!(!result.changed);
+        assert_eq!(result.metrics.get(M_UNRESOLVED), Some(1));
+    }
+
+    // --- storage-key naming ---
+
+    #[test]
+    fn storage_key_literal_renamed_to_symbol() {
+        let mut ir = module(vec![func(
+            0,
+            None,
+            0,
+            vec![
+                i64c(tag14_bits("Admin")),
+                i64c(2),
+                Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+                    tier: StorageTier::Known(KnownTier::Instance),
+                    durability: v(1),
+                    key: v(0),
+                })),
+            ],
+        )]);
+        let result = run(&mut ir);
+        assert!(result.changed);
+        assert_eq!(result.metrics.get(M_KEY_NAMED), Some(1));
+        let f0 = ir.function(f(0)).unwrap();
+        let key_binding = f0.bindings.get(v(0)).unwrap();
+        match &key_binding.expr {
+            Expr::Literal(Literal::Symbol(text)) => assert_eq!(text, "Admin"),
+            other => panic!("expected Symbol literal, got {other:?}"),
+        }
+        assert_eq!(
+            key_binding.ty,
+            IrType::Known(sordec_ir::KnownType::Symbol)
+        );
+        // Provenance preserves the original bits.
+        let note = &key_binding.latest_provenance().note;
+        assert!(note.contains("0x"), "note: {note}");
+    }
+
+    #[test]
+    fn shared_key_literal_renamed_once() {
+        // Two ops share one key literal — the rewrite is planned once.
+        let get = |key: u32, dur: u32| {
+            Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+                tier: StorageTier::Known(KnownTier::Instance),
+                durability: v(dur),
+                key: v(key),
+            }))
+        };
+        let mut ir = module(vec![func(
+            0,
+            None,
+            0,
+            vec![i64c(tag14_bits("State")), i64c(2), get(0, 1), get(0, 1)],
+        )]);
+        let result = run(&mut ir);
+        assert_eq!(result.metrics.get(M_KEY_NAMED), Some(1));
+    }
+
+    #[test]
+    fn naming_is_idempotent() {
+        let mut ir = module(vec![func(
+            0,
+            None,
+            0,
+            vec![
+                i64c(tag14_bits("Admin")),
+                i64c(2),
+                Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+                    tier: StorageTier::Known(KnownTier::Instance),
+                    durability: v(1),
+                    key: v(0),
+                })),
+                i64c(0),
+                i64c(tag14_bits("transfer")),
+                i64c(0),
+                invoke(3, 4, 5),
+            ],
+        )]);
+        assert!(run(&mut ir).changed);
+        let second = run(&mut ir);
+        assert!(!second.changed, "filled slots and Symbol literals no longer match");
     }
 
     #[test]

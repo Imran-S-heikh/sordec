@@ -417,6 +417,29 @@ fn dump_hir_recognizes_cross_contract_calls() {
 }
 
 #[test]
+fn dump_hir_names_cross_contract_callees() {
+    // The const-prop engine decodes the tag-14 callee symbols in the
+    // ABI-typed Symbol position: dex drives token.transfer and
+    // token.balance, timelock drives token.transfer. (Measured corpus
+    // wins — all three cross-contract calls in the corpus are named.)
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", DEX])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"transfer\","))
+        .stdout(predicate::str::contains("\"balance\","))
+        .stdout(predicate::str::contains("const-prop callee=\"transfer\""));
+
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("const-prop callee=\"transfer\""));
+}
+
+#[test]
 fn dump_hir_raw_flag_preserves_raw_cross_contract_calls() {
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")

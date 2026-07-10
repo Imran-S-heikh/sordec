@@ -413,6 +413,61 @@ pub fn addr_kind_result_type(kind: AddressOpKind) -> KnownType {
 }
 
 // ---------------------------------------------------------------------
+// SymbolSmall (tag 14) decoding
+// ---------------------------------------------------------------------
+
+/// Number of bits per packed symbol character.
+const SYMBOL_CODE_BITS: u32 = 6;
+/// Maximum characters in a small symbol (9 × 6 = 54 ≤ 56 body bits).
+const SYMBOL_MAX_CHARS: u32 = 9;
+
+/// Decode a raw 64-bit `Val` as a `SymbolSmall` (tag 14): up to 9
+/// characters packed 6 bits each into the 56-bit body, first character
+/// in the highest-order code slot.
+///
+/// Character codes per `soroban-env-common 26.1.2` `symbol.rs`:
+/// `1` = `_`, `2..=11` = `0`-`9`, `12..=37` = `A`-`Z`, `38..=63` =
+/// `a`-`z`; `0` is leading padding. Validated empirically against
+/// SDK-emitted constants in the corpus (`"transfer"`, `"burn"`,
+/// `"METADATA"`, …) — see the tests.
+///
+/// **Strict**: returns `None` (never a garbled name) for a wrong tag, a
+/// body wider than 54 bits, an interior zero code, or an empty body.
+#[must_use]
+pub fn decode_small_symbol(bits: u64) -> Option<String> {
+    if (bits & TAG_MASK) != u64::from(TAG_SYMBOL_SMALL) {
+        return None;
+    }
+    let body = bits >> TAG_BITS;
+    if body >= 1u64 << (SYMBOL_CODE_BITS * SYMBOL_MAX_CHARS) {
+        return None;
+    }
+    let mut out = String::new();
+    for slot in (0..SYMBOL_MAX_CHARS).rev() {
+        let code = ((body >> (SYMBOL_CODE_BITS * slot)) & 0x3F) as u8;
+        match code {
+            0 => {
+                // Zero is only valid as leading padding.
+                if !out.is_empty() {
+                    return None;
+                }
+            }
+            1 => out.push('_'),
+            2..=11 => out.push(char::from(b'0' + code - 2)),
+            12..=37 => out.push(char::from(b'A' + code - 12)),
+            38..=63 => out.push(char::from(b'a' + code - 38)),
+            _ => unreachable!("6-bit code"),
+        }
+    }
+    // An all-zero body is a valid (empty) symbol Val, but naming
+    // anything with "" adds no information — stay unresolved.
+    if out.is_empty() {
+        return None;
+    }
+    Some(out)
+}
+
+// ---------------------------------------------------------------------
 // m/v/b-module collections + bytes operations
 // ---------------------------------------------------------------------
 //
@@ -1020,6 +1075,64 @@ mod tests {
         assert_eq!(buf_kind_result_type(BufOpKind::BytesToString), KnownType::String);
         assert_eq!(buf_kind_result_type(BufOpKind::StringToBytes), KnownType::Bytes);
         assert_eq!(buf_kind_result_type(BufOpKind::DeserializeFromBytes), KnownType::Val);
+    }
+
+    // --- SymbolSmall decoding ---
+
+    #[test]
+    fn decode_small_symbol_matches_sdk_emitted_corpus_constants() {
+        // Fixed vectors harvested from the corpus fixtures' actual
+        // i64 constants — i.e. bits produced by the real SDK/rustc
+        // encoder, so this locks agreement with upstream, not just
+        // self-consistency.
+        for (bits, expected) in [
+            (2_678_977_294u64, "burn"),
+            (3_404_527_886, "mint"),
+            (696_753_673_873_934, "balance"),
+            (27_311_646_515_383_310, "METADATA"),
+            (65_154_533_130_155_790, "transfer"),
+            (4_083_516_257_707_209_486, "set_admin"),
+        ] {
+            assert_eq!(
+                decode_small_symbol(bits).as_deref(),
+                Some(expected),
+                "bits {bits} must decode to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_small_symbol_covers_all_char_classes() {
+        // Encode "_0Aa9" with the documented table and decode it back.
+        let codes = [1u64, 2, 12, 38, 11]; // _, 0, A, a, 9
+        let mut body = 0u64;
+        for c in codes {
+            body = (body << 6) | c;
+        }
+        let bits = (body << 8) | u64::from(TAG_SYMBOL_SMALL);
+        assert_eq!(decode_small_symbol(bits).as_deref(), Some("_0Aa9"));
+    }
+
+    #[test]
+    fn decode_small_symbol_rejects_malformed_input() {
+        // Wrong tag (U32Val).
+        assert_eq!(decode_small_symbol((5 << 32) | 4), None);
+        // Body wider than 54 bits (bit 55 of the body set).
+        let too_wide = (1u64 << (54 + 8)) | u64::from(TAG_SYMBOL_SMALL);
+        assert_eq!(decode_small_symbol(too_wide), None);
+        // Interior zero code: 'a' in the top slot, zero, then 'b'.
+        let body = (38u64 << 12) | 39; // slot gap between the chars
+        let bits = (body << 8) | u64::from(TAG_SYMBOL_SMALL);
+        assert_eq!(decode_small_symbol(bits), None);
+        // Empty body: a valid Val, but useless as a name.
+        assert_eq!(decode_small_symbol(u64::from(TAG_SYMBOL_SMALL)), None);
+    }
+
+    #[test]
+    fn decode_small_symbol_covers_all_char_classes_typo_guard() {
+        // "z" is code 63 — the table's last entry.
+        let bits = (63u64 << 8) | u64::from(TAG_SYMBOL_SMALL);
+        assert_eq!(decode_small_symbol(bits).as_deref(), Some("z"));
     }
 
     #[test]

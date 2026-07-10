@@ -51,7 +51,7 @@ use sordec_common::{FuncId, IrId, ValueId};
 use sordec_ir::{Expr, HighFunction, HighIr, KnownOp, KnownType, Literal, SemanticOp, WasmOpcodeKind};
 
 use super::high::resolve_use;
-use crate::val_abi::{TAG_MASK, TAG_U32_VAL};
+use crate::val_abi::{decode_small_symbol, TAG_MASK, TAG_U32_VAL};
 
 /// Defensive recursion bound for [`Resolver`] walks, mirroring
 /// [`DEFAULT_MAX_DEPTH`](super::DEFAULT_MAX_DEPTH). Cycles are handled
@@ -167,10 +167,18 @@ impl CallIndex {
 ///   offsets, and the C1 `ValEncodeSmall { ty: U32 }` wrapper is
 ///   peeled. Meets compare *decoded* u32s, so mixed representations
 ///   across callers still agree.
+/// - [`SymbolText`](Flavor::SymbolText): the value is a Soroban
+///   `Symbol` in an ABI-proven Symbol position. Terminals: a 64-bit
+///   literal is strictly decoded as a tag-14 `SymbolSmall`; a
+///   recognized `SymbolNew` op re-derives its text from rodata via its
+///   own `(lm_pos, len)` operands (independent of whether its
+///   `resolved` slot is filled — order-free). Meets compare the
+///   decoded text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Flavor {
     RawInt,
     U32Val,
+    SymbolText,
 }
 
 /// Inter-procedural constant resolver. Read-only over the IR; owns its
@@ -253,6 +261,20 @@ impl<'a> Resolver<'a> {
         self.ir.memory.read(pos, length).map(<[u8]>::to_vec)
     }
 
+    /// Resolve `value` (in `func`) — an operand in an ABI-proven
+    /// `Symbol` position — to its symbol text, whether it is a tag-14
+    /// `SymbolSmall` constant or a rodata-backed `SymbolNew`, across
+    /// phis and calls.
+    #[must_use]
+    pub fn resolve_symbol_text(&mut self, func: FuncId, value: ValueId) -> Option<String> {
+        self.reset();
+        let (lit, _) = self.walk(func, value, Flavor::SymbolText);
+        match lit? {
+            Literal::Symbol(text) => Some(text),
+            _ => None,
+        }
+    }
+
     /// Reset per-query state. The path set is empty on clean exits by
     /// the insert/remove discipline; clearing defensively keeps a
     /// panicked or capped walk from poisoning the next query. The memo
@@ -333,6 +355,27 @@ impl<'a> Resolver<'a> {
 
         match &binding.expr {
             Expr::Literal(lit) => (decode_terminal_literal(lit, flavor), false),
+
+            // A recognized symbol constructor in a Symbol position:
+            // re-derive the text from rodata via its own (lm_pos, len)
+            // operands — independent of whether the op's `resolved`
+            // slot has been filled, so upgrade ordering is a non-issue.
+            Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { lm_pos, len, .. }))
+                if flavor == Flavor::SymbolText =>
+            {
+                let (pos, t1) = self.walk(func_id, *lm_pos, Flavor::U32Val);
+                let (length, t2) = self.walk(func_id, *len, Flavor::U32Val);
+                let taint = t1 || t2;
+                let text = match (pos, length) {
+                    (Some(Literal::U32(p)), Some(Literal::U32(l))) => self
+                        .ir
+                        .memory
+                        .read(p, l)
+                        .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok()),
+                    _ => None,
+                };
+                (text.map(Literal::Symbol), taint)
+            }
 
             // The C1-recognized U32Val wrapper: peel for the U32Val
             // flavor only. In RawInt flavor a Val payload is not the
@@ -480,6 +523,14 @@ fn decode_terminal_literal(lit: &Literal, flavor: Flavor) -> Option<Literal> {
             // 32-bit literals are bare (unwrapped) offsets.
             Literal::U32(n) => Some(Literal::U32(*n)),
             Literal::I32(n) => u32::try_from(*n).ok().map(Literal::U32),
+            _ => None,
+        },
+        Flavor::SymbolText => match lit {
+            // 64-bit literals are raw Vals: strict tag-14 decode.
+            Literal::I64(bits) => decode_small_symbol(*bits as u64).map(Literal::Symbol),
+            Literal::U64(bits) => decode_small_symbol(*bits).map(Literal::Symbol),
+            // An already-decoded symbol literal passes through.
+            Literal::Symbol(text) => Some(Literal::Symbol(text.clone())),
             _ => None,
         },
     }
