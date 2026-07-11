@@ -15,7 +15,7 @@
 //! Hand-transcribed from `soroban-env-common` **26.1.2** (`src/val.rs`,
 //! `src/num.rs`) and cross-checked against the vendored
 //! `host_calls/env.json` (same release) for the conversion-function
-//! export letters. Unlike the host-call catalog (191 entries → vendored
+//! export letters. Unlike the host-call catalog (192 entries → vendored
 //! JSON), this is ~25 constants: a hand-written table with tests is the
 //! right size. **Never edit without re-verifying upstream** — the
 //! procedure is: read `val.rs`'s `Tag` enum and layout constants in the

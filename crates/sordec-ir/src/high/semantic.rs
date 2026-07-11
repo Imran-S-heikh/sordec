@@ -539,7 +539,7 @@ pub enum KnownOp {
 /// The complete `i`-module (`int`) host-side Val conversion surface.
 ///
 /// One variant per conversion host function, covering the full ABI (the
-/// same "specialization is radical" rule as the 191-entry host-call
+/// same "specialization is radical" rule as the 192-entry host-call
 /// catalog). Each variant documents its `(module, export)` import pair
 /// from `soroban-env-common 26.1.2`'s `env.json`. The
 /// `(module, export) → ValObjectKind` mapping table lives in
