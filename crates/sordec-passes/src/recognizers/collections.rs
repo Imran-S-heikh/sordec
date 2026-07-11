@@ -192,6 +192,7 @@ mod tests {
             bindings,
             region: Region::Unreachable,
             params: vec![],
+            returns: vec![],
         }
     }
 

@@ -131,6 +131,17 @@ pub struct HighFunction {
     /// `Call` arguments to these ids, and the emitter can name them.
     /// Empty for a nullary function.
     pub params: Vec<ValueId>,
+
+    /// The function's return sites, in block order: for every
+    /// `Return` terminator in the lifted CFG, the values it returned.
+    /// Preserved by the boundary lowering (`HighBlock` carries no
+    /// terminators, so returns would otherwise be invisible) so
+    /// inter-procedural analyses can resolve a caller's `Call` result
+    /// from the callee's returned values, and the emitter can type the
+    /// function result. Faithful record: 0-value and multi-value sites
+    /// appear as-is; consumers guard on arity. Empty for a function
+    /// with no reachable-or-not `Return` (diverging).
+    pub returns: Vec<Vec<ValueId>>,
 }
 
 /// One basic block in the high IR.

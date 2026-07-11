@@ -417,6 +417,22 @@ fn dump_hir_recognizes_cross_contract_calls() {
 }
 
 #[test]
+fn dump_hir_names_storage_key_through_return() {
+    // The const-prop return arm reaches the METADATA DataKey symbol,
+    // which lives in a constant-returning helper and flows to a storage
+    // op through the call result — the measured return-propagation win.
+    for wasm in [TOKEN_V22, TOKEN_V23, TOKEN_V23_STRIPPED] {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-hir", wasm])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("symbol!(\"METADATA\")"))
+            .stdout(predicate::str::contains("const-prop key symbol \"METADATA\""));
+    }
+}
+
+#[test]
 fn dump_hir_names_cross_contract_callees() {
     // The const-prop engine decodes the tag-14 callee symbols in the
     // ABI-typed Symbol position: dex drives token.transfer and

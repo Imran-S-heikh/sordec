@@ -10,8 +10,10 @@
 //! - [`CallIndex`] — the module's first call graph: for every local
 //!   function, the `Expr::Call` sites that target it.
 //! - [`Resolver`] — a whole-module constant tracer that follows `Use`
-//!   chains, meets over phi edges, and binds helper parameters to the
-//!   positional arguments of *all* their callers.
+//!   chains, meets over phi edges, binds helper parameters to the
+//!   positional arguments of *all* their callers (caller → callee), and
+//!   resolves a `Call` result to the meet of the callee's return sites
+//!   (callee → caller).
 //!
 //! ## Soundness rules (each guards a concrete wrong-answer hole)
 //!
@@ -409,6 +411,33 @@ impl<'a> Resolver<'a> {
                 )
             }
 
+            // A direct call: resolve as the callee's return value. The
+            // callee's body is fully visible, so — unlike parameter
+            // resolution — no exported/indirect guards are needed;
+            // recursion is caught by the path set. The structural
+            // guards below are permanent facts: untainted, memoizable.
+            Expr::Call { target, .. } => {
+                let Some(callee) = self.ir.function(*target) else {
+                    return (None, false);
+                };
+                // Zero return sites = diverging; any site with other
+                // than exactly one value means the Call binding is not
+                // "the value" (multi-result projections lower to
+                // Unknown). Honest None either way.
+                if callee.returns.is_empty()
+                    || callee.returns.iter().any(|values| values.len() != 1)
+                {
+                    return (None, false);
+                }
+                let callee_id = *target;
+                let site_values: Vec<ValueId> =
+                    callee.returns.iter().map(|values| values[0]).collect();
+                // Meet over every return site with the caller's
+                // unchanged flavor — taint and cycle discipline
+                // inherited from `meet`.
+                self.meet(callee_id, site_values, flavor)
+            }
+
             _ => (None, false),
         }
     }
@@ -598,6 +627,7 @@ mod tests {
             bindings,
             region: Region::Unreachable,
             params,
+            returns: vec![],
         }
     }
 
@@ -1040,5 +1070,115 @@ mod tests {
         };
         let ir = module(vec![func(0, None, 0, vec![indirect])]);
         assert!(CallIndex::build(&ir).has_indirect_calls());
+    }
+
+    // --- return-value resolution (callee → caller) ---
+
+    /// Set a function's return sites from value indices.
+    fn with_returns(mut f: HighFunction, sites: Vec<Vec<u32>>) -> HighFunction {
+        f.returns = sites
+            .into_iter()
+            .map(|vals| vals.into_iter().map(v).collect())
+            .collect();
+        f
+    }
+
+    #[test]
+    fn call_result_resolves_from_single_return_site() {
+        // f0 returns const 5; f1 calls it.
+        let f0 = with_returns(func(0, None, 0, vec![i64c(5)]), vec![vec![0]]);
+        let f1 = func(1, None, 0, vec![call(0, vec![])]);
+        let ir = module(vec![f0, f1]);
+        assert_eq!(resolve_int(&ir, 1, 0), Some(5));
+    }
+
+    #[test]
+    fn call_result_resolves_through_return_phi() {
+        // The corpus shape: f0's body is `v0 = 5; v1 = phi[(bb0, v0)]`
+        // and it returns v1.
+        let f0 = with_returns(
+            func(0, None, 0, vec![i64c(5), phi(vec![(0, 0)])]),
+            vec![vec![1]],
+        );
+        let f1 = func(1, None, 0, vec![call(0, vec![])]);
+        let ir = module(vec![f0, f1]);
+        assert_eq!(resolve_int(&ir, 1, 0), Some(5));
+    }
+
+    #[test]
+    fn call_result_meets_agreeing_return_sites() {
+        let f0 = with_returns(
+            func(0, None, 0, vec![i64c(3), i64c(3)]),
+            vec![vec![0], vec![1]],
+        );
+        let f1 = func(1, None, 0, vec![call(0, vec![])]);
+        let ir = module(vec![f0, f1]);
+        assert_eq!(resolve_int(&ir, 1, 0), Some(3));
+    }
+
+    #[test]
+    fn call_result_disagreeing_return_sites_return_none() {
+        let f0 = with_returns(
+            func(0, None, 0, vec![i64c(1), i64c(2)]),
+            vec![vec![0], vec![1]],
+        );
+        let f1 = func(1, None, 0, vec![call(0, vec![])]);
+        let ir = module(vec![f0, f1]);
+        assert_eq!(resolve_int(&ir, 1, 0), None);
+    }
+
+    #[test]
+    fn call_result_dead_site_disagreeing_returns_none() {
+        // R7: a Return in an unreachable block still participates; a
+        // disagreeing dead site conservatively forces None.
+        let f0 = with_returns(
+            func(0, None, 0, vec![i64c(7), i64c(9)]),
+            vec![vec![0], vec![1]], // second site is "dead" but present
+        );
+        let f1 = func(1, None, 0, vec![call(0, vec![])]);
+        let ir = module(vec![f0, f1]);
+        assert_eq!(resolve_int(&ir, 1, 0), None);
+    }
+
+    #[test]
+    fn call_result_zero_return_sites_returns_none() {
+        // Diverging callee (no Return terminator).
+        let f0 = func(0, None, 0, vec![i64c(5)]); // returns: []
+        let f1 = func(1, None, 0, vec![call(0, vec![])]);
+        let ir = module(vec![f0, f1]);
+        assert_eq!(resolve_int(&ir, 1, 0), None);
+    }
+
+    #[test]
+    fn call_result_multi_value_site_returns_none() {
+        // A return site with two values → the Call binding is not "the
+        // value".
+        let f0 = with_returns(
+            func(0, None, 0, vec![i64c(1), i64c(2)]),
+            vec![vec![0, 1]],
+        );
+        let f1 = func(1, None, 0, vec![call(0, vec![])]);
+        let ir = module(vec![f0, f1]);
+        assert_eq!(resolve_int(&ir, 1, 0), None);
+    }
+
+    #[test]
+    fn recursion_through_return_returns_none() {
+        // f0 returns the result of calling itself — pure cycle.
+        let f0 = with_returns(func(0, None, 0, vec![call(0, vec![])]), vec![vec![0]]);
+        let ir = module(vec![f0]);
+        assert_eq!(resolve_int(&ir, 0, 0), None);
+    }
+
+    #[test]
+    fn u32val_resolves_through_return() {
+        // A helper returns a U32Val const; the caller consumes it.
+        let f0 = with_returns(
+            func(0, None, 0, vec![i64c(u32val_bits(64))]),
+            vec![vec![0]],
+        );
+        let f1 = func(1, None, 0, vec![call(0, vec![])]);
+        let ir = module(vec![f0, f1]);
+        assert_eq!(resolve_u32val(&ir, 1, 0), Some(64));
     }
 }

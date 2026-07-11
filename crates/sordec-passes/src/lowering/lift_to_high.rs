@@ -166,6 +166,20 @@ fn lower_function(
         .map(|entry| entry.params.clone())
         .unwrap_or_default();
 
+    // Return sites, in block order. HighBlock carries no terminators
+    // (control flow lives in `region`), so without this table a
+    // callee's returned values would be invisible to inter-procedural
+    // analyses. Recorded faithfully — arity guarding is the consumer's
+    // job.
+    let returns = func
+        .blocks
+        .iter()
+        .filter_map(|(_, lblock)| match &lblock.terminator {
+            LiftedTerminator::Return { values } => Some(values.clone()),
+            _ => None,
+        })
+        .collect();
+
     HighFunction {
         id: func.id,
         name,
@@ -174,6 +188,7 @@ fn lower_function(
         bindings,
         region,
         params,
+        returns,
     }
 }
 

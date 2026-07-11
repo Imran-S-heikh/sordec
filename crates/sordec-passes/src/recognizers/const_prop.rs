@@ -42,11 +42,11 @@
 //! the `is_recognized` skip guard — its entire domain is already-Known
 //! ops.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use sordec_common::{FuncId, IrId, ProvenanceSource, ValueId};
 use sordec_ir::{
-    Expr, HighFunction, HighIr, IrType, KnownOp, KnownTier, KnownType, Literal, SemanticOp,
+    Expr, HighIr, IrType, KnownOp, KnownTier, KnownType, Literal, SemanticOp,
     StorageTier,
 };
 
@@ -80,22 +80,24 @@ impl Pass<HighIr> for ConstPropPass {
         let mut result = PassResult::default();
 
         // Phase A — read-only: snapshot the call graph, then collect
-        // rewrites per function through the whole-module resolver.
+        // rewrites (per owning function) through the whole-module
+        // resolver.
         let calls = CallIndex::build(ir);
         let mut resolver = Resolver::new(ir, &calls);
-        let mut planned: Vec<(FuncId, Vec<Rewrite>)> = Vec::new();
+        let mut planned: HashMap<FuncId, Vec<Rewrite>> = HashMap::new();
+        // Storage-key literal rewrites plan the *literal binding*, which
+        // may live in another function; dedupe globally so a shared key
+        // literal is renamed once.
+        let mut named_keys: HashSet<(FuncId, ValueId)> = HashSet::new();
+
         for func in &ir.functions {
-            let mut rewrites: Vec<Rewrite> = Vec::new();
-            // Storage-key literal rewrites planned once per terminal
-            // binding, even when several ops share the key.
-            let mut named_keys: HashSet<ValueId> = HashSet::new();
             for (id, binding) in func.bindings.iter() {
                 let Expr::Semantic(SemanticOp::Known(op)) = &binding.expr else {
                     continue;
                 };
                 match try_upgrade(&mut resolver, func.id, op) {
                     Upgrade::Rewrite(new_op, note, metric) => {
-                        rewrites.push(Rewrite {
+                        planned.entry(func.id).or_default().push(Rewrite {
                             id,
                             expr: Expr::Semantic(SemanticOp::Known(new_op)),
                             // The op's ABI result type was already set at
@@ -111,12 +113,30 @@ impl Pass<HighIr> for ConstPropPass {
                     }
                     Upgrade::NotATarget => {}
                 }
-                if let Some(rw) = try_name_storage_key(func, op, &mut named_keys) {
-                    rewrites.push(rw);
+                // Storage-key naming: collect every tag-14 symbol literal
+                // reachable through the key operand (across phis, helper
+                // params, and helper returns), and rename each once.
+                if let Some(key) = storage_key_of(op) {
+                    let mut sites = Vec::new();
+                    let mut visited = HashSet::new();
+                    collect_symbol_literal_sites(
+                        ir, &calls, func.id, key, &mut sites, &mut visited, 0,
+                    );
+                    for (site_fn, site_id, bits, text) in sites {
+                        if named_keys.insert((site_fn, site_id)) {
+                            planned.entry(site_fn).or_default().push(Rewrite {
+                                id: site_id,
+                                expr: Expr::Literal(Literal::Symbol(text.clone())),
+                                ty: Some(IrType::Known(KnownType::Symbol)),
+                                source: ProvenanceSource::DataFlow,
+                                note: format!(
+                                    "const-prop key symbol {text:?} (decoded SymbolSmall 0x{bits:x})"
+                                ),
+                                metric: M_KEY_NAMED,
+                            });
+                        }
+                    }
                 }
-            }
-            if !rewrites.is_empty() {
-                planned.push((func.id, rewrites));
             }
         }
         drop(resolver);
@@ -278,42 +298,124 @@ fn try_upgrade(resolver: &mut Resolver<'_>, func: FuncId, op: &KnownOp) -> Upgra
     }
 }
 
-/// If a storage op's `key` operand terminates at a valid tag-14 symbol
-/// literal, plan a rewrite of that *literal binding* to
-/// `Literal::Symbol` — the key position is ABI-typed `Val`, so the
-/// decode is anchored, and the note preserves the original bits.
-fn try_name_storage_key(
-    func: &HighFunction,
-    op: &KnownOp,
-    named: &mut HashSet<ValueId>,
-) -> Option<Rewrite> {
-    let key = match op {
+/// Depth bound for the storage-key site collection (mirrors the
+/// resolver's `DEFAULT_RESOLVE_DEPTH`).
+const KEY_COLLECT_DEPTH: u32 = 128;
+
+/// The `key` operand of a storage op, or `None` for a non-storage op.
+fn storage_key_of(op: &KnownOp) -> Option<ValueId> {
+    match op {
         KnownOp::StorageGet { key, .. }
         | KnownOp::StorageSet { key, .. }
         | KnownOp::StorageHas { key, .. }
         | KnownOp::StorageRemove { key, .. }
         | KnownOp::StorageExtendTtl { key, .. }
-        | KnownOp::StorageExtendTtlV2 { key, .. } => *key,
-        _ => return None,
-    };
-    let terminal = resolve_use(func, key);
-    if (terminal.index() as usize) >= func.bindings.len() || !named.insert(terminal) {
-        return None;
+        | KnownOp::StorageExtendTtlV2 { key, .. } => Some(*key),
+        _ => None,
     }
-    let bits = match &func.bindings.get(terminal)?.expr {
-        Expr::Literal(Literal::I64(bits)) => *bits as u64,
-        Expr::Literal(Literal::U64(bits)) => *bits,
-        _ => return None,
+}
+
+/// Collect every tag-14 `SymbolSmall` literal binding reachable through
+/// a storage-key operand, as `(owning_func, literal_binding, bits,
+/// text)`. Unlike the resolver's value-meet, this is a **reachability
+/// collection** (union): different witnessed paths legitimately reach
+/// different `DataKey` symbols, and each is independently ABI-anchored
+/// (a `Val`-typed key position on that static dataflow path). The
+/// `visited` set is global to this collection — a node is expanded once
+/// (reachability is arrival-path-independent), which is both complete
+/// and O(nodes+edges).
+///
+/// Fan-out: `resolve_use` chase → a decodable `I64`/`U64` literal is a
+/// site → a phi fans to all incoming → a parameter fans to every
+/// caller's positional arg → a `Call` fans to the callee's return
+/// sites (only when every site is single-valued). A `Literal::Symbol`
+/// terminal is a non-site (already named — idempotency). Malformed
+/// edges are skipped, never aborting the collection.
+#[allow(clippy::too_many_arguments)]
+fn collect_symbol_literal_sites(
+    ir: &HighIr,
+    calls: &CallIndex,
+    func_id: FuncId,
+    value: ValueId,
+    out: &mut Vec<(FuncId, ValueId, u64, String)>,
+    visited: &mut HashSet<(FuncId, ValueId)>,
+    depth: u32,
+) {
+    if depth >= KEY_COLLECT_DEPTH {
+        return;
+    }
+    let Some(func) = ir.function(func_id) else {
+        return;
     };
-    let text = decode_small_symbol(bits)?;
-    Some(Rewrite {
-        id: terminal,
-        expr: Expr::Literal(Literal::Symbol(text.clone())),
-        ty: Some(IrType::Known(KnownType::Symbol)),
-        source: ProvenanceSource::DataFlow,
-        note: format!("const-prop key symbol {text:?} (decoded SymbolSmall 0x{bits:x})"),
-        metric: M_KEY_NAMED,
-    })
+    let terminal = resolve_use(func, value);
+    if (terminal.index() as usize) >= func.bindings.len() || !visited.insert((func_id, terminal)) {
+        return;
+    }
+    let Some(binding) = func.bindings.get(terminal) else {
+        return;
+    };
+
+    // Parameter fan-out: to every caller's positional argument. (A
+    // parameter is an empty-incoming Phi; fanning to callers is the
+    // location analogue of the resolver's param path, sound existentially
+    // even without the exported/indirect guards.)
+    if let Some(index) = func.params.iter().position(|p| *p == terminal) {
+        for site in calls.callers_of(func_id) {
+            let Some(caller) = ir.function(site.caller) else {
+                continue;
+            };
+            if (site.call.index() as usize) >= caller.bindings.len() {
+                continue;
+            }
+            let Some(cb) = caller.bindings.get(site.call) else {
+                continue;
+            };
+            let Expr::Call { args, .. } = &cb.expr else {
+                continue;
+            };
+            let Some(arg) = args.get(index) else {
+                continue;
+            };
+            collect_symbol_literal_sites(ir, calls, site.caller, *arg, out, visited, depth + 1);
+        }
+        return;
+    }
+
+    match &binding.expr {
+        Expr::Literal(Literal::I64(bits)) => {
+            if let Some(text) = decode_small_symbol(*bits as u64) {
+                out.push((func_id, terminal, *bits as u64, text));
+            }
+        }
+        Expr::Literal(Literal::U64(bits)) => {
+            if let Some(text) = decode_small_symbol(*bits) {
+                out.push((func_id, terminal, *bits, text));
+            }
+        }
+        Expr::Phi { incoming } => {
+            for (_, v) in incoming {
+                collect_symbol_literal_sites(ir, calls, func_id, *v, out, visited, depth + 1);
+            }
+        }
+        Expr::Call { target, .. } => {
+            let Some(callee) = ir.function(*target) else {
+                return;
+            };
+            // Same single-value-site discipline as the resolver's Call
+            // arm: a multi-value or diverging callee's result is not a
+            // scalar the key literal can flow from.
+            if callee.returns.is_empty() || callee.returns.iter().any(|vs| vs.len() != 1) {
+                return;
+            }
+            let callee_id = *target;
+            let sites: Vec<ValueId> = callee.returns.iter().map(|vs| vs[0]).collect();
+            for rv in sites {
+                collect_symbol_literal_sites(ir, calls, callee_id, rv, out, visited, depth + 1);
+            }
+        }
+        // Literal::Symbol (already named) and everything else: non-site.
+        _ => {}
+    }
 }
 
 /// Resolve a durability operand to a known tier, mirroring the storage
@@ -410,6 +512,7 @@ mod tests {
             bindings,
             region: Region::Unreachable,
             params,
+            returns: vec![],
         }
     }
 
@@ -862,6 +965,98 @@ mod tests {
         )]);
         let result = run(&mut ir);
         assert_eq!(result.metrics.get(M_KEY_NAMED), Some(1));
+    }
+
+    fn call(target: u32, args: Vec<ValueId>) -> Expr {
+        Expr::Call {
+            target: f(target),
+            args,
+        }
+    }
+
+    fn with_returns(mut f: HighFunction, sites: Vec<Vec<u32>>) -> HighFunction {
+        f.returns = sites
+            .into_iter()
+            .map(|vals| vals.into_iter().map(v).collect())
+            .collect();
+        f
+    }
+
+    fn storage_get(key: u32, dur: u32) -> Expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+            tier: StorageTier::Known(KnownTier::Instance),
+            durability: v(dur),
+            key: v(key),
+        }))
+    }
+
+    #[test]
+    fn key_named_through_helper_return() {
+        // The exact corpus shape: func_4 returns the METADATA constant;
+        // a caller's storage op uses that call result as its key.
+        // f0 = the DataKey-returning helper; f1 does
+        //   v0 = call f0; v1 = dur=2; v2 = storage_get(key=v0, dur=v1)
+        let f0 = with_returns(
+            func(0, None, 0, vec![i64c(tag14_bits("METADATA"))]),
+            vec![vec![0]],
+        );
+        let f1 = func(
+            1,
+            None,
+            0,
+            vec![call(0, vec![]), i64c(2), storage_get(0, 1)],
+        );
+        let mut ir = module(vec![f0, f1]);
+        let result = run(&mut ir);
+        assert_eq!(result.metrics.get(M_KEY_NAMED), Some(1));
+        // The rename lands on the LITERAL binding in f0, not the caller.
+        let helper = ir.function(f(0)).unwrap();
+        match &helper.bindings.get(v(0)).unwrap().expr {
+            Expr::Literal(Literal::Symbol(text)) => assert_eq!(text, "METADATA"),
+            other => panic!("expected renamed Symbol in helper, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_param_fans_to_two_helper_literals() {
+        // f0(key) does storage_get(key). Two callers pass two DIFFERENT
+        // DataKey symbols — collection (not meet) renames BOTH.
+        let f0 = func(0, None, 1, vec![i64c(2), storage_get(0, 1)]);
+        let f1 = func(
+            1,
+            None,
+            0,
+            vec![i64c(tag14_bits("Admin")), call(0, vec![v(0)])],
+        );
+        let f2 = func(
+            2,
+            None,
+            0,
+            vec![i64c(tag14_bits("State")), call(0, vec![v(0)])],
+        );
+        let mut ir = module(vec![f0, f1, f2]);
+        let result = run(&mut ir);
+        assert_eq!(result.metrics.get(M_KEY_NAMED), Some(2));
+        assert!(matches!(
+            &ir.function(f(1)).unwrap().bindings.get(v(0)).unwrap().expr,
+            Expr::Literal(Literal::Symbol(t)) if t == "Admin"
+        ));
+        assert!(matches!(
+            &ir.function(f(2)).unwrap().bindings.get(v(0)).unwrap().expr,
+            Expr::Literal(Literal::Symbol(t)) if t == "State"
+        ));
+    }
+
+    #[test]
+    fn key_naming_through_return_is_idempotent() {
+        let f0 = with_returns(
+            func(0, None, 0, vec![i64c(tag14_bits("METADATA"))]),
+            vec![vec![0]],
+        );
+        let f1 = func(1, None, 0, vec![call(0, vec![]), i64c(2), storage_get(0, 1)]);
+        let mut ir = module(vec![f0, f1]);
+        assert!(run(&mut ir).changed);
+        assert!(!run(&mut ir).changed, "renamed literal no longer matches");
     }
 
     #[test]
