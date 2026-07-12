@@ -457,6 +457,15 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
         KnownOp::MapOp { kind, args } => render_call(out, val_abi::map_kind_name(*kind), args),
         KnownOp::VecOp { kind, args } => render_call(out, val_abi::vec_kind_name(*kind), args),
         KnownOp::BufOp { kind, args } => render_call(out, val_abi::buf_kind_name(*kind), args),
+        // ---- Crypto / PRNG / test / deploy (abi-sweep) ----
+        KnownOp::CryptoOp { kind, args } => {
+            render_call(out, val_abi::crypto_kind_name(*kind), args)
+        }
+        KnownOp::PrngOp { kind, args } => render_call(out, val_abi::prng_kind_name(*kind), args),
+        KnownOp::TestOp { kind, args } => render_call(out, val_abi::test_kind_name(*kind), args),
+        KnownOp::DeployOp { kind, args } => {
+            render_call(out, val_abi::deploy_kind_name(*kind), args)
+        }
         // ---- Cross-contract calls ----
         KnownOp::InvokeContract {
             contract,
@@ -494,9 +503,10 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             *arg_count,
             resolved_args,
         ),
-        // The remaining KnownOps get dedicated renderings when their
-        // recognizers land; until then an inspection-only Debug form.
-        other => write!(out, "{other:?}"),
+        // NOTE: this match is exhaustive over `KnownOp` — every variant
+        // has a dedicated rendering. A new `KnownOp` must add its arm
+        // here (a deliberate compile-time forcing function; there is no
+        // Debug fallback to silently absorb it).
     }
 }
 

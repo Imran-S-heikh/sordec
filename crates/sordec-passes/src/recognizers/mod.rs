@@ -34,6 +34,7 @@
 //!   (`env.invoke_contract` / `env.try_invoke_contract`).
 //! - [`const_prop`] — the inter-procedural upgrade pass (see above).
 
+pub mod abi_sweep;
 pub mod auth;
 pub mod auth_flow;
 pub mod client_call;
@@ -47,6 +48,7 @@ pub mod storage;
 pub mod val_encoding;
 pub(crate) mod wrappers;
 
+pub use abi_sweep::AbiSweepPass;
 pub use auth::AuthPass;
 pub use auth_flow::AuthFlowPass;
 pub use client_call::ClientCallPass;
