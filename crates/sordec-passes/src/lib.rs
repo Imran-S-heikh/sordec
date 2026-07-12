@@ -48,7 +48,8 @@ pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
     AbiSweepPass, AuthFlowPass, AuthPass, ClientCallPass, CollectionsPass, ConstPropPass,
-    ContextPass, CrossContractPass, EnumKeyPass, LinearMemoryPass, StoragePass, ValEncodingPass,
+    ContextPass, CrossContractPass, DispatcherPass, EnumKeyPass, LinearMemoryPass, StoragePass,
+    ValEncodingPass,
 };
 pub use sordec_common::LiftDiagnostics;
 
@@ -70,7 +71,11 @@ use sordec_ir::HighIr;
 /// but it keeps the refiners-before-consumers reading of the manifest.
 /// [`AbiSweepPass`] runs after [`StoragePass`] and [`CollectionsPass`]
 /// so every prior `l`/`m`/`v`/`b` claim happens first — its `l`-deploy
-/// pickup is then unambiguous. [`ClientCallPass`] consumes
+/// pickup is then unambiguous. [`DispatcherPass`] runs immediately after
+/// [`CollectionsPass`], which produces the
+/// `SymbolIndexInLinearMemory` `BufOp` it refines; it needs only that op
+/// plus `memory` + `soroban_facts`, so it is independent of the
+/// const-prop / enum-key refiners. [`ClientCallPass`] consumes
 /// `ConstPropPass`'s `resolved_callee`; [`AuthFlowPass`] runs last,
 /// consuming `EnumKeyPass`'s resolved keys (hard dependencies both). No
 /// fixpoint group: the dependency chain is a straight line and every
@@ -85,6 +90,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(ContextPass),
             Box::new(LinearMemoryPass),
             Box::new(CollectionsPass),
+            Box::new(DispatcherPass),
             Box::new(AbiSweepPass),
             Box::new(CrossContractPass),
             Box::new(ConstPropPass),

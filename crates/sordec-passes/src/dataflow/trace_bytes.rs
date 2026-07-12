@@ -28,10 +28,17 @@
 //! machinery here is correct and exercised for the local-constant case.
 
 use sordec_common::{IrId, ValueId};
-use sordec_ir::{Expr, HighFunction, KnownOp, KnownType, Literal, MemoryImage, SemanticOp};
+use sordec_ir::{
+    Expr, HighFunction, KnownOp, KnownType, Literal, MemoryImage, SemanticOp, WasmOpcodeKind,
+};
 
 use super::high::{resolve_use, trace_int};
 use crate::val_abi::{TAG_MASK, TAG_U32_VAL};
+
+/// Depth cap for peeling chained width conversions ahead of a constant.
+/// Conversion chains in real code are one deep (the `i32 -> i64` extend
+/// before Val-encoding); this only guards against a pathological IR.
+const CONVERSION_PEEL_DEPTH: u32 = 8;
 
 /// Resolve `value` to the `u32` it carries as a Soroban `U32Val`.
 ///
@@ -51,17 +58,59 @@ pub fn trace_u32val(func: &HighFunction, value: ValueId) -> Option<u32> {
     }
     match &func.bindings.get(terminal)?.expr {
         // C1 recognized `(raw << 32) | 4` as a U32 small-encode; the raw
-        // u32 is the wrapped payload.
+        // u32 is the wrapped payload. It commonly arrives as an
+        // `i32 -> i64` extend of a constant offset (the SDK widens the
+        // u32 before packing), so peel any width conversion first.
         Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall {
             ty: KnownType::U32,
             value: inner,
-        })) => u32::try_from(trace_int(func, *inner)?).ok(),
+        })) => u32::try_from(trace_int_through_conversions(func, *inner, CONVERSION_PEEL_DEPTH)?)
+            .ok(),
         // A fully-constant U32Val literal.
         Expr::Literal(Literal::I64(bits)) => decode_u32val(*bits as u64),
         Expr::Literal(Literal::U64(bits)) => decode_u32val(*bits),
         // A bare (unwrapped) integer offset.
         Expr::Literal(Literal::U32(n)) => Some(*n),
         Expr::Literal(Literal::I32(n)) => u32::try_from(*n).ok(),
+        _ => None,
+    }
+}
+
+/// Trace `value` to an integer constant, seeing through single-operand
+/// width conversions.
+///
+/// The lowering erases the specific conversion operator — an
+/// `i64.extend_i32_u`, an `i32.wrap_i64`, etc. all become
+/// `Expr::Unknown { op_kind: Conversion }` — so this peels *any*
+/// single-operand conversion over an integer constant. That is sound for
+/// the one caller ([`trace_u32val`]'s `U32Val` payload): only the low 32
+/// bits are packed into the Val, and every integer width conversion of a
+/// constant agrees on those bits (a float operand traces to `None` via
+/// [`trace_int`], so it stays safe). Mirrors the same peel in
+/// `recognizers::wrappers::operand_param_walk`.
+fn trace_int_through_conversions(func: &HighFunction, value: ValueId, depth: u32) -> Option<i128> {
+    let terminal = resolve_use(func, value);
+    match conversion_operand(func, terminal) {
+        Some(inner) if depth > 0 => trace_int_through_conversions(func, inner, depth - 1),
+        _ => trace_int(func, terminal),
+    }
+}
+
+/// The sole operand of `id` when it is a single-operand width conversion,
+/// else `None`. See [`trace_int_through_conversions`] for why the specific
+/// conversion opcode does not matter.
+fn conversion_operand(func: &HighFunction, id: ValueId) -> Option<ValueId> {
+    // Bounds-check before `Arena::get`, which debug_asserts on an
+    // out-of-range id (`resolve_use` returns dangling ids unchanged).
+    if (id.index() as usize) >= func.bindings.len() {
+        return None;
+    }
+    match &func.bindings.get(id)?.expr {
+        Expr::Unknown {
+            op_kind: WasmOpcodeKind::Conversion,
+            args,
+            ..
+        } if args.len() == 1 => Some(args[0]),
         _ => None,
     }
 }
@@ -187,6 +236,26 @@ mod tests {
     fn bare_u32_offset_resolves() {
         let func = func_with_exprs(vec![Expr::Literal(Literal::U32(42))]);
         assert_eq!(trace_u32val(&func, v(0)), Some(42));
+    }
+
+    #[test]
+    fn val_encode_small_peels_width_conversion() {
+        // The timelock shape: v0 = i32 const offset; v1 = i64.extend_i32_u
+        // (an opaque `Conversion` after lowering); v2 = ValEncodeSmall<U32>.
+        // trace_u32val must see through the extend to the constant.
+        let func = func_with_exprs(vec![
+            Expr::Literal(Literal::I32(1_048_600)),
+            Expr::Unknown {
+                op_kind: WasmOpcodeKind::Conversion,
+                args: vec![v(0)],
+                reason: UnknownReason::UnsupportedPattern,
+            },
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall {
+                ty: KnownType::U32,
+                value: v(1),
+            })),
+        ]);
+        assert_eq!(trace_u32val(&func, v(2)), Some(1_048_600));
     }
 
     #[test]
