@@ -57,7 +57,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use sordec_common::{FuncId, IrId, ProvenanceSource, ValueId};
 use sordec_ir::{
-    EnumKey, Expr, HighFunction, HighIr, KnownOp, MemWidth, SemanticOp, UnionDef, WasmOpcodeKind,
+    EnumKey, Expr, HighFunction, HighIr, KnownOp, MemWidth, SemanticOp, UnionDef,
 };
 
 use super::{apply_rewrites, Rewrite};
@@ -721,126 +721,17 @@ fn read_symbol_text(
 /// `depth` nested calls) contains a `SymbolNew` host op whose
 /// `(lm_pos, len)` operands are fed positionally from the wrapper's own
 /// parameters. Returns those parameter positions so a caller's constant
-/// args can be read off directly.
+/// args can be read off directly. Thin adapter over the shared
+/// [`wrapper_params`](super::wrappers::wrapper_params) search.
 fn wrapper_symbol_params(ir: &HighIr, target: FuncId, depth: u32) -> Option<(usize, usize)> {
-    let func = ir.function(target)?;
-    if func.name.is_some() {
-        return None;
+    let params = super::wrappers::wrapper_params(ir, target, depth, &|op| match op {
+        KnownOp::SymbolNew { lm_pos, len, .. } => Some(vec![*lm_pos, *len]),
+        _ => None,
+    })?;
+    match params[..] {
+        [pos, len] => Some((pos, len)),
+        _ => None,
     }
-    for (_, binding) in func.bindings.iter() {
-        match &binding.expr {
-            Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { lm_pos, len, .. })) => {
-                let pos_param = operand_param(func, *lm_pos)?;
-                let len_param = operand_param(func, *len)?;
-                return Some((pos_param, len_param));
-            }
-            Expr::Call { target: g, args } if depth > 0 => {
-                let Some((inner_pos, inner_len)) = wrapper_symbol_params(ir, *g, depth - 1)
-                else {
-                    continue;
-                };
-                let pos_param = args.get(inner_pos).and_then(|a| operand_param(func, *a));
-                let len_param = args.get(inner_len).and_then(|a| operand_param(func, *a));
-                if let (Some(p), Some(l)) = (pos_param, len_param) {
-                    return Some((p, l));
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Walk depth for [`operand_param`] — the SDK's `Symbol::new` threads
-/// its `(pos, len)` through long phi chains and width conversions.
-const PARAM_WALK_DEPTH: u32 = 64;
-
-/// Outcome of one [`operand_param_walk`] arm.
-enum ParamWalk {
-    /// Resolved to this parameter position.
-    Param(usize),
-    /// Re-entered a node on the current path: a purely-cyclic
-    /// loop-carried arm, which contributes no value of its own.
-    Cycle,
-    /// Non-parameter terminal.
-    Fail,
-}
-
-/// Which of `func`'s parameters feeds `operand`. Peels the C1
-/// `ValEncodeSmall` U32Val wrapper and pure width conversions, and
-/// meets over phi edges (every non-cyclic incoming path must reach the
-/// *same* parameter) — the SDK's `Symbol::new` small/long dual path
-/// rejoins its original `(pos, len)` through exactly such phis, with a
-/// loop-carried back edge from the small-symbol packing loop. A pure
-/// cycle arm (`x = phi(p, …→x)`) carries the value unchanged and is
-/// skipped; any *transforming* back edge (`x+1`, a load, …) fails the
-/// arm before the cycle closes, keeping the meet conservative.
-fn operand_param(func: &HighFunction, operand: ValueId) -> Option<usize> {
-    let mut path = std::collections::HashSet::new();
-    match operand_param_walk(func, operand, PARAM_WALK_DEPTH, &mut path) {
-        ParamWalk::Param(idx) => Some(idx),
-        ParamWalk::Cycle | ParamWalk::Fail => None,
-    }
-}
-
-fn operand_param_walk(
-    func: &HighFunction,
-    operand: ValueId,
-    depth: u32,
-    path: &mut std::collections::HashSet<ValueId>,
-) -> ParamWalk {
-    if depth == 0 {
-        return ParamWalk::Fail;
-    }
-    let current = resolve_use(func, operand);
-    if let Some(idx) = func.params.iter().position(|p| *p == current) {
-        return ParamWalk::Param(idx);
-    }
-    if !path.insert(current) {
-        return ParamWalk::Cycle;
-    }
-    let result = match func.bindings.get(current).map(|b| &b.expr) {
-        Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { value, .. }))) => {
-            operand_param_walk(func, *value, depth - 1, path)
-        }
-        // A pure numeric width conversion of the same value (the
-        // i32→i64 extend before Val-encoding).
-        Some(Expr::Unknown {
-            op_kind: WasmOpcodeKind::Conversion,
-            args,
-            ..
-        }) if args.len() == 1 => operand_param_walk(func, args[0], depth - 1, path),
-        Some(Expr::Phi { incoming }) if !incoming.is_empty() => {
-            let mut agreed: Option<usize> = None;
-            let mut failed = false;
-            for (_, value) in incoming {
-                match operand_param_walk(func, *value, depth - 1, path) {
-                    ParamWalk::Param(idx) => match agreed {
-                        None => agreed = Some(idx),
-                        Some(prev) if prev == idx => {}
-                        Some(_) => {
-                            failed = true;
-                            break;
-                        }
-                    },
-                    ParamWalk::Cycle => {}
-                    ParamWalk::Fail => {
-                        failed = true;
-                        break;
-                    }
-                }
-            }
-            match (failed, agreed) {
-                (false, Some(idx)) => ParamWalk::Param(idx),
-                // All arms cyclic: nothing flows in.
-                (false, None) => ParamWalk::Cycle,
-                (true, _) => ParamWalk::Fail,
-            }
-        }
-        _ => ParamWalk::Fail,
-    };
-    path.remove(&current);
-    result
 }
 
 // ---------------------------------------------------------------------

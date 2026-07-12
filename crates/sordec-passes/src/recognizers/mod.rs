@@ -44,6 +44,7 @@ pub mod enum_key;
 pub mod linear_memory;
 pub mod storage;
 pub mod val_encoding;
+pub(crate) mod wrappers;
 
 pub use auth::AuthPass;
 pub use auth_flow::AuthFlowPass;
