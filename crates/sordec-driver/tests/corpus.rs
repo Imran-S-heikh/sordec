@@ -50,6 +50,11 @@ const DEX_LIQUIDITY_POOL_WASM: &[u8] = include_bytes!(concat!(
     "/../../samples/contracts/dex-liquidity-pool/dex-liquidity-pool.wasm"
 ));
 
+const ATTESTATION_WASM: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../samples/contracts/attestation/attestation.wasm"
+));
+
 #[test]
 fn corpus_token_v22() {
     assert_corpus_fixture(TOKEN_V22_WASM, "token-v22");
@@ -73,6 +78,11 @@ fn corpus_timelock() {
 #[test]
 fn corpus_dex_liquidity_pool() {
     assert_corpus_fixture(DEX_LIQUIDITY_POOL_WASM, "dex-liquidity-pool");
+}
+
+#[test]
+fn corpus_attestation() {
+    assert_corpus_fixture(ATTESTATION_WASM, "attestation");
 }
 
 // ---------------------------------------------------------------------

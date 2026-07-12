@@ -17,6 +17,11 @@ const TOKEN_V23_STRIPPED: &str = concat!(
     "/../../samples/contracts/token-v23-stripped/token-v23-stripped.wasm"
 );
 
+const ATTESTATION: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../samples/contracts/attestation/attestation.wasm"
+);
+
 #[test]
 fn dump_facts_on_canonical_fixture_emits_clean_json() {
     Command::cargo_bin("sordec")
@@ -45,6 +50,22 @@ fn dump_facts_on_stripped_fixture_reports_no_soroban_facts() {
         .stdout(predicate::str::contains("\"soroban_facts\": null"))
         .stdout(predicate::str::contains("\"diagnostics\": []"))
         // No metadata to decode, so no diagnostics emitted.
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn dump_facts_decodes_contracterror_enum_on_attestation() {
+    // The attestation fixture's `#[contracterror] enum Error` decodes
+    // into the type registry with its named variants and u32
+    // discriminants — the corpus's only #[contracterror] surface (W8).
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-facts", ATTESTATION])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"Error\""))
+        .stdout(predicate::str::contains("\"EmptyMessage\""))
+        .stdout(predicate::str::contains("\"DigestMismatch\""))
         .stderr(predicate::str::is_empty());
 }
 

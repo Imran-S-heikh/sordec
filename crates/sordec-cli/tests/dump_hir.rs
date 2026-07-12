@@ -529,6 +529,11 @@ const TOKEN_V23_STRIPPED: &str = concat!(
     "/../../samples/contracts/token-v23-stripped/token-v23-stripped.wasm"
 );
 
+const ATTESTATION: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../samples/contracts/attestation/attestation.wasm"
+);
+
 #[test]
 fn dump_hir_names_enum_storage_keys_on_both_tokens() {
     // The enum-key recognizer (W1/D2.3 substrate): DataKey variants
@@ -618,11 +623,49 @@ fn dump_hir_annotates_admin_gates_on_both_tokens() {
 }
 
 #[test]
+fn dump_hir_recognizes_crypto_and_prng_on_attestation() {
+    // W3's crypto/prng vocabulary, proven on a real compiled contract
+    // (W8): the attestation fixture is the only corpus contract that
+    // imports the `c` and `p` modules.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", ATTESTATION])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("compute_hash_sha256"))
+        .stdout(predicate::str::contains("compute_hash_keccak256"))
+        .stdout(predicate::str::contains("verify_sig_ed25519"))
+        .stdout(predicate::str::contains("prng_u64_in_inclusive_range"))
+        // The >9-char Symbol compiles to Symbol::new_from_linear_memory.
+        .stdout(predicate::str::contains("symbol_new"))
+        // Provenance names the abi-sweep pass as the recognizer.
+        .stdout(predicate::str::contains("abi-sweep compute_hash_sha256"));
+}
+
+#[test]
+fn dump_hir_raw_flag_shows_unrecognized_crypto_prng() {
+    // Under `--raw` the crypto/prng calls render as raw `host:c:` /
+    // `host:p:` operator calls (the friendly name rides in the
+    // `host:<mod>:<name>` label). Recognition is marked by the
+    // `abi-sweep` provenance note, which `--raw` must NOT produce.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", ATTESTATION])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host:c:compute_hash_sha256"))
+        .stdout(predicate::str::contains("host:p:prng_u64_in_inclusive_range"))
+        .stdout(predicate::str::contains("abi-sweep").not())
+        .stdout(predicate::str::contains("HostFunctionAbi: abi-sweep").not());
+}
+
+#[test]
 fn dump_hir_recognizes_every_host_call_across_the_corpus() {
-    // The Phase 2 recognition milestone: with all seven recognizers
-    // registered, no raw `host:` call of any module survives the default
-    // pipeline on any corpus fixture — every host interaction renders as
-    // a named semantic op.
+    // The Phase 2 recognition milestone: no raw `host:` call of any
+    // module survives the default pipeline on any corpus fixture — every
+    // host interaction renders as a named semantic op. The attestation
+    // fixture extends the sweep to the crypto (`c`) and prng (`p`)
+    // modules that the other six never import.
     for wasm in [
         HELLO_ADD,
         TOKEN_V22,
@@ -630,6 +673,7 @@ fn dump_hir_recognizes_every_host_call_across_the_corpus() {
         TOKEN_V23_STRIPPED,
         TIMELOCK,
         DEX,
+        ATTESTATION,
     ] {
         Command::cargo_bin("sordec")
             .expect("sordec binary builds")
