@@ -53,7 +53,7 @@ use sordec_ir::{
 use super::{apply_rewrites, Rewrite};
 use crate::dataflow::{resolve_use, CallIndex, Resolver};
 use crate::pass::{Pass, PassResult};
-use crate::val_abi::decode_small_symbol;
+use crate::val_abi::{decode_small_symbol, TAG_VOID};
 
 /// Pass name — also the provenance `pass` field for every rewrite.
 pub const PASS_NAME: &str = "const-prop";
@@ -63,6 +63,8 @@ const M_TIER_UPGRADED: &str = "const_prop_tier_upgraded";
 const M_LITERAL_RESOLVED: &str = "const_prop_literal_resolved";
 const M_CALLEE_NAMED: &str = "const_prop_callee_named";
 const M_KEY_NAMED: &str = "const_prop_key_named";
+/// Storage `set(&key, &())` value operands recognized as the unit marker.
+const M_UNIT_VALUE: &str = "const_prop_unit_value";
 /// Upgrade attempts that stayed honestly unresolved (the engine's
 /// remaining-work signal).
 const M_UNRESOLVED: &str = "const_prop_unresolved";
@@ -85,10 +87,11 @@ impl Pass<HighIr> for ConstPropPass {
         let calls = CallIndex::build(ir);
         let mut resolver = Resolver::new(ir, &calls);
         let mut planned: HashMap<FuncId, Vec<Rewrite>> = HashMap::new();
-        // Storage-key literal rewrites plan the *literal binding*, which
-        // may live in another function; dedupe globally so a shared key
-        // literal is renamed once.
+        // Storage-key and unit-value literal rewrites plan the *literal
+        // binding*, which may live in another function; dedupe globally so
+        // a shared literal is renamed once.
         let mut named_keys: HashSet<(FuncId, ValueId)> = HashSet::new();
+        let mut named_units: HashSet<(FuncId, ValueId)> = HashSet::new();
 
         for func in &ir.functions {
             for (id, binding) in func.bindings.iter() {
@@ -134,6 +137,32 @@ impl Pass<HighIr> for ConstPropPass {
                                     "const-prop key symbol {text:?} (decoded SymbolSmall 0x{bits:x})"
                                 ),
                                 metric: M_KEY_NAMED,
+                            });
+                        }
+                    }
+                }
+                // Unit-value marker (D4): a `set(&key, &())` stores the
+                // Void `Val`. The value threads through the SDK's shared
+                // storage helper — polymorphic, so it is named at the
+                // caller's constant, not the op — so collect the value
+                // literal sites (existentially, like the keys) and rename
+                // each Void constant to `()`.
+                if let Some(value) = storage_set_value_of(op) {
+                    let mut sites = Vec::new();
+                    let mut visited = HashSet::new();
+                    collect_literal_sites(ir, &calls, func.id, value, &mut sites, &mut visited, 0);
+                    for (site_fn, site_id, bits) in sites {
+                        if !is_void_val(bits) {
+                            continue;
+                        }
+                        if named_units.insert((site_fn, site_id)) {
+                            planned.entry(site_fn).or_default().push(Rewrite {
+                                id: site_id,
+                                expr: Expr::Literal(Literal::Unit),
+                                ty: Some(IrType::Known(KnownType::Unit)),
+                                source: ProvenanceSource::DataFlow,
+                                note: "const-prop unit value () (Void Val)".to_string(),
+                                metric: M_UNIT_VALUE,
                             });
                         }
                     }
@@ -314,6 +343,21 @@ fn storage_key_of(op: &KnownOp) -> Option<ValueId> {
         | KnownOp::StorageExtendTtlV2 { key, .. } => Some(*key),
         _ => None,
     }
+}
+
+/// The stored value operand of a `StorageSet`, else `None`.
+fn storage_set_value_of(op: &KnownOp) -> Option<ValueId> {
+    match op {
+        KnownOp::StorageSet { value, .. } => Some(*value),
+        _ => None,
+    }
+}
+
+/// Whether raw `Val` bits are the Void constant — tag byte
+/// [`TAG_VOID`](crate::val_abi::TAG_VOID) with an empty body, i.e. the
+/// encoding of Rust's `()`.
+fn is_void_val(bits: u64) -> bool {
+    (bits & 0xFF) as u8 == TAG_VOID && (bits >> 8) == 0
 }
 
 /// Collect every integer-literal binding reachable through `value`, as
@@ -590,6 +634,96 @@ mod tests {
             }
             other => panic!("expected upgraded StorageGet, got {other:?}"),
         }
+    }
+
+    /// A `set(key, value)` helper storing its value param; the recognized
+    /// StorageSet carries `tier: Known` so only the D4 unit-value naming
+    /// is under test.
+    fn set_value_helper() -> HighFunction {
+        func(
+            2,
+            None,
+            2, // v0 = key param, v1 = value param
+            vec![Expr::Semantic(SemanticOp::Known(KnownOp::StorageSet {
+                tier: StorageTier::Known(KnownTier::Instance),
+                durability: v(0),
+                key: v(0),
+                resolved_key: None,
+                value: v(1),
+            }))],
+        )
+    }
+
+    #[test]
+    fn unit_value_named_only_at_the_unit_caller() {
+        // Two callers of one shared set helper (the timelock shape): one
+        // stores the Void `Val` (2), the other a real value (99). D4 must
+        // rename only the Void caller's literal to `()`.
+        let void_caller = func(
+            0,
+            None,
+            0,
+            vec![
+                i64c(7), // v0 = key
+                i64c(2), // v1 = Void Val
+                Expr::Call {
+                    target: f(2),
+                    args: vec![v(0), v(1)],
+                },
+            ],
+        );
+        let value_caller = func(
+            1,
+            None,
+            0,
+            vec![
+                i64c(7),  // v0 = key
+                i64c(99), // v1 = a real stored value
+                Expr::Call {
+                    target: f(2),
+                    args: vec![v(0), v(1)],
+                },
+            ],
+        );
+        let mut ir = module(vec![void_caller, value_caller, set_value_helper()]);
+        let result = run(&mut ir);
+
+        assert!(result.changed);
+        assert_eq!(result.metrics.get(M_UNIT_VALUE), Some(1));
+        // Void caller's value literal → `()`.
+        assert!(matches!(
+            ir.function(f(0)).unwrap().bindings.get(v(1)).unwrap().expr,
+            Expr::Literal(Literal::Unit)
+        ));
+        // Non-unit caller's value literal untouched.
+        assert!(matches!(
+            ir.function(f(1)).unwrap().bindings.get(v(1)).unwrap().expr,
+            Expr::Literal(Literal::I64(99))
+        ));
+    }
+
+    #[test]
+    fn unit_value_rename_is_idempotent() {
+        let mut ir = module(vec![
+            func(
+                0,
+                None,
+                0,
+                vec![
+                    i64c(7),
+                    i64c(2),
+                    Expr::Call {
+                        target: f(2),
+                        args: vec![v(0), v(1)],
+                    },
+                ],
+            ),
+            func(1, None, 0, vec![]),
+            set_value_helper(),
+        ]);
+        assert!(run(&mut ir).changed);
+        let second = run(&mut ir);
+        assert_eq!(second.metrics.get(M_UNIT_VALUE), None, "already `()`");
     }
 
     #[test]

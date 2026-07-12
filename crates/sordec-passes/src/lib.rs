@@ -28,6 +28,7 @@ pub mod dataflow;
 pub mod error;
 pub mod host_calls;
 pub mod interfaces;
+pub mod ledger;
 pub mod lift;
 pub mod lowering;
 pub mod pass;
@@ -49,7 +50,7 @@ pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
     AbiSweepPass, AuthFlowPass, AuthPass, ClientCallPass, CollectionsPass, ConstPropPass,
     ContextPass, CrossContractPass, DispatcherPass, EnumKeyPass, LinearMemoryPass, StoragePass,
-    ValEncodingPass,
+    TtlPass, ValEncodingPass,
 };
 pub use sordec_common::LiftDiagnostics;
 
@@ -76,7 +77,10 @@ use sordec_ir::HighIr;
 /// `SymbolIndexInLinearMemory` `BufOp` it refines; it needs only that op
 /// plus `memory` + `soroban_facts`, so it is independent of the
 /// const-prop / enum-key refiners. [`ClientCallPass`] consumes
-/// `ConstPropPass`'s `resolved_callee`; [`AuthFlowPass`] runs last,
+/// `ConstPropPass`'s `resolved_callee`. [`TtlPass`] runs after
+/// [`ConstPropPass`] so a `StorageExtendTtl`'s tier is already resolved
+/// on the binding — it fills the independent TTL ledger-amount slots
+/// without contending with the tier rewrite. [`AuthFlowPass`] runs last,
 /// consuming `EnumKeyPass`'s resolved keys (hard dependencies both). No
 /// fixpoint group: the dependency chain is a straight line and every
 /// pass is idempotent.
@@ -94,6 +98,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(AbiSweepPass),
             Box::new(CrossContractPass),
             Box::new(ConstPropPass),
+            Box::new(TtlPass),
             Box::new(EnumKeyPass),
             Box::new(ClientCallPass),
             Box::new(AuthFlowPass),
