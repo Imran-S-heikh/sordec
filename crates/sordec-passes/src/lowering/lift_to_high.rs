@@ -43,8 +43,8 @@ use sordec_common::{
 use sordec_ir::{
     Binding, BinaryOp, BlockTarget, Expr, ExportKind, FunctionSignature, HighBlock, HighFunction,
     HighIr, ImportKind, Import, IrType, LiftedFunction, LiftedIr, LiftedTerminator, LiftedValue,
-    LiftedValueDef, Literal, Region, SemanticOp, SorobanFacts, UnaryOp, WasmFacts, WasmOp,
-    WasmOpcodeKind,
+    LiftedValueDef, Literal, MemWidth, Region, SemanticOp, SorobanFacts, UnaryOp, WasmFacts,
+    WasmOp, WasmOpcodeKind,
 };
 use waffle::entity::EntityRef as _;
 
@@ -333,13 +333,15 @@ fn lower_operator(op: &WasmOp, args: &[ValueId], ctx: &LowerCtx<'_>) -> Expr {
         | W::I64Load16S { memory }
         | W::I64Load16U { memory }
         | W::I64Load32S { memory }
-        | W::I64Load32U { memory } => match args.first() {
-            Some(addr) => Expr::Load {
+        | W::I64Load32U { memory } => match (args.first(), load_shape(&op.0)) {
+            (Some(addr), Some((width, signed))) => Expr::Load {
                 addr: *addr,
                 offset: memory.offset,
+                width,
+                signed,
                 ty: IrType::Unknown(UnknownReason::InsufficientEvidence),
             },
-            None => unknown(op, args),
+            _ => unknown(op, args),
         },
 
         // Stores: `{ memory }`; addr + value operands.
@@ -351,11 +353,12 @@ fn lower_operator(op: &WasmOp, args: &[ValueId], ctx: &LowerCtx<'_>) -> Expr {
         | W::I32Store16 { memory }
         | W::I64Store8 { memory }
         | W::I64Store16 { memory }
-        | W::I64Store32 { memory } => match (args.first(), args.get(1)) {
-            (Some(addr), Some(value)) => Expr::Store {
+        | W::I64Store32 { memory } => match (args.first(), args.get(1), store_width(&op.0)) {
+            (Some(addr), Some(value), Some(width)) => Expr::Store {
                 addr: *addr,
                 value: *value,
                 offset: memory.offset,
+                width,
             },
             _ => unknown(op, args),
         },
@@ -423,6 +426,37 @@ fn unknown(op: &WasmOp, args: &[ValueId]) -> Expr {
         args: args.to_vec(),
         reason: UnknownReason::UnsupportedPattern,
     }
+}
+
+/// Map a load operator to its `(access width, sign extension)` pair.
+/// `signed` is `Some` only for sub-word loads — full-width loads have
+/// no extension to record. `None` for non-load operators.
+fn load_shape(w: &waffle::Operator) -> Option<(MemWidth, Option<bool>)> {
+    use waffle::Operator as W;
+    Some(match w {
+        W::I32Load { .. } | W::F32Load { .. } => (MemWidth::W4, None),
+        W::I64Load { .. } | W::F64Load { .. } => (MemWidth::W8, None),
+        W::I32Load8S { .. } | W::I64Load8S { .. } => (MemWidth::W1, Some(true)),
+        W::I32Load8U { .. } | W::I64Load8U { .. } => (MemWidth::W1, Some(false)),
+        W::I32Load16S { .. } | W::I64Load16S { .. } => (MemWidth::W2, Some(true)),
+        W::I32Load16U { .. } | W::I64Load16U { .. } => (MemWidth::W2, Some(false)),
+        W::I64Load32S { .. } => (MemWidth::W4, Some(true)),
+        W::I64Load32U { .. } => (MemWidth::W4, Some(false)),
+        _ => return None,
+    })
+}
+
+/// Map a store operator to its access width. `None` for non-store
+/// operators.
+fn store_width(w: &waffle::Operator) -> Option<MemWidth> {
+    use waffle::Operator as W;
+    Some(match w {
+        W::I32Store { .. } | W::F32Store { .. } | W::I64Store32 { .. } => MemWidth::W4,
+        W::I64Store { .. } | W::F64Store { .. } => MemWidth::W8,
+        W::I32Store8 { .. } | W::I64Store8 { .. } => MemWidth::W1,
+        W::I32Store16 { .. } | W::I64Store16 { .. } => MemWidth::W2,
+        _ => return None,
+    })
 }
 
 /// Map a binary WASM operator to a [`BinaryOp`] (sign/width erased — the
@@ -662,7 +696,38 @@ mod tests {
         let b = lower_and_bindings(ir);
         assert!(matches!(
             b.get(v(1)).unwrap().expr,
-            Expr::Load { addr, offset: 8, .. } if addr == v(0)
+            Expr::Load {
+                addr,
+                offset: 8,
+                width: MemWidth::W8,
+                signed: None,
+                ..
+            } if addr == v(0)
+        ));
+    }
+
+    #[test]
+    fn subword_load_preserves_width_and_sign() {
+        let memory = waffle::MemoryArg {
+            align: 0,
+            offset: 0,
+            memory: waffle::Memory::from(0),
+        };
+        let ir = lifted_one_fn(
+            facts_with(vec![], vec![]),
+            vec![
+                op(waffle::Operator::I32Const { value: 0 }, vec![]),
+                op(waffle::Operator::I32Load8U { memory }, vec![v(0)]),
+            ],
+        );
+        let b = lower_and_bindings(ir);
+        assert!(matches!(
+            b.get(v(1)).unwrap().expr,
+            Expr::Load {
+                width: MemWidth::W1,
+                signed: Some(false),
+                ..
+            }
         ));
     }
 
@@ -684,7 +749,37 @@ mod tests {
         let b = lower_and_bindings(ir);
         assert!(matches!(
             b.get(v(2)).unwrap().expr,
-            Expr::Store { addr, value, offset: 16 } if addr == v(0) && value == v(1)
+            Expr::Store {
+                addr,
+                value,
+                offset: 16,
+                width: MemWidth::W8,
+            } if addr == v(0) && value == v(1)
+        ));
+    }
+
+    #[test]
+    fn subword_store_preserves_width() {
+        let memory = waffle::MemoryArg {
+            align: 0,
+            offset: 0,
+            memory: waffle::Memory::from(0),
+        };
+        let ir = lifted_one_fn(
+            facts_with(vec![], vec![]),
+            vec![
+                op(waffle::Operator::I32Const { value: 0 }, vec![]),
+                op(waffle::Operator::I64Const { value: 7 }, vec![]),
+                op(waffle::Operator::I64Store32 { memory }, vec![v(0), v(1)]),
+            ],
+        );
+        let b = lower_and_bindings(ir);
+        assert!(matches!(
+            b.get(v(2)).unwrap().expr,
+            Expr::Store {
+                width: MemWidth::W4,
+                ..
+            }
         ));
     }
 

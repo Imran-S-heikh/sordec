@@ -96,6 +96,13 @@ pub enum Expr {
         addr: ValueId,
         /// Memory offset baked into the load instruction.
         offset: u32,
+        /// Access width in bytes, preserved from the WASM opcode
+        /// (`i64.load` = 8, `i64.load32_u` = 4, …). Store→load
+        /// forwarding is only sound when widths match exactly.
+        width: MemWidth,
+        /// Sign extension for sub-word loads (`load8_s` vs `load8_u`).
+        /// `None` for full-width loads, which have no extension.
+        signed: Option<bool>,
         /// Inferred or known result type.
         ty: IrType,
     },
@@ -108,6 +115,10 @@ pub enum Expr {
         value: ValueId,
         /// Memory offset baked into the store instruction.
         offset: u32,
+        /// Access width in bytes, preserved from the WASM opcode
+        /// (`i64.store` = 8, `i64.store32` = 4, …). Determines exactly
+        /// which bytes the store writes.
+        width: MemWidth,
     },
 
     /// Unrecovered WASM operation. The opcode kind is preserved so the
@@ -121,6 +132,42 @@ pub enum Expr {
         /// Why we couldn't recover this expression.
         reason: UnknownReason,
     },
+}
+
+/// Byte width of a raw memory access, preserved from the WASM opcode.
+///
+/// The lowering previously collapsed all 14 load / 9 store forms into
+/// width-less [`Expr::Load`] / [`Expr::Store`], erasing which bytes an
+/// access touches (`i64.store` vs `i64.store8` were indistinguishable).
+/// Analyses that reason about memory — store→load forwarding in
+/// particular — need the exact byte range, so the width is a permanent
+/// fact on the expression, not something to re-infer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum MemWidth {
+    /// 1 byte (`load8` / `store8`).
+    W1,
+    /// 2 bytes (`load16` / `store16`).
+    W2,
+    /// 4 bytes (`i32.load`, `f32.load`, `i64.load32`, `i32.store`,
+    /// `f32.store`, `i64.store32`).
+    W4,
+    /// 8 bytes (`i64.load`, `f64.load`, `i64.store`, `f64.store`).
+    W8,
+}
+
+impl MemWidth {
+    /// The access width in bytes.
+    #[inline]
+    #[must_use]
+    pub fn bytes(self) -> u32 {
+        match self {
+            Self::W1 => 1,
+            Self::W2 => 2,
+            Self::W4 => 4,
+            Self::W8 => 8,
+        }
+    }
 }
 
 /// Constant value of a known Soroban type.

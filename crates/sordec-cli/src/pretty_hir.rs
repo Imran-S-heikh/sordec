@@ -31,7 +31,7 @@ use std::io::{self, Write};
 use sordec_common::{IrId, ProvenanceSource, ValueId};
 use sordec_ir::{
     BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownTier, KnownType, Literal,
-    Region, SemanticOp, StorageTier, UnaryOp,
+    MemWidth, Region, SemanticOp, StorageTier, UnaryOp,
 };
 use sordec_passes::host_calls;
 
@@ -176,16 +176,29 @@ fn render_expr(out: &mut impl Write, expr: &Expr) -> io::Result<()> {
             write!(out, "]")
         }
         Expr::GlobalGet { index } => write!(out, "global.get {index}"),
-        Expr::Load { addr, offset, .. } => {
-            write!(out, "load v{} offset={offset}", addr.index())
+        Expr::Load {
+            addr,
+            offset,
+            width,
+            signed,
+            ..
+        } => {
+            write!(
+                out,
+                "load{} v{} offset={offset}",
+                mem_suffix(*width, *signed),
+                addr.index()
+            )
         }
         Expr::Store {
             addr,
             value,
             offset,
+            width,
         } => write!(
             out,
-            "store v{} <- v{} offset={offset}",
+            "store{} v{} <- v{} offset={offset}",
+            mem_suffix(*width, None),
             addr.index(),
             value.index()
         ),
@@ -446,6 +459,23 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
         // The remaining KnownOps get dedicated renderings when their
         // recognizers land; until then an inspection-only Debug form.
         other => write!(out, "{other:?}"),
+    }
+}
+
+/// WAT-style width suffix for a raw memory access. Full-width accesses
+/// (`W4`/`W8` without sign extension) render bare — exactly the
+/// pre-width output — so existing locks don't move; sub-word forms get
+/// `8`/`16`/`32` plus `_s`/`_u` on sign-extending loads. (`i64.store32`
+/// renders bare `store`: without the value's width the sub-word-ness is
+/// not displayable, but the byte width stays faithful in the IR.)
+fn mem_suffix(width: MemWidth, signed: Option<bool>) -> String {
+    match signed {
+        Some(s) => format!("{}_{}", width.bytes() * 8, if s { "s" } else { "u" }),
+        None => match width {
+            MemWidth::W1 => "8".to_string(),
+            MemWidth::W2 => "16".to_string(),
+            MemWidth::W4 | MemWidth::W8 => String::new(),
+        },
     }
 }
 
@@ -732,9 +762,13 @@ mod tests {
 
     #[test]
     fn load_and_store_render_offsets() {
+        // Full-width accesses render exactly as before the width fields
+        // landed — no suffix.
         let load = Expr::Load {
             addr: v(0),
             offset: 8,
+            width: MemWidth::W8,
+            signed: None,
             ty: IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
         };
         assert_eq!(
@@ -745,10 +779,36 @@ mod tests {
             addr: v(0),
             value: v(1),
             offset: 16,
+            width: MemWidth::W8,
         };
         assert_eq!(
             render_to_string(|w| render_expr(w, &store)),
             "store v0 <- v1 offset=16"
+        );
+    }
+
+    #[test]
+    fn subword_load_and_store_render_wat_suffixes() {
+        let load = Expr::Load {
+            addr: v(0),
+            offset: 0,
+            width: MemWidth::W1,
+            signed: Some(false),
+            ty: IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+        };
+        assert_eq!(
+            render_to_string(|w| render_expr(w, &load)),
+            "load8_u v0 offset=0"
+        );
+        let store = Expr::Store {
+            addr: v(0),
+            value: v(1),
+            offset: 4,
+            width: MemWidth::W2,
+        };
+        assert_eq!(
+            render_to_string(|w| render_expr(w, &store)),
+            "store16 v0 <- v1 offset=4"
         );
     }
 

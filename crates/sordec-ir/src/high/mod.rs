@@ -21,7 +21,7 @@ pub mod semantic;
 pub mod storage;
 pub mod ty;
 
-pub use expr::{BinaryOp, Expr, Literal, UnaryOp};
+pub use expr::{BinaryOp, Expr, Literal, MemWidth, UnaryOp};
 pub use region::Region;
 pub use semantic::{
     AddressOpKind, BufOpKind, KnownOp, MapOpKind, SemanticOp, ValObjectKind, VecOpKind,
