@@ -450,25 +450,51 @@ pub enum KnownOp {
         error: ValueId,
     },
 
-    // ---- Crypto ----
-    /// `env.crypto().sha256(input)`.
-    Sha256 {
-        /// Input bytes.
-        input: ValueId,
+    // ---- Crypto / PRNG / test / deploy (recognized by AbiSweepPass) ----
+    /// A `c`-module (crypto) host operation.
+    ///
+    /// ABI-proven recognition — the host-function identity *is* the
+    /// semantic — so bindings carry `Known` certainty. `kind` names the
+    /// specific operation; the `(module, export) → CryptoOpKind`
+    /// mapping, per-kind arity, and ABI return type live in
+    /// `sordec-passes`' `val_abi` module (this enum is IR vocabulary
+    /// only). Grouped under one op the same way `i`-module conversions
+    /// group under [`ValObjectKind`] — the "specialization is radical"
+    /// rule the whole ABI surface follows.
+    CryptoOp {
+        /// Which crypto operation this is.
+        kind: CryptoOpKind,
+        /// Operands in original host-call argument order.
+        args: Vec<ValueId>,
     },
-    /// `env.crypto().keccak256(input)`.
-    Keccak256 {
-        /// Input bytes.
-        input: ValueId,
+
+    /// A `p`-module (PRNG) host operation. Same conventions as
+    /// [`CryptoOp`](KnownOp::CryptoOp).
+    PrngOp {
+        /// Which PRNG operation this is.
+        kind: PrngOpKind,
+        /// Operands in original host-call argument order.
+        args: Vec<ValueId>,
     },
-    /// Verify an ed25519 signature.
-    VerifyEd25519 {
-        /// Public key.
-        public_key: ValueId,
-        /// Message bytes.
-        message: ValueId,
-        /// Signature bytes.
-        signature: ValueId,
+
+    /// A `t`-module (test) host operation. Same conventions as
+    /// [`CryptoOp`](KnownOp::CryptoOp).
+    TestOp {
+        /// Which test operation this is.
+        kind: TestOpKind,
+        /// Operands in original host-call argument order.
+        args: Vec<ValueId>,
+    },
+
+    /// An `l`-module *deploy/upgrade* host operation — the subset of the
+    /// ledger module outside storage CRUD/TTL (contract creation, wasm
+    /// upload/update, contract-id derivation). Same conventions as
+    /// [`CryptoOp`](KnownOp::CryptoOp).
+    DeployOp {
+        /// Which deploy/upgrade operation this is.
+        kind: DeployOpKind,
+        /// Operands in original host-call argument order.
+        args: Vec<ValueId>,
     },
 
     // ---- Val encoding (recognized by the C1 val-encoding pass) ----
@@ -907,4 +933,146 @@ pub enum BufOpKind {
     /// `(b, o)` `bytes_to_string` — reinterpret bytes as a string
     /// (protocol 23+).
     BytesToString,
+}
+
+/// The complete `c`-module (crypto) host-operation surface — hashing,
+/// signature verification / recovery, and the BLS12-381 / BN254 /
+/// Poseidon curve and field arithmetic. One variant per host function,
+/// each documented with its `(module, export)` pair from
+/// `soroban-env-common 26.1.2`'s `env.json`. Grouped under a single
+/// [`KnownOp::CryptoOp`]; the `(module, export) → CryptoOpKind`
+/// mapping, per-kind arity, and ABI return type live in
+/// `sordec-passes`' `val_abi` module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum CryptoOpKind {
+    /// `(c, _)` `compute_hash_sha256`.
+    ComputeHashSha256,
+    /// `(c, 0)` `verify_sig_ed25519`.
+    VerifySigEd25519,
+    /// `(c, 1)` `compute_hash_keccak256`.
+    ComputeHashKeccak256,
+    /// `(c, 2)` `recover_key_ecdsa_secp256k1`.
+    RecoverKeyEcdsaSecp256k1,
+    /// `(c, 3)` `verify_sig_ecdsa_secp256r1`.
+    VerifySigEcdsaSecp256r1,
+    /// `(c, 4)` `bls12_381_check_g1_is_in_subgroup`.
+    Bls12381CheckG1IsInSubgroup,
+    /// `(c, 5)` `bls12_381_g1_add`.
+    Bls12381G1Add,
+    /// `(c, 6)` `bls12_381_g1_mul`.
+    Bls12381G1Mul,
+    /// `(c, 7)` `bls12_381_g1_msm`.
+    Bls12381G1Msm,
+    /// `(c, 8)` `bls12_381_map_fp_to_g1`.
+    Bls12381MapFpToG1,
+    /// `(c, 9)` `bls12_381_hash_to_g1`.
+    Bls12381HashToG1,
+    /// `(c, a)` `bls12_381_check_g2_is_in_subgroup`.
+    Bls12381CheckG2IsInSubgroup,
+    /// `(c, b)` `bls12_381_g2_add`.
+    Bls12381G2Add,
+    /// `(c, c)` `bls12_381_g2_mul`.
+    Bls12381G2Mul,
+    /// `(c, d)` `bls12_381_g2_msm`.
+    Bls12381G2Msm,
+    /// `(c, e)` `bls12_381_map_fp2_to_g2`.
+    Bls12381MapFp2ToG2,
+    /// `(c, f)` `bls12_381_hash_to_g2`.
+    Bls12381HashToG2,
+    /// `(c, g)` `bls12_381_multi_pairing_check`.
+    Bls12381MultiPairingCheck,
+    /// `(c, h)` `bls12_381_fr_add`.
+    Bls12381FrAdd,
+    /// `(c, i)` `bls12_381_fr_sub`.
+    Bls12381FrSub,
+    /// `(c, j)` `bls12_381_fr_mul`.
+    Bls12381FrMul,
+    /// `(c, k)` `bls12_381_fr_pow`.
+    Bls12381FrPow,
+    /// `(c, l)` `bls12_381_fr_inv`.
+    Bls12381FrInv,
+    /// `(c, m)` `bn254_g1_add`.
+    Bn254G1Add,
+    /// `(c, n)` `bn254_g1_mul`.
+    Bn254G1Mul,
+    /// `(c, o)` `bn254_multi_pairing_check`.
+    Bn254MultiPairingCheck,
+    /// `(c, p)` `poseidon_permutation`.
+    PoseidonPermutation,
+    /// `(c, q)` `poseidon2_permutation`.
+    Poseidon2Permutation,
+    /// `(c, r)` `bn254_g1_msm`.
+    Bn254G1Msm,
+    /// `(c, s)` `bn254_fr_add`.
+    Bn254FrAdd,
+    /// `(c, t)` `bn254_fr_sub`.
+    Bn254FrSub,
+    /// `(c, u)` `bn254_fr_mul`.
+    Bn254FrMul,
+    /// `(c, v)` `bn254_fr_pow`.
+    Bn254FrPow,
+    /// `(c, w)` `bn254_fr_inv`.
+    Bn254FrInv,
+    /// `(c, x)` `bls12_381_g1_is_on_curve`.
+    Bls12381G1IsOnCurve,
+    /// `(c, y)` `bls12_381_g2_is_on_curve`.
+    Bls12381G2IsOnCurve,
+    /// `(c, z)` `bn254_g1_is_on_curve`.
+    Bn254G1IsOnCurve,
+}
+
+/// The complete `p`-module (PRNG) host-operation surface. Same
+/// conventions as [`CryptoOpKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum PrngOpKind {
+    /// `(p, _)` `prng_reseed` — reseed the PRNG from a bytes value.
+    PrngReseed,
+    /// `(p, 0)` `prng_bytes_new` — a fresh `Bytes` of a given length.
+    PrngBytesNew,
+    /// `(p, 1)` `prng_u64_in_inclusive_range` — a `u64` in `[lo, hi]`.
+    PrngU64InInclusiveRange,
+    /// `(p, 2)` `prng_vec_shuffle` — a shuffled copy of a vec.
+    PrngVecShuffle,
+}
+
+/// The complete `t`-module (test) host-operation surface — internal
+/// dummy functions the host exposes for testing. Same conventions as
+/// [`CryptoOpKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum TestOpKind {
+    /// `(t, _)` `dummy0`.
+    Dummy0,
+    /// `(t, 0)` `protocol_gated_dummy`.
+    ProtocolGatedDummy,
+}
+
+/// The `l`-module *deploy/upgrade* surface — the ledger exports outside
+/// storage CRUD/TTL (which are [`KnownOp::StorageGet`] et al. and the
+/// TTL ops). One variant per host function, each documented with its
+/// `(module, export)` pair. Same conventions as [`CryptoOpKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum DeployOpKind {
+    /// `(l, 3)` `create_contract` — deploy from a wasm hash + salt.
+    CreateContract,
+    /// `(l, 4)` `create_asset_contract` — deploy a Stellar Asset
+    /// Contract from a serialized asset.
+    CreateAssetContract,
+    /// `(l, 5)` `upload_wasm` — upload wasm, returning its hash.
+    UploadWasm,
+    /// `(l, 6)` `update_current_contract_wasm` — hot-swap the executing
+    /// contract's wasm.
+    UpdateCurrentContractWasm,
+    /// `(l, a)` `get_contract_id` — derive a contract id from deployer +
+    /// salt.
+    GetContractId,
+    /// `(l, b)` `get_asset_contract_id` — derive a SAC id from a
+    /// serialized asset.
+    GetAssetContractId,
+    /// `(l, e)` `create_contract_with_constructor` — deploy with
+    /// constructor arguments (protocol 22+).
+    CreateContractWithConstructor,
 }
