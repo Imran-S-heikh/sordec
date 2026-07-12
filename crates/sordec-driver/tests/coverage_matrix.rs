@@ -128,4 +128,24 @@ fn coverage_matrix_prints_and_holds_invariants() {
     // W2 evidence: dex + timelock type cross-contract calls against SEP-41.
     assert!(count("dex-liquidity-pool", "client_iface_matched") >= 1, "dex sep41");
     assert!(count("timelock", "client_iface_matched") >= 1, "timelock sep41");
+
+    // W4 evidence: timelock is the ONLY fixture importing `b.m`
+    // symbol_index_in_linear_memory — its TimeBoundKind decode is
+    // recognized and named against the spec.
+    assert!(count("timelock", "dispatcher_cases_resolved") >= 1, "timelock dispatch");
+    assert!(count("timelock", "dispatcher_enum_named") >= 1, "timelock dispatch enum");
+    for other in [
+        "hello-add",
+        "token-v22",
+        "token-v23",
+        "token-v23-stripped",
+        "dex-liquidity-pool",
+        "attestation",
+    ] {
+        assert_eq!(
+            count(other, "dispatcher_cases_resolved"),
+            0,
+            "{other} must not dispatch"
+        );
+    }
 }

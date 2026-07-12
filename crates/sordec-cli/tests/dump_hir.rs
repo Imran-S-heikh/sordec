@@ -344,9 +344,11 @@ fn dump_hir_raw_flag_preserves_raw_constructor_calls() {
 
 #[test]
 fn dump_hir_on_timelock_recognizes_collections_ops() {
-    // timelock is the fixture exercising the vec accessors, symbol
-    // dispatch, and map unpack — the collections recognizer names all of
-    // them.
+    // timelock is the fixture exercising the vec accessors and map unpack
+    // — the collections recognizer names all of them. Its
+    // symbol_index_in_linear_memory is refined a step further by the
+    // dispatcher pass (see dump_hir_recognizes_symbol_dispatch_on_timelock),
+    // so it no longer surfaces as a raw collections op on the default path.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", TIMELOCK])
@@ -355,9 +357,46 @@ fn dump_hir_on_timelock_recognizes_collections_ops() {
         .stdout(predicate::str::contains("vec_len("))
         .stdout(predicate::str::contains("vec_get("))
         .stdout(predicate::str::contains("vec_first_index_of("))
-        .stdout(predicate::str::contains("symbol_index_in_linear_memory("))
         .stdout(predicate::str::contains("map_unpack_to_linear_memory("))
         .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn dump_hir_recognizes_symbol_dispatch_on_timelock() {
+    // W4: timelock is the sole corpus contract importing `b.m`
+    // symbol_index_in_linear_memory (the internal TimeBound decode helper).
+    // The dispatcher pass reads the rodata variant table and names the
+    // `TimeBoundKind { Before, After }` enum from the contractspecv0 spec.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "symbol_dispatch(v61) -> TimeBoundKind::{Before | After}",
+        ))
+        // Provenance names the dispatcher pass and the index->variant map.
+        .stdout(predicate::str::contains(
+            "dispatcher TimeBoundKind {0=Before, 1=After}",
+        ));
+}
+
+#[test]
+fn dump_hir_raw_flag_shows_no_symbol_dispatch() {
+    // Under `--raw` the recognizer pipeline does not run, so the site
+    // stays the raw `host:b:symbol_index_in_linear_memory` call. The
+    // negative anchors on the dispatcher provenance note (not "TimeBoundKind"
+    // alone), matching the raw-flag convention used by the other locks.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "host:b:symbol_index_in_linear_memory(",
+        ))
+        .stdout(predicate::str::contains("symbol_dispatch").not())
+        .stdout(predicate::str::contains("SdkPattern: dispatcher").not());
 }
 
 #[test]
