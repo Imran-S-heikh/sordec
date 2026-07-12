@@ -229,6 +229,8 @@ fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Reco
                     resolved_key: None,
                     threshold: args[2],
                     extend_to: args[3],
+                    resolved_threshold: None,
+                    resolved_extend_to: None,
                 },
                 ty: KnownType::Unit,
                 metric: M_EXTEND_TTL,
@@ -240,6 +242,8 @@ fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Reco
             op: KnownOp::ExtendCurrentContractInstanceAndCodeTtl {
                 threshold: args[0],
                 extend_to: args[1],
+                resolved_threshold: None,
+                resolved_extend_to: None,
             },
             ty: KnownType::Unit,
             metric: M_EXTEND_TTL,
@@ -572,6 +576,7 @@ mod tests {
                 resolved_key: None,
                 threshold,
                 extend_to,
+                ..
             })) => {
                 assert!(matches!(tier, StorageTier::Known(KnownTier::Persistent)));
                 assert_eq!(*key, v(0));

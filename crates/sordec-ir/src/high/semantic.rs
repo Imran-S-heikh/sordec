@@ -223,6 +223,13 @@ pub enum KnownOp {
         threshold: ValueId,
         /// New target ledger count.
         extend_to: ValueId,
+        /// Witnessed `threshold` ledger count, filled by the `const-prop`
+        /// pass when the `U32Val` operand resolves to a constant; `None`
+        /// until proven. A named duration (a `DAY_IN_LEDGERS` multiple)
+        /// rides the provenance note, not this slot.
+        resolved_threshold: Option<u32>,
+        /// Witnessed `extend_to` ledger count; see `resolved_threshold`.
+        resolved_extend_to: Option<u32>,
     },
 
     /// `env.storage().instance().extend_ttl(threshold, extend_to)` —
@@ -237,6 +244,13 @@ pub enum KnownOp {
         threshold: ValueId,
         /// New target ledger count.
         extend_to: ValueId,
+        /// Witnessed `threshold` ledger count, filled by the `const-prop`
+        /// pass when the `U32Val` operand resolves to a constant; `None`
+        /// until proven. See
+        /// [`StorageExtendTtl`](KnownOp::StorageExtendTtl).
+        resolved_threshold: Option<u32>,
+        /// Witnessed `extend_to` ledger count; see `resolved_threshold`.
+        resolved_extend_to: Option<u32>,
     },
 
     /// Extend another contract's instance + code TTL.

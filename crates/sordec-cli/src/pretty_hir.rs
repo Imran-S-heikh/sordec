@@ -289,13 +289,15 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             resolved_key,
             threshold,
             extend_to,
+            resolved_threshold,
+            resolved_extend_to,
         } => write!(
             out,
-            "extend_ttl<{}>({}, v{}, v{})",
+            "extend_ttl<{}>({}, {}, {})",
             tier_str(tier),
             key_str(key, resolved_key),
-            threshold.index(),
-            extend_to.index()
+            ttl_arg(*threshold, resolved_threshold),
+            ttl_arg(*extend_to, resolved_extend_to)
         ),
         KnownOp::StorageExtendTtlV2 {
             tier,
@@ -317,11 +319,13 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
         KnownOp::ExtendCurrentContractInstanceAndCodeTtl {
             threshold,
             extend_to,
+            resolved_threshold,
+            resolved_extend_to,
         } => write!(
             out,
-            "extend_instance_and_code_ttl(v{}, v{})",
-            threshold.index(),
-            extend_to.index()
+            "extend_instance_and_code_ttl({}, {})",
+            ttl_arg(*threshold, resolved_threshold),
+            ttl_arg(*extend_to, resolved_extend_to)
         ),
         KnownOp::ExtendContractInstanceAndCodeTtl {
             contract,
@@ -509,6 +513,17 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
         // has a dedicated rendering. A new `KnownOp` must add its arm
         // here (a deliberate compile-time forcing function; there is no
         // Debug fallback to silently absorb it).
+    }
+}
+
+/// Render a TTL ledger-count operand: the witnessed constant when the
+/// `const-prop` pass resolved the `U32Val` (e.g. `518400`), else the raw
+/// value id. The human duration (`30 days`) rides the binding's
+/// provenance note, not the operand text.
+fn ttl_arg(raw: ValueId, resolved: &Option<u32>) -> String {
+    match resolved {
+        Some(ledgers) => ledgers.to_string(),
+        None => format!("v{}", raw.index()),
     }
 }
 
@@ -1066,9 +1081,28 @@ mod tests {
             resolved_key: None,
             threshold: v(9),
             extend_to: v(14),
+            resolved_threshold: None,
+            resolved_extend_to: None,
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "extend_ttl<persistent>(v4, v9, v14)");
+    }
+
+    #[test]
+    fn extend_ttl_renders_resolved_ledger_counts() {
+        // const-prop filled the U32Val operands: show the counts, not vN.
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::StorageExtendTtl {
+            tier: StorageTier::Known(KnownTier::Persistent),
+            durability: v(5),
+            key: v(4),
+            resolved_key: None,
+            threshold: v(9),
+            extend_to: v(14),
+            resolved_threshold: Some(501120),
+            resolved_extend_to: Some(518400),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "extend_ttl<persistent>(v4, 501120, 518400)");
     }
 
     #[test]
@@ -1077,10 +1111,26 @@ mod tests {
             KnownOp::ExtendCurrentContractInstanceAndCodeTtl {
                 threshold: v(9),
                 extend_to: v(14),
+                resolved_threshold: None,
+                resolved_extend_to: None,
             },
         ));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "extend_instance_and_code_ttl(v9, v14)");
+    }
+
+    #[test]
+    fn extend_current_instance_ttl_renders_resolved_counts() {
+        let expr = Expr::Semantic(SemanticOp::Known(
+            KnownOp::ExtendCurrentContractInstanceAndCodeTtl {
+                threshold: v(9),
+                extend_to: v(14),
+                resolved_threshold: Some(103680),
+                resolved_extend_to: Some(120960),
+            },
+        ));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "extend_instance_and_code_ttl(103680, 120960)");
     }
 
     // --- C4 auth + address renderings ---
