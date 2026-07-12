@@ -27,6 +27,7 @@
 pub mod dataflow;
 pub mod error;
 pub mod host_calls;
+pub mod interfaces;
 pub mod lift;
 pub mod lowering;
 pub mod pass;
