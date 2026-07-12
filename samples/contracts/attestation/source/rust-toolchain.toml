@@ -1,0 +1,9 @@
+# This contract is purpose-built for the sordec corpus. We pin a
+# specific stable version (not the moving "stable" channel) for
+# reproducibility, matching the toolchain the committed wasm was built
+# with. The wasm32-unknown-unknown target matches the existing token
+# fixtures.
+[toolchain]
+channel = "1.97"
+targets = ["wasm32-unknown-unknown"]
+components = ["rustc", "cargo"]

@@ -1,0 +1,8 @@
+upstream_url=none (original work)
+upstream_commit=none
+upstream_tag=none
+upstream_path=none
+license=Apache-2.0
+vendored_on=2026-07-12
+vendored_by=Imran Shaikh <imransheikhsadi@gmail.com>
+notes=Original contract authored for the sordec decompiler corpus — NOT vendored from upstream. Purpose: exercise host surfaces absent from the SEP-41 token / timelock / AMM fixtures — the `c` (crypto) module (sha256, keccak256, ed25519_verify), the `p` (prng) module (u64_in_range), a `#[contracterror]` enum with `Result` returns, and a `> 9`-char `Symbol` (Symbol::new_from_linear_memory). Built against soroban-sdk 23.0.1 (resolved to 23.5.3, per the committed Cargo.lock) targeting wasm32-unknown-unknown with rustc 1.97. Storage-free by design.

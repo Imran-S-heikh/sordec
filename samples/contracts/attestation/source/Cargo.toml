@@ -1,0 +1,29 @@
+[package]
+name = "attestation"
+description = "Signature-attestation contract — sordec corpus fixture exercising crypto/prng/contracterror surfaces"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.89.0"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+soroban-sdk = { version = "23.0.1" }
+
+[dev-dependencies]
+soroban-sdk = { version = "23.0.1", features = ["testutils"] }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+# Opt out of any parent workspace (this vendored source stands alone).
+[workspace]
