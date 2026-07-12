@@ -119,10 +119,11 @@ impl Pass<HighIr> for ConstPropPass {
                 if let Some(key) = storage_key_of(op) {
                     let mut sites = Vec::new();
                     let mut visited = HashSet::new();
-                    collect_symbol_literal_sites(
-                        ir, &calls, func.id, key, &mut sites, &mut visited, 0,
-                    );
-                    for (site_fn, site_id, bits, text) in sites {
+                    collect_literal_sites(ir, &calls, func.id, key, &mut sites, &mut visited, 0);
+                    for (site_fn, site_id, bits) in sites {
+                        let Some(text) = decode_small_symbol(bits) else {
+                            continue;
+                        };
                         if named_keys.insert((site_fn, site_id)) {
                             planned.entry(site_fn).or_default().push(Rewrite {
                                 id: site_id,
@@ -315,29 +316,30 @@ fn storage_key_of(op: &KnownOp) -> Option<ValueId> {
     }
 }
 
-/// Collect every tag-14 `SymbolSmall` literal binding reachable through
-/// a storage-key operand, as `(owning_func, literal_binding, bits,
-/// text)`. Unlike the resolver's value-meet, this is a **reachability
-/// collection** (union): different witnessed paths legitimately reach
-/// different `DataKey` symbols, and each is independently ABI-anchored
-/// (a `Val`-typed key position on that static dataflow path). The
-/// `visited` set is global to this collection — a node is expanded once
-/// (reachability is arrival-path-independent), which is both complete
-/// and O(nodes+edges).
+/// Collect every integer-literal binding reachable through `value`, as
+/// `(owning_func, literal_binding, bits)`. Unlike the resolver's
+/// value-meet, this is a **reachability collection** (union): different
+/// witnessed paths legitimately reach different constants (distinct
+/// `DataKey` symbols on distinct static paths), and each is independently
+/// anchored by the operand's `Val`-typed position. Callers classify the
+/// raw `bits` — a tag-14 `SymbolSmall`, the Void `Val`, … — and skip
+/// non-matching sites. The `visited` set is global to this collection: a
+/// node is expanded once (reachability is arrival-path-independent),
+/// which is both complete and O(nodes+edges).
 ///
-/// Fan-out: `resolve_use` chase → a decodable `I64`/`U64` literal is a
-/// site → a phi fans to all incoming → a parameter fans to every
-/// caller's positional arg → a `Call` fans to the callee's return
-/// sites (only when every site is single-valued). A `Literal::Symbol`
-/// terminal is a non-site (already named — idempotency). Malformed
-/// edges are skipped, never aborting the collection.
-#[allow(clippy::too_many_arguments)]
-fn collect_symbol_literal_sites(
+/// Fan-out: `resolve_use` chase → an `I64`/`U64` literal is a site → a
+/// phi fans to all incoming → a parameter fans to every caller's
+/// positional arg → a `Call` fans to the callee's return sites (only
+/// when every site is single-valued). A non-integer terminal (an
+/// already-named `Literal::Symbol` / `Literal::Unit`, a computed value)
+/// is a non-site — which also makes re-runs idempotent. Malformed edges
+/// are skipped, never aborting the collection.
+fn collect_literal_sites(
     ir: &HighIr,
     calls: &CallIndex,
     func_id: FuncId,
     value: ValueId,
-    out: &mut Vec<(FuncId, ValueId, u64, String)>,
+    out: &mut Vec<(FuncId, ValueId, u64)>,
     visited: &mut HashSet<(FuncId, ValueId)>,
     depth: u32,
 ) {
@@ -376,25 +378,17 @@ fn collect_symbol_literal_sites(
             let Some(arg) = args.get(index) else {
                 continue;
             };
-            collect_symbol_literal_sites(ir, calls, site.caller, *arg, out, visited, depth + 1);
+            collect_literal_sites(ir, calls, site.caller, *arg, out, visited, depth + 1);
         }
         return;
     }
 
     match &binding.expr {
-        Expr::Literal(Literal::I64(bits)) => {
-            if let Some(text) = decode_small_symbol(*bits as u64) {
-                out.push((func_id, terminal, *bits as u64, text));
-            }
-        }
-        Expr::Literal(Literal::U64(bits)) => {
-            if let Some(text) = decode_small_symbol(*bits) {
-                out.push((func_id, terminal, *bits, text));
-            }
-        }
+        Expr::Literal(Literal::I64(bits)) => out.push((func_id, terminal, *bits as u64)),
+        Expr::Literal(Literal::U64(bits)) => out.push((func_id, terminal, *bits)),
         Expr::Phi { incoming } => {
             for (_, v) in incoming {
-                collect_symbol_literal_sites(ir, calls, func_id, *v, out, visited, depth + 1);
+                collect_literal_sites(ir, calls, func_id, *v, out, visited, depth + 1);
             }
         }
         Expr::Call { target, .. } => {
@@ -403,17 +397,17 @@ fn collect_symbol_literal_sites(
             };
             // Same single-value-site discipline as the resolver's Call
             // arm: a multi-value or diverging callee's result is not a
-            // scalar the key literal can flow from.
+            // scalar the literal can flow from.
             if callee.returns.is_empty() || callee.returns.iter().any(|vs| vs.len() != 1) {
                 return;
             }
             let callee_id = *target;
             let sites: Vec<ValueId> = callee.returns.iter().map(|vs| vs[0]).collect();
             for rv in sites {
-                collect_symbol_literal_sites(ir, calls, callee_id, rv, out, visited, depth + 1);
+                collect_literal_sites(ir, calls, callee_id, rv, out, visited, depth + 1);
             }
         }
-        // Literal::Symbol (already named) and everything else: non-site.
+        // Already-named literals and everything else: non-site.
         _ => {}
     }
 }
