@@ -463,12 +463,27 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             function,
             args,
             resolved_callee,
-        } => render_invoke(out, "invoke_contract", *contract, *function, args, resolved_callee),
+            arg_count,
+            resolved_args,
+            interface: _,
+        } => render_invoke(
+            out,
+            "invoke_contract",
+            *contract,
+            *function,
+            args,
+            resolved_callee,
+            *arg_count,
+            resolved_args,
+        ),
         KnownOp::TryInvokeContract {
             contract,
             function,
             args,
             resolved_callee,
+            arg_count,
+            resolved_args,
+            interface: _,
         } => render_invoke(
             out,
             "try_invoke_contract",
@@ -476,6 +491,8 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             *function,
             args,
             resolved_callee,
+            *arg_count,
+            resolved_args,
         ),
         // The remaining KnownOps get dedicated renderings when their
         // recognizers land; until then an inspection-only Debug form.
@@ -556,6 +573,11 @@ fn render_call(out: &mut impl Write, name: &str, args: &[ValueId]) -> io::Result
 /// Render a cross-contract call: the callee renders as its recovered
 /// name when the const-prop engine resolved it, else as the raw symbol
 /// operand.
+/// Render a cross-contract call. The args slot upgrades with the
+/// client-call pass's evidence: full recovered elements as
+/// `[v6, v9]`, arity-only as `vN: 3 args`, and the raw handle when
+/// nothing is proven (exactly the pre-client-call output).
+#[allow(clippy::too_many_arguments)]
 fn render_invoke(
     out: &mut impl Write,
     name: &str,
@@ -563,14 +585,30 @@ fn render_invoke(
     function: ValueId,
     args: &[ValueId],
     resolved_callee: &Option<String>,
+    arg_count: Option<u32>,
+    resolved_args: &Option<Vec<ValueId>>,
 ) -> io::Result<()> {
     write!(out, "{name}(v{}, ", contract.index())?;
     match resolved_callee {
         Some(callee) => write!(out, "{callee:?}")?,
         None => write!(out, "v{}", function.index())?,
     }
-    for a in args {
-        write!(out, ", v{}", a.index())?;
+    if let Some(elements) = resolved_args {
+        write!(out, ", [")?;
+        for (i, e) in elements.iter().enumerate() {
+            if i > 0 {
+                write!(out, ", ")?;
+            }
+            write!(out, "v{}", e.index())?;
+        }
+        write!(out, "]")?;
+    } else {
+        for a in args {
+            write!(out, ", v{}", a.index())?;
+            if let Some(n) = arg_count {
+                write!(out, ": {n} arg{}", if n == 1 { "" } else { "s" })?;
+            }
+        }
     }
     write!(out, ")")
 }
@@ -1224,6 +1262,9 @@ mod tests {
             function: v(2),
             args: vec![v(3)],
             resolved_callee: None,
+            arg_count: None,
+            resolved_args: None,
+            interface: None,
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "invoke_contract(v1, v2, v3)");
@@ -1236,8 +1277,40 @@ mod tests {
             function: v(5),
             args: vec![v(6)],
             resolved_callee: None,
+            arg_count: None,
+            resolved_args: None,
+            interface: None,
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "try_invoke_contract(v4, v5, v6)");
+    }
+
+    #[test]
+    fn invoke_contract_renders_client_call_tiers() {
+        // Arity-only tier: the raw handle stays visible, annotated.
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::InvokeContract {
+            contract: v(1),
+            function: v(2),
+            args: vec![v(3)],
+            resolved_callee: Some("transfer".to_string()),
+            arg_count: Some(3),
+            resolved_args: None,
+            interface: Some(sordec_ir::ClientInterface::Sep41Token),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "invoke_contract(v1, \"transfer\", v3: 3 args)");
+
+        // Full-elements tier: recovered values replace the handle.
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::InvokeContract {
+            contract: v(1),
+            function: v(2),
+            args: vec![v(3)],
+            resolved_callee: Some("balance".to_string()),
+            arg_count: Some(1),
+            resolved_args: Some(vec![v(6)]),
+            interface: Some(sordec_ir::ClientInterface::Sep41Token),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "invoke_contract(v1, \"balance\", [v6])");
     }
 }

@@ -52,6 +52,20 @@ pub struct EnumKey {
     pub payload: Vec<ValueId>,
 }
 
+/// A known contract interface a cross-contract call was matched
+/// against, by callee name + argument arity (structural evidence — the
+/// callee's actual code is not inspectable; the matching pass records
+/// the evidence in provenance). One variant per interface the
+/// decompiler knows; the Phase-3 emitter renders the matching typed
+/// client (`token::Client::…`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum ClientInterface {
+    /// The SEP-41 token interface (CAP-46-6 / `soroban-sdk`
+    /// `token::Interface`).
+    Sep41Token,
+}
+
 /// Semantic operation associated with a binding.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -337,6 +351,20 @@ pub enum KnownOp {
         /// rodata-backed `SymbolNew`); `None` until proven.
         // JUSTIFY: Callee names are arbitrary contract identifiers.
         resolved_callee: Option<String>,
+        /// Argument count recovered from the args-vec constructor's
+        /// constant length by the `client-call` pass; `None` until
+        /// proven.
+        arg_count: Option<u32>,
+        /// Per-element argument values recovered from the caller's
+        /// frame slots, in vec order. `Some` only when EVERY element
+        /// was proven (all-or-nothing — a partial list would
+        /// misrepresent the call); `None` otherwise.
+        resolved_args: Option<Vec<ValueId>>,
+        /// Interface the call was matched against (callee name + arity
+        /// against a known interface table — Inferred-grade structural
+        /// evidence, recorded in provenance); `None` when no known
+        /// interface fits.
+        interface: Option<ClientInterface>,
         /// Argument vector.
         args: Vec<ValueId>,
     },
@@ -353,6 +381,20 @@ pub enum KnownOp {
         /// rodata-backed `SymbolNew`); `None` until proven.
         // JUSTIFY: Callee names are arbitrary contract identifiers.
         resolved_callee: Option<String>,
+        /// Argument count recovered from the args-vec constructor's
+        /// constant length by the `client-call` pass; `None` until
+        /// proven.
+        arg_count: Option<u32>,
+        /// Per-element argument values recovered from the caller's
+        /// frame slots, in vec order. `Some` only when EVERY element
+        /// was proven (all-or-nothing — a partial list would
+        /// misrepresent the call); `None` otherwise.
+        resolved_args: Option<Vec<ValueId>>,
+        /// Interface the call was matched against (callee name + arity
+        /// against a known interface table — Inferred-grade structural
+        /// evidence, recorded in provenance); `None` when no known
+        /// interface fits.
+        interface: Option<ClientInterface>,
         /// Argument vector.
         args: Vec<ValueId>,
     },

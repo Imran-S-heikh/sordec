@@ -105,6 +105,11 @@ fn try_cross_contract(id: ValueId, expr: &Expr) -> Option<Rewrite> {
                 // Filled by the const-prop engine when the symbol
                 // constant is reachable.
                 resolved_callee: None,
+                // Filled by the client-call pass when the args-vec
+                // construction is provable.
+                arg_count: None,
+                resolved_args: None,
+                interface: None,
             },
             "call",
             M_INVOKE,
@@ -115,6 +120,9 @@ fn try_cross_contract(id: ValueId, expr: &Expr) -> Option<Rewrite> {
                 function: args[1],
                 args: vec![args[2]],
                 resolved_callee: None,
+                arg_count: None,
+                resolved_args: None,
+                interface: None,
             },
             "try_call",
             M_TRY_INVOKE,
@@ -214,6 +222,9 @@ mod tests {
                 function,
                 args,
                 resolved_callee,
+                arg_count: None,
+                resolved_args: None,
+                interface: None,
             })) => {
                 assert_eq!(*resolved_callee, None, "recognition never names");
                 assert_eq!(*contract, v(0));

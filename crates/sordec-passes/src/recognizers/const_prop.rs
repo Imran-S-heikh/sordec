@@ -805,6 +805,9 @@ mod tests {
             function: v(function),
             args: vec![v(args)],
             resolved_callee: None,
+            arg_count: None,
+            resolved_args: None,
+            interface: None,
         }))
     }
 
