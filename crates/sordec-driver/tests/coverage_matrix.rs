@@ -148,4 +148,26 @@ fn coverage_matrix_prints_and_holds_invariants() {
             "{other} must not dispatch"
         );
     }
+
+    // W5 D3: the token contracts resolve their SEP-41 instance-bump TTL
+    // ledger amounts; no other fixture extends TTL.
+    for token in ["token-v22", "token-v23", "token-v23-stripped"] {
+        assert!(count(token, "ttl_resolved") >= 1, "{token} ttl");
+    }
+    for other in ["hello-add", "timelock", "dex-liquidity-pool", "attestation"] {
+        assert_eq!(count(other, "ttl_resolved"), 0, "{other} must not ttl");
+    }
+
+    // W5 D4: only timelock stores a unit-value marker (`set(&Init, &())`).
+    assert!(count("timelock", "const_prop_unit_value") >= 1, "timelock unit value");
+    for other in [
+        "hello-add",
+        "token-v22",
+        "token-v23",
+        "token-v23-stripped",
+        "dex-liquidity-pool",
+        "attestation",
+    ] {
+        assert_eq!(count(other, "const_prop_unit_value"), 0, "{other} must not unit");
+    }
 }

@@ -174,10 +174,84 @@ fn dump_hir_raw_flag_preserves_raw_storage_calls() {
         .stdout(predicate::str::contains("storage_set").not());
 }
 
+#[test]
+fn dump_hir_names_ttl_ledger_durations_on_token_v23() {
+    // W5 D3: the SEP-41 instance bump's U32Val ledger amounts resolve to
+    // their counts, and the whole-day durations are named in the note.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "extend_instance_and_code_ttl(103680, 120960)",
+        ))
+        .stdout(predicate::str::contains(
+            "ttl threshold 103680 (6 days), extend_to 120960 (7 days)",
+        ));
+}
+
+#[test]
+fn dump_hir_raw_flag_shows_no_ttl_naming() {
+    // Under `--raw` the amounts stay the raw Val-encoded bits and no `ttl`
+    // provenance note is emitted (anchor the negative on the note).
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("445302209249284i64"))
+        .stdout(predicate::str::contains("ttl threshold").not());
+}
+
+#[test]
+fn dump_hir_marks_unit_value_store_on_timelock() {
+    // W5 D4: timelock's `set(&DataKey::Init, &())` stores the Void `Val`;
+    // the value literal is named as the unit marker `()`.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "const-prop unit value () (Void Val)",
+        ));
+}
+
+#[test]
+fn dump_hir_raw_flag_shows_no_unit_value_marker() {
+    // Under `--raw` the Void value stays the raw `2i64` constant and the
+    // unit-value note is absent.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2i64"))
+        .stdout(predicate::str::contains("unit value").not());
+}
+
 const DEX: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../samples/contracts/dex-liquidity-pool/dex-liquidity-pool.wasm"
 );
+
+#[test]
+fn dump_hir_labels_constructor_entrypoint() {
+    // W5 D6: the `__constructor` export renders with the constructor
+    // label on both token and dex (not pipeline-gated, so no --raw
+    // inverse — the name comes from the export table).
+    for wasm in [TOKEN_V23, DEX] {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-hir", wasm])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "[exported as \"__constructor\" (constructor entrypoint)]",
+            ));
+    }
+}
 
 #[test]
 fn dump_hir_recognizes_require_auth_across_corpus() {
