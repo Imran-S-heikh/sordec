@@ -36,6 +36,7 @@
 
 pub mod auth;
 pub mod auth_flow;
+pub mod client_call;
 pub mod collections;
 pub mod const_prop;
 pub mod context;
@@ -48,6 +49,7 @@ pub(crate) mod wrappers;
 
 pub use auth::AuthPass;
 pub use auth_flow::AuthFlowPass;
+pub use client_call::ClientCallPass;
 pub use collections::CollectionsPass;
 pub use const_prop::ConstPropPass;
 pub use context::ContextPass;

@@ -438,21 +438,25 @@ fn dump_hir_names_cross_contract_callees() {
     // ABI-typed Symbol position: dex drives token.transfer and
     // token.balance, timelock drives token.transfer. (Measured corpus
     // wins — all three cross-contract calls in the corpus are named.)
+    // The named callee is visible in the invoke rendering; the
+    // displayed provenance note is now the client-call pass's (it
+    // touches the binding last — see
+    // `dump_hir_types_cross_contract_client_calls`), so this test
+    // asserts the rendering, not the note.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", DEX])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"transfer\","))
-        .stdout(predicate::str::contains("\"balance\","))
-        .stdout(predicate::str::contains("const-prop callee=\"transfer\""));
+        .stdout(predicate::str::contains("\"balance\","));
 
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", TIMELOCK])
         .assert()
         .success()
-        .stdout(predicate::str::contains("const-prop callee=\"transfer\""));
+        .stdout(predicate::str::contains("\"transfer\","));
 }
 
 #[test]

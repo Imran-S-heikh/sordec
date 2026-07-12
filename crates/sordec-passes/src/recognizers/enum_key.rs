@@ -55,14 +55,14 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use sordec_common::{FuncId, IrId, ProvenanceSource, ValueId};
+use sordec_common::{FuncId, ProvenanceSource, ValueId};
 use sordec_ir::{
     EnumKey, Expr, HighFunction, HighIr, KnownOp, MemWidth, SemanticOp, UnionDef,
 };
 
 use super::{apply_rewrites, Rewrite};
 use crate::dataflow::{
-    block_containing, canon_addr, facts_before, may_write_memory, resolve_use, trace_int,
+    block_containing, canon_addr, facts_before, may_write_memory, trace_int,
     trace_u32val, CallIndex, Resolver,
 };
 use crate::pass::{Pass, PassResult};
@@ -79,8 +79,6 @@ const M_CTOR_MATCHED: &str = "enum_key_ctor_matched";
 /// remaining-work signal).
 const M_UNRESOLVED: &str = "enum_key_unresolved";
 
-/// Depth cap for chasing a key operand through single-incoming phis.
-const KEY_CHASE_DEPTH: u32 = 32;
 /// Nesting cap for locating the `SymbolNew` op behind a wrapper call
 /// (the SDK's `Symbol::new` sits one or two tiny helpers deep).
 const WRAPPER_DEPTH: u32 = 2;
@@ -578,21 +576,11 @@ fn slot_values_at(
     })
 }
 
-/// Chase a key operand through `Use` links and pure-rename phis (a phi
-/// with exactly one incoming edge) to its terminal producer.
+/// Chase a key operand through `Use` links and pure-rename phis to its
+/// terminal producer (the shared
+/// [`chase_value`](super::wrappers::chase_value)).
 fn chase_key(func: &HighFunction, key: ValueId) -> ValueId {
-    let mut current = key;
-    for _ in 0..KEY_CHASE_DEPTH {
-        let terminal = resolve_use(func, current);
-        if (terminal.index() as usize) >= func.bindings.len() {
-            return terminal;
-        }
-        match func.bindings.get(terminal).map(|b| &b.expr) {
-            Some(Expr::Phi { incoming }) if incoming.len() == 1 => current = incoming[0].1,
-            _ => return terminal,
-        }
-    }
-    current
+    super::wrappers::chase_value(func, key)
 }
 
 /// Gates 1 + 2: prove `target` is an enum-key constructor and identify
@@ -741,7 +729,7 @@ fn wrapper_symbol_params(ir: &HighIr, target: FuncId, depth: u32) -> Option<(usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sordec_common::{Arena, BlockId, Provenance, ProvenanceSource, UnknownReason};
+    use sordec_common::{Arena, BlockId, IrId, Provenance, ProvenanceSource, UnknownReason};
     use sordec_ir::{
         Binding, DataSegment, HighBlock, IrType, KnownTier, Literal, MemoryImage, Region,
         SorobanFacts, StorageTier, TypeRegistry, UnionCase, WasmFacts,

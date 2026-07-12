@@ -47,8 +47,8 @@ pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
-    AuthFlowPass, AuthPass, CollectionsPass, ConstPropPass, ContextPass, CrossContractPass,
-    EnumKeyPass, LinearMemoryPass, StoragePass, ValEncodingPass,
+    AuthFlowPass, AuthPass, ClientCallPass, CollectionsPass, ConstPropPass, ContextPass,
+    CrossContractPass, EnumKeyPass, LinearMemoryPass, StoragePass, ValEncodingPass,
 };
 pub use sordec_common::LiftDiagnostics;
 
@@ -68,8 +68,9 @@ use sordec_ir::HighIr;
 /// peels. [`EnumKeyPass`] runs after [`ConstPropPass`] — not a hard
 /// dependency (its evidence is local constants + rodata + frame facts),
 /// but it keeps the refiners-before-consumers reading of the manifest.
-/// [`AuthFlowPass`] runs last: it consumes `EnumKeyPass`'s resolved
-/// keys (a hard dependency). No fixpoint group: the dependency chain is
+/// [`ClientCallPass`] consumes `ConstPropPass`'s `resolved_callee`;
+/// [`AuthFlowPass`] runs last, consuming `EnumKeyPass`'s resolved keys
+/// (hard dependencies both). No fixpoint group: the dependency chain is
 /// a straight line and every pass is idempotent.
 #[must_use]
 pub fn default_high_pipeline() -> Pipeline<HighIr> {
@@ -84,6 +85,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(CrossContractPass),
             Box::new(ConstPropPass),
             Box::new(EnumKeyPass),
+            Box::new(ClientCallPass),
             Box::new(AuthFlowPass),
         ],
         vec![],

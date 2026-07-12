@@ -21,7 +21,7 @@
 
 use std::collections::HashSet;
 
-use sordec_common::{FuncId, ValueId};
+use sordec_common::{FuncId, IrId, ValueId};
 use sordec_ir::{Expr, HighFunction, HighIr, KnownOp, SemanticOp, WasmOpcodeKind};
 
 use crate::dataflow::resolve_use;
@@ -29,6 +29,27 @@ use crate::dataflow::resolve_use;
 /// Walk depth for [`operand_param`] — the SDK's `Symbol::new` threads
 /// its `(pos, len)` through long phi chains and width conversions.
 const PARAM_WALK_DEPTH: u32 = 64;
+
+/// Depth cap for [`chase_value`]'s single-incoming-phi chase.
+const CHASE_DEPTH: u32 = 32;
+
+/// Chase a value through `Use` links and pure-rename phis (a phi with
+/// exactly one incoming edge) to its terminal producer — the standard
+/// prelude before matching a value against a constructor-call shape.
+pub(crate) fn chase_value(func: &HighFunction, value: ValueId) -> ValueId {
+    let mut current = value;
+    for _ in 0..CHASE_DEPTH {
+        let terminal = resolve_use(func, current);
+        if (terminal.index() as usize) >= func.bindings.len() {
+            return terminal;
+        }
+        match func.bindings.get(terminal).map(|b| &b.expr) {
+            Some(Expr::Phi { incoming }) if incoming.len() == 1 => current = incoming[0].1,
+            _ => return terminal,
+        }
+    }
+    current
+}
 
 /// Identify a constructor wrapper: a non-exported helper whose body
 /// (within `depth` nested calls) contains a `KnownOp` accepted by
