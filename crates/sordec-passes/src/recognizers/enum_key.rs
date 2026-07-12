@@ -56,10 +56,9 @@
 use std::collections::{BTreeSet, HashMap};
 
 use sordec_common::{FuncId, ProvenanceSource, ValueId};
-use sordec_ir::{
-    EnumKey, Expr, HighFunction, HighIr, KnownOp, MemWidth, SemanticOp, UnionDef,
-};
+use sordec_ir::{EnumKey, Expr, HighFunction, HighIr, KnownOp, MemWidth, SemanticOp};
 
+use super::symbols::{unique_union_index_by_cases, valid_symbol_text};
 use super::{apply_rewrites, Rewrite};
 use crate::dataflow::{
     block_containing, canon_addr, facts_before, may_write_memory, trace_int,
@@ -82,8 +81,6 @@ const M_UNRESOLVED: &str = "enum_key_unresolved";
 /// Nesting cap for locating the `SymbolNew` op behind a wrapper call
 /// (the SDK's `Symbol::new` sits one or two tiny helpers deep).
 const WRAPPER_DEPTH: u32 = 2;
-/// Soroban symbols are at most 32 bytes of `[a-zA-Z0-9_]`.
-const MAX_SYMBOL_LEN: u32 = 32;
 
 /// The enum storage-key recognizer pass. Stateless between runs.
 #[derive(Debug, Default, Clone, Copy)]
@@ -669,21 +666,9 @@ fn summarize_ctor(ir: &HighIr, target: FuncId) -> Option<CtorSummary> {
 
     // (2) Registry gate: exactly one union with this exact case set.
     let unions = &ir.soroban_facts.as_ref()?.types.unions;
-    let mut matches = unions
-        .iter()
-        .enumerate()
-        .filter(|(_, u)| union_case_set(u) == texts);
-    let (union_idx, _) = matches.next()?;
-    if matches.next().is_some() {
-        // Two unions with identical case sets: ambiguous, never guess.
-        return None;
-    }
+    let union_idx = unique_union_index_by_cases(unions, &texts)?;
 
     Some(CtorSummary { union_idx, disc })
-}
-
-fn union_case_set(union: &UnionDef) -> BTreeSet<String> {
-    union.cases.iter().map(|c| c.name.clone()).collect()
 }
 
 /// Resolve a `(pos, len)` pair at a callsite to symbol text in rodata.
@@ -695,14 +680,7 @@ fn read_symbol_text(
 ) -> Option<String> {
     let pos = trace_u32val(func, pos)?;
     let len = trace_u32val(func, len)?;
-    if len == 0 || len > MAX_SYMBOL_LEN {
-        return None;
-    }
-    let bytes = ir.memory.read(pos, len)?;
-    let text = std::str::from_utf8(bytes).ok()?;
-    text.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        .then(|| text.to_string())
+    valid_symbol_text(ir.memory.read(pos, len)?)
 }
 
 /// Identify a symbol-constructor wrapper: a helper whose body (within
@@ -732,7 +710,7 @@ mod tests {
     use sordec_common::{Arena, BlockId, IrId, Provenance, ProvenanceSource, UnknownReason};
     use sordec_ir::{
         Binding, DataSegment, HighBlock, IrType, KnownTier, Literal, MemoryImage, Region,
-        SorobanFacts, StorageTier, TypeRegistry, UnionCase, WasmFacts,
+        SorobanFacts, StorageTier, TypeRegistry, UnionCase, UnionDef, WasmFacts,
     };
 
     // --- builders: multi-function modules with scheduled blocks ---

@@ -45,6 +45,7 @@ pub mod cross_contract;
 pub mod enum_key;
 pub mod linear_memory;
 pub mod storage;
+pub(crate) mod symbols;
 pub mod val_encoding;
 pub(crate) mod wrappers;
 
