@@ -56,6 +56,14 @@ pub fn render_high_ir(out: &mut impl Write, high: &HighIr) -> io::Result<()> {
 
 fn render_function(out: &mut impl Write, func: &HighFunction) -> io::Result<()> {
     match &func.name {
+        // The SDK's deploy-time constructor export (D6). Distinguished
+        // from ordinary contract methods — its `#[contractimpl]`
+        // `__constructor` runs once at instantiation.
+        Some(name) if name == "__constructor" => writeln!(
+            out,
+            "function func_{} [exported as {name:?} (constructor entrypoint)] {{",
+            func.id.index()
+        )?,
         Some(name) => writeln!(
             out,
             "function func_{} [exported as {name:?}] {{",
@@ -810,6 +818,9 @@ fn provenance_source_str(source: ProvenanceSource) -> &'static str {
 mod tests {
     use super::*;
 
+    use sordec_common::{Arena, BlockId, FuncId};
+    use sordec_ir::{HighBlock, HighFunction};
+
     fn render_to_string(f: impl FnOnce(&mut Vec<u8>) -> io::Result<()>) -> String {
         let mut buf = Vec::new();
         f(&mut buf).expect("write succeeds");
@@ -818,6 +829,48 @@ mod tests {
 
     fn v(idx: u32) -> ValueId {
         ValueId::from_index(idx)
+    }
+
+    /// A minimal single-block function with the given export name.
+    fn named_fn(name: Option<&str>) -> HighFunction {
+        let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
+        blocks.push(HighBlock {
+            id: BlockId::from_index(0),
+            bindings: vec![],
+        });
+        HighFunction {
+            id: FuncId::from_index(3),
+            name: name.map(str::to_string),
+            signature: None,
+            blocks,
+            bindings: Arena::new(),
+            region: Region::Unreachable,
+            params: vec![],
+            returns: vec![],
+        }
+    }
+
+    fn header_line(func: &HighFunction) -> String {
+        render_to_string(|w| render_function(w, func))
+            .lines()
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn constructor_export_is_labeled() {
+        let header = header_line(&named_fn(Some("__constructor")));
+        assert_eq!(
+            header,
+            "function func_3 [exported as \"__constructor\" (constructor entrypoint)] {"
+        );
+    }
+
+    #[test]
+    fn ordinary_export_header_is_unchanged() {
+        let header = header_line(&named_fn(Some("transfer")));
+        assert_eq!(header, "function func_3 [exported as \"transfer\"] {");
     }
 
     #[test]
