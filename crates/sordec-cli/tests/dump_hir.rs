@@ -470,6 +470,55 @@ fn dump_hir_raw_flag_preserves_raw_cross_contract_calls() {
         .stdout(predicate::str::contains("invoke_contract(").not());
 }
 
+#[test]
+fn dump_hir_types_cross_contract_client_calls() {
+    // W2/D2.4: invoke ops are typed against the SEP-41 interface by
+    // callee name + arity. dex `balance` is a single-block
+    // construction, so its element list is fully recovered; the
+    // multi-arg `transfer` sites build the vec via an out-of-block
+    // copy loop, so they carry arity + interface but keep the raw
+    // handle (elements honestly unproven).
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", DEX])
+        .assert()
+        .success()
+        // Full-element tier (balance/1).
+        .stdout(predicate::str::contains("\"balance\", [v"))
+        .stdout(predicate::str::contains(
+            "sep41 balance(id) (callee+arity match, structural)",
+        ))
+        // Arity tier (transfer/3).
+        .stdout(predicate::str::contains("\"transfer\", v"))
+        .stdout(predicate::str::contains("3 args"))
+        .stdout(predicate::str::contains(
+            "sep41 transfer(from, to, amount)",
+        ));
+
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("3 args"))
+        .stdout(predicate::str::contains(
+            "sep41 transfer(from, to, amount)",
+        ));
+}
+
+#[test]
+fn dump_hir_raw_flag_shows_no_client_call_typing() {
+    // Under `--raw` neither the arity/element tiers nor the interface
+    // match appear (no recognizer pipeline runs).
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", DEX])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("client-call").not())
+        .stdout(predicate::str::contains("sep41").not());
+}
+
 const TOKEN_V22: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../samples/contracts/token-v22/token-v22.wasm"
