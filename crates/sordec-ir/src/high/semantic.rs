@@ -21,6 +21,37 @@ use super::ty::KnownType;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+/// A storage key recognized as a `#[contracttype]` enum variant
+/// constructed by the SDK's shared enum-constructor idiom
+/// (`DataKey::Admin`-class keys).
+///
+/// Filled by the `enum-key` pass only when its full evidence gate
+/// passed: the constructor helper's rodata variant texts exactly match
+/// one `contractspecv0` union, the per-callsite discriminant is a
+/// proven constant in range, and the payload footprint agrees with the
+/// variant's field list. One link is structural rather than witnessed —
+/// rustc assigns the stored tag values in declaration order for this
+/// enum shape — so the naming is **Inferred-grade** evidence by
+/// construction; the provenance note on the storage op records the
+/// discriminant and the mapping. Following the `resolved_callee`
+/// precedent, this is a retained slot on the consuming op: the
+/// constructor `Call` binding itself is never rewritten (removing a
+/// callsite would silently shrink `CallIndex` caller sets and unsound
+/// the `Resolver`'s meets).
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct EnumKey {
+    /// Enum type name from `contractspecv0` (e.g. `"DataKey"`).
+    // JUSTIFY: Type names are arbitrary user-defined identifiers.
+    pub enum_name: String,
+    /// Variant name (e.g. `"Admin"`).
+    // JUSTIFY: Variant names are arbitrary user-defined identifiers.
+    pub variant: String,
+    /// Caller-side SSA values stored into the variant's payload slots,
+    /// in ascending slot-offset order. Empty for unit variants.
+    pub payload: Vec<ValueId>,
+}
+
 /// Semantic operation associated with a binding.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -64,6 +95,11 @@ pub enum KnownOp {
         durability: ValueId,
         /// Key value.
         key: ValueId,
+        /// Recognized `#[contracttype]` enum-variant key
+        /// (`DataKey::Admin`-class), filled by the `enum-key` pass when
+        /// its evidence gate passes; `None` until proven. See
+        /// [`EnumKey`].
+        resolved_key: Option<EnumKey>,
     },
 
     /// `env.storage().<tier>().set::<_>(&key, &value)`.
@@ -77,6 +113,11 @@ pub enum KnownOp {
         durability: ValueId,
         /// Key value.
         key: ValueId,
+        /// Recognized `#[contracttype]` enum-variant key
+        /// (`DataKey::Admin`-class), filled by the `enum-key` pass when
+        /// its evidence gate passes; `None` until proven. See
+        /// [`EnumKey`].
+        resolved_key: Option<EnumKey>,
         /// Value being stored.
         value: ValueId,
     },
@@ -92,6 +133,11 @@ pub enum KnownOp {
         durability: ValueId,
         /// Key value.
         key: ValueId,
+        /// Recognized `#[contracttype]` enum-variant key
+        /// (`DataKey::Admin`-class), filled by the `enum-key` pass when
+        /// its evidence gate passes; `None` until proven. See
+        /// [`EnumKey`].
+        resolved_key: Option<EnumKey>,
     },
 
     /// `env.storage().<tier>().remove::<_>(&key)`.
@@ -105,6 +151,11 @@ pub enum KnownOp {
         durability: ValueId,
         /// Key value.
         key: ValueId,
+        /// Recognized `#[contracttype]` enum-variant key
+        /// (`DataKey::Admin`-class), filled by the `enum-key` pass when
+        /// its evidence gate passes; `None` until proven. See
+        /// [`EnumKey`].
+        resolved_key: Option<EnumKey>,
     },
 
     /// `env.storage().<tier>().extend_ttl(&key, threshold, extend_to)`.
@@ -120,6 +171,11 @@ pub enum KnownOp {
         durability: ValueId,
         /// Key value.
         key: ValueId,
+        /// Recognized `#[contracttype]` enum-variant key
+        /// (`DataKey::Admin`-class), filled by the `enum-key` pass when
+        /// its evidence gate passes; `None` until proven. See
+        /// [`EnumKey`].
+        resolved_key: Option<EnumKey>,
         /// Threshold ledger count.
         threshold: ValueId,
         /// New target ledger count.
@@ -191,6 +247,11 @@ pub enum KnownOp {
         durability: ValueId,
         /// Key value.
         key: ValueId,
+        /// Recognized `#[contracttype]` enum-variant key
+        /// (`DataKey::Admin`-class), filled by the `enum-key` pass when
+        /// its evidence gate passes; `None` until proven. See
+        /// [`EnumKey`].
+        resolved_key: Option<EnumKey>,
         /// New target ledger count.
         extend_to: ValueId,
         /// Minimum extension bound.

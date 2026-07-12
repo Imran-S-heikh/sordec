@@ -562,6 +562,7 @@ mod tests {
                 tier: StorageTier::Unknown(UnknownReason::InsufficientEvidence),
                 durability: v(1),
                 key: v(0),
+                resolved_key: None,
             }))],
         )
     }
@@ -926,6 +927,7 @@ mod tests {
                     tier: StorageTier::Known(KnownTier::Instance),
                     durability: v(1),
                     key: v(0),
+                    resolved_key: None,
                 })),
             ],
         )]);
@@ -955,6 +957,7 @@ mod tests {
                 tier: StorageTier::Known(KnownTier::Instance),
                 durability: v(dur),
                 key: v(key),
+                resolved_key: None,
             }))
         };
         let mut ir = module(vec![func(
@@ -987,6 +990,7 @@ mod tests {
             tier: StorageTier::Known(KnownTier::Instance),
             durability: v(dur),
             key: v(key),
+            resolved_key: None,
         }))
     }
 
@@ -1072,6 +1076,7 @@ mod tests {
                     tier: StorageTier::Known(KnownTier::Instance),
                     durability: v(1),
                     key: v(0),
+                    resolved_key: None,
                 })),
                 i64c(0),
                 i64c(tag14_bits("transfer")),
@@ -1096,6 +1101,7 @@ mod tests {
                 tier: StorageTier::Known(KnownTier::Persistent),
                 durability: v(1),
                 key: v(0),
+                resolved_key: None,
             }))],
         )]);
         let result = run(&mut ir);

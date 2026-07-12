@@ -30,8 +30,8 @@ use std::io::{self, Write};
 
 use sordec_common::{IrId, ProvenanceSource, ValueId};
 use sordec_ir::{
-    BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownTier, KnownType, Literal,
-    MemWidth, Region, SemanticOp, StorageTier, UnaryOp,
+    BinaryOp, Binding, EnumKey, Expr, HighFunction, HighIr, IrType, KnownOp, KnownTier, KnownType,
+    Literal, MemWidth, Region, SemanticOp, StorageTier, UnaryOp,
 };
 use sordec_passes::host_calls;
 
@@ -234,46 +234,66 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             tier,
             durability: _,
             key,
+            resolved_key,
         } => {
-            write!(out, "storage_get<{}>(v{})", tier_str(tier), key.index())
+            write!(
+                out,
+                "storage_get<{}>({})",
+                tier_str(tier),
+                key_str(key, resolved_key)
+            )
         }
         KnownOp::StorageSet {
             tier,
             durability: _,
             key,
+            resolved_key,
             value,
         } => write!(
             out,
-            "storage_set<{}>(v{}, v{})",
+            "storage_set<{}>({}, v{})",
             tier_str(tier),
-            key.index(),
+            key_str(key, resolved_key),
             value.index()
         ),
         KnownOp::StorageHas {
             tier,
             durability: _,
             key,
+            resolved_key,
         } => {
-            write!(out, "storage_has<{}>(v{})", tier_str(tier), key.index())
+            write!(
+                out,
+                "storage_has<{}>({})",
+                tier_str(tier),
+                key_str(key, resolved_key)
+            )
         }
         KnownOp::StorageRemove {
             tier,
             durability: _,
             key,
+            resolved_key,
         } => {
-            write!(out, "storage_remove<{}>(v{})", tier_str(tier), key.index())
+            write!(
+                out,
+                "storage_remove<{}>({})",
+                tier_str(tier),
+                key_str(key, resolved_key)
+            )
         }
         KnownOp::StorageExtendTtl {
             tier,
             durability: _,
             key,
+            resolved_key,
             threshold,
             extend_to,
         } => write!(
             out,
-            "extend_ttl<{}>(v{}, v{}, v{})",
+            "extend_ttl<{}>({}, v{}, v{})",
             tier_str(tier),
-            key.index(),
+            key_str(key, resolved_key),
             threshold.index(),
             extend_to.index()
         ),
@@ -281,14 +301,15 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             tier,
             durability: _,
             key,
+            resolved_key,
             extend_to,
             min_extension,
             max_extension,
         } => write!(
             out,
-            "extend_ttl_v2<{}>(v{}, v{}, v{}, v{})",
+            "extend_ttl_v2<{}>({}, v{}, v{}, v{})",
             tier_str(tier),
-            key.index(),
+            key_str(key, resolved_key),
             extend_to.index(),
             min_extension.index(),
             max_extension.index()
@@ -460,6 +481,34 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
         // recognizers land; until then an inspection-only Debug form.
         other => write!(out, "{other:?}"),
     }
+}
+
+/// Render a storage key operand: the raw value id alone, or — when the
+/// enum-key pass resolved it — annotated with the recognized variant
+/// (`v30: DataKey::Admin`, `v15: DataKey::Allowance(v1, v2)`). The
+/// value id stays visible for traceability back to the constructor
+/// call.
+fn key_str(key: &ValueId, resolved: &Option<EnumKey>) -> String {
+    let Some(enum_key) = resolved else {
+        return format!("v{}", key.index());
+    };
+    let mut s = format!(
+        "v{}: {}::{}",
+        key.index(),
+        enum_key.enum_name,
+        enum_key.variant
+    );
+    if !enum_key.payload.is_empty() {
+        s.push('(');
+        for (i, p) in enum_key.payload.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            s.push_str(&format!("v{}", p.index()));
+        }
+        s.push(')');
+    }
+    s
 }
 
 /// WAT-style width suffix for a raw memory access. Full-width accesses
@@ -879,9 +928,41 @@ mod tests {
             tier: StorageTier::Known(KnownTier::Instance),
             durability: v(93),
             key: v(92),
+            resolved_key: None,
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "storage_get<instance>(v92)");
+    }
+
+    #[test]
+    fn storage_get_renders_resolved_enum_key() {
+        // Unit variant: no payload parens.
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+            tier: StorageTier::Known(KnownTier::Instance),
+            durability: v(93),
+            key: v(92),
+            resolved_key: Some(EnumKey {
+                enum_name: "DataKey".to_string(),
+                variant: "Admin".to_string(),
+                payload: vec![],
+            }),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "storage_get<instance>(v92: DataKey::Admin)");
+
+        // Payload variant: values in slot order.
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+            tier: StorageTier::Known(KnownTier::Temporary),
+            durability: v(93),
+            key: v(15),
+            resolved_key: Some(EnumKey {
+                enum_name: "DataKey".to_string(),
+                variant: "Allowance".to_string(),
+                payload: vec![v(1), v(2)],
+            }),
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "storage_get<temporary>(v15: DataKey::Allowance(v1, v2))");
     }
 
     #[test]
@@ -890,6 +971,7 @@ mod tests {
             tier: StorageTier::Known(KnownTier::Temporary),
             durability: v(10),
             key: v(9),
+            resolved_key: None,
             value: v(0),
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
@@ -902,6 +984,7 @@ mod tests {
             tier: StorageTier::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
             durability: v(2),
             key: v(1),
+            resolved_key: None,
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "storage_has<?>(v1)");
@@ -913,6 +996,7 @@ mod tests {
             tier: StorageTier::Known(KnownTier::Persistent),
             durability: v(5),
             key: v(4),
+            resolved_key: None,
             threshold: v(9),
             extend_to: v(14),
         }));
