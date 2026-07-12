@@ -42,7 +42,10 @@
 //! (`obj_from_u64` etc.) and come back as object handles.
 
 use sordec_common::UnknownReason;
-use sordec_ir::{AddressOpKind, BufOpKind, IrType, KnownType, MapOpKind, ValObjectKind, VecOpKind};
+use sordec_ir::{
+    AddressOpKind, BufOpKind, CryptoOpKind, DeployOpKind, IrType, KnownType, MapOpKind, PrngOpKind,
+    TestOpKind, ValObjectKind, VecOpKind,
+};
 
 // ---------------------------------------------------------------------
 // Bit layout
@@ -785,6 +788,359 @@ pub fn buf_kind_result_type(kind: BufOpKind) -> KnownType {
 }
 
 // ---------------------------------------------------------------------
+// c / p / t / l-deploy tables (W3 — the remaining-ABI sweep)
+// ---------------------------------------------------------------------
+
+/// Map a `c`-module host import `(module, name)` pair to its
+/// [`CryptoOpKind`], or `None` for a non-`c` import.
+#[must_use]
+pub fn crypto_fn_kind(module: &str, name: &str) -> Option<CryptoOpKind> {
+    use CryptoOpKind as K;
+    if module != "c" {
+        return None;
+    }
+    Some(match name {
+        "_" => K::ComputeHashSha256,
+        "0" => K::VerifySigEd25519,
+        "1" => K::ComputeHashKeccak256,
+        "2" => K::RecoverKeyEcdsaSecp256k1,
+        "3" => K::VerifySigEcdsaSecp256r1,
+        "4" => K::Bls12381CheckG1IsInSubgroup,
+        "5" => K::Bls12381G1Add,
+        "6" => K::Bls12381G1Mul,
+        "7" => K::Bls12381G1Msm,
+        "8" => K::Bls12381MapFpToG1,
+        "9" => K::Bls12381HashToG1,
+        "a" => K::Bls12381CheckG2IsInSubgroup,
+        "b" => K::Bls12381G2Add,
+        "c" => K::Bls12381G2Mul,
+        "d" => K::Bls12381G2Msm,
+        "e" => K::Bls12381MapFp2ToG2,
+        "f" => K::Bls12381HashToG2,
+        "g" => K::Bls12381MultiPairingCheck,
+        "h" => K::Bls12381FrAdd,
+        "i" => K::Bls12381FrSub,
+        "j" => K::Bls12381FrMul,
+        "k" => K::Bls12381FrPow,
+        "l" => K::Bls12381FrInv,
+        "m" => K::Bn254G1Add,
+        "n" => K::Bn254G1Mul,
+        "o" => K::Bn254MultiPairingCheck,
+        "p" => K::PoseidonPermutation,
+        "q" => K::Poseidon2Permutation,
+        "r" => K::Bn254G1Msm,
+        "s" => K::Bn254FrAdd,
+        "t" => K::Bn254FrSub,
+        "u" => K::Bn254FrMul,
+        "v" => K::Bn254FrPow,
+        "w" => K::Bn254FrInv,
+        "x" => K::Bls12381G1IsOnCurve,
+        "y" => K::Bls12381G2IsOnCurve,
+        "z" => K::Bn254G1IsOnCurve,
+        _ => return None,
+    })
+}
+
+/// Friendly (snake-case, upstream) name of a crypto operation.
+#[must_use]
+pub fn crypto_kind_name(kind: CryptoOpKind) -> &'static str {
+    use CryptoOpKind as K;
+    match kind {
+        K::ComputeHashSha256 => "compute_hash_sha256",
+        K::VerifySigEd25519 => "verify_sig_ed25519",
+        K::ComputeHashKeccak256 => "compute_hash_keccak256",
+        K::RecoverKeyEcdsaSecp256k1 => "recover_key_ecdsa_secp256k1",
+        K::VerifySigEcdsaSecp256r1 => "verify_sig_ecdsa_secp256r1",
+        K::Bls12381CheckG1IsInSubgroup => "bls12_381_check_g1_is_in_subgroup",
+        K::Bls12381G1Add => "bls12_381_g1_add",
+        K::Bls12381G1Mul => "bls12_381_g1_mul",
+        K::Bls12381G1Msm => "bls12_381_g1_msm",
+        K::Bls12381MapFpToG1 => "bls12_381_map_fp_to_g1",
+        K::Bls12381HashToG1 => "bls12_381_hash_to_g1",
+        K::Bls12381CheckG2IsInSubgroup => "bls12_381_check_g2_is_in_subgroup",
+        K::Bls12381G2Add => "bls12_381_g2_add",
+        K::Bls12381G2Mul => "bls12_381_g2_mul",
+        K::Bls12381G2Msm => "bls12_381_g2_msm",
+        K::Bls12381MapFp2ToG2 => "bls12_381_map_fp2_to_g2",
+        K::Bls12381HashToG2 => "bls12_381_hash_to_g2",
+        K::Bls12381MultiPairingCheck => "bls12_381_multi_pairing_check",
+        K::Bls12381FrAdd => "bls12_381_fr_add",
+        K::Bls12381FrSub => "bls12_381_fr_sub",
+        K::Bls12381FrMul => "bls12_381_fr_mul",
+        K::Bls12381FrPow => "bls12_381_fr_pow",
+        K::Bls12381FrInv => "bls12_381_fr_inv",
+        K::Bn254G1Add => "bn254_g1_add",
+        K::Bn254G1Mul => "bn254_g1_mul",
+        K::Bn254MultiPairingCheck => "bn254_multi_pairing_check",
+        K::PoseidonPermutation => "poseidon_permutation",
+        K::Poseidon2Permutation => "poseidon2_permutation",
+        K::Bn254G1Msm => "bn254_g1_msm",
+        K::Bn254FrAdd => "bn254_fr_add",
+        K::Bn254FrSub => "bn254_fr_sub",
+        K::Bn254FrMul => "bn254_fr_mul",
+        K::Bn254FrPow => "bn254_fr_pow",
+        K::Bn254FrInv => "bn254_fr_inv",
+        K::Bls12381G1IsOnCurve => "bls12_381_g1_is_on_curve",
+        K::Bls12381G2IsOnCurve => "bls12_381_g2_is_on_curve",
+        K::Bn254G1IsOnCurve => "bn254_g1_is_on_curve",
+    }
+}
+
+/// ABI argument count of a crypto operation.
+#[must_use]
+pub fn crypto_kind_arity(kind: CryptoOpKind) -> usize {
+    use CryptoOpKind as K;
+    match kind {
+        // Unary: single-input hashes, subgroup/on-curve checks, fr_inv.
+        K::ComputeHashSha256
+        | K::ComputeHashKeccak256
+        | K::Bls12381CheckG1IsInSubgroup
+        | K::Bls12381CheckG2IsInSubgroup
+        | K::Bls12381MapFpToG1
+        | K::Bls12381MapFp2ToG2
+        | K::Bls12381FrInv
+        | K::Bn254FrInv
+        | K::Bls12381G1IsOnCurve
+        | K::Bls12381G2IsOnCurve
+        | K::Bn254G1IsOnCurve => 1,
+        // Binary: point add/mul/msm, pairings, fr add/sub/mul/pow,
+        // hash-to-curve (msg, dst).
+        K::Bls12381G1Add
+        | K::Bls12381G1Mul
+        | K::Bls12381G1Msm
+        | K::Bls12381HashToG1
+        | K::Bls12381G2Add
+        | K::Bls12381G2Mul
+        | K::Bls12381G2Msm
+        | K::Bls12381HashToG2
+        | K::Bls12381MultiPairingCheck
+        | K::Bls12381FrAdd
+        | K::Bls12381FrSub
+        | K::Bls12381FrMul
+        | K::Bls12381FrPow
+        | K::Bn254G1Add
+        | K::Bn254G1Mul
+        | K::Bn254MultiPairingCheck
+        | K::Bn254G1Msm
+        | K::Bn254FrAdd
+        | K::Bn254FrSub
+        | K::Bn254FrMul
+        | K::Bn254FrPow => 2,
+        // Ternary: sig verify/recover.
+        K::VerifySigEd25519 | K::RecoverKeyEcdsaSecp256k1 | K::VerifySigEcdsaSecp256r1 => 3,
+        // Poseidon permutations carry 8 operands each.
+        K::PoseidonPermutation | K::Poseidon2Permutation => 8,
+    }
+}
+
+/// Result type of a crypto operation, per the env.json ABI signatures.
+#[must_use]
+pub fn crypto_kind_result_type(kind: CryptoOpKind) -> KnownType {
+    use CryptoOpKind as K;
+    match kind {
+        // Hashes, point ops, key recovery → BytesObject.
+        K::ComputeHashSha256
+        | K::ComputeHashKeccak256
+        | K::RecoverKeyEcdsaSecp256k1
+        | K::Bls12381G1Add
+        | K::Bls12381G1Mul
+        | K::Bls12381G1Msm
+        | K::Bls12381MapFpToG1
+        | K::Bls12381HashToG1
+        | K::Bls12381G2Add
+        | K::Bls12381G2Mul
+        | K::Bls12381G2Msm
+        | K::Bls12381MapFp2ToG2
+        | K::Bls12381HashToG2
+        | K::Bn254G1Add
+        | K::Bn254G1Mul
+        | K::Bn254G1Msm => KnownType::Bytes,
+        // Signature verifies → Void; subgroup / on-curve / pairing
+        // checks → Bool.
+        K::VerifySigEd25519 | K::VerifySigEcdsaSecp256r1 => KnownType::Unit,
+        K::Bls12381CheckG1IsInSubgroup
+        | K::Bls12381CheckG2IsInSubgroup
+        | K::Bls12381MultiPairingCheck
+        | K::Bn254MultiPairingCheck
+        | K::Bls12381G1IsOnCurve
+        | K::Bls12381G2IsOnCurve
+        | K::Bn254G1IsOnCurve => KnownType::Bool,
+        // Field arithmetic → U256Val.
+        K::Bls12381FrAdd
+        | K::Bls12381FrSub
+        | K::Bls12381FrMul
+        | K::Bls12381FrPow
+        | K::Bls12381FrInv
+        | K::Bn254FrAdd
+        | K::Bn254FrSub
+        | K::Bn254FrMul
+        | K::Bn254FrPow
+        | K::Bn254FrInv => KnownType::U256,
+        // Poseidon permutations → VecObject.
+        K::PoseidonPermutation | K::Poseidon2Permutation => vec_of_unknown(),
+    }
+}
+
+/// Map a `p`-module host import `(module, name)` pair to its
+/// [`PrngOpKind`], or `None` for a non-`p` import.
+#[must_use]
+pub fn prng_fn_kind(module: &str, name: &str) -> Option<PrngOpKind> {
+    use PrngOpKind as K;
+    if module != "p" {
+        return None;
+    }
+    Some(match name {
+        "_" => K::PrngReseed,
+        "0" => K::PrngBytesNew,
+        "1" => K::PrngU64InInclusiveRange,
+        "2" => K::PrngVecShuffle,
+        _ => return None,
+    })
+}
+
+/// Friendly (snake-case, upstream) name of a PRNG operation.
+#[must_use]
+pub fn prng_kind_name(kind: PrngOpKind) -> &'static str {
+    use PrngOpKind as K;
+    match kind {
+        K::PrngReseed => "prng_reseed",
+        K::PrngBytesNew => "prng_bytes_new",
+        K::PrngU64InInclusiveRange => "prng_u64_in_inclusive_range",
+        K::PrngVecShuffle => "prng_vec_shuffle",
+    }
+}
+
+/// ABI argument count of a PRNG operation.
+#[must_use]
+pub fn prng_kind_arity(kind: PrngOpKind) -> usize {
+    use PrngOpKind as K;
+    match kind {
+        K::PrngReseed | K::PrngBytesNew | K::PrngVecShuffle => 1,
+        K::PrngU64InInclusiveRange => 2,
+    }
+}
+
+/// Result type of a PRNG operation, per the env.json ABI signatures.
+#[must_use]
+pub fn prng_kind_result_type(kind: PrngOpKind) -> KnownType {
+    use PrngOpKind as K;
+    match kind {
+        K::PrngReseed => KnownType::Unit,
+        K::PrngBytesNew => KnownType::Bytes,
+        K::PrngU64InInclusiveRange => KnownType::U64,
+        K::PrngVecShuffle => vec_of_unknown(),
+    }
+}
+
+/// Map a `t`-module host import `(module, name)` pair to its
+/// [`TestOpKind`], or `None` for a non-`t` import.
+#[must_use]
+pub fn test_fn_kind(module: &str, name: &str) -> Option<TestOpKind> {
+    use TestOpKind as K;
+    if module != "t" {
+        return None;
+    }
+    Some(match name {
+        "_" => K::Dummy0,
+        "0" => K::ProtocolGatedDummy,
+        _ => return None,
+    })
+}
+
+/// Friendly (snake-case, upstream) name of a test operation.
+#[must_use]
+pub fn test_kind_name(kind: TestOpKind) -> &'static str {
+    use TestOpKind as K;
+    match kind {
+        K::Dummy0 => "dummy0",
+        K::ProtocolGatedDummy => "protocol_gated_dummy",
+    }
+}
+
+/// ABI argument count of a test operation (both are nullary).
+#[must_use]
+pub fn test_kind_arity(kind: TestOpKind) -> usize {
+    match kind {
+        TestOpKind::Dummy0 | TestOpKind::ProtocolGatedDummy => 0,
+    }
+}
+
+/// Result type of a test operation (both return a raw `Val`).
+#[must_use]
+pub fn test_kind_result_type(kind: TestOpKind) -> KnownType {
+    match kind {
+        TestOpKind::Dummy0 | TestOpKind::ProtocolGatedDummy => KnownType::Val,
+    }
+}
+
+/// Map an `l`-module *deploy/upgrade* host import `(module, name)` pair
+/// to its [`DeployOpKind`], or `None` for the storage CRUD/TTL exports
+/// (StoragePass's ops) or a non-`l` import.
+#[must_use]
+pub fn deploy_fn_kind(module: &str, name: &str) -> Option<DeployOpKind> {
+    use DeployOpKind as K;
+    if module != "l" {
+        return None;
+    }
+    Some(match name {
+        "3" => K::CreateContract,
+        "4" => K::CreateAssetContract,
+        "5" => K::UploadWasm,
+        "6" => K::UpdateCurrentContractWasm,
+        "a" => K::GetContractId,
+        "b" => K::GetAssetContractId,
+        "e" => K::CreateContractWithConstructor,
+        // "_"/"0"/"1"/"2" CRUD, "7"-"9"/"c"-"g" TTL → StoragePass.
+        _ => return None,
+    })
+}
+
+/// Friendly (snake-case, upstream) name of a deploy operation.
+#[must_use]
+pub fn deploy_kind_name(kind: DeployOpKind) -> &'static str {
+    use DeployOpKind as K;
+    match kind {
+        K::CreateContract => "create_contract",
+        K::CreateAssetContract => "create_asset_contract",
+        K::UploadWasm => "upload_wasm",
+        K::UpdateCurrentContractWasm => "update_current_contract_wasm",
+        K::GetContractId => "get_contract_id",
+        K::GetAssetContractId => "get_asset_contract_id",
+        K::CreateContractWithConstructor => "create_contract_with_constructor",
+    }
+}
+
+/// ABI argument count of a deploy operation.
+#[must_use]
+pub fn deploy_kind_arity(kind: DeployOpKind) -> usize {
+    use DeployOpKind as K;
+    match kind {
+        K::CreateAssetContract | K::UploadWasm | K::UpdateCurrentContractWasm
+        | K::GetAssetContractId => 1,
+        K::GetContractId => 2,
+        K::CreateContract => 3,
+        K::CreateContractWithConstructor => 4,
+    }
+}
+
+/// Result type of a deploy operation, per the env.json ABI signatures.
+#[must_use]
+pub fn deploy_kind_result_type(kind: DeployOpKind) -> KnownType {
+    use DeployOpKind as K;
+    match kind {
+        // Contract creation + id derivation → AddressObject.
+        K::CreateContract
+        | K::CreateAssetContract
+        | K::GetContractId
+        | K::GetAssetContractId
+        | K::CreateContractWithConstructor => KnownType::Address,
+        // upload_wasm → the wasm hash BytesObject.
+        K::UploadWasm => KnownType::Bytes,
+        K::UpdateCurrentContractWasm => KnownType::Unit,
+    }
+}
+
+// ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
 
@@ -1030,6 +1386,141 @@ mod tests {
                 "val_abi buf name for b.{export} drifted from the vendored catalog"
             );
         }
+    }
+
+    // --- c/p/t/l-deploy tables (W3) ---
+
+    /// Every `c` export (`_`, `0`-`9`, `a`-`z` = 37) maps, and its
+    /// friendly name agrees with the vendored catalog. Also asserts the
+    /// count so a future host release that *adds* a crypto function
+    /// fails here until the table is extended.
+    #[test]
+    fn crypto_table_agrees_with_vendored_catalog() {
+        let exports: Vec<String> = std::iter::once("_".to_string())
+            .chain(('0'..='9').map(|c| c.to_string()))
+            .chain(('a'..='z').map(|c| c.to_string()))
+            .collect();
+        assert_eq!(exports.len(), 37, "expected 37 crypto exports");
+        for export in &exports {
+            let kind = crypto_fn_kind("c", export)
+                .unwrap_or_else(|| panic!("c.{export} must map to a CryptoOpKind"));
+            let catalog = crate::host_calls::resolve("c", export)
+                .unwrap_or_else(|| panic!("c.{export} must exist in the vendored catalog"));
+            assert_eq!(
+                catalog.friendly_name,
+                crypto_kind_name(kind),
+                "val_abi crypto name for c.{export} drifted from the catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn prng_table_agrees_with_vendored_catalog() {
+        for export in ["_", "0", "1", "2"] {
+            let kind = prng_fn_kind("p", export).expect("maps");
+            let catalog = crate::host_calls::resolve("p", export)
+                .unwrap_or_else(|| panic!("p.{export} must exist in the catalog"));
+            assert_eq!(
+                catalog.friendly_name,
+                prng_kind_name(kind),
+                "val_abi prng name for p.{export} drifted from the catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn test_table_agrees_with_vendored_catalog() {
+        for export in ["_", "0"] {
+            let kind = test_fn_kind("t", export).expect("maps");
+            let catalog = crate::host_calls::resolve("t", export)
+                .unwrap_or_else(|| panic!("t.{export} must exist in the catalog"));
+            assert_eq!(
+                catalog.friendly_name,
+                test_kind_name(kind),
+                "val_abi test name for t.{export} drifted from the catalog"
+            );
+        }
+    }
+
+    #[test]
+    fn deploy_table_agrees_with_vendored_catalog() {
+        for export in ["3", "4", "5", "6", "a", "b", "e"] {
+            let kind = deploy_fn_kind("l", export).expect("maps");
+            let catalog = crate::host_calls::resolve("l", export)
+                .unwrap_or_else(|| panic!("l.{export} must exist in the catalog"));
+            assert_eq!(
+                catalog.friendly_name,
+                deploy_kind_name(kind),
+                "val_abi deploy name for l.{export} drifted from the catalog"
+            );
+        }
+    }
+
+    /// The deploy table and StoragePass's CRUD/TTL exports partition the
+    /// `l` module with no overlap and no gap: the union must be exactly
+    /// the 18 `l` exports the catalog knows.
+    #[test]
+    fn deploy_and_storage_partition_the_ledger_module() {
+        let storage_ttl = ["_", "0", "1", "2", "7", "8", "9", "c", "d", "f", "g"];
+        let deploy = ["3", "4", "5", "6", "a", "b", "e"];
+        // No export is in both sets.
+        for d in deploy {
+            assert!(!storage_ttl.contains(&d), "l.{d} claimed by both");
+            assert!(deploy_fn_kind("l", d).is_some(), "l.{d} must map to deploy");
+        }
+        // The deploy table rejects every storage/TTL export.
+        for s in storage_ttl {
+            assert_eq!(deploy_fn_kind("l", s), None, "l.{s} is StoragePass's");
+        }
+        // The union covers all 18.
+        assert_eq!(storage_ttl.len() + deploy.len(), 18);
+    }
+
+    #[test]
+    fn abi_sweep_wrong_module_returns_none() {
+        assert_eq!(crypto_fn_kind("p", "_"), None);
+        assert_eq!(prng_fn_kind("c", "_"), None);
+        assert_eq!(test_fn_kind("l", "_"), None);
+        assert_eq!(deploy_fn_kind("c", "3"), None);
+        assert_eq!(crypto_fn_kind("c", "zz"), None, "nonexistent export");
+    }
+
+    #[test]
+    fn abi_sweep_result_types_match_abi() {
+        assert_eq!(
+            crypto_kind_result_type(CryptoOpKind::ComputeHashSha256),
+            KnownType::Bytes
+        );
+        assert_eq!(
+            crypto_kind_result_type(CryptoOpKind::VerifySigEd25519),
+            KnownType::Unit
+        );
+        assert_eq!(
+            crypto_kind_result_type(CryptoOpKind::Bls12381MultiPairingCheck),
+            KnownType::Bool
+        );
+        assert_eq!(
+            crypto_kind_result_type(CryptoOpKind::Bls12381FrAdd),
+            KnownType::U256
+        );
+        assert!(matches!(
+            crypto_kind_result_type(CryptoOpKind::PoseidonPermutation),
+            KnownType::Vec(_)
+        ));
+        assert_eq!(crypto_kind_arity(CryptoOpKind::PoseidonPermutation), 8);
+        assert_eq!(
+            prng_kind_result_type(PrngOpKind::PrngU64InInclusiveRange),
+            KnownType::U64
+        );
+        assert_eq!(
+            deploy_kind_result_type(DeployOpKind::CreateContract),
+            KnownType::Address
+        );
+        assert_eq!(
+            deploy_kind_result_type(DeployOpKind::UploadWasm),
+            KnownType::Bytes
+        );
+        assert_eq!(test_kind_result_type(TestOpKind::Dummy0), KnownType::Val);
     }
 
     #[test]
