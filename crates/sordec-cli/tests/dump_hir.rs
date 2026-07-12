@@ -477,6 +477,94 @@ const TOKEN_V23_STRIPPED: &str = concat!(
 );
 
 #[test]
+fn dump_hir_names_enum_storage_keys_on_both_tokens() {
+    // The enum-key recognizer (W1/D2.3 substrate): DataKey variants
+    // built by the shared constructor helper are named on the storage
+    // ops, across all three channels the token exercises — unit
+    // variant (Admin, instance), one-payload (Balance, persistent),
+    // two-payload (Allowance, temporary).
+    for wasm in [TOKEN_V22, TOKEN_V23] {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-hir", wasm])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("storage_get<instance>(v30: DataKey::Admin)"))
+            .stdout(predicate::str::contains(": DataKey::Balance(v"))
+            .stdout(predicate::str::contains(": DataKey::Allowance(v"))
+            // The provenance note records the evidence chain, including
+            // the decl-order mapping assumption.
+            .stdout(predicate::str::contains(
+                "enum-key DataKey::Admin (disc 3 via frame slot, spec union matched, decl-order mapping)",
+            ));
+    }
+}
+
+#[test]
+fn dump_hir_names_enum_storage_keys_by_value_on_timelock_and_dex() {
+    // All-unit DataKey enums pass the discriminant by value; the
+    // monomorphic sites name (timelock claim's Balance get + remove,
+    // dex's TokenA getter). The shared polymorphic helpers (timelock's
+    // has serving Init AND Balance, dex's getter serving TokenB..Shares)
+    // must stay honestly unnamed — the meet refuses disagreement.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("storage_get<instance>(v182: DataKey::Balance)"))
+        .stdout(predicate::str::contains("storage_remove<instance>(v163: DataKey::Balance)"))
+        .stdout(predicate::str::contains(": DataKey::Init").not());
+
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", DEX])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(": DataKey::TokenA"))
+        .stdout(predicate::str::contains(": DataKey::TokenB").not());
+}
+
+#[test]
+fn dump_hir_stripped_token_names_no_enum_keys() {
+    // The honesty lock: without a contractspecv0 section there is no
+    // union registry, so the enum-key pass recognizes nothing — no
+    // guessed names, ever.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23_STRIPPED])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DataKey::").not())
+        .stdout(predicate::str::contains("admin gate:").not());
+}
+
+#[test]
+fn dump_hir_annotates_admin_gates_on_both_tokens() {
+    // The D2.3 flow: require_auth whose address is the instance-storage
+    // admin read carries the admin-gate annotation (mint + set_admin);
+    // param-auth sites (transfer etc.) never do. `--raw` shows neither.
+    for wasm in [TOKEN_V22, TOKEN_V23] {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-hir", wasm])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "admin gate: address = storage_get<instance>(DataKey::Admin)",
+            ));
+    }
+
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", TOKEN_V22])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("admin gate:").not())
+        .stdout(predicate::str::contains("DataKey::").not());
+}
+
+#[test]
 fn dump_hir_recognizes_every_host_call_across_the_corpus() {
     // The Phase 2 recognition milestone: with all seven recognizers
     // registered, no raw `host:` call of any module survives the default
