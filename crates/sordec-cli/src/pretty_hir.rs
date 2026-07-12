@@ -30,8 +30,8 @@ use std::io::{self, Write};
 
 use sordec_common::{IrId, ProvenanceSource, ValueId};
 use sordec_ir::{
-    BinaryOp, Binding, EnumKey, Expr, HighFunction, HighIr, IrType, KnownOp, KnownTier, KnownType,
-    Literal, MemWidth, Region, SemanticOp, StorageTier, UnaryOp,
+    BinaryOp, Binding, DispatchTable, EnumKey, Expr, HighFunction, HighIr, IrType, KnownOp,
+    KnownTier, KnownType, Literal, MemWidth, Region, SemanticOp, StorageTier, UnaryOp,
 };
 use sordec_passes::host_calls;
 
@@ -457,6 +457,8 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
         KnownOp::MapOp { kind, args } => render_call(out, val_abi::map_kind_name(*kind), args),
         KnownOp::VecOp { kind, args } => render_call(out, val_abi::vec_kind_name(*kind), args),
         KnownOp::BufOp { kind, args } => render_call(out, val_abi::buf_kind_name(*kind), args),
+        // ---- Enum dispatch (dispatcher pass) ----
+        KnownOp::SymbolDispatch { sym, table, .. } => render_symbol_dispatch(out, *sym, table),
         // ---- Crypto / PRNG / test / deploy (abi-sweep) ----
         KnownOp::CryptoOp { kind, args } => {
             render_call(out, val_abi::crypto_kind_name(*kind), args)
@@ -507,6 +509,23 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
         // has a dedicated rendering. A new `KnownOp` must add its arm
         // here (a deliberate compile-time forcing function; there is no
         // Debug fallback to silently absorb it).
+    }
+}
+
+/// Render a recognized symbol-dispatch (enum-from-`Val` decode). The
+/// looked-up symbol stays visible for traceability; the decoded variant
+/// list renders as `EnumName::{Before | After}` when the enum was named
+/// against the spec, or bare `{Before | After}` when only the rodata
+/// cases are known (a stripped binary or no unique union match).
+fn render_symbol_dispatch(
+    out: &mut impl Write,
+    sym: ValueId,
+    table: &DispatchTable,
+) -> io::Result<()> {
+    let cases = table.cases.join(" | ");
+    match &table.enum_name {
+        Some(name) => write!(out, "symbol_dispatch(v{}) -> {name}::{{{cases}}}", sym.index()),
+        None => write!(out, "symbol_dispatch(v{}) -> {{{cases}}}", sym.index()),
     }
 }
 
@@ -1250,6 +1269,38 @@ mod tests {
         }));
         let s = render_to_string(|w| render_expr(w, &expr));
         assert_eq!(s, "symbol_index_in_linear_memory(v1, v2, v3)");
+    }
+
+    #[test]
+    fn symbol_dispatch_renders_named_enum() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::SymbolDispatch {
+            sym: v(61),
+            table_pos: v(69),
+            len: v(70),
+            table: DispatchTable {
+                cases: vec!["Before".to_string(), "After".to_string()],
+                enum_name: Some("TimeBoundKind".to_string()),
+            },
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "symbol_dispatch(v61) -> TimeBoundKind::{Before | After}");
+    }
+
+    #[test]
+    fn symbol_dispatch_renders_bare_cases_when_enum_unnamed() {
+        // No unique union match (or a stripped binary): cases are still
+        // ground truth from rodata, but the enum stays unnamed.
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::SymbolDispatch {
+            sym: v(61),
+            table_pos: v(69),
+            len: v(70),
+            table: DispatchTable {
+                cases: vec!["Before".to_string(), "After".to_string()],
+                enum_name: None,
+            },
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr));
+        assert_eq!(s, "symbol_dispatch(v61) -> {Before | After}");
     }
 
     #[test]

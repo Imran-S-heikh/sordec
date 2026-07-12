@@ -52,6 +52,35 @@ pub struct EnumKey {
     pub payload: Vec<ValueId>,
 }
 
+/// A decoded symbol-dispatch table — the ground truth behind the SDK's
+/// `#[contracttype]` enum-from-`Val` decoder.
+///
+/// The SDK decodes an enum by calling `symbol_index_in_linear_memory` with
+/// a pointer to a rodata array of byte-slice descriptors (one per variant
+/// name), then switching on the returned index. The `dispatcher` pass reads
+/// that array out of linear memory and records it here.
+///
+/// `cases` is **witnessed** ground truth (the exact bytes rustc baked into
+/// rodata), so it is always present when this table is produced — the pass
+/// decodes all-or-nothing and leaves the site a plain `BufOp` if any entry
+/// fails to resolve. `enum_name`, by contrast, follows the None-is-honest
+/// discipline: it is filled only when exactly one `contractspecv0` union's
+/// case set equals `cases`, and stays `None` for a stripped binary (no
+/// spec) or an ambiguous match — never a guess.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct DispatchTable {
+    /// Variant names in table order. Index `i` is the value the host
+    /// returns for `cases[i]`, matching the `br_table` arm order and the
+    /// enum's declaration-order discriminants.
+    // JUSTIFY: Variant names are arbitrary user-defined identifiers.
+    pub cases: Vec<String>,
+    /// Enum type name from `contractspecv0` when a unique union's case set
+    /// equals `cases`; `None` when no spec, no match, or an ambiguous one.
+    // JUSTIFY: Type names are arbitrary user-defined identifiers.
+    pub enum_name: Option<String>,
+}
+
 /// A known contract interface a cross-contract call was matched
 /// against, by callee name + argument arity (structural evidence — the
 /// callee's actual code is not inspectable; the matching pass records
@@ -662,6 +691,34 @@ pub enum KnownOp {
         kind: BufOpKind,
         /// Operands in original host-call argument order.
         args: Vec<ValueId>,
+    },
+
+    // ---- Enum dispatch (recognized by the dispatcher pass) ----
+    /// `(b, m) symbol_index_in_linear_memory`, refined by the `dispatcher`
+    /// pass into the SDK's `#[contracttype]` enum-from-`Val` decoder.
+    ///
+    /// The pass reads the rodata slice-descriptor table this call switches
+    /// on and records the ordered variant list in [`DispatchTable`]
+    /// (`SdkPattern` evidence, `Known` certainty by construction — the
+    /// variant names are witnessed rodata bytes). A `BufOp` of this kind is
+    /// rewritten into `SymbolDispatch` only when the table decodes
+    /// all-or-nothing; otherwise it honestly stays a `BufOp`. The operand
+    /// `sym`/`table_pos`/`len` fields preserve the original host-call
+    /// arguments (nothing is discarded). Returns the matched variant index
+    /// (`Known(U32)`, unchanged from the `BufOp` result type).
+    ///
+    /// Recovering the actual `match` arms from the surrounding `br_table`
+    /// is control-flow structuring (Phase 3); this op names the enum and
+    /// records the index→variant map only.
+    SymbolDispatch {
+        /// The `Symbol` being looked up (original argument 0).
+        sym: ValueId,
+        /// Linear-memory position of the slice-descriptor table (argument 1).
+        table_pos: ValueId,
+        /// Number of descriptors in the table (argument 2).
+        len: ValueId,
+        /// The decoded variant list and, when resolvable, the enum name.
+        table: DispatchTable,
     },
 }
 

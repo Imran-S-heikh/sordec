@@ -24,8 +24,8 @@ pub mod ty;
 pub use expr::{BinaryOp, Expr, Literal, MemWidth, UnaryOp};
 pub use region::Region;
 pub use semantic::{
-    AddressOpKind, BufOpKind, ClientInterface, CryptoOpKind, DeployOpKind, EnumKey, KnownOp,
-    MapOpKind, PrngOpKind, SemanticOp, TestOpKind, ValObjectKind, VecOpKind,
+    AddressOpKind, BufOpKind, ClientInterface, CryptoOpKind, DeployOpKind, DispatchTable, EnumKey,
+    KnownOp, MapOpKind, PrngOpKind, SemanticOp, TestOpKind, ValObjectKind, VecOpKind,
 };
 pub use storage::{KnownTier, StorageTier};
 pub use ty::{IrType, KnownType};
