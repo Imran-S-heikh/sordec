@@ -35,6 +35,7 @@
 //! - [`const_prop`] — the inter-procedural upgrade pass (see above).
 
 pub mod auth;
+pub mod auth_flow;
 pub mod collections;
 pub mod const_prop;
 pub mod context;
@@ -45,6 +46,7 @@ pub mod storage;
 pub mod val_encoding;
 
 pub use auth::AuthPass;
+pub use auth_flow::AuthFlowPass;
 pub use collections::CollectionsPass;
 pub use const_prop::ConstPropPass;
 pub use context::ContextPass;
