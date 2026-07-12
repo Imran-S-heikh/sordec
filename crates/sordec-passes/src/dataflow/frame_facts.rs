@@ -78,6 +78,22 @@ impl FrameFacts {
         }
     }
 
+    /// Like [`value_at`](Self::value_at), but additionally accepts a
+    /// **wider** store at the same offset — a little-endian truncating
+    /// read (WASM memory is little-endian, so the low bytes of a wider
+    /// store sit exactly where a narrower load at the same offset
+    /// reads). CAVEAT: the returned value is the *full* stored value;
+    /// the runtime reads its truncation. Callers must range-check the
+    /// resolved constant so that any value truncation would change
+    /// fails their gate instead of being misread.
+    #[must_use]
+    pub fn value_at_trunc(&self, offset: u32, width: MemWidth) -> Option<ValueId> {
+        match self.slots.get(&offset) {
+            Some(fact) if fact.width.bytes() >= width.bytes() => Some(fact.value),
+            _ => None,
+        }
+    }
+
     /// All facts in ascending offset order.
     pub fn iter(&self) -> impl Iterator<Item = (u32, SlotFact)> + '_ {
         self.slots.iter().map(|(off, fact)| (*off, *fact))
@@ -187,48 +203,51 @@ pub fn facts_before(
             facts.kill_all();
             continue;
         };
-        match &binding.expr {
-            Expr::Store {
-                addr,
-                value,
-                offset,
-                width,
-            } => {
-                let (store_base, addr_off) = canon_addr(func, *addr);
-                let total = u32::checked_add(addr_off, *offset);
-                match total {
-                    Some(total) if store_base == base => facts.record(total, *width, *value),
-                    // Different base (may alias) or offset overflow:
-                    // fail closed.
-                    _ => facts.kill_all(),
-                }
+        if let Expr::Store {
+            addr,
+            value,
+            offset,
+            width,
+        } = &binding.expr
+        {
+            let (store_base, addr_off) = canon_addr(func, *addr);
+            match u32::checked_add(addr_off, *offset) {
+                Some(total) if store_base == base => facts.record(total, *width, *value),
+                // Different base (may alias) or offset overflow:
+                // fail closed.
+                _ => facts.kill_all(),
             }
-            Expr::Call { .. } | Expr::IndirectCall { .. } => facts.kill_all(),
-            Expr::Semantic(SemanticOp::Unknown { .. }) => facts.kill_all(),
-            Expr::Semantic(SemanticOp::Known(op)) => {
-                if known_op_writes_memory(op) {
-                    facts.kill_all();
-                }
-            }
-            Expr::Unknown { op_kind, .. } => {
-                if opcode_kind_may_write_memory(*op_kind) {
-                    facts.kill_all();
-                }
-            }
-            // Pure value producers: literals, uses, phis, arithmetic,
-            // loads, global reads.
-            Expr::Literal(_)
-            | Expr::Use(_)
-            | Expr::Unary { .. }
-            | Expr::Binary { .. }
-            | Expr::Phi { .. }
-            | Expr::GlobalGet { .. }
-            | Expr::Load { .. } => {}
+        } else if may_write_memory(&binding.expr) {
+            facts.kill_all();
         }
     }
     // `at` was never reached: the query position is not in this block,
     // so no computed fact is positionally valid.
     FrameFacts::default()
+}
+
+/// Whether an expression may write linear memory — the module's shared
+/// kill predicate (stores are handled separately by [`facts_before`],
+/// which needs their address; this classifies everything else).
+/// Fail-closed: unrecognized host calls, any call, and uncategorised
+/// raw operators all count as writers.
+#[must_use]
+pub fn may_write_memory(expr: &Expr) -> bool {
+    match expr {
+        Expr::Store { .. } | Expr::Call { .. } | Expr::IndirectCall { .. } => true,
+        Expr::Semantic(SemanticOp::Unknown { .. }) => true,
+        Expr::Semantic(SemanticOp::Known(op)) => known_op_writes_memory(op),
+        Expr::Unknown { op_kind, .. } => opcode_kind_may_write_memory(*op_kind),
+        // Pure value producers: literals, uses, phis, arithmetic,
+        // loads, global reads.
+        Expr::Literal(_)
+        | Expr::Use(_)
+        | Expr::Unary { .. }
+        | Expr::Binary { .. }
+        | Expr::Phi { .. }
+        | Expr::GlobalGet { .. }
+        | Expr::Load { .. } => false,
+    }
 }
 
 /// Whether a recognized host op writes guest linear memory.

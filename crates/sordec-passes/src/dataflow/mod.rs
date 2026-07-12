@@ -41,7 +41,9 @@ pub mod trace_const;
 
 pub use const_prop::{CallIndex, CallSite, Resolver, DEFAULT_RESOLVE_DEPTH};
 pub use def_use::{DefUseIndex, UseSite};
-pub use frame_facts::{block_containing, canon_addr, facts_before, FrameFacts, SlotFact};
+pub use frame_facts::{
+    block_containing, canon_addr, facts_before, may_write_memory, FrameFacts, SlotFact,
+};
 pub use high::{resolve_use, trace_int, trace_literal, DEFAULT_USE_DEPTH};
 pub use trace_bytes::{trace_bytes, trace_u32val};
 pub use trace_const::{trace_const, trace_const_with_limit, TraceStop, DEFAULT_MAX_DEPTH};

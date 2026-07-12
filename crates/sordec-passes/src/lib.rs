@@ -46,8 +46,8 @@ pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
-    AuthPass, CollectionsPass, ConstPropPass, ContextPass, CrossContractPass, LinearMemoryPass,
-    StoragePass, ValEncodingPass,
+    AuthPass, CollectionsPass, ConstPropPass, ContextPass, CrossContractPass, EnumKeyPass,
+    LinearMemoryPass, StoragePass, ValEncodingPass,
 };
 pub use sordec_common::LiftDiagnostics;
 
@@ -60,10 +60,15 @@ use sordec_ir::HighIr;
 /// order the kickoff plan sequences them; as more land they join a
 /// fixpoint group so patterns that feed each other converge.
 ///
-/// [`LinearMemoryPass`] runs last because it consumes [`ValEncodingPass`]'s
-/// output: the `(position, length)` operands of the `*_new_from_linear_memory`
-/// constructors arrive as `U32Val`s that C1 has already collapsed into
-/// `ValEncodeSmall`, which the linear-memory tracer peels.
+/// [`LinearMemoryPass`] runs after [`ValEncodingPass`] because it consumes
+/// C1's output: the `(position, length)` operands of the
+/// `*_new_from_linear_memory` constructors arrive as `U32Val`s that C1 has
+/// already collapsed into `ValEncodeSmall`, which the linear-memory tracer
+/// peels. [`EnumKeyPass`] runs after [`ConstPropPass`] — not a hard
+/// dependency (its evidence is local constants + rodata + frame facts),
+/// but it keeps the refiners-before-consumers reading of the manifest.
+/// No fixpoint group: the dependency chain is a straight line and every
+/// pass is idempotent.
 #[must_use]
 pub fn default_high_pipeline() -> Pipeline<HighIr> {
     Pipeline::new(
@@ -76,6 +81,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(CollectionsPass),
             Box::new(CrossContractPass),
             Box::new(ConstPropPass),
+            Box::new(EnumKeyPass),
         ],
         vec![],
     )
