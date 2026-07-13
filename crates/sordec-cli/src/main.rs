@@ -280,8 +280,10 @@ fn run_dump_hir(args: &DumpHirArgs) -> u8 {
     // 4b. Run the pattern-recovery pipeline unless `--raw`. Recognizers
     //     rewrite bindings into semantic ops in place; `--raw` preserves
     //     the mechanical lowering view for debugging.
+    let mut pipeline_diagnostics = Vec::new();
     if !args.raw {
-        let _report = sordec_passes::default_high_pipeline().run(&mut high);
+        let report = sordec_passes::default_high_pipeline().run(&mut high);
+        pipeline_diagnostics = report.diagnostics().cloned().collect();
     }
 
     // 5. Render to stdout.
@@ -292,9 +294,11 @@ fn run_dump_hir(args: &DumpHirArgs) -> u8 {
         return EXIT_IO_ERR;
     }
 
-    // 6. Parse + lift diagnostics to stderr, after stdout.
+    // 6. Parse + lift + recogniser-pipeline diagnostics to stderr, after
+    //    stdout.
     let mut combined = parse_output.diagnostics.into_vec();
     combined.extend(lift_output.diagnostics.into_vec());
+    combined.extend(pipeline_diagnostics);
     diagnostics::print_diagnostics(&combined);
 
     EXIT_OK
@@ -336,13 +340,26 @@ fn run_coverage(args: &CoverageArgs) -> u8 {
         }
     };
 
-    // 4. Compute the report. Pure — no failure modes.
+    // 4. Run the recogniser pipeline (on a lowered clone of the lifted
+    //    IR; the original is borrowed by `compute_coverage`) and aggregate
+    //    its diagnostics per code — the E3/F9 coverage signal.
+    let recognizer_diagnostics = match sordec_passes::LiftToHigh.lower(lift_output.lifted.clone()) {
+        Ok(mut high) => sordec_passes::default_high_pipeline()
+            .run(&mut high)
+            .diagnostic_counts_by_code(),
+        // A lowering failure here is not fatal to coverage — report the
+        // lift-layer numbers with an empty diagnostic section.
+        Err(_) => std::collections::BTreeMap::new(),
+    };
+
+    // 5. Compute the report. Pure — no failure modes.
     let report = coverage::compute_coverage(
         &args.wasm,
         parse_output.diagnostics.as_slice(),
         parse_output.soroban_facts.is_some(),
         &lift_output.lifted,
         lift_output.diagnostics.as_slice(),
+        &recognizer_diagnostics,
     );
 
     // 5. Render to stdout in the requested format. Lock stdout to

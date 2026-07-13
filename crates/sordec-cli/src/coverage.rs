@@ -74,6 +74,8 @@ pub struct CoverageReport {
     /// Operator counts by kind. Closed total: the four numbered buckets
     /// sum to `total`.
     pub operators: OperatorBreakdown,
+    /// Per-code counts of recogniser-pipeline diagnostics (E3/F9).
+    pub diagnostics: DiagnosticCoverage,
 }
 
 /// Parse-stage health.
@@ -170,6 +172,32 @@ pub struct OperatorBreakdown {
     pub other: usize,
 }
 
+/// Per-code counts of the diagnostics the recogniser pipeline surfaced
+/// (spec E3/F9) — every recogniser-miss and every unrecognised host call,
+/// bucketed by their stable `LiftDiagnosticCode`.
+///
+/// `total == 0` for a fully-recovered contract. Distinct from the
+/// lift-stage [`LiftCoverage`] diagnostics, which are emitted before
+/// recognition; this section reflects the post-recognition pipeline.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagnosticCoverage {
+    /// Sum of all per-code counts.
+    pub total: usize,
+    /// One entry per diagnostic code that fired, sorted by descending
+    /// count then code (empty when the contract is fully recovered).
+    pub by_code: Vec<DiagnosticCodeCount>,
+}
+
+/// One diagnostic code and how many times the pipeline emitted it.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagnosticCodeCount {
+    /// Stable `<layer>::snake_case` code identifier
+    /// ([`sordec_common::DiagnosticCode::key`]).
+    pub code: String,
+    /// Number of diagnostics with this code.
+    pub count: usize,
+}
+
 // ---------------------------------------------------------------------
 // Compute
 // ---------------------------------------------------------------------
@@ -196,6 +224,7 @@ pub fn compute_coverage(
     metadata_present: bool,
     lifted: &LiftedIr,
     lift_diagnostics: &[Diagnostic],
+    recognizer_diagnostics: &BTreeMap<&'static str, usize>,
 ) -> CoverageReport {
     let metadata_diag_count = front_diagnostics
         .iter()
@@ -305,7 +334,23 @@ pub fn compute_coverage(
             call_indirect,
             other: other_ops,
         },
+        diagnostics: build_diagnostic_coverage(recognizer_diagnostics),
     }
+}
+
+/// Turn the pipeline's per-code diagnostic counts into the report
+/// section: total plus a list sorted by descending count, then code.
+fn build_diagnostic_coverage(counts: &BTreeMap<&'static str, usize>) -> DiagnosticCoverage {
+    let total = counts.values().sum();
+    let mut by_code: Vec<DiagnosticCodeCount> = counts
+        .iter()
+        .map(|(&code, &count)| DiagnosticCodeCount {
+            code: code.to_string(),
+            count,
+        })
+        .collect();
+    by_code.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.code.cmp(&b.code)));
+    DiagnosticCoverage { total, by_code }
 }
 
 /// Count distinct functions that any diagnostic blames via a
@@ -452,6 +497,15 @@ pub fn render_text(out: &mut impl Write, r: &CoverageReport) -> io::Result<()> {
         r.operators.other
     )?;
 
+    writeln!(
+        out,
+        "  diagnostics:     {} total (recogniser misses)",
+        r.diagnostics.total,
+    )?;
+    for c in &r.diagnostics.by_code {
+        writeln!(out, "                     {} (\u{00d7}{})", c.code, c.count)?;
+    }
+
     Ok(())
 }
 
@@ -575,7 +629,7 @@ mod tests {
     #[test]
     fn compute_coverage_on_empty_ir_returns_zeros_without_panic() {
         let ir = empty_lifted_ir(vec![]);
-        let r = compute_coverage(Path::new("empty.wasm"), &[], false, &ir, &[]);
+        let r = compute_coverage(Path::new("empty.wasm"), &[], false, &ir, &[], &BTreeMap::new());
 
         assert_eq!(r.parse.diagnostics, 0);
         assert!(r.parse.ok);
@@ -586,6 +640,40 @@ mod tests {
         assert!(r.host_calls.ratio.is_none(), "denominator-zero → null");
         assert!(r.host_calls.unrecognized.is_empty());
         assert_eq!(r.operators.total, 0);
+        // No recogniser diagnostics → clean section.
+        assert_eq!(r.diagnostics.total, 0);
+        assert!(r.diagnostics.by_code.is_empty());
+    }
+
+    #[test]
+    fn diagnostic_coverage_totals_and_sorts_by_count() {
+        let ir = empty_lifted_ir(vec![]);
+        let counts = BTreeMap::from([
+            ("lift::non_constant_durability_arg", 3),
+            ("lift::unresolved_symbol_dispatch", 1),
+            ("lift::non_constant_ttl_amount", 3),
+        ]);
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &counts);
+
+        assert_eq!(r.diagnostics.total, 7);
+        // Sorted by descending count, then code ascending for ties.
+        let order: Vec<&str> = r.diagnostics.by_code.iter().map(|c| c.code.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "lift::non_constant_durability_arg",
+                "lift::non_constant_ttl_amount",
+                "lift::unresolved_symbol_dispatch",
+            ]
+        );
+        assert_eq!(r.diagnostics.by_code[0].count, 3);
+
+        // The text render surfaces the section.
+        let mut buf = Vec::new();
+        render_text(&mut buf, &r).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("diagnostics:     7 total (recogniser misses)"));
+        assert!(text.contains("lift::non_constant_ttl_amount (\u{00d7}3)"));
     }
 
     #[test]
@@ -594,7 +682,7 @@ mod tests {
         // catalog resolves to `put_contract_data`. One Call to it
         // should produce recognized=1, total=1, ratio=1.0.
         let ir = lifted_ir_with_one_function(vec![import("l", "_")], vec![op_call(0)]);
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[]);
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new());
 
         assert_eq!(r.host_calls.total, 1);
         assert_eq!(r.host_calls.recognized, 1);
@@ -612,7 +700,7 @@ mod tests {
             vec![import("zz", "?")],
             vec![op_call(0), op_call(0), op_call(0)],
         );
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[]);
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new());
 
         assert_eq!(r.host_calls.total, 3);
         assert_eq!(r.host_calls.recognized, 0);
@@ -629,7 +717,7 @@ mod tests {
         // One import (idx 0) and one call to a local function
         // (waffle idx 1, past imported_func_count of 1).
         let ir = lifted_ir_with_one_function(vec![import("l", "_")], vec![op_call(1)]);
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[]);
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new());
 
         assert_eq!(r.operators.call_to_import, 0);
         assert_eq!(r.operators.call_to_local, 1);
@@ -657,7 +745,7 @@ mod tests {
             ),
         ];
         let ir = empty_lifted_ir(vec![]);
-        let r = compute_coverage(Path::new("t.wasm"), &diags, true, &ir, &[]);
+        let r = compute_coverage(Path::new("t.wasm"), &diags, true, &ir, &[], &BTreeMap::new());
 
         assert_eq!(r.parse.diagnostics, 0);
         assert!(r.parse.ok);
@@ -667,7 +755,7 @@ mod tests {
     #[test]
     fn render_text_handles_zero_host_calls_without_nan() {
         let ir = empty_lifted_ir(vec![]);
-        let r = compute_coverage(Path::new("hello.wasm"), &[], true, &ir, &[]);
+        let r = compute_coverage(Path::new("hello.wasm"), &[], true, &ir, &[], &BTreeMap::new());
         let mut buf = Vec::new();
         render_text(&mut buf, &r).expect("write succeeds");
         let s = String::from_utf8(buf).expect("utf-8");
@@ -683,7 +771,7 @@ mod tests {
     #[test]
     fn render_json_round_trips_through_serde_json() {
         let ir = lifted_ir_with_one_function(vec![import("l", "_")], vec![op_call(0)]);
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[]);
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new());
 
         let mut buf = Vec::new();
         render_json(&mut buf, &r).expect("serialize");
@@ -726,7 +814,7 @@ mod tests {
                 op_call(2),
             ],
         );
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[]);
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new());
 
         let names: Vec<_> = r
             .host_calls
@@ -760,7 +848,7 @@ mod tests {
                 },
             ],
         );
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[]);
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new());
 
         let sum = r.operators.call_to_import
             + r.operators.call_to_local
