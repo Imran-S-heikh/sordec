@@ -50,7 +50,7 @@ pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
     AbiSweepPass, AuthFlowPass, AuthPass, ClientCallPass, CollectionsPass, ConstPropPass,
     ContextPass, CrossContractPass, DispatcherPass, EnumKeyPass, LinearMemoryPass, StoragePass,
-    TtlPass, ValEncodingPass,
+    TtlPass, UnrecognizedScanPass, ValEncodingPass,
 };
 pub use sordec_common::LiftDiagnostics;
 
@@ -80,7 +80,11 @@ use sordec_ir::HighIr;
 /// `ConstPropPass`'s `resolved_callee`. [`TtlPass`] runs after
 /// [`ConstPropPass`] so a `StorageExtendTtl`'s tier is already resolved
 /// on the binding — it fills the independent TTL ledger-amount slots
-/// without contending with the tier rewrite. [`AuthFlowPass`] runs last,
+/// without contending with the tier rewrite. [`UnrecognizedScanPass`] is
+/// the terminal step: after every recogniser has run, it emits a
+/// diagnostic for each host call still left as `SemanticOp::Unknown`
+/// (diagnostics-only, never rewrites). [`AuthFlowPass`] runs last of the
+/// rewriting passes,
 /// consuming `EnumKeyPass`'s resolved keys (hard dependencies both). No
 /// fixpoint group: the dependency chain is a straight line and every
 /// pass is idempotent.
@@ -102,6 +106,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(EnumKeyPass),
             Box::new(ClientCallPass),
             Box::new(AuthFlowPass),
+            Box::new(UnrecognizedScanPass),
         ],
         vec![],
     )

@@ -6,8 +6,10 @@
 //! `changed: true`. The architecture's monotonicity invariant
 //! guarantees this loop terminates.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
+
+use sordec_common::Diagnostic;
 
 use crate::pass::{Pass, PassResult};
 
@@ -150,6 +152,28 @@ pub struct PipelineReport {
     pub per_pass: Vec<(&'static str, PassResult)>,
 }
 
+impl PipelineReport {
+    /// Every diagnostic every pass surfaced, in invocation order.
+    pub fn diagnostics(&self) -> impl Iterator<Item = &Diagnostic> {
+        self.per_pass
+            .iter()
+            .flat_map(|(_, result)| result.diagnostics.iter())
+    }
+
+    /// Per-code diagnostic counts, keyed on the stable
+    /// [`DiagnosticCode::key`](sordec_common::DiagnosticCode::key)
+    /// (`<layer>::snake_case`) — the aggregation feeding `sordec coverage`.
+    /// Sorted by key for deterministic output.
+    #[must_use]
+    pub fn diagnostic_counts_by_code(&self) -> BTreeMap<&'static str, usize> {
+        let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+        for diagnostic in self.diagnostics() {
+            *counts.entry(diagnostic.code.key()).or_insert(0) += 1;
+        }
+        counts
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +197,26 @@ mod tests {
                 PassResult::default()
             }
         }
+    }
+
+    #[test]
+    fn diagnostic_counts_aggregate_by_code_across_passes() {
+        use sordec_common::{Diagnostic, LiftDiagnosticCode};
+        let mut report = PipelineReport::default();
+        let mk = |code| PassResult {
+            diagnostics: vec![Diagnostic::warning(code, "x")],
+            ..Default::default()
+        };
+        report.per_pass.push(("a", mk(LiftDiagnosticCode::NonConstantTtlAmount)));
+        report.per_pass.push(("b", mk(LiftDiagnosticCode::NonConstantTtlAmount)));
+        report
+            .per_pass
+            .push(("c", mk(LiftDiagnosticCode::UnrecognisedHostCall)));
+
+        assert_eq!(report.diagnostics().count(), 3);
+        let counts = report.diagnostic_counts_by_code();
+        assert_eq!(counts.get("lift::non_constant_ttl_amount"), Some(&2));
+        assert_eq!(counts.get("lift::unrecognised_host_call"), Some(&1));
     }
 
     #[test]

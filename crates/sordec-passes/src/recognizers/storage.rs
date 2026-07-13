@@ -32,7 +32,9 @@
 //! - No deploy-op recognition (`create_contract` etc.) — those `l`-module
 //!   functions belong to the cross-contract/deploy recognizer.
 
-use sordec_common::{ProvenanceSource, UnknownReason, ValueId};
+use sordec_common::{
+    Diagnostic, IrId, LiftDiagnosticCode, Location, ProvenanceSource, UnknownReason, ValueId,
+};
 use sordec_ir::{
     Expr, HighFunction, HighIr, IrType, KnownOp, KnownTier, KnownType, SemanticOp, StorageTier,
 };
@@ -66,19 +68,22 @@ impl Pass<HighIr> for StoragePass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
         for func in &mut ir.functions {
-            let (changed, metrics) = recognize_function(func);
+            let (changed, metrics, diagnostics) = recognize_function(func);
             result.changed |= changed;
             for (key, value) in metrics.iter() {
                 result.metrics.increment(key, value);
             }
+            result.diagnostics.extend(diagnostics);
         }
         result
     }
 }
 
-fn recognize_function(func: &mut HighFunction) -> (bool, PassMetrics) {
+fn recognize_function(func: &mut HighFunction) -> (bool, PassMetrics, Vec<Diagnostic>) {
     let mut metrics = PassMetrics::new();
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
     let mut rewrites: Vec<Rewrite> = Vec::new();
+    let func_id = func.id;
 
     for (id, binding) in func.bindings.iter() {
         if is_recognized(&binding.expr) {
@@ -92,7 +97,17 @@ fn recognize_function(func: &mut HighFunction) -> (bool, PassMetrics) {
         metrics.increment(matched.rewrite.metric, 1);
         match matched.tier_resolved {
             Some(true) => metrics.increment(M_TIER_RESOLVED, 1),
-            Some(false) => metrics.increment(M_TIER_UNKNOWN, 1),
+            Some(false) => {
+                metrics.increment(M_TIER_UNKNOWN, 1);
+                diagnostics.push(
+                    Diagnostic::warning(LiftDiagnosticCode::NonConstantDurabilityArg, "").at(
+                        Location::Value {
+                            func: func_id,
+                            value: id.index(),
+                        },
+                    ),
+                );
+            }
             None => {}
         }
         rewrites.push(matched.rewrite);
@@ -100,7 +115,7 @@ fn recognize_function(func: &mut HighFunction) -> (bool, PassMetrics) {
 
     let changed = !rewrites.is_empty();
     apply_rewrites(func, PASS_NAME, rewrites);
-    (changed, metrics)
+    (changed, metrics, diagnostics)
 }
 
 /// The recognized shape of one `l`-module call: the semantic op, its
@@ -417,7 +432,7 @@ mod tests {
         })
     }
 
-    fn run(func: &mut HighFunction) -> (bool, PassMetrics) {
+    fn run(func: &mut HighFunction) -> (bool, PassMetrics, Vec<Diagnostic>) {
         recognize_function(func)
     }
 
@@ -450,7 +465,7 @@ mod tests {
                 i64c(konst),
                 host_l("1", vec![v(0), v(1)]),
             ]);
-            let (changed, metrics) = run(&mut func);
+            let (changed, metrics, _diags) = run(&mut func);
             assert!(changed);
             assert_eq!(metrics.get(M_GET), Some(1));
             assert_eq!(metrics.get(M_TIER_RESOLVED), Some(1));
@@ -472,7 +487,7 @@ mod tests {
             i64c(1),
             host_l("_", vec![v(0), v(1), v(2)]),
         ]);
-        let (changed, metrics) = run(&mut func);
+        let (changed, metrics, _diags) = run(&mut func);
         assert!(changed);
         assert_eq!(metrics.get(M_SET), Some(1));
         match expr_at(&func, v(3)) {
@@ -495,7 +510,7 @@ mod tests {
     #[test]
     fn has_returns_bool() {
         let mut func = func_with(vec![i64c(0), i64c(2), host_l("0", vec![v(0), v(1)])]);
-        let (changed, _) = run(&mut func);
+        let (changed, _, _diags) = run(&mut func);
         assert!(changed);
         assert_eq!(func.bindings.get(v(2)).unwrap().ty, IrType::Known(KnownType::Bool));
     }
@@ -503,7 +518,7 @@ mod tests {
     #[test]
     fn remove_recognized() {
         let mut func = func_with(vec![i64c(0), i64c(0), host_l("2", vec![v(0), v(1)])]);
-        let (changed, metrics) = run(&mut func);
+        let (changed, metrics, _diags) = run(&mut func);
         assert!(changed);
         assert_eq!(metrics.get(M_REMOVE), Some(1));
     }
@@ -518,7 +533,7 @@ mod tests {
             Expr::Phi { incoming: vec![] },
             host_l("1", vec![v(0), v(1)]),
         ]);
-        let (changed, metrics) = run(&mut func);
+        let (changed, metrics, diags) = run(&mut func);
         assert!(changed, "op is still recognized even when tier is unknown");
         assert_eq!(metrics.get(M_TIER_UNKNOWN), Some(1));
         assert_eq!(metrics.get(M_TIER_RESOLVED), None);
@@ -526,6 +541,17 @@ mod tests {
             StorageTier::Unknown(UnknownReason::InsufficientEvidence) => {}
             other => panic!("expected Unknown(InsufficientEvidence), got {other:?}"),
         }
+        // The miss also surfaces a located diagnostic (W6), not just the
+        // counter.
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code.key(), "lift::non_constant_durability_arg");
+        assert_eq!(
+            diags[0].location,
+            Some(sordec_common::Location::Value {
+                func: FuncId::from_index(0),
+                value: 2
+            })
+        );
     }
 
     #[test]
@@ -533,7 +559,7 @@ mod tests {
         // Durability const 7 is not a valid discriminant → Unknown, not
         // a guess. This is the exact bug class the pass exists to kill.
         let mut func = func_with(vec![i64c(0), i64c(7), host_l("1", vec![v(0), v(1)])]);
-        let (changed, metrics) = run(&mut func);
+        let (changed, metrics, _diags) = run(&mut func);
         assert!(changed);
         assert_eq!(metrics.get(M_TIER_UNKNOWN), Some(1));
         match tier_of(&func, v(2)) {
@@ -565,7 +591,7 @@ mod tests {
             i64c(200),
             host_l("7", vec![v(0), v(1), v(2), v(3)]),
         ]);
-        let (changed, metrics) = run(&mut func);
+        let (changed, metrics, _diags) = run(&mut func);
         assert!(changed);
         assert_eq!(metrics.get(M_EXTEND_TTL), Some(1));
         match expr_at(&func, v(4)) {
@@ -591,7 +617,7 @@ mod tests {
     fn current_instance_ttl_l8_has_no_tier() {
         // v0 threshold; v1 extend_to; v2 = extend_current(...)
         let mut func = func_with(vec![i64c(0), i64c(0), host_l("8", vec![v(0), v(1)])]);
-        let (changed, metrics) = run(&mut func);
+        let (changed, metrics, _diags) = run(&mut func);
         assert!(changed);
         assert_eq!(metrics.get(M_EXTEND_TTL), Some(1));
         // No tier resolution counter fires for a no-tier op.
@@ -616,7 +642,7 @@ mod tests {
             i64c(30),
             host_l("f", vec![v(0), v(1), v(2), v(3), v(4)]),
         ]);
-        let (changed, _) = run(&mut func);
+        let (changed, _, _diags) = run(&mut func);
         assert!(changed);
         match expr_at(&func, v(5)) {
             Expr::Semantic(SemanticOp::Known(KnownOp::StorageExtendTtlV2 {
@@ -644,7 +670,7 @@ mod tests {
     fn deploy_op_l3_not_recognized() {
         // l.3 = create_contract is a deploy op, not storage.
         let mut func = func_with(vec![i64c(0), i64c(0), i64c(0), host_l("3", vec![v(0), v(1), v(2)])]);
-        let (changed, _) = run(&mut func);
+        let (changed, _, _diags) = run(&mut func);
         assert!(!changed, "create_contract is not this recognizer's scope");
     }
 
@@ -657,7 +683,7 @@ mod tests {
             i64c(9),
             host_l("1", vec![v(0), v(1), v(2)]),
         ]);
-        let (changed, _) = run(&mut func);
+        let (changed, _, _diags) = run(&mut func);
         assert!(!changed);
     }
 
@@ -670,7 +696,7 @@ mod tests {
             reason: UnknownReason::UnsupportedPattern,
         });
         let mut func = func_with(vec![i64c(0), expr]);
-        let (changed, _) = run(&mut func);
+        let (changed, _, _diags) = run(&mut func);
         assert!(!changed);
     }
 

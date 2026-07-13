@@ -18,7 +18,9 @@
 
 use std::collections::HashMap;
 
-use sordec_common::{FuncId, ProvenanceSource, ValueId};
+use sordec_common::{
+    Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, ProvenanceSource, ValueId,
+};
 use sordec_ir::{Expr, HighIr, KnownOp, SemanticOp};
 
 use super::{apply_rewrites, Rewrite};
@@ -74,6 +76,16 @@ impl Pass<HighIr> for TtlPass {
                     }
                     Resolution::StillUnresolved => {
                         result.metrics.increment(M_UNRESOLVED, 1);
+                        // Code + location are self-sufficient; no extra
+                        // message (matches the metadata-diagnostic style).
+                        result.diagnostics.push(
+                            Diagnostic::warning(LiftDiagnosticCode::NonConstantTtlAmount, "").at(
+                                Location::Value {
+                                    func: func.id,
+                                    value: id.index(),
+                                },
+                            ),
+                        );
                     }
                     Resolution::AlreadyResolved => {}
                 }

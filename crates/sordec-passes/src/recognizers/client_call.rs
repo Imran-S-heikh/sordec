@@ -33,7 +33,9 @@
 
 use std::collections::HashMap;
 
-use sordec_common::{FuncId, ProvenanceSource, ValueId};
+use sordec_common::{
+    Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, ProvenanceSource, ValueId,
+};
 use sordec_ir::{
     ClientInterface, Expr, HighFunction, HighIr, KnownOp, MemWidth, SemanticOp,
 };
@@ -114,7 +116,19 @@ impl Pass<HighIr> for ClientCallPass {
                             metric: M_ARITY,
                         });
                     }
-                    None => result.metrics.increment(M_UNRESOLVED, 1),
+                    None => {
+                        result.metrics.increment(M_UNRESOLVED, 1);
+                        result.diagnostics.push(
+                            Diagnostic::warning(
+                                LiftDiagnosticCode::UnresolvedCrossContractCallee,
+                                "",
+                            )
+                            .at(Location::Value {
+                                func: func.id,
+                                value: id.index(),
+                            }),
+                        );
+                    }
                 }
             }
         }

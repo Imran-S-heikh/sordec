@@ -55,7 +55,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use sordec_common::{FuncId, ProvenanceSource, ValueId};
+use sordec_common::{
+    Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, ProvenanceSource, ValueId,
+};
 use sordec_ir::{EnumKey, Expr, HighFunction, HighIr, KnownOp, MemWidth, SemanticOp};
 
 use super::symbols::{unique_union_index_by_cases, valid_symbol_text};
@@ -171,7 +173,19 @@ impl Pass<HighIr> for EnumKeyPass {
                             metric: M_KEY_NAMED,
                         });
                     }
-                    Naming::Unresolved => result.metrics.increment(M_UNRESOLVED, 1),
+                    Naming::Unresolved => {
+                        result.metrics.increment(M_UNRESOLVED, 1);
+                        result.diagnostics.push(
+                            Diagnostic::warning(
+                                LiftDiagnosticCode::UnrecognisedStoragePattern,
+                                "",
+                            )
+                            .at(Location::Value {
+                                func: func.id,
+                                value: id.index(),
+                            }),
+                        );
+                    }
                     Naming::NotACandidate => {}
                 }
             }

@@ -15,6 +15,8 @@
 
 use std::collections::HashMap;
 
+use sordec_common::Diagnostic;
+
 /// A single analysis or transformation step over IR of type `Ir`.
 ///
 /// Every pass is parameterised by the IR layer it consumes (typically
@@ -61,6 +63,15 @@ pub struct PassResult {
 
     /// Free-form human-readable diagnostic notes.
     pub notes: Vec<String>,
+
+    /// Structured, located diagnostics the pass surfaced — one per
+    /// recogniser-miss (a construct it produced valid IR for but could
+    /// not fully recover). Parallel to `metrics`: the counter tracks
+    /// *how many*, this carries *which* and *where* (a
+    /// [`sordec_common::Diagnostic`] with a `LiftDiagnosticCode` and a
+    /// `Location`). Aggregated by [`crate::PipelineReport`] and surfaced
+    /// in `sordec coverage` / `dump-hir` stderr.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// Named diagnostic counters reported by a pass.

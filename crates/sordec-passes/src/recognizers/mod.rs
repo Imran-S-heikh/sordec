@@ -48,6 +48,7 @@ pub mod linear_memory;
 pub mod storage;
 pub(crate) mod symbols;
 pub mod ttl;
+pub mod unrecognized;
 pub mod val_encoding;
 pub(crate) mod wrappers;
 
@@ -64,6 +65,7 @@ pub use enum_key::EnumKeyPass;
 pub use linear_memory::LinearMemoryPass;
 pub use storage::StoragePass;
 pub use ttl::TtlPass;
+pub use unrecognized::UnrecognizedScanPass;
 pub use val_encoding::ValEncodingPass;
 
 use sordec_common::{Provenance, ProvenanceSource, ValueId};

@@ -31,7 +31,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use sordec_common::{FuncId, ProvenanceSource, ValueId};
+use sordec_common::{
+    Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, ProvenanceSource, ValueId,
+};
 use sordec_ir::{
     BufOpKind, DispatchTable, Expr, HighFunction, HighIr, KnownOp, MemoryImage, SemanticOp,
 };
@@ -86,6 +88,14 @@ impl Pass<HighIr> for DispatcherPass {
                 };
                 let Some(cases) = decode_dispatch_table(func, &ir.memory, table_pos, len) else {
                     result.metrics.increment(M_UNRESOLVED, 1);
+                    result.diagnostics.push(
+                        Diagnostic::warning(LiftDiagnosticCode::UnresolvedSymbolDispatch, "").at(
+                            Location::Value {
+                                func: func.id,
+                                value: id.index(),
+                            },
+                        ),
+                    );
                     continue;
                 };
                 let enum_name = name_enum(unions, &cases);
