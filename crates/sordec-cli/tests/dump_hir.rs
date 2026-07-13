@@ -32,7 +32,7 @@ fn dump_hir_on_hello_add_emits_high_ir_scaffolding() {
         // Every binding carries a provenance note from the lowering.
         .stdout(predicate::str::contains(";; DataFlow:"))
         // hello-add is clean — no diagnostics.
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("[error]").not());
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn dump_hir_raw_renders_unrecognized_host_calls() {
         .assert()
         .success()
         .stdout(predicate::str::contains("host:l:put_contract_data"))
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("[error]").not());
 }
 
 #[test]
@@ -78,7 +78,7 @@ fn dump_hir_on_hello_add_recognizes_val_ops() {
         .stdout(predicate::str::contains("obj_from_u64"))
         // Provenance for a recognized bit-pattern is SdkPattern.
         .stdout(predicate::str::contains(";; SdkPattern: val-encode"))
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("[error]").not());
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn dump_hir_raw_flag_shows_unrecognized_lowering() {
         .stdout(predicate::str::contains("shl "))
         .stdout(predicate::str::contains("val_encode").not())
         .stdout(predicate::str::contains("has_tag").not())
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("[error]").not());
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn dump_hir_on_token_v23_recognizes_i128_object_conversions() {
         .stdout(predicate::str::contains("obj_from_i128_pieces"))
         .stdout(predicate::str::contains("obj_to_i128_hi64"))
         .stdout(predicate::str::contains(";; HostFunctionAbi:"))
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("[error]").not());
 }
 
 const TIMELOCK: &str = concat!(
@@ -132,7 +132,7 @@ fn dump_hir_on_token_v23_resolves_all_three_storage_tiers() {
         .stdout(predicate::str::contains("storage_get<temporary>"))
         // Provenance records the tier evidence.
         .stdout(predicate::str::contains("durability const"))
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("[error]").not());
 }
 
 #[test]
@@ -150,6 +150,34 @@ fn dump_hir_on_token_v23_shows_honest_unknown_tier() {
 }
 
 #[test]
+fn dump_hir_surfaces_recognizer_miss_diagnostics_on_stderr() {
+    // W6: recogniser misses drain to stderr as located `lift::…`
+    // warnings (the auditor-facing side channel), while stdout stays the
+    // clean IR. token-v23 has unresolved storage tiers.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "[warning] lift::non_constant_durability_arg",
+        ))
+        .stderr(predicate::str::contains("in func"));
+}
+
+#[test]
+fn dump_hir_raw_flag_suppresses_recognizer_diagnostics() {
+    // `--raw` skips the pipeline, so no recogniser diagnostics are
+    // produced (the miss sites never run).
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", TOKEN_V23])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("lift::").not());
+}
+
+#[test]
 fn dump_hir_on_timelock_recognizes_storage() {
     // timelock uses instance storage (has(Init), balance get/set).
     Command::cargo_bin("sordec")
@@ -158,7 +186,7 @@ fn dump_hir_on_timelock_recognizes_storage() {
         .assert()
         .success()
         .stdout(predicate::str::contains("storage_"))
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("[error]").not());
 }
 
 #[test]
@@ -277,7 +305,7 @@ fn dump_hir_on_token_v23_recognizes_muxed_address_conversions() {
         .success()
         .stdout(predicate::str::contains("get_address_from_muxed_address"))
         .stdout(predicate::str::contains("get_id_from_muxed_address"))
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("[error]").not());
 }
 
 #[test]
@@ -306,7 +334,7 @@ fn dump_hir_on_token_v23_recognizes_events_and_ledger() {
         .success()
         .stdout(predicate::str::contains("publish_event("))
         .stdout(predicate::str::contains("get_ledger_sequence()"))
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("[error]").not());
 }
 
 #[test]
@@ -318,7 +346,7 @@ fn dump_hir_on_timelock_recognizes_context() {
         .success()
         .stdout(predicate::str::contains("get_current_contract_address()"))
         .stdout(predicate::str::contains("get_ledger_timestamp()"))
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("[error]").not());
 }
 
 #[test]
@@ -369,7 +397,7 @@ fn dump_hir_recognizes_linear_memory_constructors() {
         .stdout(predicate::str::contains("symbol_new("))
         .stdout(predicate::str::contains("vec_new("))
         .stdout(predicate::str::contains("map_new("))
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("[error]").not());
 }
 
 #[test]
@@ -432,7 +460,7 @@ fn dump_hir_on_timelock_recognizes_collections_ops() {
         .stdout(predicate::str::contains("vec_get("))
         .stdout(predicate::str::contains("vec_first_index_of("))
         .stdout(predicate::str::contains("map_unpack_to_linear_memory("))
-        .stderr(predicate::str::is_empty());
+        .stderr(predicate::str::contains("[error]").not());
 }
 
 #[test]

@@ -84,6 +84,7 @@ fn coverage_with_json_emits_parseable_json() {
         "lift",
         "host_calls",
         "operators",
+        "diagnostics",
     ] {
         assert!(v.get(key).is_some(), "missing top-level key {key:?}");
     }
@@ -92,6 +93,59 @@ fn coverage_with_json_emits_parseable_json() {
     assert!(v["host_calls"]["recognized"].is_number());
     assert!(v["host_calls"]["unrecognized"].is_array());
     assert!(v["operators"]["total"].is_number());
+    assert!(v["diagnostics"]["total"].is_number());
+    assert!(v["diagnostics"]["by_code"].is_array());
+}
+
+#[test]
+fn coverage_json_reports_recognizer_miss_diagnostics_on_token_v23() {
+    // W6 E3/F9: the token contract has real recogniser misses (unresolved
+    // storage tiers, unnamed enum keys, the cross-function balance-bump
+    // TTL). They surface as per-code counts in the coverage diagnostics
+    // section.
+    let out = Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["coverage", "--json", TOKEN_V23])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+
+    let total = v["diagnostics"]["total"].as_u64().expect("total is a number");
+    assert!(total >= 1, "token-v23 has recogniser misses, got {total}");
+    let by_code = v["diagnostics"]["by_code"].as_array().expect("by_code array");
+    let codes: Vec<&str> = by_code
+        .iter()
+        .filter_map(|e| e["code"].as_str())
+        .collect();
+    assert!(
+        codes.contains(&"lift::non_constant_durability_arg"),
+        "expected the storage-tier miss code, got {codes:?}"
+    );
+    // Every listed code is `lift::`-namespaced with a positive count.
+    for e in by_code {
+        assert!(e["code"].as_str().unwrap().starts_with("lift::"));
+        assert!(e["count"].as_u64().unwrap() >= 1);
+    }
+}
+
+#[test]
+fn coverage_on_hello_add_reports_zero_diagnostics() {
+    // A fully-recovered contract: no recogniser misses, no surviving
+    // unknown host calls.
+    let out = Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["coverage", "--json", HELLO_ADD])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+    assert_eq!(v["diagnostics"]["total"].as_u64(), Some(0));
+    assert!(v["diagnostics"]["by_code"].as_array().unwrap().is_empty());
 }
 
 #[test]

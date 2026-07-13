@@ -170,4 +170,32 @@ fn coverage_matrix_prints_and_holds_invariants() {
     ] {
         assert_eq!(count(other, "const_prop_unit_value"), 0, "{other} must not unit");
     }
+
+    // W6: the terminal unrecognised-scan finds no surviving `Unknown` host
+    // call on any corpus fixture — every host call is recognised (the
+    // zero-`host:` sweep, now enforced through the diagnostic pass metric).
+    for fixture in [
+        "hello-add",
+        "token-v22",
+        "token-v23",
+        "token-v23-stripped",
+        "timelock",
+        "dex-liquidity-pool",
+        "attestation",
+    ] {
+        assert_eq!(
+            count(fixture, "unrecognised_host_call"),
+            0,
+            "{fixture} has an unrecognised host call"
+        );
+    }
+    // W6: the token contracts surface real recogniser-miss diagnostics
+    // (unresolved storage tiers) — the counter that backs the E3 coverage
+    // section.
+    for token in ["token-v22", "token-v23", "token-v23-stripped"] {
+        assert!(
+            count(token, "storage_tier_unknown") >= 1,
+            "{token} storage-tier miss"
+        );
+    }
 }
