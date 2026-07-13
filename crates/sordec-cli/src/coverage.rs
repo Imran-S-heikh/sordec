@@ -1327,7 +1327,8 @@ mod tests {
         render_json(&mut buf, &r).expect("serialize");
         let v: serde_json::Value = serde_json::from_slice(&buf).expect("parse");
 
-        // Spot-check the schema's top-level keys match D7 of the plan.
+        // Spot-check the schema's top-level keys match D7 of the plan,
+        // plus the W7 additions. Schema is append-only: none removed.
         for key in [
             "wasm",
             "catalog",
@@ -1336,6 +1337,8 @@ mod tests {
             "lift",
             "host_calls",
             "operators",
+            "recognition",
+            "headline",
         ] {
             assert!(v.get(key).is_some(), "missing top-level key {key:?}");
         }
@@ -1406,5 +1409,81 @@ mod tests {
             + r.operators.other;
         assert_eq!(sum, r.operators.total, "operator buckets must sum to total");
         assert_eq!(r.operators.total, 3);
+    }
+
+    #[test]
+    fn recognition_ratios_computed_from_metric_totals() {
+        use sordec_passes::metrics_catalog as mc;
+        // A synthetic counter map mirroring token-v23's shape, so the
+        // ratio math is checked without booting the whole pipeline.
+        let totals = BTreeMap::from([
+            (mc::STORAGE_TIER_RESOLVED, 8i64),
+            (mc::STORAGE_TIER_UNKNOWN, 2),
+            (mc::STORAGE_GET, 4),
+            (mc::ENUM_KEY_NAMED, 6),
+            (mc::ENUM_KEY_UNRESOLVED, 2),
+            (mc::TTL_RESOLVED, 1),
+            (mc::TTL_UNRESOLVED, 1),
+            (mc::INVOKE_CONTRACT, 2),
+            (mc::CLIENT_ARITY_RESOLVED, 2),
+            (mc::CLIENT_IFACE_MATCHED, 2),
+        ]);
+        let ir = empty_lifted_ir(vec![]);
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new(), &totals);
+
+        let rec = &r.recognition;
+        assert_eq!(rec.storage.tier_ratio, Some(0.8), "8/10");
+        assert_eq!(rec.storage.ops.get, 4);
+        assert_eq!(rec.enum_keys.ratio, Some(0.75), "6/8");
+        assert_eq!(rec.ttl.ratio, Some(0.5), "1/2");
+        assert_eq!(rec.client_calls.sites, 2, "invoke + try_invoke");
+        assert_eq!(rec.client_calls.typed_ratio, Some(1.0), "arity 2/2");
+    }
+
+    #[test]
+    fn recognition_ratios_are_none_on_zero_denominator() {
+        // No counters at all — every ratio null, never NaN.
+        let ir = empty_lifted_ir(vec![]);
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new(), &BTreeMap::new());
+        assert!(r.recognition.storage.tier_ratio.is_none());
+        assert!(r.recognition.enum_keys.ratio.is_none());
+        assert!(r.recognition.ttl.ratio.is_none());
+        assert!(r.recognition.client_calls.typed_ratio.is_none());
+        assert!(r.recognition.dispatcher.ratio.is_none());
+        assert!(r.headline.deep_facts.ratio.is_none());
+    }
+
+    #[test]
+    fn headline_deep_facts_sum_the_five_pairs() {
+        use sordec_passes::metrics_catalog as mc;
+        // resolved = 8+6+1+2+0 = 17; attempted = 10+8+2+2+0 = 22.
+        let totals = BTreeMap::from([
+            (mc::STORAGE_TIER_RESOLVED, 8i64),
+            (mc::STORAGE_TIER_UNKNOWN, 2),
+            (mc::ENUM_KEY_NAMED, 6),
+            (mc::ENUM_KEY_UNRESOLVED, 2),
+            (mc::TTL_RESOLVED, 1),
+            (mc::TTL_UNRESOLVED, 1),
+            (mc::CLIENT_ARITY_RESOLVED, 2),
+        ]);
+        let ir = empty_lifted_ir(vec![]);
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new(), &totals);
+        assert_eq!(r.headline.deep_facts.resolved, 17);
+        assert_eq!(r.headline.deep_facts.attempted, 22);
+    }
+
+    #[test]
+    fn headline_host_interactions_subtract_surviving_unknowns() {
+        use sordec_passes::metrics_catalog as mc;
+        // Three import-call sites; one survived unrecognised → 2/3.
+        let ir = lifted_ir_with_one_function(
+            vec![import("l", "_")],
+            vec![op_call(0), op_call(0), op_call(0)],
+        );
+        let totals = BTreeMap::from([(mc::UNRECOGNISED_HOST_CALL, 1i64)]);
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new(), &totals);
+        assert_eq!(r.headline.host_interactions.total, 3);
+        assert_eq!(r.headline.host_interactions.recognized, 2);
+        assert_eq!(r.headline.host_interactions.ratio, Some(2.0 / 3.0));
     }
 }

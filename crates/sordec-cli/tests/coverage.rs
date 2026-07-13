@@ -18,6 +18,11 @@ const TOKEN_V23: &str = concat!(
     "/../../samples/contracts/token-v23/token-v23.wasm"
 );
 
+const DEX_LP: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../samples/contracts/dex-liquidity-pool/dex-liquidity-pool.wasm"
+);
+
 #[test]
 fn coverage_on_hello_add_succeeds_with_clean_lift() {
     // hello-add is the smallest realistic contract we ship — one
@@ -174,6 +179,111 @@ fn coverage_with_json_emits_finite_ratios() {
         completeness.is_null() || completeness.as_f64().is_some_and(f64::is_finite),
         "lift.completeness must be null or finite, got {completeness:?}"
     );
+}
+
+#[test]
+fn coverage_on_token_v23_renders_recognition_and_headline_sections() {
+    // W7: the recognition + semantic-recovery sections render on a real
+    // contract. Anchor on section labels and stable structural claims,
+    // not vendor-sensitive counts (exact numbers live in the driver
+    // coverage-matrix test).
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["coverage", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("recognition:"))
+        .stdout(predicate::str::contains("storage:"))
+        .stdout(predicate::str::contains("enum keys:"))
+        .stdout(predicate::str::contains("val boilerplate:"))
+        .stdout(predicate::str::contains("semantic recovery:"))
+        .stdout(predicate::str::contains("host interactions:"))
+        .stdout(predicate::str::contains("deep facts:"))
+        // The Phase-3/4 accuracy caveat must be present so the headline
+        // is never mistaken for the RFP accuracy score.
+        .stdout(predicate::str::contains("Phase-4"))
+        .stdout(predicate::str::contains("NaN").not())
+        .stdout(predicate::str::contains("inf").not())
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn coverage_json_exposes_recognition_and_headline_on_token_v23() {
+    let out = Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["coverage", "--json", TOKEN_V23])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+
+    // Recognition sub-structs present with the honest-denominator shape.
+    let rec = &v["recognition"];
+    assert!(rec["storage"]["tier_ratio"].is_number() || rec["storage"]["tier_ratio"].is_null());
+    assert_eq!(rec["events"]["flavor_split"], "phase-3-emit");
+    assert_eq!(rec["wide_arithmetic"]["deferred"], "C19");
+    // token-v23 makes no cross-contract calls, so the typed ratio must be
+    // null (never 0.0, never NaN) — the zero-denominator contract.
+    assert!(
+        rec["client_calls"]["typed_ratio"].is_null(),
+        "token has no invoke sites → typed_ratio null, got {:?}",
+        rec["client_calls"]["typed_ratio"]
+    );
+
+    // Headline: host interactions are the stable 100% recognition claim;
+    // deep facts are a finite fraction (exact value pinned in the driver
+    // matrix). The note carries the Phase-4 caveat.
+    let host = &v["headline"]["host_interactions"];
+    assert_eq!(host["ratio"].as_f64(), Some(1.0), "host interactions 100%");
+    let deep = v["headline"]["deep_facts"]["ratio"]
+        .as_f64()
+        .expect("deep-facts ratio is a number on token-v23");
+    assert!((0.0..=1.0).contains(&deep), "deep facts in [0,1], got {deep}");
+    assert!(
+        v["headline"]["note"].as_str().unwrap().contains("Phase-4"),
+        "headline note must state the Phase-4 accuracy caveat"
+    );
+}
+
+#[test]
+fn coverage_on_dex_types_its_cross_contract_calls() {
+    // The dex fixture is the corpus's cross-contract witness: it calls
+    // SEP-41 token clients, so the client-calls ratio must be non-null
+    // and its interface-matched count positive.
+    let out = Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["coverage", "--json", DEX_LP])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+    let cc = &v["recognition"]["client_calls"];
+    assert!(cc["sites"].as_i64().unwrap() >= 1, "dex has invoke sites");
+    assert!(cc["iface_matched"].as_i64().unwrap() >= 1, "dex matches SEP-41");
+    let typed = cc["typed_ratio"].as_f64().expect("dex typed_ratio is a number");
+    assert!((0.0..=1.0).contains(&typed), "typed ratio in [0,1], got {typed}");
+}
+
+#[test]
+fn coverage_on_hello_add_renders_degenerate_recognition_without_nan() {
+    // hello-add exercises no recognisers with a miss channel, so every
+    // ratio row is `n/a` — but host interactions are still 100% (its two
+    // Val-encode host calls are recognised) and nothing renders NaN/inf.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["coverage", HELLO_ADD])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("recognition:"))
+        .stdout(predicate::str::contains("semantic recovery:"))
+        .stdout(predicate::str::contains("n/a"))
+        .stdout(predicate::str::contains("NaN").not())
+        .stdout(predicate::str::contains("inf").not())
+        .stderr(predicate::str::is_empty());
 }
 
 #[test]
