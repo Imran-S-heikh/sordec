@@ -149,6 +149,15 @@ impl fmt::Display for Location {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ParseDiagnosticCode {}
 
+impl ParseDiagnosticCode {
+    /// Stable `parse::snake_case` identifier. Uninhabited today.
+    #[must_use]
+    pub fn key(&self) -> &'static str {
+        // Uninhabited — match against `&self` is exhaustive with no arms.
+        match *self {}
+    }
+}
+
 impl fmt::Display for ParseDiagnosticCode {
     fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Uninhabited — match against `&self` is exhaustive with no arms.
@@ -199,6 +208,20 @@ pub enum MetadataDiagnosticCode {
     },
 }
 
+impl MetadataDiagnosticCode {
+    /// Stable, payload-free `metadata::snake_case` identifier for
+    /// per-code aggregation.
+    #[must_use]
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::UnresolvedTypeReference { .. } => "metadata::unresolved_type_reference",
+            Self::DuplicateTypeName { .. } => "metadata::duplicate_type_name",
+            Self::DuplicateFunctionName { .. } => "metadata::duplicate_function_name",
+            Self::MalformedContractMeta { .. } => "metadata::malformed_contract_meta",
+        }
+    }
+}
+
 impl fmt::Display for MetadataDiagnosticCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -218,26 +241,156 @@ impl fmt::Display for MetadataDiagnosticCode {
     }
 }
 
-/// Codes for diagnostics emitted during the WASM → SSA + CFG lift.
+/// Codes for diagnostics emitted during WASM → IR lift and Phase-2
+/// pattern recovery.
 ///
-/// No variants are defined yet — the lifter currently surfaces every
-/// recoverable situation through the existing `LiftedTerminator::Unreachable`
-/// fallback (for `waffle::Terminator::None`) or through hard `LiftError`
-/// variants for true SSA-invariant violations. Phase 2's pattern recovery
-/// work will be the first to add variants here.
+/// This is the **recognition taxonomy**: one code per situation the
+/// pipeline can produce valid IR for but could not fully recover — a
+/// host call it does not recognize, a slot it could not resolve to a
+/// constant, a construct whose recogniser is deferred. Every variant is
+/// documented and `Display`-able so the set is a stable spec; the subset
+/// with a live emission site is noted per-variant. Variants carry no
+/// payload — the specific function / value / host name rides on the
+/// [`Diagnostic`]'s [`Location`] and `message`, and [`key`](Self::key)
+/// gives a stable payload-free identifier for per-code aggregation.
 ///
-/// The empty enum is intentional: it pre-establishes the structural slot
-/// in [`DiagnosticCode`] so callers don't have to plumb a new outer
-/// variant when the first lift diagnostic lands.
+/// Codes are only *emitted* where a recogniser actually gives up; a
+/// documented-but-unemitted variant lands its emission when its feature
+/// does (`#[non_exhaustive]` keeps that additive).
 #[non_exhaustive]
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub enum LiftDiagnosticCode {}
+pub enum LiftDiagnosticCode {
+    // ---- Emitted today (W6) ----
+    /// A host import survived the whole recognition pipeline unmatched —
+    /// no recogniser claimed its `(module, name)`. Emitted by the
+    /// terminal unrecognised-scan over surviving `SemanticOp::Unknown`
+    /// bindings. On a fully-recognised module (the whole corpus) this
+    /// never fires; it is the definitional lift diagnostic for
+    /// out-of-catalog or future-protocol WASM.
+    UnrecognisedHostCall,
+    /// A storage operation's durability argument was not a provable
+    /// constant, so its tier stayed `Unknown`. Emitted by the storage
+    /// recogniser.
+    NonConstantDurabilityArg,
+    /// A storage key was constructed by the `#[contracttype]` enum idiom
+    /// but could not be named against a `contractspecv0` union (no spec,
+    /// ambiguous match, or a polymorphic helper). Emitted by the
+    /// `enum-key` recogniser.
+    UnrecognisedStoragePattern,
+    /// A TTL `extend_ttl` ledger amount (`threshold` / `extend_to`) did
+    /// not resolve to a constant. Emitted by the `ttl` recogniser.
+    NonConstantTtlAmount,
+    /// A cross-contract call could not be typed against a known interface
+    /// — its callee symbol or arity did not resolve. Emitted by the
+    /// `client-call` recogniser.
+    UnresolvedCrossContractCallee,
+    /// A `symbol_index_in_linear_memory` enum-dispatch table could not be
+    /// decoded from rodata (non-constant table position/length, or a
+    /// descriptor that failed the `Symbol` grammar). Emitted by the
+    /// `dispatcher` recogniser.
+    UnresolvedSymbolDispatch,
+
+    // ---- Taxonomy, not yet emitted (lands with its feature) ----
+    /// A `Symbol`/`String`/`Bytes` linear-memory literal position was not
+    /// a provable constant. Not yet emitted — the linear-memory
+    /// recogniser records `resolved: None` inline today.
+    NonConstantSymbolArg,
+    /// A cross-contract call resolved its callee but the contract had no
+    /// `contractspecv0` interface to type the client against. Not yet
+    /// emitted — folded into [`UnresolvedCrossContractCallee`] for now.
+    ContractSpecMissingForClient,
+    /// A `Result` `Ok`/`Err` tag could not be disambiguated. Not yet
+    /// emitted — result-tag recovery (C18) is deferred.
+    AmbiguousResultTag,
+    /// A function's control flow could not be structured and fell back to
+    /// `Region::Unstructured`. Not yet emitted — control-flow structuring
+    /// (J2) is Phase 3.
+    StructuringFallback,
+    /// A widened-integer (`i128`/`u128`/…) arithmetic sequence could not
+    /// be fused into a single operation. Not yet emitted — wide-int
+    /// fusion (C19) is deferred.
+    WidenedIntegerFusionFailed,
+    /// An event's topic vector shape could not be recovered. Not yet
+    /// emitted — topic-vec expansion (C14) is emit-side.
+    EventTopicShapeUnknown,
+    /// An auth-context call's argument shape did not match the expected
+    /// `require_auth_for_args` form. Not yet emitted — reserved for
+    /// auth-context refinement.
+    AuthContextArgsMismatch,
+    /// A PRNG host call fell outside the recognised `p`-module catalog.
+    /// Not yet emitted — such a call currently surfaces via
+    /// [`UnrecognisedHostCall`]; reserved for a specific PRNG diagnostic.
+    UnrecognisedPrngCall,
+    /// A crypto host call fell outside the recognised `c`-module catalog.
+    /// Not yet emitted — see [`UnrecognisedPrngCall`].
+    UnrecognisedCryptoCall,
+    /// A `panic!` lowered to a bare `unreachable` with no structured
+    /// error code. Not yet emitted — bare-panic recovery (C16) is
+    /// deferred.
+    PanicWithoutErrorCode,
+}
+
+impl LiftDiagnosticCode {
+    /// Stable, payload-free identifier for this code — used as the
+    /// aggregation key in coverage's per-code counts and as the `Display`
+    /// prefix. Format `lift::snake_case`.
+    #[must_use]
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::UnrecognisedHostCall => "lift::unrecognised_host_call",
+            Self::NonConstantDurabilityArg => "lift::non_constant_durability_arg",
+            Self::UnrecognisedStoragePattern => "lift::unrecognised_storage_pattern",
+            Self::NonConstantTtlAmount => "lift::non_constant_ttl_amount",
+            Self::UnresolvedCrossContractCallee => "lift::unresolved_cross_contract_callee",
+            Self::UnresolvedSymbolDispatch => "lift::unresolved_symbol_dispatch",
+            Self::NonConstantSymbolArg => "lift::non_constant_symbol_arg",
+            Self::ContractSpecMissingForClient => "lift::contract_spec_missing_for_client",
+            Self::AmbiguousResultTag => "lift::ambiguous_result_tag",
+            Self::StructuringFallback => "lift::structuring_fallback",
+            Self::WidenedIntegerFusionFailed => "lift::widened_integer_fusion_failed",
+            Self::EventTopicShapeUnknown => "lift::event_topic_shape_unknown",
+            Self::AuthContextArgsMismatch => "lift::auth_context_args_mismatch",
+            Self::UnrecognisedPrngCall => "lift::unrecognised_prng_call",
+            Self::UnrecognisedCryptoCall => "lift::unrecognised_crypto_call",
+            Self::PanicWithoutErrorCode => "lift::panic_without_error_code",
+        }
+    }
+
+    /// One-line human description (without the `key` prefix).
+    fn description(&self) -> &'static str {
+        match self {
+            Self::UnrecognisedHostCall => "host call survived recognition unmatched",
+            Self::NonConstantDurabilityArg => {
+                "storage tier unresolved — durability argument is not a constant"
+            }
+            Self::UnrecognisedStoragePattern => {
+                "storage key enum could not be named against the contract spec"
+            }
+            Self::NonConstantTtlAmount => "TTL ledger amount did not resolve to a constant",
+            Self::UnresolvedCrossContractCallee => {
+                "cross-contract call could not be typed against a known interface"
+            }
+            Self::UnresolvedSymbolDispatch => {
+                "symbol-dispatch table could not be decoded from rodata"
+            }
+            Self::NonConstantSymbolArg => "linear-memory literal position is not a constant",
+            Self::ContractSpecMissingForClient => "no contract spec to type the client call",
+            Self::AmbiguousResultTag => "Result Ok/Err tag could not be disambiguated",
+            Self::StructuringFallback => "control flow fell back to unstructured",
+            Self::WidenedIntegerFusionFailed => "wide-integer arithmetic could not be fused",
+            Self::EventTopicShapeUnknown => "event topic vector shape not recovered",
+            Self::AuthContextArgsMismatch => "auth-context argument shape did not match",
+            Self::UnrecognisedPrngCall => "PRNG host call outside the recognised catalog",
+            Self::UnrecognisedCryptoCall => "crypto host call outside the recognised catalog",
+            Self::PanicWithoutErrorCode => "bare panic without a structured error code",
+        }
+    }
+}
 
 impl fmt::Display for LiftDiagnosticCode {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Uninhabited — match against `&self` is exhaustive with no arms.
-        match *self {}
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.key(), self.description())
     }
 }
 
@@ -259,6 +412,20 @@ pub enum DiagnosticCode {
     /// A diagnostic emitted during WASM-to-IR lifting. Currently always
     /// uninhabited; reserved for Phase 2 pattern recovery.
     Lift(LiftDiagnosticCode),
+}
+
+impl DiagnosticCode {
+    /// Stable, payload-free `<layer>::snake_case` identifier for per-code
+    /// aggregation (coverage's diagnostic counts key on this, not on the
+    /// payload-bearing [`Display`](fmt::Display)).
+    #[must_use]
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Parse(c) => c.key(),
+            Self::Metadata(c) => c.key(),
+            Self::Lift(c) => c.key(),
+        }
+    }
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -677,6 +844,79 @@ mod tests {
         assert_eq!(diagnostics.as_slice(), std::slice::from_ref(&event));
         assert_eq!(diagnostics.iter().count(), 1);
         assert_eq!(diagnostics.into_vec(), vec![event]);
+    }
+
+    #[test]
+    fn lift_code_display_prefixes_key_then_description() {
+        let c = LiftDiagnosticCode::NonConstantDurabilityArg;
+        assert_eq!(c.key(), "lift::non_constant_durability_arg");
+        assert_eq!(
+            c.to_string(),
+            "lift::non_constant_durability_arg: storage tier unresolved — durability argument is not a constant"
+        );
+        // A "not yet emitted" taxonomy variant still Displays + keys.
+        assert_eq!(
+            LiftDiagnosticCode::StructuringFallback.key(),
+            "lift::structuring_fallback"
+        );
+    }
+
+    #[test]
+    fn lift_code_keys_are_unique_and_lift_prefixed() {
+        use std::collections::HashSet;
+        let all = [
+            LiftDiagnosticCode::UnrecognisedHostCall,
+            LiftDiagnosticCode::NonConstantDurabilityArg,
+            LiftDiagnosticCode::UnrecognisedStoragePattern,
+            LiftDiagnosticCode::NonConstantTtlAmount,
+            LiftDiagnosticCode::UnresolvedCrossContractCallee,
+            LiftDiagnosticCode::UnresolvedSymbolDispatch,
+            LiftDiagnosticCode::NonConstantSymbolArg,
+            LiftDiagnosticCode::ContractSpecMissingForClient,
+            LiftDiagnosticCode::AmbiguousResultTag,
+            LiftDiagnosticCode::StructuringFallback,
+            LiftDiagnosticCode::WidenedIntegerFusionFailed,
+            LiftDiagnosticCode::EventTopicShapeUnknown,
+            LiftDiagnosticCode::AuthContextArgsMismatch,
+            LiftDiagnosticCode::UnrecognisedPrngCall,
+            LiftDiagnosticCode::UnrecognisedCryptoCall,
+            LiftDiagnosticCode::PanicWithoutErrorCode,
+        ];
+        let keys: HashSet<&str> = all.iter().map(|c| c.key()).collect();
+        assert_eq!(keys.len(), all.len(), "keys must be unique");
+        assert!(all.iter().all(|c| c.key().starts_with("lift::")));
+    }
+
+    #[test]
+    fn diagnostic_code_key_dispatches_to_layer() {
+        let lift: DiagnosticCode = LiftDiagnosticCode::UnresolvedSymbolDispatch.into();
+        assert_eq!(lift.key(), "lift::unresolved_symbol_dispatch");
+        let meta: DiagnosticCode = MetadataDiagnosticCode::DuplicateTypeName {
+            name: "DataKey".to_string(),
+        }
+        .into();
+        assert_eq!(meta.key(), "metadata::duplicate_type_name");
+    }
+
+    #[test]
+    fn lift_warning_carries_code_and_location() {
+        let d = Diagnostic::warning(
+            LiftDiagnosticCode::NonConstantTtlAmount,
+            "extend_ttl amount v9 not a constant",
+        )
+        .at(Location::Value {
+            func: FuncId::from_index(1),
+            value: 9,
+        });
+        assert_eq!(d.severity, Severity::Warning);
+        assert_eq!(d.code.key(), "lift::non_constant_ttl_amount");
+        assert_eq!(
+            d.location,
+            Some(Location::Value {
+                func: FuncId::from_index(1),
+                value: 9
+            })
+        );
     }
 
     #[test]
