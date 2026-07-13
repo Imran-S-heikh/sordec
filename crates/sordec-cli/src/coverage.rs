@@ -9,15 +9,19 @@
 //!    catalog freshness; degrades only when a contract uses calls
 //!    introduced after the vendored protocol version.
 //! 2. **Lift completeness** — fraction of functions waffle lifted
-//!    without diagnostics. Today this is trivially 100% because
-//!    [`sordec_common::LiftDiagnosticCode`] has no variants; reporting
-//!    it now puts the metric in place for Phase 2 when pattern-recovery
-//!    passes start emitting recoverable conditions.
+//!    without lift-stage diagnostics. (The recogniser-pipeline misses
+//!    that W6 wired into [`sordec_common::LiftDiagnosticCode`] surface
+//!    separately, in the diagnostics section below.)
 //! 3. **Parse + metadata health** — boolean checks (did the WASM parse,
 //!    was Soroban metadata present and decoded). Always-yes for real
 //!    contracts; tracked for completeness.
 //!
-//! Plus context counters (total operators broken down by call kind).
+//! Plus the **recognition** section (W7): per-pattern recovery counts
+//! and ratios (storage tiers, enum keys, TTL, client calls, dispatcher,
+//! auth, events, collections, panics, Val boilerplate) drawn from the
+//! pipeline's [`PassMetrics`](sordec_passes::PassMetrics), and a
+//! two-number **semantic recovery** headline. Plus context counters
+//! (total operators broken down by call kind).
 //!
 //! ## Output formats
 //!
@@ -44,7 +48,7 @@ use std::path::Path;
 use serde::Serialize;
 use sordec_common::{Diagnostic, DiagnosticCode, Location};
 use sordec_ir::{ImportKind, LiftedIr, LiftedValueDef};
-use sordec_passes::host_calls;
+use sordec_passes::{host_calls, metrics_catalog as mc};
 use waffle::entity::EntityRef as _;
 
 // ---------------------------------------------------------------------
@@ -74,6 +78,8 @@ pub struct CoverageReport {
     /// Operator counts by kind. Closed total: the four numbered buckets
     /// sum to `total`.
     pub operators: OperatorBreakdown,
+    /// Per-pattern recognition counts and ratios (F1–F8 + beyond-kickoff).
+    pub recognition: RecognitionCoverage,
     /// Per-code counts of recogniser-pipeline diagnostics (E3/F9).
     pub diagnostics: DiagnosticCoverage,
 }
@@ -172,6 +178,189 @@ pub struct OperatorBreakdown {
     pub other: usize,
 }
 
+/// Per-pattern recognition counts and ratios (spec F1–F8, plus the
+/// enum-key / TTL / dispatcher ratios W7 added beyond the kickoff list).
+///
+/// Drawn from the recogniser pipeline's
+/// [`PassMetrics`](sordec_passes::PassMetrics) counters, keyed on
+/// [`sordec_passes::metrics_catalog`]. **Ratios render only where a
+/// pass emits a real miss counter** (storage tier, enum key, TTL,
+/// client typing, dispatcher); every other group is a count plus a note
+/// saying where its misses would surface — deriving a denominator any
+/// other way would mean inventing the fact the pipeline failed to
+/// recover (the no-guessing principle). Ratios are `None` on a zero
+/// denominator, never `NaN`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecognitionCoverage {
+    /// F1 — storage durability-tier resolution + CRUD/TTL op counts.
+    pub storage: StorageRecognition,
+    /// Enum storage-key naming ratio (beyond-kickoff).
+    pub enum_keys: EnumKeyRecognition,
+    /// TTL ledger-amount resolution ratio (D3; beyond-kickoff).
+    pub ttl: TtlRecognition,
+    /// F5 — cross-contract client-call typing.
+    pub client_calls: ClientCallRecognition,
+    /// Symbol-dispatcher case-table resolution ratio (C25; beyond-kickoff).
+    pub dispatcher: DispatcherRecognition,
+    /// F2 — auth pattern counts (misses surface as unrecognised host calls).
+    pub auth: AuthRecognition,
+    /// F3 — event-emission count (flavor split is Phase-3 emit).
+    pub events: EventRecognition,
+    /// F4 — collection constructor/op counts (element expansion is W9).
+    pub collections: CollectionRecognition,
+    /// F6 — typed-panic count (bare panic!/unwrap detection is Phase-3).
+    pub panics: PanicRecognition,
+    /// F7 — wide-arithmetic fusion (deferred; C19).
+    pub wide_arithmetic: WideArithRecognition,
+    /// F8 — collapsed Val-boilerplate site counts.
+    pub val_boilerplate: ValBoilerplateRecognition,
+}
+
+/// F1 — storage tier resolution ratio + per-op CRUD/TTL counts.
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageRecognition {
+    /// Storage ops whose durability tier resolved to a concrete tier.
+    pub tiers_resolved: i64,
+    /// Storage ops whose durability arg stayed a typed `Unknown`.
+    pub tiers_unknown: i64,
+    /// `tiers_resolved / (tiers_resolved + tiers_unknown)`; `None` when zero.
+    pub tier_ratio: Option<f64>,
+    /// `get` / `set` / `has` / `remove` / `extend_ttl` op counts.
+    pub ops: StorageOps,
+}
+
+/// Per-op storage CRUD/TTL counts.
+#[derive(Debug, Clone, Serialize)]
+pub struct StorageOps {
+    pub get: i64,
+    pub set: i64,
+    pub has: i64,
+    pub remove: i64,
+    pub extend_ttl: i64,
+}
+
+/// Enum storage-key naming ratio.
+#[derive(Debug, Clone, Serialize)]
+pub struct EnumKeyRecognition {
+    /// Keys named against the `#[contracttype]` spec.
+    pub named: i64,
+    /// Keys the recognizer soundly declined to name.
+    pub unresolved: i64,
+    /// Constructor sites matched (payload-carrying variants).
+    pub ctor_matched: i64,
+    /// `named / (named + unresolved)`; `None` when zero.
+    pub ratio: Option<f64>,
+}
+
+/// TTL ledger-amount resolution ratio (D3).
+#[derive(Debug, Clone, Serialize)]
+pub struct TtlRecognition {
+    pub resolved: i64,
+    pub unresolved: i64,
+    /// `resolved / (resolved + unresolved)`; `None` when zero.
+    pub ratio: Option<f64>,
+}
+
+/// F5 — cross-contract client-call typing.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClientCallRecognition {
+    /// Total invoke sites (`invoke_contract` + `try_invoke_contract`).
+    pub sites: i64,
+    /// Sites whose argument arity was recovered (the "typed" numerator).
+    pub arity_resolved: i64,
+    /// Sites whose full argument element list was recovered.
+    pub args_resolved: i64,
+    /// Sites matched to a known interface table (SEP-41 today).
+    pub iface_matched: i64,
+    /// Sites the recognizer soundly declined.
+    pub unresolved: i64,
+    /// `arity_resolved / sites`; `None` when zero. Numerator is arity
+    /// (structural typing), not iface: a non-SEP-41 callee can never
+    /// match the interface table, so using iface would penalise
+    /// contracts for calling interfaces we lack tables for.
+    pub typed_ratio: Option<f64>,
+}
+
+/// Symbol-dispatcher case-table resolution ratio (C25).
+#[derive(Debug, Clone, Serialize)]
+pub struct DispatcherRecognition {
+    pub cases_resolved: i64,
+    pub enum_named: i64,
+    pub unresolved: i64,
+    /// `cases_resolved / (cases_resolved + unresolved)`; `None` when zero.
+    pub ratio: Option<f64>,
+}
+
+/// F2 — auth pattern counts. No ratio: an unrecognised auth call would
+/// survive as a `SemanticOp::Unknown` and surface in the diagnostics
+/// section as `lift::unrecognised_host_call`, not as a typed miss here.
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthRecognition {
+    pub require_auth: i64,
+    pub require_auth_for_args: i64,
+    pub authorize_as_curr_contract: i64,
+    pub address_conversion: i64,
+    /// Admin-from-instance-storage gates recognised (W1 auth-flow).
+    pub admin_gates: i64,
+}
+
+/// F3 — event emission count. The raw / `TokenUtils` / `#[contractevent]`
+/// flavor split is a Phase-3 emit-side distinction (all three compile to
+/// one host call; C14), so it is not a Phase-2 recognition ratio.
+#[derive(Debug, Clone, Serialize)]
+pub struct EventRecognition {
+    pub published: i64,
+    /// Marker that the flavor split is deferred to the Phase-3 emitter.
+    pub flavor_split: &'static str,
+}
+
+/// F4 — collection constructor / op counts. No ratio: literal element
+/// expansion (`vec![&env, a, b]` contents) is W9-deferred structuring
+/// (C9), not a Phase-2 recognition miss.
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectionRecognition {
+    pub vec_new: i64,
+    pub vec_op: i64,
+    pub map_new: i64,
+    pub map_op: i64,
+    pub buf_op: i64,
+}
+
+/// F6 — typed-panic count. Bare `panic!` / `unwrap` detection is
+/// control-flow shaped (C16/C17) and lands with Phase-3 structuring, so
+/// there is no Phase-2 denominator.
+#[derive(Debug, Clone, Serialize)]
+pub struct PanicRecognition {
+    /// `panic_with_error` / `fail_with_error` sites recognised.
+    pub typed: i64,
+    /// Marker that bare-panic/unwrap detection is deferred.
+    pub untyped_detection: &'static str,
+}
+
+/// F7 — wide-arithmetic fusion. Deferred (C19): multi-block carry chains
+/// need structuring; the corpus's i128 flows go through host objects and
+/// are already recognised as such. Reports zero with a deferral pointer.
+#[derive(Debug, Clone, Serialize)]
+pub struct WideArithRecognition {
+    pub fused: i64,
+    /// Deferral pointer (the closeout item that tracks it).
+    pub deferred: &'static str,
+}
+
+/// F8 — collapsed Val-boilerplate site counts. No ratio by construction:
+/// a *missed* pure-bit-op pattern is indistinguishable from ordinary
+/// arithmetic, so there is no honest denominator; the `dump-hir` e2e
+/// locks are the real guard that these collapse.
+#[derive(Debug, Clone, Serialize)]
+pub struct ValBoilerplateRecognition {
+    pub object: i64,
+    pub tag_check: i64,
+    pub encode_small: i64,
+    pub encode_u32: i64,
+    pub decode_small: i64,
+    pub compare: i64,
+}
+
 /// Per-code counts of the diagnostics the recogniser pipeline surfaced
 /// (spec E3/F9) — every recogniser-miss and every unrecognised host call,
 /// bucketed by their stable `LiftDiagnosticCode`.
@@ -211,8 +400,13 @@ pub struct DiagnosticCodeCount {
 /// variant.
 ///
 /// `lift_diagnostics` is borrowed from
-/// `sordec_passes::LiftOutput.diagnostics` (always empty in v0; see
-/// the module-level note).
+/// `sordec_passes::LiftOutput.diagnostics` — lift-stage conditions,
+/// distinct from the recogniser-pipeline diagnostics aggregated in
+/// `recognizer_diagnostics`.
+///
+/// `metric_totals` is borrowed from
+/// [`sordec_passes::PipelineReport::metric_totals`] — the per-pass
+/// counter sums that back the W7 recognition + headline sections.
 ///
 /// This function is pure (no I/O) and total — it does not panic on
 /// any well-formed input, including contracts with zero functions or
@@ -225,6 +419,7 @@ pub fn compute_coverage(
     lifted: &LiftedIr,
     lift_diagnostics: &[Diagnostic],
     recognizer_diagnostics: &BTreeMap<&'static str, usize>,
+    metric_totals: &BTreeMap<&'static str, i64>,
 ) -> CoverageReport {
     let metadata_diag_count = front_diagnostics
         .iter()
@@ -334,7 +529,118 @@ pub fn compute_coverage(
             call_indirect,
             other: other_ops,
         },
+        recognition: build_recognition(metric_totals),
         diagnostics: build_diagnostic_coverage(recognizer_diagnostics),
+    }
+}
+
+/// Read a metric counter, defaulting to 0 when the pipeline never
+/// emitted it (a pattern absent from this contract).
+fn metric(totals: &BTreeMap<&'static str, i64>, key: &'static str) -> i64 {
+    totals.get(key).copied().unwrap_or(0)
+}
+
+/// `numerator / denominator` as a fraction, or `None` when the
+/// denominator is zero — the report's uniform never-`NaN` ratio policy.
+fn ratio(numerator: i64, denominator: i64) -> Option<f64> {
+    if denominator == 0 {
+        None
+    } else {
+        Some(numerator as f64 / denominator as f64)
+    }
+}
+
+/// Build the recognition section from the pipeline's per-pass counter
+/// totals. Every counter is looked up by a `metrics_catalog` const —
+/// no raw key strings here (see [`RecognitionCoverage`]).
+fn build_recognition(t: &BTreeMap<&'static str, i64>) -> RecognitionCoverage {
+    let tiers_resolved = metric(t, mc::STORAGE_TIER_RESOLVED);
+    let tiers_unknown = metric(t, mc::STORAGE_TIER_UNKNOWN);
+
+    let enum_named = metric(t, mc::ENUM_KEY_NAMED);
+    let enum_unresolved = metric(t, mc::ENUM_KEY_UNRESOLVED);
+
+    let ttl_resolved = metric(t, mc::TTL_RESOLVED);
+    let ttl_unresolved = metric(t, mc::TTL_UNRESOLVED);
+
+    let sites = metric(t, mc::INVOKE_CONTRACT) + metric(t, mc::TRY_INVOKE_CONTRACT);
+    let arity_resolved = metric(t, mc::CLIENT_ARITY_RESOLVED);
+
+    let cases_resolved = metric(t, mc::DISPATCHER_CASES_RESOLVED);
+    let dispatcher_unresolved = metric(t, mc::DISPATCHER_UNRESOLVED);
+
+    RecognitionCoverage {
+        storage: StorageRecognition {
+            tiers_resolved,
+            tiers_unknown,
+            tier_ratio: ratio(tiers_resolved, tiers_resolved + tiers_unknown),
+            ops: StorageOps {
+                get: metric(t, mc::STORAGE_GET),
+                set: metric(t, mc::STORAGE_SET),
+                has: metric(t, mc::STORAGE_HAS),
+                remove: metric(t, mc::STORAGE_REMOVE),
+                extend_ttl: metric(t, mc::STORAGE_EXTEND_TTL),
+            },
+        },
+        enum_keys: EnumKeyRecognition {
+            named: enum_named,
+            unresolved: enum_unresolved,
+            ctor_matched: metric(t, mc::ENUM_KEY_CTOR_MATCHED),
+            ratio: ratio(enum_named, enum_named + enum_unresolved),
+        },
+        ttl: TtlRecognition {
+            resolved: ttl_resolved,
+            unresolved: ttl_unresolved,
+            ratio: ratio(ttl_resolved, ttl_resolved + ttl_unresolved),
+        },
+        client_calls: ClientCallRecognition {
+            sites,
+            arity_resolved,
+            args_resolved: metric(t, mc::CLIENT_ARGS_RESOLVED),
+            iface_matched: metric(t, mc::CLIENT_IFACE_MATCHED),
+            unresolved: metric(t, mc::CLIENT_UNRESOLVED),
+            typed_ratio: ratio(arity_resolved, sites),
+        },
+        dispatcher: DispatcherRecognition {
+            cases_resolved,
+            enum_named: metric(t, mc::DISPATCHER_ENUM_NAMED),
+            unresolved: dispatcher_unresolved,
+            ratio: ratio(cases_resolved, cases_resolved + dispatcher_unresolved),
+        },
+        auth: AuthRecognition {
+            require_auth: metric(t, mc::REQUIRE_AUTH),
+            require_auth_for_args: metric(t, mc::REQUIRE_AUTH_FOR_ARGS),
+            authorize_as_curr_contract: metric(t, mc::AUTHORIZE_AS_CURR_CONTRACT),
+            address_conversion: metric(t, mc::ADDRESS_CONVERSION),
+            admin_gates: metric(t, mc::AUTH_ADMIN_GATE),
+        },
+        events: EventRecognition {
+            published: metric(t, mc::PUBLISH_EVENT),
+            flavor_split: "phase-3-emit",
+        },
+        collections: CollectionRecognition {
+            vec_new: metric(t, mc::VEC_NEW),
+            vec_op: metric(t, mc::VEC_OP),
+            map_new: metric(t, mc::MAP_NEW),
+            map_op: metric(t, mc::MAP_OP),
+            buf_op: metric(t, mc::BUF_OP),
+        },
+        panics: PanicRecognition {
+            typed: metric(t, mc::PANIC_WITH_ERROR),
+            untyped_detection: "phase-3-structuring",
+        },
+        wide_arithmetic: WideArithRecognition {
+            fused: 0,
+            deferred: "C19",
+        },
+        val_boilerplate: ValBoilerplateRecognition {
+            object: metric(t, mc::VAL_OBJECT),
+            tag_check: metric(t, mc::VAL_TAG_CHECK),
+            encode_small: metric(t, mc::VAL_ENCODE_SMALL),
+            encode_u32: metric(t, mc::VAL_ENCODE_U32),
+            decode_small: metric(t, mc::VAL_DECODE_SMALL),
+            compare: metric(t, mc::VAL_COMPARE),
+        },
     }
 }
 
@@ -497,6 +803,8 @@ pub fn render_text(out: &mut impl Write, r: &CoverageReport) -> io::Result<()> {
         r.operators.other
     )?;
 
+    render_recognition(out, &r.recognition)?;
+
     writeln!(
         out,
         "  diagnostics:     {} total (recogniser misses)",
@@ -515,6 +823,132 @@ fn plural(n: usize, singular: &str) -> String {
     } else {
         format!("{singular}s")
     }
+}
+
+/// Format an optional ratio as a percentage, or `n/a` on a zero
+/// denominator. Never emits `NaN`/`inf` (the ratio is already `None`
+/// in that case).
+fn fmt_pct(ratio: Option<f64>) -> String {
+    match ratio {
+        Some(r) => format!("{:.1}%", r * 100.0),
+        None => "n/a".to_string(),
+    }
+}
+
+/// Render the W7 recognition section — per-pattern counts and ratios.
+/// Fixed shape: every row renders even at zero, so the report is a
+/// stable artifact rather than a highlights reel.
+fn render_recognition(out: &mut impl Write, r: &RecognitionCoverage) -> io::Result<()> {
+    writeln!(out, "  recognition:")?;
+
+    let s = &r.storage;
+    writeln!(
+        out,
+        "    storage:        tiers {} / {} resolved     ({})",
+        s.tiers_resolved,
+        s.tiers_resolved + s.tiers_unknown,
+        fmt_pct(s.tier_ratio),
+    )?;
+    writeln!(
+        out,
+        "                    get ×{}, set ×{}, has ×{}, remove ×{}, extend_ttl ×{}",
+        s.ops.get, s.ops.set, s.ops.has, s.ops.remove, s.ops.extend_ttl,
+    )?;
+
+    let e = &r.enum_keys;
+    writeln!(
+        out,
+        "    enum keys:      {} / {} named             ({})   ctor ×{}",
+        e.named,
+        e.named + e.unresolved,
+        fmt_pct(e.ratio),
+        e.ctor_matched,
+    )?;
+
+    let ttl = &r.ttl;
+    writeln!(
+        out,
+        "    ttl amounts:    {} / {} resolved          ({})",
+        ttl.resolved,
+        ttl.resolved + ttl.unresolved,
+        fmt_pct(ttl.ratio),
+    )?;
+
+    let c = &r.client_calls;
+    if c.sites == 0 {
+        writeln!(out, "    client calls:   no invoke sites")?;
+    } else {
+        writeln!(
+            out,
+            "    client calls:   {} / {} typed             ({})   iface ×{}, args ×{}",
+            c.arity_resolved,
+            c.sites,
+            fmt_pct(c.typed_ratio),
+            c.iface_matched,
+            c.args_resolved,
+        )?;
+    }
+
+    let d = &r.dispatcher;
+    if d.cases_resolved + d.unresolved == 0 {
+        writeln!(out, "    dispatcher:     no dispatch sites")?;
+    } else {
+        writeln!(
+            out,
+            "    dispatcher:     {} / {} cases resolved    ({})   enum ×{}",
+            d.cases_resolved,
+            d.cases_resolved + d.unresolved,
+            fmt_pct(d.ratio),
+            d.enum_named,
+        )?;
+    }
+
+    let a = &r.auth;
+    writeln!(
+        out,
+        "    auth:           require_auth ×{}, for_args ×{}, as_curr ×{}, addr_conv ×{}, admin_gate ×{}",
+        a.require_auth,
+        a.require_auth_for_args,
+        a.authorize_as_curr_contract,
+        a.address_conversion,
+        a.admin_gates,
+    )?;
+
+    writeln!(
+        out,
+        "    events:         {} published   (flavor split: Phase-3 emit)",
+        r.events.published,
+    )?;
+
+    let col = &r.collections;
+    writeln!(
+        out,
+        "    collections:    vec ×{}, vec_op ×{}, map ×{}, map_op ×{}, buf_op ×{}",
+        col.vec_new, col.vec_op, col.map_new, col.map_op, col.buf_op,
+    )?;
+
+    writeln!(
+        out,
+        "    panics:         {} typed   (bare panic!/unwrap: Phase-3)",
+        r.panics.typed,
+    )?;
+
+    writeln!(
+        out,
+        "    wide arithmetic: {} fused   (deferred: {})",
+        r.wide_arithmetic.fused, r.wide_arithmetic.deferred,
+    )?;
+
+    let v = &r.val_boilerplate;
+    let val_total =
+        v.object + v.tag_check + v.encode_small + v.encode_u32 + v.decode_small + v.compare;
+    writeln!(
+        out,
+        "    val boilerplate: {val_total} sites collapsed   (object ×{}, tag ×{}, enc_small ×{}, enc_u32 ×{}, dec_small ×{}, cmp ×{})",
+        v.object, v.tag_check, v.encode_small, v.encode_u32, v.decode_small, v.compare,
+    )?;
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------
@@ -629,7 +1063,7 @@ mod tests {
     #[test]
     fn compute_coverage_on_empty_ir_returns_zeros_without_panic() {
         let ir = empty_lifted_ir(vec![]);
-        let r = compute_coverage(Path::new("empty.wasm"), &[], false, &ir, &[], &BTreeMap::new());
+        let r = compute_coverage(Path::new("empty.wasm"), &[], false, &ir, &[], &BTreeMap::new(), &BTreeMap::new());
 
         assert_eq!(r.parse.diagnostics, 0);
         assert!(r.parse.ok);
@@ -653,7 +1087,7 @@ mod tests {
             ("lift::unresolved_symbol_dispatch", 1),
             ("lift::non_constant_ttl_amount", 3),
         ]);
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &counts);
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &counts, &BTreeMap::new());
 
         assert_eq!(r.diagnostics.total, 7);
         // Sorted by descending count, then code ascending for ties.
@@ -682,7 +1116,7 @@ mod tests {
         // catalog resolves to `put_contract_data`. One Call to it
         // should produce recognized=1, total=1, ratio=1.0.
         let ir = lifted_ir_with_one_function(vec![import("l", "_")], vec![op_call(0)]);
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new());
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new(), &BTreeMap::new());
 
         assert_eq!(r.host_calls.total, 1);
         assert_eq!(r.host_calls.recognized, 1);
@@ -700,7 +1134,7 @@ mod tests {
             vec![import("zz", "?")],
             vec![op_call(0), op_call(0), op_call(0)],
         );
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new());
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new(), &BTreeMap::new());
 
         assert_eq!(r.host_calls.total, 3);
         assert_eq!(r.host_calls.recognized, 0);
@@ -717,7 +1151,7 @@ mod tests {
         // One import (idx 0) and one call to a local function
         // (waffle idx 1, past imported_func_count of 1).
         let ir = lifted_ir_with_one_function(vec![import("l", "_")], vec![op_call(1)]);
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new());
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new(), &BTreeMap::new());
 
         assert_eq!(r.operators.call_to_import, 0);
         assert_eq!(r.operators.call_to_local, 1);
@@ -745,7 +1179,7 @@ mod tests {
             ),
         ];
         let ir = empty_lifted_ir(vec![]);
-        let r = compute_coverage(Path::new("t.wasm"), &diags, true, &ir, &[], &BTreeMap::new());
+        let r = compute_coverage(Path::new("t.wasm"), &diags, true, &ir, &[], &BTreeMap::new(), &BTreeMap::new());
 
         assert_eq!(r.parse.diagnostics, 0);
         assert!(r.parse.ok);
@@ -755,7 +1189,7 @@ mod tests {
     #[test]
     fn render_text_handles_zero_host_calls_without_nan() {
         let ir = empty_lifted_ir(vec![]);
-        let r = compute_coverage(Path::new("hello.wasm"), &[], true, &ir, &[], &BTreeMap::new());
+        let r = compute_coverage(Path::new("hello.wasm"), &[], true, &ir, &[], &BTreeMap::new(), &BTreeMap::new());
         let mut buf = Vec::new();
         render_text(&mut buf, &r).expect("write succeeds");
         let s = String::from_utf8(buf).expect("utf-8");
@@ -771,7 +1205,7 @@ mod tests {
     #[test]
     fn render_json_round_trips_through_serde_json() {
         let ir = lifted_ir_with_one_function(vec![import("l", "_")], vec![op_call(0)]);
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new());
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new(), &BTreeMap::new());
 
         let mut buf = Vec::new();
         render_json(&mut buf, &r).expect("serialize");
@@ -814,7 +1248,7 @@ mod tests {
                 op_call(2),
             ],
         );
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new());
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new(), &BTreeMap::new());
 
         let names: Vec<_> = r
             .host_calls
@@ -848,7 +1282,7 @@ mod tests {
                 },
             ],
         );
-        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new());
+        let r = compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new(), &BTreeMap::new());
 
         let sum = r.operators.call_to_import
             + r.operators.call_to_local

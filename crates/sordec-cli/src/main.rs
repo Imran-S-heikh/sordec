@@ -341,16 +341,23 @@ fn run_coverage(args: &CoverageArgs) -> u8 {
     };
 
     // 4. Run the recogniser pipeline (on a lowered clone of the lifted
-    //    IR; the original is borrowed by `compute_coverage`) and aggregate
-    //    its diagnostics per code — the E3/F9 coverage signal.
-    let recognizer_diagnostics = match sordec_passes::LiftToHigh.lower(lift_output.lifted.clone()) {
-        Ok(mut high) => sordec_passes::default_high_pipeline()
-            .run(&mut high)
-            .diagnostic_counts_by_code(),
-        // A lowering failure here is not fatal to coverage — report the
-        // lift-layer numbers with an empty diagnostic section.
-        Err(_) => std::collections::BTreeMap::new(),
-    };
+    //    IR; the original is borrowed by `compute_coverage`) and harvest
+    //    both signals from the one report: per-code diagnostics (the
+    //    E3/F9 signal) and per-pass metric totals (the F1–F8 + headline
+    //    signal).
+    let (recognizer_diagnostics, metric_totals) =
+        match sordec_passes::LiftToHigh.lower(lift_output.lifted.clone()) {
+            Ok(mut high) => {
+                let report = sordec_passes::default_high_pipeline().run(&mut high);
+                (report.diagnostic_counts_by_code(), report.metric_totals())
+            }
+            // A lowering failure here is not fatal to coverage — report the
+            // lift-layer numbers with empty recognition sections.
+            Err(_) => (
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::new(),
+            ),
+        };
 
     // 5. Compute the report. Pure — no failure modes.
     let report = coverage::compute_coverage(
@@ -360,6 +367,7 @@ fn run_coverage(args: &CoverageArgs) -> u8 {
         &lift_output.lifted,
         lift_output.diagnostics.as_slice(),
         &recognizer_diagnostics,
+        &metric_totals,
     );
 
     // 5. Render to stdout in the requested format. Lock stdout to
