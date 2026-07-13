@@ -80,6 +80,8 @@ pub struct CoverageReport {
     pub operators: OperatorBreakdown,
     /// Per-pattern recognition counts and ratios (F1–F8 + beyond-kickoff).
     pub recognition: RecognitionCoverage,
+    /// The two-number semantic-recovery headline (W7).
+    pub headline: HeadlineCoverage,
     /// Per-code counts of recogniser-pipeline diagnostics (E3/F9).
     pub diagnostics: DiagnosticCoverage,
 }
@@ -361,6 +363,57 @@ pub struct ValBoilerplateRecognition {
     pub compare: i64,
 }
 
+/// The two-number semantic-recovery headline (W7).
+///
+/// Deliberately **not** blended into one scalar: the two axes measure
+/// different things and a single number would either bury the recognition
+/// win or overstate resolution.
+///
+/// - **host interactions** — did the pipeline turn each host-boundary
+///   call into a named semantic operation? (Phase-2's recognition claim.)
+/// - **deep facts** — of the sub-facts the recognisers *attempted* to
+///   resolve (storage tier, enum key, TTL amount, client arity, dispatch
+///   cases), how many resolved? Every miss is a sound decline carrying a
+///   located diagnostic (see the diagnostics section), not a crash or a
+///   guess.
+///
+/// Neither is the RFP's contractual accuracy number: structural accuracy
+/// vs source is a Phase-4 scoring artifact over Phase-3 emitter output.
+/// [`note`](Self::note) states that inline.
+#[derive(Debug, Clone, Serialize)]
+pub struct HeadlineCoverage {
+    /// Host-boundary calls the pipeline recognised into semantic ops.
+    pub host_interactions: HostInteractions,
+    /// Deep sub-facts resolved out of those attempted.
+    pub deep_facts: DeepFacts,
+    /// Plain-language pointer to the Phase-3/4 accuracy metric.
+    pub note: &'static str,
+}
+
+/// Host-boundary call recognition — the pipeline's verdict.
+#[derive(Debug, Clone, Serialize)]
+pub struct HostInteractions {
+    /// Host-call sites turned into a named semantic op
+    /// (`total` − surviving `Unknown`s).
+    pub recognized: i64,
+    /// Total host-boundary call sites.
+    pub total: i64,
+    /// `recognized / total`; `None` when the contract has no host calls.
+    pub ratio: Option<f64>,
+}
+
+/// Deep-fact resolution — summed over the five
+/// [`metrics_catalog::DEEP_FACT_PAIRS`](sordec_passes::metrics_catalog::DEEP_FACT_PAIRS).
+#[derive(Debug, Clone, Serialize)]
+pub struct DeepFacts {
+    /// Sub-facts resolved to a concrete value.
+    pub resolved: i64,
+    /// Sub-facts the recognisers attempted (resolved + soundly declined).
+    pub attempted: i64,
+    /// `resolved / attempted`; `None` when nothing was attempted.
+    pub ratio: Option<f64>,
+}
+
 /// Per-code counts of the diagnostics the recogniser pipeline surfaced
 /// (spec E3/F9) — every recogniser-miss and every unrecognised host call,
 /// bucketed by their stable `LiftDiagnosticCode`.
@@ -530,7 +583,48 @@ pub fn compute_coverage(
             other: other_ops,
         },
         recognition: build_recognition(metric_totals),
+        headline: build_headline(metric_totals, call_to_import),
         diagnostics: build_diagnostic_coverage(recognizer_diagnostics),
+    }
+}
+
+/// Build the two-number semantic-recovery headline.
+///
+/// `host_call_sites` is the operator-walk count of `Call`-to-import
+/// instructions (the total host-boundary interactions). The recognised
+/// count subtracts the terminal scan's surviving `Unknown`s — the
+/// pipeline's own recognition verdict, stricter than catalog naming.
+fn build_headline(t: &BTreeMap<&'static str, i64>, host_call_sites: usize) -> HeadlineCoverage {
+    let total = host_call_sites as i64;
+    let unrecognised = metric(t, mc::UNRECOGNISED_HOST_CALL);
+    // Saturating: the scan can never blame more sites than exist, but a
+    // never-negative numerator keeps the ratio honest under any drift.
+    let recognized = total.saturating_sub(unrecognised).max(0);
+
+    // Deep facts: sum resolved / attempted over the five locked pairs.
+    let mut resolved = 0i64;
+    let mut attempted = 0i64;
+    for &(ok, miss) in mc::DEEP_FACT_PAIRS {
+        let r = metric(t, ok);
+        let u = metric(t, miss);
+        resolved += r;
+        attempted += r + u;
+    }
+
+    HeadlineCoverage {
+        host_interactions: HostInteractions {
+            recognized,
+            total,
+            ratio: ratio(recognized, total),
+        },
+        deep_facts: DeepFacts {
+            resolved,
+            attempted,
+            ratio: ratio(resolved, attempted),
+        },
+        note: "structural accuracy vs source (>=90% AST node-count, D4.1) \
+               is a Phase-4 metric built on the Phase-3 Rust emitter — \
+               not yet computable",
     }
 }
 
@@ -804,6 +898,7 @@ pub fn render_text(out: &mut impl Write, r: &CoverageReport) -> io::Result<()> {
     )?;
 
     render_recognition(out, &r.recognition)?;
+    render_headline(out, &r.headline)?;
 
     writeln!(
         out,
@@ -948,6 +1043,27 @@ fn render_recognition(out: &mut impl Write, r: &RecognitionCoverage) -> io::Resu
         v.object, v.tag_check, v.encode_small, v.encode_u32, v.decode_small, v.compare,
     )?;
 
+    Ok(())
+}
+
+/// Render the two-number semantic-recovery headline.
+fn render_headline(out: &mut impl Write, h: &HeadlineCoverage) -> io::Result<()> {
+    writeln!(out, "  semantic recovery:")?;
+    writeln!(
+        out,
+        "    host interactions:  {} / {} recognized       ({})",
+        h.host_interactions.recognized,
+        h.host_interactions.total,
+        fmt_pct(h.host_interactions.ratio),
+    )?;
+    writeln!(
+        out,
+        "    deep facts:         {} / {} resolved         ({})",
+        h.deep_facts.resolved,
+        h.deep_facts.attempted,
+        fmt_pct(h.deep_facts.ratio),
+    )?;
+    writeln!(out, "    note: {}", h.note)?;
     Ok(())
 }
 
