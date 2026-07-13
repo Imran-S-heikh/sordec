@@ -172,11 +172,32 @@ impl PipelineReport {
         }
         counts
     }
+
+    /// Every pass's [`PassMetrics`](crate::PassMetrics) counters summed
+    /// across all invocations into one `counter-key → total` map — the
+    /// per-pattern recognition signal feeding the `sordec coverage`
+    /// recognition + headline sections (spec F1–F8).
+    ///
+    /// A counter emitted by a fixpoint-repeated pass accumulates across
+    /// every invocation, matching [`Self::diagnostics`]'s invocation-order
+    /// semantics. Keys are the stable `&'static str`s catalogued in
+    /// [`crate::metrics_catalog`]; sorted for deterministic output.
+    #[must_use]
+    pub fn metric_totals(&self) -> BTreeMap<&'static str, i64> {
+        let mut totals: BTreeMap<&'static str, i64> = BTreeMap::new();
+        for (_pass, result) in &self.per_pass {
+            for (key, value) in result.metrics.iter() {
+                *totals.entry(key).or_insert(0) += value;
+            }
+        }
+        totals
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pass::PassMetrics;
 
     struct CountUp {
         name: &'static str,
@@ -217,6 +238,30 @@ mod tests {
         let counts = report.diagnostic_counts_by_code();
         assert_eq!(counts.get("lift::non_constant_ttl_amount"), Some(&2));
         assert_eq!(counts.get("lift::unrecognised_host_call"), Some(&1));
+    }
+
+    #[test]
+    fn metric_totals_sum_counters_across_pass_invocations() {
+        let mut report = PipelineReport::default();
+        let mk = |k1: &'static str, v1, k2: &'static str, v2| {
+            let mut metrics = PassMetrics::new();
+            metrics.increment(k1, v1);
+            metrics.increment(k2, v2);
+            PassResult {
+                metrics,
+                ..Default::default()
+            }
+        };
+        // Same key ("shared") emitted by two passes must accumulate; a
+        // fixpoint-repeated pass would land here as another entry too.
+        report.per_pass.push(("a", mk("shared", 2, "only_a", 1)));
+        report.per_pass.push(("b", mk("shared", 3, "only_b", 5)));
+
+        let totals = report.metric_totals();
+        assert_eq!(totals.get("shared"), Some(&5));
+        assert_eq!(totals.get("only_a"), Some(&1));
+        assert_eq!(totals.get("only_b"), Some(&5));
+        assert_eq!(totals.get("never"), None);
     }
 
     #[test]

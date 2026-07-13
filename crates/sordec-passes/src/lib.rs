@@ -19,6 +19,9 @@
 //! - [`val_abi`] — vendored Soroban `Val` encoding ABI (tag table, bit
 //!   layout, conversion-function mapping) consumed by the Val-encoding
 //!   recognizer.
+//! - [`metrics_catalog`] — the canonical public names of the
+//!   `PassMetrics` counter keys that `sordec coverage` surfaces (F1–F8
+//!   + the enum-key / TTL / dispatcher ratios).
 //!
 //! Concrete pattern-recovery passes (Val encoding, storage tier,
 //! auth chain, cross-contract clients) land in this crate during
@@ -31,6 +34,7 @@ pub mod interfaces;
 pub mod ledger;
 pub mod lift;
 pub mod lowering;
+pub mod metrics_catalog;
 pub mod pass;
 pub mod pipeline;
 pub mod recognizers;
