@@ -68,18 +68,62 @@ committed bytes are reproducible from the recipe in `BUILD.md`.
 
 ## Feature-coverage matrix
 
-This matrix is the cross-reference for future passes: when a Phase 2/3 task
-introduces (say) storage-tier detection, scan this column to find the
-fixtures that exercise it.
+This matrix is the high-level cross-reference: which contract-level
+*features* each fixture exercises. For the finer per-pass view — which
+recogniser actually fires on which fixture — see
+[Recognizer coverage](#recognizer-coverage) below.
 
-| Fixture | SDK | Stripped | Storage | Auth | Events | Errors | Cross-call | AMM math | Notes |
-|---------|-----|:--------:|:-------:|:----:|:------:|:------:|:----------:|:-------:|-------|
-| `hello-add/`           | =21.0.0  | – | – | – | – | – | – | – | First-party, smallest realistic Soroban contract (`add(u64, u64) -> u64`) |
-| `token-v22/`           | =22.0.11 | – | ✓ | ✓ | ✓ | ✓ | ✓ | – | SEP-41 token, older SDK + wasm32-unknown-unknown target |
-| `token-v23/`           | =23.0.1  | – | ✓ | ✓ | ✓ | ✓ | ✓ | – | SEP-41 token, canonical (latest soroban-examples release) |
-| `token-v23-stripped/`  | =23.0.1  | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | – | Same as token-v23, custom sections removed |
-| `timelock/`            | =23.0.1  | – | ✓ | ✓ | – | – | ✓ | – | Time-bounded claimable balance (cross-contract token calls) |
-| `dex-liquidity-pool/`  | =23.0.1  | – | ✓ | ✓ | – | – | ✓ | ✓ | Constant-product AMM (largest fixture, AMM math + LP shares) |
+| Fixture | SDK | Stripped | Storage | Auth | Events | Errors | Cross-call | Crypto | PRNG | AMM math | Notes |
+|---------|-----|:--------:|:-------:|:----:|:------:|:------:|:----------:|:------:|:----:|:-------:|-------|
+| `hello-add/`           | =21.0.0  | – | – | – | – | – | – | – | – | – | First-party, smallest realistic Soroban contract (`add(u64, u64) -> u64`) |
+| `token-v22/`           | =22.0.11 | – | ✓ | ✓ | ✓ | ✓ | ✓ | – | – | – | SEP-41 token, older SDK + wasm32-unknown-unknown target |
+| `token-v23/`           | =23.0.1  | – | ✓ | ✓ | ✓ | ✓ | ✓ | – | – | – | SEP-41 token, canonical (latest soroban-examples release) |
+| `token-v23-stripped/`  | =23.0.1  | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | – | – | – | Same as token-v23, custom sections removed |
+| `timelock/`            | =23.0.1  | – | ✓ | ✓ | – | – | ✓ | – | – | – | Time-bounded claimable balance (cross-contract token calls) |
+| `dex-liquidity-pool/`  | =23.0.1  | – | ✓ | ✓ | – | – | ✓ | – | – | ✓ | Constant-product AMM (largest fixture, AMM math + LP shares) |
+| `attestation/`         | =23.0.1  | – | – | – | – | ✓ | – | ✓ | ✓ | – | First-party, storage-free by design; crypto (sha256/keccak256/ed25519) + PRNG + `#[contracterror]` + a `>9`-char `Symbol` — the host surfaces the SEP-41 / timelock / AMM fixtures don't reach |
+
+## Recognizer coverage
+
+The per-pass view: which `sordec-passes` recogniser fires on which
+fixture. This is the human-readable projection of the machine-checked H1
+matrix in `crates/sordec-driver/tests/coverage_matrix.rs` (run it with
+`--nocapture` to see the raw per-metric counts), and it matches the
+`recognition:` section of `sordec coverage <fixture>.wasm`. ✓ = the
+recogniser rewrote at least one binding on that fixture.
+
+| Recognizer (pass) | hello | v22 | v23 | v23-str | timelock | dex | attest |
+|-------------------|:-----:|:---:|:---:|:-------:|:--------:|:---:|:------:|
+| val-encoding (C1)                    | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| linear-memory (Symbol/String/Bytes/Vec/Map `new`) | – | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| storage tier (C2/C3)                 | – | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| auth primitives (C4)                 | – | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| auth-flow / admin gate (W1)          | – | ✓ | ✓ | – | – | – | – |
+| context (ledger / event / compare / panic) | – | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| collections (map / vec / buf ops)    | – | ✓ | ✓ | ✓ | ✓ | – | ✓ |
+| const-prop (inter-proc upgrade)      | – | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| enum-key (C5 / D2)                   | – | ✓ | ✓ | – | ✓ | ✓ | – |
+| ttl amounts (D3)                     | – | ✓ | ✓ | ✓ | – | – | – |
+| cross-contract (C6)                  | – | – | – | – | ✓ | ✓ | – |
+| client-call typing (C7 / W2)         | – | – | – | – | ✓ | ✓ | – |
+| dispatcher (C25 / W4)                | – | – | – | – | ✓ | – | – |
+| abi-sweep crypto/PRNG (C21 / C22)    | – | – | – | – | – | – | ✓ |
+
+Reading the table:
+
+- **The stripped token is the honesty control.** `token-v23-stripped` is
+  byte-identical to `token-v23` minus the `contractspecv0` custom section.
+  Two recognisers go dark on it — **auth-flow/admin-gate** and
+  **enum-key** — because both name things against the spec; with the spec
+  gone they soundly decline rather than guess. Everything spec-independent
+  (storage, auth primitives, ttl, const-prop) still fires identically.
+- **Singletons** (one fixture is the sole witness): **dispatcher** →
+  timelock (the only `b.m` symbol-index enum decode in the corpus);
+  **abi-sweep crypto/PRNG** → attestation (W8 added it precisely to
+  exercise the `c`/`p` modules); **ttl amounts** → the three tokens.
+- **The terminal unrecognised-scan runs on all seven and finds zero
+  surviving unknown host calls** — that is the 100% "host interactions"
+  figure in `sordec coverage`.
 
 ## Adding a new fixture
 
