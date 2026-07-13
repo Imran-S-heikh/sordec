@@ -18,7 +18,7 @@ your `.wasm` or write outside of stdout.
 |---|---|---|
 | `sordec dump-facts <wasm>`  | JSON | What we extracted: imports, exports, decoded Soroban metadata, contract spec, custom sections |
 | `sordec dump-ir <wasm>`     | Text | Waffle-style CFG/SSA IR with **named host calls** (e.g. `host:l:put_contract_data`) |
-| `sordec coverage <wasm>`    | Text or `--json` | How much of the contract our pipeline understands: host-call recognition %, lift completeness, operator breakdown |
+| `sordec coverage <wasm>`    | Text or `--json` | How much of the contract our pipeline understands: per-pattern recognition (storage tiers, enum keys, TTL, client calls, …), a two-number semantic-recovery headline, host-call recognition %, and recogniser-miss diagnostics |
 
 What's coming next:
 
@@ -57,9 +57,41 @@ coverage report — token-v23.wasm
                      call (local):     116
                      call indirect:      0
                      other:            934
+  recognition:
+    storage:        tiers 8 / 10 resolved     (80.0%)
+                    get ×4, set ×4, has ×1, remove ×0, extend_ttl ×2
+    enum keys:      6 / 8 named             (75.0%)   ctor ×1
+    ttl amounts:    1 / 2 resolved          (50.0%)
+    client calls:   no invoke sites
+    dispatcher:     no dispatch sites
+    auth:           require_auth ×7, for_args ×0, as_curr ×0, addr_conv ×2, admin_gate ×2
+    events:         5 published   (flavor split: Phase-3 emit)
+    collections:    vec ×1, vec_op ×0, map ×1, map_op ×1, buf_op ×0
+    panics:         0 typed   (bare panic!/unwrap: Phase-3)
+    wide arithmetic: 0 fused   (deferred: C19)
+    val boilerplate: 28 sites collapsed   (object ×5, tag ×5, enc_small ×2, enc_u32 ×14, dec_small ×2, cmp ×0)
+  semantic recovery:
+    host interactions:  35 / 35 recognized       (100.0%)
+    deep facts:         15 / 20 resolved         (75.0%)
+    note: structural accuracy vs source (>=90% AST node-count, D4.1) is a Phase-4 metric built on the Phase-3 Rust emitter — not yet computable
+  diagnostics:     5 total (recogniser misses)
+                     lift::non_constant_durability_arg (×2)
+                     lift::unrecognised_storage_pattern (×2)
+                     lift::non_constant_ttl_amount (×1)
 ```
 
-100% host-call recognition across all six [corpus fixtures](samples/contracts/) at the time of this Phase 1 cut.
+**Reading the headline.** *Host interactions* (100% across all seven
+[corpus fixtures](samples/contracts/)) is Phase 2's recognition claim:
+every host-boundary call is turned into a named semantic operation.
+*Deep facts* (75% on token-v23) is the fraction of finer sub-facts —
+storage tiers, enum-key names, TTL amounts, client-call arity, dispatch
+cases — the recognisers resolved; each miss is a **sound decline**
+carrying a located diagnostic (a polymorphic helper site, an
+indirect-call-blocked amount), never a guess. A ratio is shown only
+where a pass emits a real miss counter; the other rows are counts with a
+note on where their misses would surface. Neither number is the RFP's
+contractual accuracy score — that is structural AST-diff against source,
+a Phase-4 artifact over the Phase-3 Rust emitter.
 
 ## Architecture
 

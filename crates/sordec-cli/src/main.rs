@@ -66,7 +66,12 @@ enum Command {
     DumpIr(DumpIrArgs),
     /// Lift + lower to HighIr and emit the typed bindings as text.
     DumpHir(DumpHirArgs),
-    /// Report how much of a contract this pipeline currently understands.
+    /// Report how much of a contract this pipeline currently understands:
+    /// per-pattern recognition (storage tiers, enum keys, TTL, client
+    /// calls, dispatcher, auth, events, collections, panics, Val
+    /// boilerplate), a two-number semantic-recovery headline (host
+    /// interactions vs deep facts), host-call recognition %, and
+    /// recogniser-miss diagnostics by code.
     Coverage(CoverageArgs),
 }
 
