@@ -46,26 +46,32 @@ not finished Rust.
 
 ## What landed
 
-Phase 2 was executed as a nine-item work queue (W1–W9) on top of the
-D2.1/D2.2 recognizers that landed at the Phase 1→2 boundary. Each row is
-real, gated commits on `main`.
+The six Phase 2 deliverables (D2.1–D2.6), each backed by real, gated
+commits on `main`:
 
-| Work item | Spec | Deliverable | Anchor |
-|---|---|---|---|
-| W1 | D2.3 | Enum-key recognizer (3 discriminant channels) + auth-flow pass: admin gate + `transfer_from` allowance chain named | [`0145e79`](https://github.com/Imran-S-heikh/sordec/commit/0145e79) |
-| W2 | D2.4 | Cross-contract client typing: SEP-41 interface table + `client-call` pass (arity / elements / interface tiers) | [`6afd964`](https://github.com/Imran-S-heikh/sordec/commit/6afd964) |
-| W3 | C21–C23 | **Entire 192-function host ABI in vocabulary** (crypto 37 / PRNG 4 / test 2 / deploy 7) + `abi-sweep` pass + drift-guarded tables | [`3ccc332`](https://github.com/Imran-S-heikh/sordec/commit/3ccc332) |
-| W4 | C25 | Symbol-dispatch table recognizer — decodes the rodata `(pos,len)` descriptor table, names the enum (`TimeBoundKind`) | [`d895c26`](https://github.com/Imran-S-heikh/sordec/commit/d895c26) |
-| W5 | D3/D4/D6 | TTL magic-number resolution (named durations) + unit-value marker + `__constructor` label | [`455f69a`](https://github.com/Imran-S-heikh/sordec/commit/455f69a) |
-| W6 | E1–E3/F9 | `LiftDiagnosticCode` taxonomy (16 codes, 6 wired) + recognizer-miss diagnostics + per-code coverage | [`14e11dc`](https://github.com/Imran-S-heikh/sordec/commit/14e11dc) |
-| W7 | F1–F8/I4 | Coverage recognition sub-metrics + two-number **semantic-recovery headline** | [`818d9e0`](https://github.com/Imran-S-heikh/sordec/commit/818d9e0) |
-| W8 | H1–H3 | `attestation` fixture (crypto/PRNG/`#[contracterror]`/long-`Symbol`) + H1 recognizer × fixture matrix | [`5ad1cd3`](https://github.com/Imran-S-heikh/sordec/commit/5ad1cd3) |
-| W9 | I1 | Corpus README per-recognizer coverage + consolidated deferral ledger | [`a03c54a`](https://github.com/Imran-S-heikh/sordec/commit/a03c54a) |
+| Deliverable | What landed | Anchor |
+|---|---|---|
+| D2.1 Val encoding/decoding | Recognizer that collapses the tag/shift/or bit-packing chains and `Symbol` packing into typed literals | [`b8c45fc`](https://github.com/Imran-S-heikh/sordec/commit/b8c45fc) |
+| D2.2 Storage tier resolver | Traces the durability argument back to `temporary` / `persistent` / `instance`; a non-constant tier stays a typed `Unknown` with a reason, never a guess | [`df6c191`](https://github.com/Imran-S-heikh/sordec/commit/df6c191) |
+| D2.3 Auth chain | `require_auth` / `require_auth_for_args`, the admin-from-instance-storage gate, and the `transfer_from` allowance flow — with storage keys named against the contract's declared types | [`0145e79`](https://github.com/Imran-S-heikh/sordec/commit/0145e79) |
+| D2.4 Cross-contract call | Types generic `invoke_contract` against a recovered SEP-41 interface, matched by callee + arity | [`6afd964`](https://github.com/Imran-S-heikh/sordec/commit/6afd964) |
+| D2.5 Pattern integration | Recognizers run as an ordered pipeline with per-pattern counters and a bounded fixpoint | [`c102407`](https://github.com/Imran-S-heikh/sordec/commit/c102407) |
+| D2.6 Per-pattern integration tests | 561 workspace tests; every recognizer exercised on every applicable fixture; a recognizer × fixture coverage matrix | [`5ad1cd3`](https://github.com/Imran-S-heikh/sordec/commit/5ad1cd3) |
 
-The recognizers run as a **12-pass ordered pipeline** (`default_high_pipeline`)
-over `HighIr`, each attaching provenance, each monotonic and idempotent.
-`PipelineReport` records per-pass metrics; a terminal unrecognised-scan
-emits a diagnostic for any host call no pass claimed.
+### Depth added beyond the six deliverables
+
+Phase 2 also went past the required surface:
+
+- **The complete host-function vocabulary** — all ~192 Soroban runtime functions (crypto, randomness, deployment, …) are recognized, so no call is left unnamed. [`3ccc332`](https://github.com/Imran-S-heikh/sordec/commit/3ccc332)
+- **Symbol-dispatch reconstruction** — recovers the enum a contract switches on when routing a call (e.g. timelock's `TimeBoundKind {Before, After}`). [`d895c26`](https://github.com/Imran-S-heikh/sordec/commit/d895c26)
+- **TTL, unit-value, and constructor recovery** — named ledger durations, `()` value markers, and the `__constructor` entrypoint label. [`455f69a`](https://github.com/Imran-S-heikh/sordec/commit/455f69a)
+- **Diagnostics + self-grading** — a located diagnostic at every recognizer-miss, and the two-number `coverage` report (host interactions + deep facts). [`14e11dc`](https://github.com/Imran-S-heikh/sordec/commit/14e11dc), [`818d9e0`](https://github.com/Imran-S-heikh/sordec/commit/818d9e0)
+- **A purpose-built test contract** — the `attestation` fixture (crypto / randomness / `#[contracterror]` / long `Symbol`) extends the corpus to seven. [`d4ce4d9`](https://github.com/Imran-S-heikh/sordec/commit/d4ce4d9)
+
+The recognizers run as a **15-pass ordered pipeline** over the typed
+working IR, each attaching provenance to its conclusions, each monotonic
+and idempotent. Per-pass metrics feed the coverage report; a terminal
+scan emits a diagnostic for any host call no pass claimed.
 
 ---
 
@@ -111,10 +117,10 @@ bash tools/verify-fixtures.sh
 |---|---|---|
 | D2.1 Val encoding/decoding | ✅ | `val-encoding` pass; bit-packing unit tests; small-symbol decoder |
 | D2.2 Storage tier resolver | ✅ | `storage` pass on token + timelock, all three tiers; non-constant → typed `Unknown` (honest `<?>`), inter-procedural upgrade |
-| D2.3 Auth chain | ✅ (W1) | `require_auth` carries `admin gate: address = storage_get<instance>(DataKey::Admin)`; allowance chain named `DataKey::Allowance(from, spender)`; zero false positives |
-| D2.4 Cross-contract call | ✅ (W2) | every corpus invoke typed against SEP-41 by callee + arity; dex + timelock |
-| D2.5 Pattern integration | ✅ | 12-pass `default_high_pipeline`; `PassMetrics`; `PipelineReport`; bounded fixpoint |
-| D2.6 Per-pattern integration tests | ✅ | 561 workspace tests; 7 corpus fixtures; H1 recognizer × fixture matrix; zero-`host:` sweep |
+| D2.3 Auth chain | ✅ | `require_auth` carries `admin gate: address = storage_get<instance>(DataKey::Admin)`; allowance chain named `DataKey::Allowance(from, spender)`; zero false positives |
+| D2.4 Cross-contract call | ✅ | every corpus invoke typed against SEP-41 by callee + arity; dex + timelock |
+| D2.5 Pattern integration | ✅ | 15-pass ordered pipeline; per-pattern counters; bounded fixpoint |
+| D2.6 Per-pattern integration tests | ✅ | 561 workspace tests; 7 corpus fixtures; recognizer × fixture coverage matrix; zero-`host:` sweep |
 
 ### Test suite — 561 tests passing
 
@@ -172,15 +178,14 @@ missed. The resolution *rate* is unchanged.
   indirect-call-blocked amount — carrying a located diagnostic, never a
   guess.
 
-> **Wording note (for ABS UG / milestone sign-off).** The proposal's
-> contractual acceptance number is **≥90% structural (AST node-count)
-> accuracy on `token-v23`** — a Phase-4 artifact (D4.1) built on the
-> Phase-3 Rust emitter, neither of which exists yet. The kickoff's
-> "≥95% semantic recovery" phrasing predates this two-number accounting.
-> Phase 2 reports what it can measure honestly today (recognition +
-> deep-fact resolution); the AST-diff accuracy score arrives in Phase 4.
-> The exact public phrasing of this section is pending confirmation
-> against the milestone wording.
+> **Note on the accuracy number.** The proposal's contractual acceptance
+> figure is **≥90% structural (AST node-count) accuracy on `token-v23`** —
+> a Phase-4 deliverable (D4.1) built on the Phase-3 Rust emitter, neither
+> of which exists yet. It is therefore not measurable at the end of
+> Phase 2. What Phase 2 reports is the two numbers above — host-interaction
+> recognition and deep-fact resolution — which measure how much of each
+> contract the pipeline understands, not the AST-diff score. That score
+> arrives in Phase 4 once there is emitted Rust to compare against source.
 
 ### D2-Demo — the recovered semantic layer (`dump-hir`)
 
@@ -237,7 +242,7 @@ gaps.
 |---|---|
 | Round-trip / structural **accuracy scoring** (`sordec score`, D4.1) | needs the Phase-3 emitter first |
 | Multi-version protocol catalog | append-only ABI; 26.1.2 covers deployed contracts today |
-| Wide-int (`i128`/`u256`) arithmetic fusion; formatted panic; `sqrt` inline; `log_from_linear_memory`; multi-`#[contractimpl]` merge | multi-block / fmt / no-marker / no-corpus-fixture — see the tracker ledger |
+| Wide-int (`i128`/`u256`) arithmetic fusion; formatted panic; `sqrt` inline; `log_from_linear_memory`; multi-`#[contractimpl]` merge | multi-block carry chains / format machinery / no SDK marker / no corpus fixture exercises them yet |
 
 These are scope, not bugs. Ten `LiftDiagnosticCode` taxonomy slots are
 defined and documented ahead of the features that will emit them

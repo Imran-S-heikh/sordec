@@ -86,28 +86,29 @@ recogniser actually fires on which fixture — see
 ## Recognizer coverage
 
 The per-pass view: which `sordec-passes` recogniser fires on which
-fixture. This is the human-readable projection of the machine-checked H1
-matrix in `crates/sordec-driver/tests/coverage_matrix.rs` (run it with
+fixture. This is the human-readable projection of the machine-checked
+recogniser × fixture matrix in
+`crates/sordec-driver/tests/coverage_matrix.rs` (run it with
 `--nocapture` to see the raw per-metric counts), and it matches the
 `recognition:` section of `sordec coverage <fixture>.wasm`. ✓ = the
 recogniser rewrote at least one binding on that fixture.
 
 | Recognizer (pass) | hello | v22 | v23 | v23-str | timelock | dex | attest |
 |-------------------|:-----:|:---:|:---:|:-------:|:--------:|:---:|:------:|
-| val-encoding (C1)                    | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| val-encoding                         | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | linear-memory (Symbol/String/Bytes/Vec/Map `new`) | – | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| storage tier (C2/C3)                 | – | ✓ | ✓ | ✓ | ✓ | ✓ | – |
-| auth primitives (C4)                 | – | ✓ | ✓ | ✓ | ✓ | ✓ | – |
-| auth-flow / admin gate (W1)          | – | ✓ | ✓ | – | – | – | – |
+| storage tier                         | – | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| auth primitives                      | – | ✓ | ✓ | ✓ | ✓ | ✓ | – |
+| auth-flow / admin gate               | – | ✓ | ✓ | – | – | – | – |
 | context (ledger / event / compare / panic) | – | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | collections (map / vec / buf ops)    | – | ✓ | ✓ | ✓ | ✓ | – | ✓ |
 | const-prop (inter-proc upgrade)      | – | ✓ | ✓ | ✓ | ✓ | ✓ | – |
-| enum-key (C5 / D2)                   | – | ✓ | ✓ | – | ✓ | ✓ | – |
-| ttl amounts (D3)                     | – | ✓ | ✓ | ✓ | – | – | – |
-| cross-contract (C6)                  | – | – | – | – | ✓ | ✓ | – |
-| client-call typing (C7 / W2)         | – | – | – | – | ✓ | ✓ | – |
-| dispatcher (C25 / W4)                | – | – | – | – | ✓ | – | – |
-| abi-sweep crypto/PRNG (C21 / C22)    | – | – | – | – | – | – | ✓ |
+| enum-key                             | – | ✓ | ✓ | – | ✓ | ✓ | – |
+| ttl amounts                          | – | ✓ | ✓ | ✓ | – | – | – |
+| cross-contract                       | – | – | – | – | ✓ | ✓ | – |
+| client-call typing                   | – | – | – | – | ✓ | ✓ | – |
+| dispatcher                           | – | – | – | – | ✓ | – | – |
+| abi-sweep crypto/PRNG                 | – | – | – | – | – | – | ✓ |
 
 Reading the table:
 
@@ -119,8 +120,9 @@ Reading the table:
   (storage, auth primitives, ttl, const-prop) still fires identically.
 - **Singletons** (one fixture is the sole witness): **dispatcher** →
   timelock (the only `b.m` symbol-index enum decode in the corpus);
-  **abi-sweep crypto/PRNG** → attestation (W8 added it precisely to
-  exercise the `c`/`p` modules); **ttl amounts** → the three tokens.
+  **abi-sweep crypto/PRNG** → attestation (this fixture was added
+  precisely to exercise the crypto and PRNG host modules); **ttl
+  amounts** → the three tokens.
 - **The terminal unrecognised-scan runs on all seven and finds zero
   surviving unknown host calls** — that is the 100% "host interactions"
   figure in `sordec coverage`.
