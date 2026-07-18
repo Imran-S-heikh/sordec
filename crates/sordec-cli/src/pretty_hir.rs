@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! function func_0 [exported as "add"] {
-//!   ;; region: unstructured (entry bb0, structuring not yet run)
+//!   ;; region: structured
 //!   bb0:
 //!     v3: ? = i64.add(v1, v2)          ;; DataFlow: operator: Arithmetic
 //!     v6: ? = host:l:put_contract_data(v4, v5)   ;; DataFlow: operator: Call
@@ -20,10 +20,12 @@
 //! }
 //! ```
 //!
-//! Control flow is not structured at the L1 layer, so the region is a
-//! single `;; unstructured` banner rather than nested `if`/`loop`. Block
-//! parameters (phi nodes) are not scheduled into any block's binding
-//! list, so they render in a trailing "unscheduled" section.
+//! Control flow is structured at the lowering boundary, but this
+//! renderer still shows the flat block listing with a one-line region
+//! banner — the nested `if`/`loop`/`match` rendering is the
+//! structured-renderer work (A4/W5). Block parameters (phi nodes) are
+//! not scheduled into any block's binding list, so they render in a
+//! trailing "unscheduled" section.
 //!
 //! # Folded rendering (W3/B6)
 //!
@@ -232,13 +234,16 @@ fn render_function(out: &mut impl Write, func: &HighFunction, folded: bool) -> i
 
 fn render_region_banner(out: &mut impl Write, region: &Region) -> io::Result<()> {
     match region {
+        // Defensive fallback only (irreducible/malformed input) —
+        // corpus-locked to zero and paired with a StructuringFallback
+        // diagnostic.
         Region::Unstructured { entry, .. } => writeln!(
             out,
-            "  ;; region: unstructured (entry bb{}, structuring not yet run)",
+            "  ;; region: unstructured (entry bb{}, structuring fell back)",
             entry.index()
         ),
-        // Structured regions arrive with the Phase-3 structuring pass;
-        // until then this arm is unreachable in practice.
+        // The banner records that structuring succeeded; the nested
+        // if/loop/match rendering is the structured-renderer work (A4).
         _ => writeln!(out, "  ;; region: structured"),
     }
 }

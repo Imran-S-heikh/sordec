@@ -200,6 +200,16 @@ pub const TREEIFY_PINNED_SINGLE_USE: &str = "treeify_pinned_single_use";
 pub const TREEIFY_DEAD_RESIDUE: &str = "treeify_dead_residue";
 
 // ---------------------------------------------------------------------
+// Control-flow structuring (Phase 3 C2). Same W8-surfacing status as
+// the declutter keys above; the full structuring coverage set (A6)
+// lands with W8.
+// ---------------------------------------------------------------------
+
+/// Functions whose control flow fell back to `Region::Unstructured` —
+/// corpus-locked to zero (K3); non-zero only on exotic input.
+pub const STRUCTURING_FALLBACK: &str = "structuring_fallback";
+
+// ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)
 // ---------------------------------------------------------------------
 

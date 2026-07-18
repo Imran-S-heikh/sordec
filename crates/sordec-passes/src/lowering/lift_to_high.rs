@@ -2,13 +2,13 @@
 //!
 //! [`LiftToHigh`] is the phase-boundary [`crate::LoweringStep`] that turns
 //! the SSA + CFG lifted form into the high IR that pattern-recovery
-//! passes refine. It is deliberately **mechanical**: it maps every lifted
-//! value to a typed [`Binding`] one-to-one, with honest fallbacks, and
-//! does **no** semantic recognition, type inference, or control-flow
-//! structuring. Recognition and type inference happen in the
-//! `Pass<HighIr>` recognizers that run afterward. Structuring cannot: the
-//! high IR carries no terminators, so it is computed from the lifted CFG
-//! at this boundary (see the control-flow note below).
+//! passes refine. Value lowering is deliberately **mechanical**: every
+//! lifted value maps to a typed [`Binding`] one-to-one, with honest
+//! fallbacks, and no semantic recognition or type inference happens here
+//! — those are the `Pass<HighIr>` recognizers that run afterward.
+//! Control flow is the one exception: the high IR carries no
+//! terminators, so structuring runs at this boundary — the last point
+//! where CFG edges still exist (see the control-flow note below).
 //!
 //! ## What each value becomes
 //!
@@ -30,12 +30,13 @@
 //! - **Types.** Every binding gets [`IrType::Unknown`]. WASM machine
 //!   types are not Soroban semantic types; guessing would be wrong. Type
 //!   recovery is a later pass.
-//! - **Control flow.** Each function's [`Region`] is
-//!   [`Region::Unstructured`] until the structurer lands: structuring
-//!   (recovering `if`/`while`/`match` from the lifted terminators) runs
-//!   at this boundary — the last point where CFG edges still exist — not
-//!   as a `Pass<HighIr>`. Data-flow recognizers work on bindings, not
-//!   regions, so this does not block them.
+//! - **Control-flow interpretation.** Each function's [`Region`] comes
+//!   from [`crate::structuring::structure`] over the lifted CFG (fresh
+//!   [`CfgFacts`], post-declutter) — an exact translation, never a
+//!   guess: loop classification, guard recovery, and `match` sugaring
+//!   are refinement passes. Irreducible or malformed input (never real
+//!   rustc output) degrades to [`Region::Unstructured`], surfaced as a
+//!   `StructuringFallback` diagnostic by the structuring stats pass.
 //! - **Recognition.** No `obj_from_*` collapse, no storage-tier
 //!   resolution, etc. Those are the high-IR passes this lowering feeds.
 
@@ -52,7 +53,9 @@ use sordec_ir::{
 };
 use waffle::entity::EntityRef as _;
 
+use crate::dataflow::CfgFacts;
 use crate::lowering::{LoweringError, LoweringStep};
+use crate::structuring::structure;
 
 /// Name recorded on every binding's initial provenance and returned from
 /// [`LoweringStep::name`].
@@ -154,10 +157,23 @@ fn lower_function(
         });
     }
 
-    // Control flow is not structured at this layer (see module docs).
-    let region = Region::Unstructured {
-        entry: func.entry,
-        reason: UnknownReason::UpstreamUnknown,
+    // Structure the CFG at this boundary — the last point where
+    // terminators exist. Facts are built fresh here: the declutter
+    // passes have already reshaped the CFG, so any lift-time snapshot
+    // would be stale (Region v2 design, DD9). Both fallback paths
+    // preserve every block and binding — only structure is lost — and
+    // the structuring stats pass turns them into diagnostics.
+    let cfg = CfgFacts::build(func);
+    let region = if cfg.is_reducible() {
+        structure(func, &cfg).unwrap_or(Region::Unstructured {
+            entry: func.entry,
+            reason: UnknownReason::UnsupportedPattern,
+        })
+    } else {
+        Region::Unstructured {
+            entry: func.entry,
+            reason: UnknownReason::IrreducibleControlFlow,
+        }
     };
 
     // Function parameters = the ENTRY block's params, in order. Only the
@@ -932,14 +948,73 @@ mod tests {
     }
 
     #[test]
-    fn region_is_unstructured() {
+    fn region_is_structured_at_the_boundary() {
+        // Single Unreachable-terminated block: the structurer runs
+        // inside `lower_function` and emits the exact tree.
         let ir = lifted_one_fn(
             facts_with(vec![], vec![]),
             vec![op(waffle::Operator::I64Const { value: 1 }, vec![])],
         );
         let high = LiftToHigh.lower(ir).expect("lowering succeeds");
         let f = high.functions.into_iter().next().unwrap();
-        assert!(matches!(f.region, Region::Unstructured { .. }));
+        assert_eq!(
+            f.region,
+            Region::Sequence(vec![
+                Region::Basic(BlockId::from_index(0)),
+                Region::Unreachable,
+            ])
+        );
+    }
+
+    #[test]
+    fn irreducible_cfg_falls_back_to_unstructured() {
+        // Two-entry loop: bb0 br_ifs into bb1/bb2, which branch to each
+        // other — the canonical irreducible shape. WASM cannot express
+        // this; the boundary must degrade honestly, not panic.
+        let mut ir = lifted_one_fn_with_term(
+            facts_with(vec![], vec![]),
+            vec![op(waffle::Operator::I32Const { value: 1 }, vec![])],
+            LiftedTerminator::BranchIf {
+                cond: v(0),
+                if_true: BlockTarget {
+                    block: BlockId::from_index(1),
+                    args: vec![],
+                },
+                if_false: BlockTarget {
+                    block: BlockId::from_index(2),
+                    args: vec![],
+                },
+            },
+            vec![],
+        );
+        let func = &mut ir.functions[0];
+        func.blocks.push(LiftedBlock {
+            id: BlockId::from_index(1),
+            params: vec![],
+            instructions: vec![],
+            terminator: LiftedTerminator::Branch(BlockTarget {
+                block: BlockId::from_index(2),
+                args: vec![],
+            }),
+        });
+        func.blocks.push(LiftedBlock {
+            id: BlockId::from_index(2),
+            params: vec![],
+            instructions: vec![],
+            terminator: LiftedTerminator::Branch(BlockTarget {
+                block: BlockId::from_index(1),
+                args: vec![],
+            }),
+        });
+        let high = LiftToHigh.lower(ir).expect("lowering still succeeds");
+        let f = high.functions.into_iter().next().unwrap();
+        assert_eq!(
+            f.region,
+            Region::Unstructured {
+                entry: BlockId::from_index(0),
+                reason: UnknownReason::IrreducibleControlFlow,
+            }
+        );
     }
 
     #[test]

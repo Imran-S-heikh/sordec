@@ -10,6 +10,65 @@
 use sordec_common::{BlockId, IrId, ValueId};
 use sordec_ir::{LiftedIr, LiftedTerminator};
 
+/// The committed WASM corpus, `(name, bytes)`, sha256-pinned via
+/// `tools/verify-fixtures.sh`. Shared by the corpus-lock test binaries.
+///
+/// `allow(dead_code)`: every sibling binary that declares `mod common;`
+/// compiles its own copy of this module, and not all of them reference
+/// the corpus.
+#[allow(dead_code)]
+pub const FIXTURES: &[(&str, &[u8])] = &[
+    (
+        "hello-add",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/hello-add/hello-add.wasm"
+        )),
+    ),
+    (
+        "token-v22",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/token-v22/token-v22.wasm"
+        )),
+    ),
+    (
+        "token-v23",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/token-v23/token-v23.wasm"
+        )),
+    ),
+    (
+        "token-v23-stripped",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/token-v23-stripped/token-v23-stripped.wasm"
+        )),
+    ),
+    (
+        "timelock",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/timelock/timelock.wasm"
+        )),
+    ),
+    (
+        "dex-liquidity-pool",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/dex-liquidity-pool/dex-liquidity-pool.wasm"
+        )),
+    ),
+    (
+        "attestation",
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/attestation/attestation.wasm"
+        )),
+    ),
+];
+
 /// Re-derives the post-lift invariants on the public IR surface. The
 /// crate-internal `validate_lifted_function` is also invoked via
 /// `debug_assert!` from inside `lift_with_waffle`; this helper repeats

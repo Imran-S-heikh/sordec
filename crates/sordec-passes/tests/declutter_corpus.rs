@@ -22,57 +22,7 @@ use sordec_passes::{
     DefUseIndex,
 };
 
-const FIXTURES: &[(&str, &[u8])] = &[
-    (
-        "hello-add",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../samples/contracts/hello-add/hello-add.wasm"
-        )),
-    ),
-    (
-        "token-v22",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../samples/contracts/token-v22/token-v22.wasm"
-        )),
-    ),
-    (
-        "token-v23",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../samples/contracts/token-v23/token-v23.wasm"
-        )),
-    ),
-    (
-        "token-v23-stripped",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../samples/contracts/token-v23-stripped/token-v23-stripped.wasm"
-        )),
-    ),
-    (
-        "timelock",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../samples/contracts/timelock/timelock.wasm"
-        )),
-    ),
-    (
-        "dex-liquidity-pool",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../samples/contracts/dex-liquidity-pool/dex-liquidity-pool.wasm"
-        )),
-    ),
-    (
-        "attestation",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../samples/contracts/attestation/attestation.wasm"
-        )),
-    ),
-];
+use common::FIXTURES;
 
 /// Lift a fixture and run the declutter pipeline over it.
 fn declutter(wasm: &[u8]) -> LiftedIr {

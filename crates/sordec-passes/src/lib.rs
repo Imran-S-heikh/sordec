@@ -68,7 +68,7 @@ pub use recognizers::{
     TtlPass, UnrecognizedScanPass, ValEncodingPass,
 };
 pub use sordec_common::LiftDiagnostics;
-pub use structuring::{structure, StructureError};
+pub use structuring::{structure, StructureError, StructuringStatsPass};
 pub use treeify::TreeifyStatsPass;
 
 use sordec_ir::{HighIr, LiftedIr};
@@ -139,6 +139,7 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
 pub fn default_high_pipeline() -> Pipeline<HighIr> {
     Pipeline::new(
         vec![
+            Box::new(StructuringStatsPass),
             Box::new(ValEncodingPass),
             Box::new(StoragePass),
             Box::new(AuthPass),

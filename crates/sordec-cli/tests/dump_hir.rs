@@ -1,7 +1,7 @@
 //! End-to-end tests for `sordec dump-hir`.
 //!
 //! Asserts structural anchors of the HighIr rendering — function
-//! scaffolding, the unstructured-region banner, provenance notes, and
+//! scaffolding, the region banner, provenance notes, and
 //! host-call rendering. Exact expression text is not snapshotted (the
 //! lowering will grow as recognizers land).
 
@@ -25,10 +25,12 @@ fn dump_hir_on_hello_add_emits_high_ir_scaffolding() {
         .args(["dump-hir", HELLO_ADD])
         .assert()
         .success()
-        // Function scaffolding and the (mechanically-lowered) region
-        // banner must appear.
+        // Function scaffolding and the region banner must appear —
+        // structured, now that the Beyond Relooper port runs at the
+        // lowering boundary (K3: no fallback on corpus input).
         .stdout(predicate::str::contains("function func_"))
-        .stdout(predicate::str::contains("region: unstructured"))
+        .stdout(predicate::str::contains("region: structured"))
+        .stdout(predicate::str::contains("region: unstructured").not())
         // Every binding carries a provenance note from the lowering.
         .stdout(predicate::str::contains(";; DataFlow:"))
         // hello-add is clean — no diagnostics.

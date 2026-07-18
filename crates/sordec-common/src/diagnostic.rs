@@ -291,6 +291,13 @@ pub enum LiftDiagnosticCode {
     /// `dispatcher` recogniser.
     UnresolvedSymbolDispatch,
 
+    /// A function's control flow could not be structured and fell back
+    /// to `Region::Unstructured` — irreducible or malformed input at the
+    /// `LiftToHigh` boundary. Emitted by the structuring stats pass;
+    /// never expected on real compiler output (WASM cannot express
+    /// irreducible control flow), and corpus-locked to zero.
+    StructuringFallback,
+
     // ---- Taxonomy, not yet emitted (lands with its feature) ----
     /// A `Symbol`/`String`/`Bytes` linear-memory literal position was not
     /// a provable constant. Not yet emitted — the linear-memory
@@ -303,10 +310,6 @@ pub enum LiftDiagnosticCode {
     /// A `Result` `Ok`/`Err` tag could not be disambiguated. Not yet
     /// emitted — result-tag recovery (C18) is deferred.
     AmbiguousResultTag,
-    /// A function's control flow could not be structured and fell back to
-    /// `Region::Unstructured`. Not yet emitted — control-flow structuring
-    /// (J2) is Phase 3.
-    StructuringFallback,
     /// A widened-integer (`i128`/`u128`/…) arithmetic sequence could not
     /// be fused into a single operation. Not yet emitted — wide-int
     /// fusion (C19) is deferred.

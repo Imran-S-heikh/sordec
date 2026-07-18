@@ -55,7 +55,10 @@
 //! and the corpus lock asserts it never fires on real contracts.
 
 mod classify;
+mod stats;
 mod walk;
+
+pub use stats::StructuringStatsPass;
 
 use sordec_common::BlockId;
 use sordec_ir::{LiftedFunction, Region};
