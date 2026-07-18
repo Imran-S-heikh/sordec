@@ -26,8 +26,8 @@ pub mod wasm_facts;
 pub use high::{
     AddressOpKind, BinaryOp, Binding, BufOpKind, ClientInterface, CryptoOpKind, DeployOpKind,
     DispatchTable, EnumKey, Expr, HighBlock, HighFunction, HighIr, IrType, KnownOp, KnownTier,
-    KnownType, Literal, MapOpKind, MemWidth, PrngOpKind, Region, SemanticOp, StorageTier,
-    TestOpKind, UnaryOp, ValObjectKind, VecOpKind,
+    KnownType, Literal, LoopKind, MapOpKind, MemWidth, PhiTransfer, PrngOpKind, Region,
+    SemanticOp, StorageTier, SwitchArm, TestOpKind, UnaryOp, ValObjectKind, VecOpKind,
 };
 pub use lifted::{
     BlockTarget, LiftedBlock, LiftedFunction, LiftedIr, LiftedTerminator, LiftedType, LiftedValue,

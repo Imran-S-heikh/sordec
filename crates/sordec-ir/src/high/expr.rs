@@ -73,8 +73,10 @@ pub enum Expr {
     },
 
     /// Phi node (block parameter that takes a value from each predecessor).
-    /// In structured IR these are usually erased into let-bindings; this
-    /// variant survives only when structuring fails for some reason.
+    /// Phis survive in the high IR by design: structured regions spell
+    /// per-edge value flow as [`crate::PhiTransfer`] assignments that
+    /// reference these bindings, and the emit layer later materializes
+    /// them as mutable locals (one assignment per transfer pair).
     Phi {
         /// Predecessor → value mapping.
         ///

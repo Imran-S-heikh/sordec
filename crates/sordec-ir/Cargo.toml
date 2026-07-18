@@ -12,6 +12,9 @@ sordec-common.workspace = true
 waffle.workspace = true
 serde = { workspace = true, optional = true }
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [features]
 default = []
 serde = ["dep:serde", "sordec-common/serde"]

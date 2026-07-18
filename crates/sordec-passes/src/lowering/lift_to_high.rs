@@ -5,8 +5,10 @@
 //! passes refine. It is deliberately **mechanical**: it maps every lifted
 //! value to a typed [`Binding`] one-to-one, with honest fallbacks, and
 //! does **no** semantic recognition, type inference, or control-flow
-//! structuring. Those happen in the `Pass<HighIr>` recognizers that run
-//! afterward.
+//! structuring. Recognition and type inference happen in the
+//! `Pass<HighIr>` recognizers that run afterward. Structuring cannot: the
+//! high IR carries no terminators, so it is computed from the lifted CFG
+//! at this boundary (see the control-flow note below).
 //!
 //! ## What each value becomes
 //!
@@ -29,9 +31,11 @@
 //!   types are not Soroban semantic types; guessing would be wrong. Type
 //!   recovery is a later pass.
 //! - **Control flow.** Each function's [`Region`] is
-//!   [`Region::Unstructured`] — structuring (recovering `if`/`while`/
-//!   `match`) is a separate, larger analysis. Data-flow recognizers work
-//!   on bindings, not regions, so this does not block them.
+//!   [`Region::Unstructured`] until the structurer lands: structuring
+//!   (recovering `if`/`while`/`match` from the lifted terminators) runs
+//!   at this boundary — the last point where CFG edges still exist — not
+//!   as a `Pass<HighIr>`. Data-flow recognizers work on bindings, not
+//!   regions, so this does not block them.
 //! - **Recognition.** No `obj_from_*` collapse, no storage-tier
 //!   resolution, etc. Those are the high-IR passes this lowering feeds.
 
