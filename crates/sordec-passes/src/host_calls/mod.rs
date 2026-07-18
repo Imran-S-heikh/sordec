@@ -104,6 +104,17 @@ pub fn catalog_size() -> usize {
     CATALOG.len()
 }
 
+/// Every entry in the vendored catalog, in `env.json` order.
+///
+/// Exists for totality proofs: consumers that claim to cover the whole
+/// ABI surface (the `effects` classification table, coverage metrics)
+/// iterate this to assert no entry was missed. Point lookups should
+/// keep using [`resolve`].
+#[must_use]
+pub fn all() -> &'static [HostCall] {
+    &CATALOG
+}
+
 // ---------------------------------------------------------------------
 // Internal: parse env.json once, cache forever
 // ---------------------------------------------------------------------
@@ -271,5 +282,14 @@ mod tests {
         // Smoke check that we updated the constant when re-vendoring.
         assert!(CATALOG_VERSION.contains("soroban-env-common"));
         assert!(CATALOG_VERSION.contains("26."));
+    }
+
+    #[test]
+    fn all_len_equals_catalog_size_and_contains_known_entry() {
+        assert_eq!(all().len(), catalog_size());
+        assert!(
+            all().iter().any(|hc| hc.module == "l" && hc.name == "_"),
+            "put_contract_data must be enumerable via all()"
+        );
     }
 }

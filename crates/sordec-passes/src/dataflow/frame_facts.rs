@@ -35,10 +35,7 @@
 use std::collections::BTreeMap;
 
 use sordec_common::{BlockId, IrId, ValueId};
-use sordec_ir::{
-    BinaryOp, BufOpKind, Expr, HighBlock, HighFunction, KnownOp, MapOpKind, MemWidth, SemanticOp,
-    VecOpKind, WasmOpcodeKind,
-};
+use sordec_ir::{BinaryOp, Expr, HighBlock, HighFunction, MemWidth};
 
 use super::high::{resolve_use, trace_int};
 
@@ -231,70 +228,19 @@ pub fn facts_before(
 /// which needs their address; this classifies everything else).
 /// Fail-closed: unrecognized host calls, any call, and uncategorised
 /// raw operators all count as writers.
+///
+/// Delegates to the [`crate::effects`] classification table (which
+/// absorbed this module's original per-`KnownOp` and per-opcode-kind
+/// write predicates — the INVARIANT that a new `KnownOp` variant must
+/// declare its guest-memory behaviour now lives on
+/// [`crate::effects::known_op_effects`]'s exhaustive match). Notably a
+/// `GlobalSet` still does NOT kill: it writes a *global*, not linear
+/// memory — the axes are separate — which is what lets the
+/// shadow-stack-pointer adjust precede a tracked store without
+/// poisoning the scan.
 #[must_use]
 pub fn may_write_memory(expr: &Expr) -> bool {
-    match expr {
-        Expr::Store { .. } | Expr::Call { .. } | Expr::IndirectCall { .. } => true,
-        Expr::Semantic(SemanticOp::Unknown { .. }) => true,
-        Expr::Semantic(SemanticOp::Known(op)) => known_op_writes_memory(op),
-        Expr::Unknown { op_kind, .. } => opcode_kind_may_write_memory(*op_kind),
-        // Pure value producers: literals, uses, phis, arithmetic,
-        // loads, global reads.
-        Expr::Literal(_)
-        | Expr::Use(_)
-        | Expr::Unary { .. }
-        | Expr::Binary { .. }
-        | Expr::Phi { .. }
-        | Expr::GlobalGet { .. }
-        | Expr::Load { .. } => false,
-    }
-}
-
-/// Whether a recognized host op writes guest linear memory.
-///
-/// Host functions touch guest memory only through the explicit
-/// linear-memory APIs; everything else operates on host objects.
-/// INVARIANT: a future `KnownOp` variant whose host function writes
-/// linear memory must be added here — new variants land alongside
-/// their detecting pass, and this table is part of that review.
-fn known_op_writes_memory(op: &KnownOp) -> bool {
-    match op {
-        KnownOp::BufOp { kind, .. } => matches!(
-            kind,
-            BufOpKind::BytesCopyToLinearMemory
-                | BufOpKind::StringCopyToLinearMemory
-                | BufOpKind::SymbolCopyToLinearMemory
-        ),
-        KnownOp::MapOp { kind, .. } => matches!(kind, MapOpKind::UnpackToLinearMemory),
-        KnownOp::VecOp { kind, .. } => matches!(kind, VecOpKind::UnpackToLinearMemory),
-        _ => false,
-    }
-}
-
-/// Whether a raw WASM operator class may write linear memory.
-/// Known-pure classes are listed explicitly; everything else —
-/// `Store`, `MemoryOp`, `Call`, `CallIndirect`, `Other`, and any class
-/// a future `WasmOpcodeKind` bump adds (the enum is `#[non_exhaustive]`)
-/// — fails closed.
-fn opcode_kind_may_write_memory(kind: WasmOpcodeKind) -> bool {
-    match kind {
-        // GlobalSet writes a *global*, not linear memory — this is what
-        // lets the shadow-stack-pointer adjust precede a tracked store
-        // without poisoning the scan.
-        WasmOpcodeKind::Const
-        | WasmOpcodeKind::Arithmetic
-        | WasmOpcodeKind::Bitwise
-        | WasmOpcodeKind::Comparison
-        | WasmOpcodeKind::Unary
-        | WasmOpcodeKind::Conversion
-        | WasmOpcodeKind::Load
-        | WasmOpcodeKind::GlobalGet
-        | WasmOpcodeKind::GlobalSet
-        | WasmOpcodeKind::Select
-        | WasmOpcodeKind::Unreachable
-        | WasmOpcodeKind::Nop => false,
-        _ => true,
-    }
+    crate::effects::expr_effects(expr).writes_memory
 }
 
 // ---------------------------------------------------------------------
@@ -305,7 +251,9 @@ fn opcode_kind_may_write_memory(kind: WasmOpcodeKind) -> bool {
 mod tests {
     use super::*;
     use sordec_common::{Arena, FuncId, Provenance, ProvenanceSource, UnknownReason};
-    use sordec_ir::{Binding, IrType, Literal, Region};
+    use sordec_ir::{
+        Binding, BufOpKind, IrType, KnownOp, Literal, Region, SemanticOp, WasmOpcodeKind,
+    };
 
     /// Build a one-block function whose bindings are `exprs` at ids
     /// 0..N, **all scheduled in bb0 in order** (unlike the tracer-test

@@ -28,6 +28,7 @@
 //! Phase 2 as separate modules.
 
 pub mod dataflow;
+pub mod effects;
 pub mod error;
 pub mod host_calls;
 pub mod interfaces;
