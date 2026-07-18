@@ -205,6 +205,68 @@ impl Region {
         self.walk_value_uses(&mut f);
     }
 
+    /// Visit every region node in this tree, in depth-first pre-order
+    /// (a node is visited before its children).
+    ///
+    /// This is the structural companion to [`Region::for_each_value_use`]:
+    /// consumers that need to census node shapes — the structuring
+    /// coverage metrics, the corpus locks asserting zero
+    /// [`Region::Unstructured`], the skeleton cross-check counting
+    /// [`Region::Loop`]/[`Region::Switch`] nodes — walk with this instead
+    /// of re-implementing the recursion.
+    ///
+    /// The internal match is exhaustive on purpose: adding a `Region`
+    /// variant without deciding its position in the walk fails to
+    /// compile here rather than silently skipping subtrees.
+    pub fn for_each_node<F: FnMut(&Region)>(&self, mut f: F) {
+        self.walk_nodes(&mut f);
+    }
+
+    fn walk_nodes<F: FnMut(&Region)>(&self, f: &mut F) {
+        f(self);
+        match self {
+            Region::Basic(_)
+            | Region::Break { .. }
+            | Region::Continue { .. }
+            | Region::Transfer { .. }
+            | Region::Return { .. }
+            | Region::Unreachable
+            | Region::Unstructured { .. } => {}
+            Region::Sequence(items) => {
+                for item in items {
+                    item.walk_nodes(f);
+                }
+            }
+            Region::Scope { out: _, body } => body.walk_nodes(f),
+            Region::If {
+                cond: _,
+                then_region,
+                else_region,
+            } => {
+                then_region.walk_nodes(f);
+                if let Some(else_region) = else_region {
+                    else_region.walk_nodes(f);
+                }
+            }
+            Region::Loop {
+                header: _,
+                body,
+                kind: _,
+            } => body.walk_nodes(f),
+            Region::Switch {
+                index: _,
+                arms,
+                default,
+                dispatch: _,
+            } => {
+                for arm in arms {
+                    arm.body.walk_nodes(f);
+                }
+                default.walk_nodes(f);
+            }
+        }
+    }
+
     fn walk_value_uses<F: FnMut(ValueId)>(&self, f: &mut F) {
         match self {
             Region::Basic(_) => {}
@@ -483,6 +545,30 @@ mod tests {
         };
         // index, dispatch binding, arm bodies in order, then default.
         assert_eq!(value_uses(&region), vec![v(0), v(1), v(3), v(5)]);
+    }
+
+    #[test]
+    fn for_each_node_visits_every_node_pre_order() {
+        let mut kinds = Vec::new();
+        guard_tree().for_each_node(|r| {
+            kinds.push(match r {
+                Region::Sequence(_) => "seq",
+                Region::Scope { .. } => "scope",
+                Region::Basic(_) => "basic",
+                Region::If { .. } => "if",
+                Region::Break { .. } => "break",
+                Region::Return { .. } => "return",
+                _ => "other",
+            });
+        });
+        assert_eq!(
+            kinds,
+            vec![
+                "seq", "scope", "seq", "basic", "if", "break", "basic", "break", "basic",
+                "return"
+            ],
+            "pre-order: parent before children, siblings in sequence order"
+        );
     }
 
     #[test]

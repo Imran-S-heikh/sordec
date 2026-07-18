@@ -61,4 +61,11 @@ pub enum UnknownReason {
     /// A required upstream value was itself `Unknown`, so we could not
     /// propagate further. Forms a chain back to the original cause.
     UpstreamUnknown,
+
+    /// The function's CFG contains an irreducible edge (a back edge whose
+    /// target does not dominate its source), so control-flow structuring
+    /// was not attempted. WASM cannot express irreducible control flow,
+    /// so this never fires on real compiler output — it defends against
+    /// exotic producers and hand-written modules.
+    IrreducibleControlFlow,
 }

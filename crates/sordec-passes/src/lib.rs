@@ -40,6 +40,7 @@ pub mod metrics_catalog;
 pub mod pass;
 pub mod pipeline;
 pub mod recognizers;
+pub mod structuring;
 #[cfg(test)]
 mod test_util;
 pub mod treeify;
@@ -67,6 +68,7 @@ pub use recognizers::{
     TtlPass, UnrecognizedScanPass, ValEncodingPass,
 };
 pub use sordec_common::LiftDiagnostics;
+pub use structuring::{structure, StructureError};
 pub use treeify::TreeifyStatsPass;
 
 use sordec_ir::{HighIr, LiftedIr};
