@@ -852,3 +852,48 @@ fn dump_hir_with_garbage_input_exits_one() {
 
     let _ = std::fs::remove_file(&tmp);
 }
+
+// ---------------------------------------------------------------------
+// W3 treeification: folded rendering on the default path
+// ---------------------------------------------------------------------
+
+#[test]
+fn dump_hir_folds_single_use_pure_chains() {
+    // The muxed-address tag guard in `transfer` — four raw bindings
+    // (two consts, an `and`, an `ne`) — renders as one nested line on
+    // the default path. Only mechanically-lowered bindings fold;
+    // recognizer-touched ones keep their line + provenance note.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ne (and v1, 255i64), 77i64"));
+}
+
+#[test]
+fn dump_hir_raw_flag_shows_unfolded_chains() {
+    // `--raw` skips both pipelines and the fold plan: the same guard
+    // stays flat ANF with one binding per line.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ne (and v1, 255i64), 77i64").not())
+        .stdout(predicate::str::contains("and v1, v8"));
+}
+
+#[test]
+fn dump_hir_hides_pruning_residue_behind_count_line() {
+    // De-clutter tombstones (pruned params, resolved aliases) hide
+    // behind one honest count line per affected function.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "pruning-residue binding(s) hidden (--raw shows them)",
+        ));
+}

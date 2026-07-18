@@ -24,6 +24,21 @@
 //! single `;; unstructured` banner rather than nested `if`/`loop`. Block
 //! parameters (phi nodes) are not scheduled into any block's binding
 //! list, so they render in a trailing "unscheduled" section.
+//!
+//! # Folded rendering (W3/B6)
+//!
+//! On the default (non-`--raw`) path, bindings the
+//! [`InlinePlan`] treeification analysis classifies
+//! `Inline(ExprOperand)` — pure-total, read exactly once by another
+//! live binding — skip their own statement line and render nested
+//! inside their consumer instead: `v6 = sub v4, 48i32` rather than a
+//! separate `v5 = 48i32` line. De-clutter residue (`Dead`) is hidden
+//! behind one honest count line. The single choke point for operand
+//! text is [`FoldCtx::operand`] — every expression-position id goes
+//! through it, which is what guarantees a skipped line always
+//! reappears at its use site. Phi incomings are the deliberate
+//! exception (per-edge transfer assignments, A1 DD2); the plan never
+//! classifies a phi-consumed value `Inline`.
 
 use std::collections::HashSet;
 use std::io::{self, Write};
@@ -34,13 +49,93 @@ use sordec_ir::{
     KnownTier, KnownType, Literal, MemWidth, Region, SemanticOp, StorageTier, UnaryOp,
 };
 use sordec_passes::host_calls;
+use sordec_passes::{InlineClass, InlinePlan, InlineSite};
+
+/// Defensive recursion bound for folded rendering. Well-formed SSA
+/// cannot cycle (an `Inline` chain is finite and single-use), so this
+/// only fires on malformed IR — where the fallback prints the bare id
+/// rather than overflowing the stack.
+const MAX_FOLD_DEPTH: u16 = 256;
+
+/// Rendering context for operand positions: the function (to resolve
+/// folded bindings), the fold plan (absent on the `--raw` path), and
+/// the current fold depth.
+#[derive(Clone, Copy)]
+struct FoldCtx<'a> {
+    func: Option<&'a HighFunction>,
+    plan: Option<&'a InlinePlan>,
+    depth: u16,
+}
+
+impl FoldCtx<'_> {
+    /// A context that never folds — every operand renders as `vN`.
+    #[cfg(test)]
+    fn plain() -> FoldCtx<'static> {
+        FoldCtx {
+            func: None,
+            plan: None,
+            depth: 0,
+        }
+    }
+
+    /// Does `value`'s binding fold into its consumer instead of
+    /// rendering its own line? The exact predicate the line-skip and
+    /// operand rendering share.
+    ///
+    /// Renderer policy on top of the [`InlinePlan`] capability: only
+    /// bindings still carrying their **single initial provenance
+    /// entry** (the mechanical lowering's) fold. A binding any
+    /// recognizer touched keeps its own line — its provenance note is
+    /// the visible recognition surface (`;; SdkPattern: …`), and
+    /// folding would erase it. The Phase-4 emitter applies its own
+    /// policy (J3) over the same plan.
+    fn folds(&self, value: ValueId) -> bool {
+        self.plan.is_some_and(|plan| {
+            matches!(
+                plan.class(value),
+                InlineClass::Inline(InlineSite::ExprOperand { .. })
+            )
+        }) && self
+            .func
+            .and_then(|f| f.bindings.get(value))
+            .is_some_and(|b| b.provenance().len() == 1)
+    }
+
+    /// Operand text: `vN`, or the folded expression when `value`'s
+    /// binding inlines (literals bare, everything else parenthesized).
+    fn operand(&self, value: ValueId) -> String {
+        if self.depth < MAX_FOLD_DEPTH
+            && self.folds(value)
+            && let Some(binding) = self.func.and_then(|f| f.bindings.get(value))
+        {
+            let deeper = FoldCtx {
+                depth: self.depth + 1,
+                ..*self
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            let ok = match &binding.expr {
+                Expr::Literal(lit) => render_literal(&mut buf, lit).is_ok(),
+                expr => {
+                    buf.push(b'(');
+                    let ok = render_expr(&mut buf, expr, &deeper).is_ok();
+                    buf.push(b')');
+                    ok
+                }
+            };
+            if ok && let Ok(text) = String::from_utf8(buf) {
+                return text;
+            }
+        }
+        format!("v{}", value.index())
+    }
+}
 
 /// Render a [`HighIr`] to `out` as text.
 ///
 /// # Errors
 ///
 /// Returns the underlying [`io::Error`] when writing to `out` fails.
-pub fn render_high_ir(out: &mut impl Write, high: &HighIr) -> io::Result<()> {
+pub fn render_high_ir(out: &mut impl Write, high: &HighIr, folded: bool) -> io::Result<()> {
     if high.functions.is_empty() {
         writeln!(out, ";; (module has no local functions)")?;
         return Ok(());
@@ -49,12 +144,12 @@ pub fn render_high_ir(out: &mut impl Write, high: &HighIr) -> io::Result<()> {
         if i > 0 {
             writeln!(out)?;
         }
-        render_function(out, func)?;
+        render_function(out, func, folded)?;
     }
     Ok(())
 }
 
-fn render_function(out: &mut impl Write, func: &HighFunction) -> io::Result<()> {
+fn render_function(out: &mut impl Write, func: &HighFunction, folded: bool) -> io::Result<()> {
     match &func.name {
         // The SDK's deploy-time constructor export (D6). Distinguished
         // from ordinary contract methods — its `#[contractimpl]`
@@ -74,31 +169,61 @@ fn render_function(out: &mut impl Write, func: &HighFunction) -> io::Result<()> 
 
     render_region_banner(out, &func.region)?;
 
+    let plan = folded.then(|| InlinePlan::build(func));
+    let ctx = FoldCtx {
+        func: Some(func),
+        plan: plan.as_ref(),
+        depth: 0,
+    };
+
     // Bindings grouped by block, in block order. Track which bindings we
-    // rendered so phis/unscheduled values can be shown afterward.
+    // accounted for so phis/unscheduled values can be shown afterward.
+    // A binding that folds renders nested inside its consumer instead
+    // of on its own line.
     let mut rendered: HashSet<ValueId> = HashSet::new();
     for (block_id, block) in func.blocks.iter() {
         writeln!(out, "  bb{}:", block_id.index())?;
         for &value_id in &block.bindings {
             if let Some(binding) = func.bindings.get(value_id) {
-                render_binding(out, binding)?;
                 rendered.insert(value_id);
+                if !ctx.folds(value_id) {
+                    render_binding(out, binding, &ctx)?;
+                }
             }
         }
     }
 
     // Bindings not scheduled into any block (block params / phis).
+    // De-clutter residue hides behind the count line; folded bindings
+    // render at their use site like their scheduled counterparts.
+    let mut dead_hidden = 0usize;
     let unscheduled: Vec<&Binding> = func
         .bindings
         .iter()
         .filter(|(id, _)| !rendered.contains(id))
+        .filter(|(id, _)| {
+            match plan.as_ref().map(|p| p.class(*id)) {
+                Some(InlineClass::Dead) => {
+                    dead_hidden += 1;
+                    false
+                }
+                Some(InlineClass::Inline(InlineSite::ExprOperand { .. })) => false,
+                _ => true,
+            }
+        })
         .map(|(_, b)| b)
         .collect();
     if !unscheduled.is_empty() {
         writeln!(out, "  ;; unscheduled bindings (block params / phis):")?;
         for binding in unscheduled {
-            render_binding(out, binding)?;
+            render_binding(out, binding, &ctx)?;
         }
+    }
+    if dead_hidden > 0 {
+        writeln!(
+            out,
+            "  ;; {dead_hidden} pruning-residue binding(s) hidden (--raw shows them)"
+        )?;
     }
 
     writeln!(out, "}}")?;
@@ -118,14 +243,14 @@ fn render_region_banner(out: &mut impl Write, region: &Region) -> io::Result<()>
     }
 }
 
-fn render_binding(out: &mut impl Write, binding: &Binding) -> io::Result<()> {
+fn render_binding(out: &mut impl Write, binding: &Binding, ctx: &FoldCtx<'_>) -> io::Result<()> {
     write!(
         out,
         "    v{}: {} = ",
         binding.id.index(),
         ir_type_str(&binding.ty)
     )?;
-    render_expr(out, &binding.expr)?;
+    render_expr(out, &binding.expr, ctx)?;
     let prov = binding.latest_provenance();
     writeln!(
         out,
@@ -135,9 +260,9 @@ fn render_binding(out: &mut impl Write, binding: &Binding) -> io::Result<()> {
     )
 }
 
-fn render_expr(out: &mut impl Write, expr: &Expr) -> io::Result<()> {
+fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Result<()> {
     match expr {
-        Expr::Semantic(SemanticOp::Known(op)) => render_known_op(out, op),
+        Expr::Semantic(SemanticOp::Known(op)) => render_known_op(out, op, ctx),
         Expr::Semantic(SemanticOp::Unknown {
             host_module,
             host_fn,
@@ -148,17 +273,23 @@ fn render_expr(out: &mut impl Write, expr: &Expr) -> io::Result<()> {
                 Some(hc) => write!(out, "host:{}:{}", hc.module, hc.friendly_name)?,
                 None => write!(out, "host:{host_module}:{host_fn}")?,
             }
-            render_args(out, args)
+            render_args(out, args, ctx)
         }
         Expr::Literal(lit) => render_literal(out, lit),
-        Expr::Use(value) => write!(out, "v{}", value.index()),
-        Expr::Unary { op, value } => write!(out, "{}(v{})", unary_str(*op), value.index()),
-        Expr::Binary { op, lhs, rhs } => {
-            write!(out, "{} v{}, v{}", binary_str(*op), lhs.index(), rhs.index())
+        Expr::Use(value) => write!(out, "{}", ctx.operand(*value)),
+        Expr::Unary { op, value } => {
+            write!(out, "{}({})", unary_str(*op), ctx.operand(*value))
         }
+        Expr::Binary { op, lhs, rhs } => write!(
+            out,
+            "{} {}, {}",
+            binary_str(*op),
+            ctx.operand(*lhs),
+            ctx.operand(*rhs)
+        ),
         Expr::Call { target, args } => {
             write!(out, "call func_{}", target.index())?;
-            render_args(out, args)
+            render_args(out, args, ctx)
         }
         Expr::IndirectCall {
             table,
@@ -168,11 +299,14 @@ fn render_expr(out: &mut impl Write, expr: &Expr) -> io::Result<()> {
         } => {
             write!(
                 out,
-                "call_indirect table={table} sig={sig} via v{}",
-                callee.index()
+                "call_indirect table={table} sig={sig} via {}",
+                ctx.operand(*callee)
             )?;
-            render_args(out, args)
+            render_args(out, args, ctx)
         }
+        // Phi incomings render as raw ids on purpose: they are
+        // per-edge transfer assignments (A1 DD2), and the fold plan
+        // never classifies a phi-consumed value `Inline`.
         Expr::Phi { incoming } => {
             write!(out, "phi [")?;
             for (i, (block, value)) in incoming.iter().enumerate() {
@@ -193,9 +327,9 @@ fn render_expr(out: &mut impl Write, expr: &Expr) -> io::Result<()> {
         } => {
             write!(
                 out,
-                "load{} v{} offset={offset}",
+                "load{} {} offset={offset}",
                 mem_suffix(*width, *signed),
-                addr.index()
+                ctx.operand(*addr)
             )
         }
         Expr::Store {
@@ -205,14 +339,14 @@ fn render_expr(out: &mut impl Write, expr: &Expr) -> io::Result<()> {
             width,
         } => write!(
             out,
-            "store{} v{} <- v{} offset={offset}",
+            "store{} {} <- {} offset={offset}",
             mem_suffix(*width, None),
-            addr.index(),
-            value.index()
+            ctx.operand(*addr),
+            ctx.operand(*value)
         ),
         Expr::Unknown { op_kind, args, .. } => {
             write!(out, "<unrecovered {op_kind:?}>")?;
-            render_args(out, args)
+            render_args(out, args, ctx)
         }
     }
 }
@@ -220,22 +354,27 @@ fn render_expr(out: &mut impl Write, expr: &Expr) -> io::Result<()> {
 /// Render a recognized [`KnownOp`]. The four Val-encoding ops (C1) get
 /// dedicated forms; the other KnownOps keep the Debug fallback until
 /// their own recognizers land and earn a rendering.
-fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
+fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io::Result<()> {
     use sordec_passes::val_abi;
     match op {
         KnownOp::ValEncodeSmall { ty, value } => {
-            write!(out, "val_encode<{}>(v{})", known_type_str(ty), value.index())
+            write!(
+                out,
+                "val_encode<{}>({})",
+                known_type_str(ty),
+                ctx.operand(*value)
+            )
         }
         KnownOp::ValDecodeSmall { value } => {
-            write!(out, "val_decode(v{})", value.index())
+            write!(out, "val_decode({})", ctx.operand(*value))
         }
         KnownOp::ValTagCheck { value, tag } => {
             let name = val_abi::tag_name(*tag).unwrap_or("?");
-            write!(out, "has_tag(v{}, {name})", value.index())
+            write!(out, "has_tag({}, {name})", ctx.operand(*value))
         }
         KnownOp::ValObject { kind, args } => {
             write!(out, "{}", val_abi::obj_kind_name(*kind))?;
-            render_args(out, args)
+            render_args(out, args, ctx)
         }
         // ---- Storage (C2) + TTL (C3) ----
         KnownOp::StorageGet {
@@ -248,7 +387,7 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
                 out,
                 "storage_get<{}>({})",
                 tier_str(tier),
-                key_str(key, resolved_key)
+                key_str(key, resolved_key, ctx)
             )
         }
         KnownOp::StorageSet {
@@ -259,10 +398,10 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             value,
         } => write!(
             out,
-            "storage_set<{}>({}, v{})",
+            "storage_set<{}>({}, {})",
             tier_str(tier),
-            key_str(key, resolved_key),
-            value.index()
+            key_str(key, resolved_key, ctx),
+            ctx.operand(*value)
         ),
         KnownOp::StorageHas {
             tier,
@@ -274,7 +413,7 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
                 out,
                 "storage_has<{}>({})",
                 tier_str(tier),
-                key_str(key, resolved_key)
+                key_str(key, resolved_key, ctx)
             )
         }
         KnownOp::StorageRemove {
@@ -287,7 +426,7 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
                 out,
                 "storage_remove<{}>({})",
                 tier_str(tier),
-                key_str(key, resolved_key)
+                key_str(key, resolved_key, ctx)
             )
         }
         KnownOp::StorageExtendTtl {
@@ -303,9 +442,9 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             out,
             "extend_ttl<{}>({}, {}, {})",
             tier_str(tier),
-            key_str(key, resolved_key),
-            ttl_arg(*threshold, resolved_threshold),
-            ttl_arg(*extend_to, resolved_extend_to)
+            key_str(key, resolved_key, ctx),
+            ttl_arg(*threshold, resolved_threshold, ctx),
+            ttl_arg(*extend_to, resolved_extend_to, ctx)
         ),
         KnownOp::StorageExtendTtlV2 {
             tier,
@@ -317,12 +456,12 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             max_extension,
         } => write!(
             out,
-            "extend_ttl_v2<{}>({}, v{}, v{}, v{})",
+            "extend_ttl_v2<{}>({}, {}, {}, {})",
             tier_str(tier),
-            key_str(key, resolved_key),
-            extend_to.index(),
-            min_extension.index(),
-            max_extension.index()
+            key_str(key, resolved_key, ctx),
+            ctx.operand(*extend_to),
+            ctx.operand(*min_extension),
+            ctx.operand(*max_extension)
         ),
         KnownOp::ExtendCurrentContractInstanceAndCodeTtl {
             threshold,
@@ -332,8 +471,8 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
         } => write!(
             out,
             "extend_instance_and_code_ttl({}, {})",
-            ttl_arg(*threshold, resolved_threshold),
-            ttl_arg(*extend_to, resolved_extend_to)
+            ttl_arg(*threshold, resolved_threshold, ctx),
+            ttl_arg(*extend_to, resolved_extend_to, ctx)
         ),
         KnownOp::ExtendContractInstanceAndCodeTtl {
             contract,
@@ -341,10 +480,10 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             extend_to,
         } => write!(
             out,
-            "extend_contract_instance_and_code_ttl(v{}, v{}, v{})",
-            contract.index(),
-            threshold.index(),
-            extend_to.index()
+            "extend_contract_instance_and_code_ttl({}, {}, {})",
+            ctx.operand(*contract),
+            ctx.operand(*threshold),
+            ctx.operand(*extend_to)
         ),
         KnownOp::ExtendContractInstanceTtl {
             contract,
@@ -352,10 +491,10 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             extend_to,
         } => write!(
             out,
-            "extend_contract_instance_ttl(v{}, v{}, v{})",
-            contract.index(),
-            threshold.index(),
-            extend_to.index()
+            "extend_contract_instance_ttl({}, {}, {})",
+            ctx.operand(*contract),
+            ctx.operand(*threshold),
+            ctx.operand(*extend_to)
         ),
         KnownOp::ExtendContractCodeTtl {
             contract,
@@ -363,10 +502,10 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             extend_to,
         } => write!(
             out,
-            "extend_contract_code_ttl(v{}, v{}, v{})",
-            contract.index(),
-            threshold.index(),
-            extend_to.index()
+            "extend_contract_code_ttl({}, {}, {})",
+            ctx.operand(*contract),
+            ctx.operand(*threshold),
+            ctx.operand(*extend_to)
         ),
         KnownOp::ExtendContractInstanceAndCodeTtlV2 {
             contract,
@@ -376,28 +515,34 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             max_extension,
         } => write!(
             out,
-            "extend_contract_instance_and_code_ttl_v2(v{}, v{}, v{}, v{}, v{})",
-            contract.index(),
-            extension_scope.index(),
-            extend_to.index(),
-            min_extension.index(),
-            max_extension.index()
+            "extend_contract_instance_and_code_ttl_v2({}, {}, {}, {}, {})",
+            ctx.operand(*contract),
+            ctx.operand(*extension_scope),
+            ctx.operand(*extend_to),
+            ctx.operand(*min_extension),
+            ctx.operand(*max_extension)
         ),
         // ---- Auth + address (C4) ----
-        KnownOp::RequireAuth { address } => write!(out, "require_auth(v{})", address.index()),
+        KnownOp::RequireAuth { address } => {
+            write!(out, "require_auth({})", ctx.operand(*address))
+        }
         KnownOp::RequireAuthForArgs { address, args } => {
-            write!(out, "require_auth_for_args(v{}", address.index())?;
+            write!(out, "require_auth_for_args({}", ctx.operand(*address))?;
             for a in args {
-                write!(out, ", v{}", a.index())?;
+                write!(out, ", {}", ctx.operand(*a))?;
             }
             write!(out, ")")
         }
         KnownOp::AuthorizeAsCurrContract { auth_entries } => {
-            write!(out, "authorize_as_curr_contract(v{})", auth_entries.index())
+            write!(
+                out,
+                "authorize_as_curr_contract({})",
+                ctx.operand(*auth_entries)
+            )
         }
         KnownOp::AddressConversion { kind, args } => {
             write!(out, "{}", val_abi::addr_kind_name(*kind))?;
-            render_args(out, args)
+            render_args(out, args, ctx)
         }
         // ---- Context (C15) + events (C14) + panic (C16-partial) ----
         KnownOp::GetCurrentContractAddress => write!(out, "get_current_contract_address()"),
@@ -409,13 +554,15 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
         KnownOp::PublishEvent { topics, data } => {
             write!(out, "publish_event(")?;
             for t in topics {
-                write!(out, "v{}, ", t.index())?;
+                write!(out, "{}, ", ctx.operand(*t))?;
             }
-            write!(out, "v{})", data.index())
+            write!(out, "{})", ctx.operand(*data))
         }
-        KnownOp::ValCompare { a, b } => write!(out, "val_cmp(v{}, v{})", a.index(), b.index()),
+        KnownOp::ValCompare { a, b } => {
+            write!(out, "val_cmp({}, {})", ctx.operand(*a), ctx.operand(*b))
+        }
         KnownOp::PanicWithError { error } => {
-            write!(out, "panic_with_error(v{})", error.index())
+            write!(out, "panic_with_error({})", ctx.operand(*error))
         }
         // ---- Linear-memory constructors ----
         // Resolved literals render as the recovered value; unresolved ones
@@ -427,7 +574,12 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             resolved,
         } => match resolved {
             Some(s) => write!(out, "symbol_new({s:?})"),
-            None => write!(out, "symbol_new(v{}, v{})", lm_pos.index(), len.index()),
+            None => write!(
+                out,
+                "symbol_new({}, {})",
+                ctx.operand(*lm_pos),
+                ctx.operand(*len)
+            ),
         },
         KnownOp::StringNew {
             lm_pos,
@@ -435,7 +587,12 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             resolved,
         } => match resolved {
             Some(s) => write!(out, "string_new({s:?})"),
-            None => write!(out, "string_new(v{}, v{})", lm_pos.index(), len.index()),
+            None => write!(
+                out,
+                "string_new({}, {})",
+                ctx.operand(*lm_pos),
+                ctx.operand(*len)
+            ),
         },
         KnownOp::BytesNew {
             lm_pos,
@@ -449,10 +606,20 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
                 }
                 write!(out, ")")
             }
-            None => write!(out, "bytes_new(v{}, v{})", lm_pos.index(), len.index()),
+            None => write!(
+                out,
+                "bytes_new({}, {})",
+                ctx.operand(*lm_pos),
+                ctx.operand(*len)
+            ),
         },
         KnownOp::VecNew { vals_pos, len } => {
-            write!(out, "vec_new(v{}, v{})", vals_pos.index(), len.index())
+            write!(
+                out,
+                "vec_new({}, {})",
+                ctx.operand(*vals_pos),
+                ctx.operand(*len)
+            )
         }
         KnownOp::MapNew {
             keys_pos,
@@ -460,25 +627,37 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             len,
         } => write!(
             out,
-            "map_new(v{}, v{}, v{})",
-            keys_pos.index(),
-            vals_pos.index(),
-            len.index()
+            "map_new({}, {}, {})",
+            ctx.operand(*keys_pos),
+            ctx.operand(*vals_pos),
+            ctx.operand(*len)
         ),
         // ---- Collections / bytes ----
-        KnownOp::MapOp { kind, args } => render_call(out, val_abi::map_kind_name(*kind), args),
-        KnownOp::VecOp { kind, args } => render_call(out, val_abi::vec_kind_name(*kind), args),
-        KnownOp::BufOp { kind, args } => render_call(out, val_abi::buf_kind_name(*kind), args),
+        KnownOp::MapOp { kind, args } => {
+            render_call(out, val_abi::map_kind_name(*kind), args, ctx)
+        }
+        KnownOp::VecOp { kind, args } => {
+            render_call(out, val_abi::vec_kind_name(*kind), args, ctx)
+        }
+        KnownOp::BufOp { kind, args } => {
+            render_call(out, val_abi::buf_kind_name(*kind), args, ctx)
+        }
         // ---- Enum dispatch (dispatcher pass) ----
-        KnownOp::SymbolDispatch { sym, table, .. } => render_symbol_dispatch(out, *sym, table),
+        KnownOp::SymbolDispatch { sym, table, .. } => {
+            render_symbol_dispatch(out, *sym, table, ctx)
+        }
         // ---- Crypto / PRNG / test / deploy (abi-sweep) ----
         KnownOp::CryptoOp { kind, args } => {
-            render_call(out, val_abi::crypto_kind_name(*kind), args)
+            render_call(out, val_abi::crypto_kind_name(*kind), args, ctx)
         }
-        KnownOp::PrngOp { kind, args } => render_call(out, val_abi::prng_kind_name(*kind), args),
-        KnownOp::TestOp { kind, args } => render_call(out, val_abi::test_kind_name(*kind), args),
+        KnownOp::PrngOp { kind, args } => {
+            render_call(out, val_abi::prng_kind_name(*kind), args, ctx)
+        }
+        KnownOp::TestOp { kind, args } => {
+            render_call(out, val_abi::test_kind_name(*kind), args, ctx)
+        }
         KnownOp::DeployOp { kind, args } => {
-            render_call(out, val_abi::deploy_kind_name(*kind), args)
+            render_call(out, val_abi::deploy_kind_name(*kind), args, ctx)
         }
         // ---- Cross-contract calls ----
         KnownOp::InvokeContract {
@@ -498,6 +677,7 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             resolved_callee,
             *arg_count,
             resolved_args,
+            ctx,
         ),
         KnownOp::TryInvokeContract {
             contract,
@@ -516,6 +696,7 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
             resolved_callee,
             *arg_count,
             resolved_args,
+            ctx,
         ),
         // NOTE: this match is exhaustive over `KnownOp` — every variant
         // has a dedicated rendering. A new `KnownOp` must add its arm
@@ -528,10 +709,10 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp) -> io::Result<()> {
 /// `const-prop` pass resolved the `U32Val` (e.g. `518400`), else the raw
 /// value id. The human duration (`30 days`) rides the binding's
 /// provenance note, not the operand text.
-fn ttl_arg(raw: ValueId, resolved: &Option<u32>) -> String {
+fn ttl_arg(raw: ValueId, resolved: &Option<u32>, ctx: &FoldCtx<'_>) -> String {
     match resolved {
         Some(ledgers) => ledgers.to_string(),
-        None => format!("v{}", raw.index()),
+        None => ctx.operand(raw),
     }
 }
 
@@ -544,11 +725,16 @@ fn render_symbol_dispatch(
     out: &mut impl Write,
     sym: ValueId,
     table: &DispatchTable,
+    ctx: &FoldCtx<'_>,
 ) -> io::Result<()> {
     let cases = table.cases.join(" | ");
     match &table.enum_name {
-        Some(name) => write!(out, "symbol_dispatch(v{}) -> {name}::{{{cases}}}", sym.index()),
-        None => write!(out, "symbol_dispatch(v{}) -> {{{cases}}}", sym.index()),
+        Some(name) => write!(
+            out,
+            "symbol_dispatch({}) -> {name}::{{{cases}}}",
+            ctx.operand(sym)
+        ),
+        None => write!(out, "symbol_dispatch({}) -> {{{cases}}}", ctx.operand(sym)),
     }
 }
 
@@ -557,10 +743,13 @@ fn render_symbol_dispatch(
 /// (`v30: DataKey::Admin`, `v15: DataKey::Allowance(v1, v2)`). The
 /// value id stays visible for traceability back to the constructor
 /// call.
-fn key_str(key: &ValueId, resolved: &Option<EnumKey>) -> String {
+fn key_str(key: &ValueId, resolved: &Option<EnumKey>, ctx: &FoldCtx<'_>) -> String {
     let Some(enum_key) = resolved else {
-        return format!("v{}", key.index());
+        return ctx.operand(*key);
     };
+    // The key id itself stays a raw id even when its binding folds: it
+    // is the traceability anchor back to the constructor call, and the
+    // variant annotation, not the id, carries the meaning.
     let mut s = format!(
         "v{}: {}::{}",
         key.index(),
@@ -573,7 +762,7 @@ fn key_str(key: &ValueId, resolved: &Option<EnumKey>) -> String {
             if i > 0 {
                 s.push_str(", ");
             }
-            s.push_str(&format!("v{}", p.index()));
+            s.push_str(&ctx.operand(*p));
         }
         s.push(')');
     }
@@ -597,7 +786,7 @@ fn mem_suffix(width: MemWidth, signed: Option<bool>) -> String {
     }
 }
 
-fn render_args(out: &mut impl Write, args: &[ValueId]) -> io::Result<()> {
+fn render_args(out: &mut impl Write, args: &[ValueId], ctx: &FoldCtx<'_>) -> io::Result<()> {
     if args.is_empty() {
         return Ok(());
     }
@@ -606,7 +795,7 @@ fn render_args(out: &mut impl Write, args: &[ValueId]) -> io::Result<()> {
         if i > 0 {
             write!(out, ", ")?;
         }
-        write!(out, "v{}", arg.index())?;
+        write!(out, "{}", ctx.operand(*arg))?;
     }
     write!(out, ")")
 }
@@ -614,12 +803,17 @@ fn render_args(out: &mut impl Write, args: &[ValueId]) -> io::Result<()> {
 /// Render `name(v1, v2, …)`, keeping the parens for a nullary call —
 /// unlike [`render_args`], which omits them (its callers suffix an
 /// argument-less form onto identifiers, not calls).
-fn render_call(out: &mut impl Write, name: &str, args: &[ValueId]) -> io::Result<()> {
+fn render_call(
+    out: &mut impl Write,
+    name: &str,
+    args: &[ValueId],
+    ctx: &FoldCtx<'_>,
+) -> io::Result<()> {
     write!(out, "{name}")?;
     if args.is_empty() {
         return write!(out, "()");
     }
-    render_args(out, args)
+    render_args(out, args, ctx)
 }
 
 /// Render a cross-contract call: the callee renders as its recovered
@@ -639,11 +833,12 @@ fn render_invoke(
     resolved_callee: &Option<String>,
     arg_count: Option<u32>,
     resolved_args: &Option<Vec<ValueId>>,
+    ctx: &FoldCtx<'_>,
 ) -> io::Result<()> {
-    write!(out, "{name}(v{}, ", contract.index())?;
+    write!(out, "{name}({}, ", ctx.operand(contract))?;
     match resolved_callee {
         Some(callee) => write!(out, "{callee:?}")?,
-        None => write!(out, "v{}", function.index())?,
+        None => write!(out, "{}", ctx.operand(function))?,
     }
     if let Some(elements) = resolved_args {
         write!(out, ", [")?;
@@ -651,12 +846,12 @@ fn render_invoke(
             if i > 0 {
                 write!(out, ", ")?;
             }
-            write!(out, "v{}", e.index())?;
+            write!(out, "{}", ctx.operand(*e))?;
         }
         write!(out, "]")?;
     } else {
         for a in args {
-            write!(out, ", v{}", a.index())?;
+            write!(out, ", {}", ctx.operand(*a))?;
             if let Some(n) = arg_count {
                 write!(out, ": {n} arg{}", if n == 1 { "" } else { "s" })?;
             }
@@ -851,7 +1046,7 @@ mod tests {
     }
 
     fn header_line(func: &HighFunction) -> String {
-        render_to_string(|w| render_function(w, func))
+        render_to_string(|w| render_function(w, func, false))
             .lines()
             .next()
             .unwrap()
@@ -875,7 +1070,9 @@ mod tests {
 
     #[test]
     fn literal_i64_renders_with_suffix() {
-        let s = render_to_string(|w| render_expr(w, &Expr::Literal(Literal::I64(42))));
+        let s = render_to_string(|w| {
+            render_expr(w, &Expr::Literal(Literal::I64(42)), &FoldCtx::plain())
+        });
         assert_eq!(s, "42i64");
     }
 
@@ -886,13 +1083,13 @@ mod tests {
             lhs: v(1),
             rhs: v(2),
         };
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "add v1, v2");
     }
 
     #[test]
     fn use_renders_as_value_ref() {
-        let s = render_to_string(|w| render_expr(w, &Expr::Use(v(7))));
+        let s = render_to_string(|w| render_expr(w, &Expr::Use(v(7)), &FoldCtx::plain()));
         assert_eq!(s, "v7");
     }
 
@@ -905,7 +1102,7 @@ mod tests {
             args: vec![v(1), v(2)],
             reason: sordec_common::UnknownReason::UnsupportedPattern,
         });
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "host:l:put_contract_data(v1, v2)");
     }
 
@@ -917,7 +1114,7 @@ mod tests {
             args: vec![],
             reason: sordec_common::UnknownReason::UnsupportedPattern,
         });
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "host:zz:?");
     }
 
@@ -929,7 +1126,7 @@ mod tests {
                 (sordec_common::BlockId::from_index(2), v(10)),
             ],
         };
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "phi [bb1 -> v9, bb2 -> v10]");
     }
 
@@ -940,7 +1137,7 @@ mod tests {
             args: vec![v(3)],
             reason: sordec_common::UnknownReason::UnsupportedPattern,
         };
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "<unrecovered Conversion>(v3)");
     }
 
@@ -956,7 +1153,7 @@ mod tests {
             ty: IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
         };
         assert_eq!(
-            render_to_string(|w| render_expr(w, &load)),
+            render_to_string(|w| render_expr(w, &load, &FoldCtx::plain())),
             "load v0 offset=8"
         );
         let store = Expr::Store {
@@ -966,7 +1163,7 @@ mod tests {
             width: MemWidth::W8,
         };
         assert_eq!(
-            render_to_string(|w| render_expr(w, &store)),
+            render_to_string(|w| render_expr(w, &store, &FoldCtx::plain())),
             "store v0 <- v1 offset=16"
         );
     }
@@ -981,7 +1178,7 @@ mod tests {
             ty: IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
         };
         assert_eq!(
-            render_to_string(|w| render_expr(w, &load)),
+            render_to_string(|w| render_expr(w, &load, &FoldCtx::plain())),
             "load8_u v0 offset=0"
         );
         let store = Expr::Store {
@@ -991,7 +1188,7 @@ mod tests {
             width: MemWidth::W2,
         };
         assert_eq!(
-            render_to_string(|w| render_expr(w, &store)),
+            render_to_string(|w| render_expr(w, &store, &FoldCtx::plain())),
             "store16 v0 <- v1 offset=4"
         );
     }
@@ -1024,14 +1221,14 @@ mod tests {
             ty: KnownType::U64,
             value: v(51),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "val_encode<u64>(v51)");
     }
 
     #[test]
     fn val_decode_renders_without_type() {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value: v(34) }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "val_decode(v34)");
     }
 
@@ -1041,7 +1238,7 @@ mod tests {
             value: v(1),
             tag: 64,
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "has_tag(v1, U64Object)");
     }
 
@@ -1051,7 +1248,7 @@ mod tests {
             kind: sordec_ir::ValObjectKind::ObjFromU64,
             args: vec![v(49)],
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "obj_from_u64(v49)");
     }
 
@@ -1065,7 +1262,7 @@ mod tests {
             key: v(92),
             resolved_key: None,
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "storage_get<instance>(v92)");
     }
 
@@ -1082,7 +1279,7 @@ mod tests {
                 payload: vec![],
             }),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "storage_get<instance>(v92: DataKey::Admin)");
 
         // Payload variant: values in slot order.
@@ -1096,7 +1293,7 @@ mod tests {
                 payload: vec![v(1), v(2)],
             }),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "storage_get<temporary>(v15: DataKey::Allowance(v1, v2))");
     }
 
@@ -1109,7 +1306,7 @@ mod tests {
             resolved_key: None,
             value: v(0),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "storage_set<temporary>(v9, v0)");
     }
 
@@ -1121,7 +1318,7 @@ mod tests {
             key: v(1),
             resolved_key: None,
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "storage_has<?>(v1)");
     }
 
@@ -1137,7 +1334,7 @@ mod tests {
             resolved_threshold: None,
             resolved_extend_to: None,
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "extend_ttl<persistent>(v4, v9, v14)");
     }
 
@@ -1154,7 +1351,7 @@ mod tests {
             resolved_threshold: Some(501120),
             resolved_extend_to: Some(518400),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "extend_ttl<persistent>(v4, 501120, 518400)");
     }
 
@@ -1168,7 +1365,7 @@ mod tests {
                 resolved_extend_to: None,
             },
         ));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "extend_instance_and_code_ttl(v9, v14)");
     }
 
@@ -1182,7 +1379,7 @@ mod tests {
                 resolved_extend_to: Some(120960),
             },
         ));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "extend_instance_and_code_ttl(103680, 120960)");
     }
 
@@ -1191,7 +1388,7 @@ mod tests {
     #[test]
     fn require_auth_renders() {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::RequireAuth { address: v(6) }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "require_auth(v6)");
     }
 
@@ -1201,7 +1398,7 @@ mod tests {
             address: v(21),
             args: vec![v(33)],
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "require_auth_for_args(v21, v33)");
     }
 
@@ -1210,7 +1407,7 @@ mod tests {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::AuthorizeAsCurrContract {
             auth_entries: v(8),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "authorize_as_curr_contract(v8)");
     }
 
@@ -1220,7 +1417,7 @@ mod tests {
             kind: sordec_ir::AddressOpKind::GetIdFromMuxedAddress,
             args: vec![v(155)],
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "get_id_from_muxed_address(v155)");
     }
 
@@ -1235,7 +1432,7 @@ mod tests {
             (KnownOp::GetMaxLiveUntilLedger, "get_max_live_until_ledger()"),
         ] {
             let expr = Expr::Semantic(SemanticOp::Known(op));
-            let s = render_to_string(|w| render_expr(w, &expr));
+            let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
             assert_eq!(s, expected);
         }
     }
@@ -1246,21 +1443,21 @@ mod tests {
             topics: vec![v(21)],
             data: v(33),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "publish_event(v21, v33)");
     }
 
     #[test]
     fn val_compare_renders() {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::ValCompare { a: v(10), b: v(12) }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "val_cmp(v10, v12)");
     }
 
     #[test]
     fn panic_with_error_renders() {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::PanicWithError { error: v(4) }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "panic_with_error(v4)");
     }
 
@@ -1273,7 +1470,7 @@ mod tests {
             len: v(131),
             resolved: Some("transfer".to_string()),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "symbol_new(\"transfer\")");
     }
 
@@ -1284,7 +1481,7 @@ mod tests {
             len: v(131),
             resolved: None,
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "symbol_new(v115, v131)");
     }
 
@@ -1295,7 +1492,7 @@ mod tests {
             len: v(2),
             resolved: Some("hello".to_string()),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "string_new(\"hello\")");
     }
 
@@ -1306,7 +1503,7 @@ mod tests {
             len: v(2),
             resolved: Some(vec![0xde, 0xad, 0xbe, 0xef]),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "bytes_new(0xdeadbeef)");
     }
 
@@ -1317,7 +1514,7 @@ mod tests {
             len: v(8),
             resolved: None,
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "bytes_new(v7, v8)");
     }
 
@@ -1327,7 +1524,7 @@ mod tests {
             vals_pos: v(7),
             len: v(12),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "vec_new(v7, v12)");
     }
 
@@ -1338,7 +1535,7 @@ mod tests {
             vals_pos: v(4),
             len: v(5),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "map_new(v3, v4, v5)");
     }
 
@@ -1350,7 +1547,7 @@ mod tests {
             kind: sordec_ir::MapOpKind::UnpackToLinearMemory,
             args: vec![v(1), v(2), v(3), v(4)],
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "map_unpack_to_linear_memory(v1, v2, v3, v4)");
     }
 
@@ -1360,7 +1557,7 @@ mod tests {
             kind: sordec_ir::VecOpKind::Len,
             args: vec![v(9)],
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "vec_len(v9)");
     }
 
@@ -1370,7 +1567,7 @@ mod tests {
             kind: sordec_ir::BufOpKind::SymbolIndexInLinearMemory,
             args: vec![v(1), v(2), v(3)],
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "symbol_index_in_linear_memory(v1, v2, v3)");
     }
 
@@ -1385,7 +1582,7 @@ mod tests {
                 enum_name: Some("TimeBoundKind".to_string()),
             },
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "symbol_dispatch(v61) -> TimeBoundKind::{Before | After}");
     }
 
@@ -1402,7 +1599,7 @@ mod tests {
                 enum_name: None,
             },
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "symbol_dispatch(v61) -> {Before | After}");
     }
 
@@ -1413,7 +1610,7 @@ mod tests {
             kind: sordec_ir::MapOpKind::New,
             args: vec![],
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "map_new()");
     }
 
@@ -1430,7 +1627,7 @@ mod tests {
             resolved_args: None,
             interface: None,
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "invoke_contract(v1, v2, v3)");
     }
 
@@ -1445,7 +1642,7 @@ mod tests {
             resolved_args: None,
             interface: None,
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "try_invoke_contract(v4, v5, v6)");
     }
 
@@ -1461,7 +1658,7 @@ mod tests {
             resolved_args: None,
             interface: Some(sordec_ir::ClientInterface::Sep41Token),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "invoke_contract(v1, \"transfer\", v3: 3 args)");
 
         // Full-elements tier: recovered values replace the handle.
@@ -1474,7 +1671,7 @@ mod tests {
             resolved_args: Some(vec![v(6)]),
             interface: Some(sordec_ir::ClientInterface::Sep41Token),
         }));
-        let s = render_to_string(|w| render_expr(w, &expr));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "invoke_contract(v1, \"balance\", [v6])");
     }
 }

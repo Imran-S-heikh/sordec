@@ -736,6 +736,249 @@ pub enum KnownOp {
     },
 }
 
+impl KnownOp {
+    /// Visit every [`ValueId`] this operation **reads**, in field
+    /// declaration order — operand slots plus every resolved fact that
+    /// references a value ([`EnumKey::payload`], `resolved_args`), since
+    /// renderers and analyses treat those references as live.
+    ///
+    /// Every variant is destructured **without** a `..` rest pattern on
+    /// purpose: adding a field (or a variant) without classifying its
+    /// value reads fails to compile here rather than silently
+    /// under-counting uses. Non-value fields are bound and discarded.
+    #[allow(clippy::too_many_lines)]
+    pub fn for_each_value_use<F: FnMut(ValueId)>(&self, mut f: F) {
+        let visit_key = |resolved_key: &Option<EnumKey>, f: &mut F| {
+            if let Some(key) = resolved_key {
+                for &value in &key.payload {
+                    f(value);
+                }
+            }
+        };
+        match self {
+            KnownOp::StorageGet {
+                tier: _,
+                durability,
+                key,
+                resolved_key,
+            }
+            | KnownOp::StorageHas {
+                tier: _,
+                durability,
+                key,
+                resolved_key,
+            }
+            | KnownOp::StorageRemove {
+                tier: _,
+                durability,
+                key,
+                resolved_key,
+            } => {
+                f(*durability);
+                f(*key);
+                visit_key(resolved_key, &mut f);
+            }
+            KnownOp::StorageSet {
+                tier: _,
+                durability,
+                key,
+                resolved_key,
+                value,
+            } => {
+                f(*durability);
+                f(*key);
+                f(*value);
+                visit_key(resolved_key, &mut f);
+            }
+            KnownOp::StorageExtendTtl {
+                tier: _,
+                durability,
+                key,
+                resolved_key,
+                threshold,
+                extend_to,
+                resolved_threshold: _,
+                resolved_extend_to: _,
+            } => {
+                f(*durability);
+                f(*key);
+                f(*threshold);
+                f(*extend_to);
+                visit_key(resolved_key, &mut f);
+            }
+            KnownOp::ExtendCurrentContractInstanceAndCodeTtl {
+                threshold,
+                extend_to,
+                resolved_threshold: _,
+                resolved_extend_to: _,
+            } => {
+                f(*threshold);
+                f(*extend_to);
+            }
+            KnownOp::ExtendContractInstanceAndCodeTtl {
+                contract,
+                threshold,
+                extend_to,
+            }
+            | KnownOp::ExtendContractInstanceTtl {
+                contract,
+                threshold,
+                extend_to,
+            }
+            | KnownOp::ExtendContractCodeTtl {
+                contract,
+                threshold,
+                extend_to,
+            } => {
+                f(*contract);
+                f(*threshold);
+                f(*extend_to);
+            }
+            KnownOp::StorageExtendTtlV2 {
+                tier: _,
+                durability,
+                key,
+                resolved_key,
+                extend_to,
+                min_extension,
+                max_extension,
+            } => {
+                f(*durability);
+                f(*key);
+                f(*extend_to);
+                f(*min_extension);
+                f(*max_extension);
+                visit_key(resolved_key, &mut f);
+            }
+            KnownOp::ExtendContractInstanceAndCodeTtlV2 {
+                contract,
+                extension_scope,
+                extend_to,
+                min_extension,
+                max_extension,
+            } => {
+                f(*contract);
+                f(*extension_scope);
+                f(*extend_to);
+                f(*min_extension);
+                f(*max_extension);
+            }
+            KnownOp::RequireAuth { address } => f(*address),
+            KnownOp::RequireAuthForArgs { address, args } => {
+                f(*address);
+                for &value in args {
+                    f(value);
+                }
+            }
+            KnownOp::AuthorizeAsCurrContract { auth_entries } => f(*auth_entries),
+            KnownOp::AddressConversion { kind: _, args }
+            | KnownOp::CryptoOp { kind: _, args }
+            | KnownOp::PrngOp { kind: _, args }
+            | KnownOp::TestOp { kind: _, args }
+            | KnownOp::DeployOp { kind: _, args }
+            | KnownOp::ValObject { kind: _, args }
+            | KnownOp::MapOp { kind: _, args }
+            | KnownOp::VecOp { kind: _, args }
+            | KnownOp::BufOp { kind: _, args } => {
+                for &value in args {
+                    f(value);
+                }
+            }
+            KnownOp::InvokeContract {
+                contract,
+                function,
+                resolved_callee: _,
+                arg_count: _,
+                resolved_args,
+                interface: _,
+                args,
+            }
+            | KnownOp::TryInvokeContract {
+                contract,
+                function,
+                resolved_callee: _,
+                arg_count: _,
+                resolved_args,
+                interface: _,
+                args,
+            } => {
+                f(*contract);
+                f(*function);
+                for &value in args {
+                    f(value);
+                }
+                if let Some(resolved) = resolved_args {
+                    for &value in resolved {
+                        f(value);
+                    }
+                }
+            }
+            KnownOp::PublishEvent { topics, data } => {
+                for &value in topics {
+                    f(value);
+                }
+                f(*data);
+            }
+            KnownOp::ValCompare { a, b } => {
+                f(*a);
+                f(*b);
+            }
+            KnownOp::PanicWithError { error } => f(*error),
+            KnownOp::ValEncodeSmall { ty: _, value }
+            | KnownOp::ValDecodeSmall { value }
+            | KnownOp::ValTagCheck { value, tag: _ } => f(*value),
+            KnownOp::SymbolNew {
+                lm_pos,
+                len,
+                resolved: _,
+            }
+            | KnownOp::StringNew {
+                lm_pos,
+                len,
+                resolved: _,
+            }
+            | KnownOp::BytesNew {
+                lm_pos,
+                len,
+                resolved: _,
+            } => {
+                f(*lm_pos);
+                f(*len);
+            }
+            KnownOp::VecNew { vals_pos, len } => {
+                f(*vals_pos);
+                f(*len);
+            }
+            KnownOp::MapNew {
+                keys_pos,
+                vals_pos,
+                len,
+            } => {
+                f(*keys_pos);
+                f(*vals_pos);
+                f(*len);
+            }
+            KnownOp::SymbolDispatch {
+                sym,
+                table_pos,
+                len,
+                table: _,
+            } => {
+                f(*sym);
+                f(*table_pos);
+                f(*len);
+            }
+            // Nullary context accessors: no operands.
+            KnownOp::GetCurrentContractAddress
+            | KnownOp::GetLedgerSequence
+            | KnownOp::GetLedgerTimestamp
+            | KnownOp::GetLedgerProtocolVersion
+            | KnownOp::GetLedgerNetworkId
+            | KnownOp::GetMaxLiveUntilLedger => {}
+        }
+    }
+}
+
 /// The complete `i`-module (`int`) host-side Val conversion surface.
 ///
 /// One variant per conversion host function, covering the full ABI (the

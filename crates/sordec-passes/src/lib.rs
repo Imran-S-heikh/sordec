@@ -40,13 +40,14 @@ pub mod metrics_catalog;
 pub mod pass;
 pub mod pipeline;
 pub mod recognizers;
+pub mod treeify;
 pub mod val_abi;
 
 pub use dataflow::{
     for_each_target, resolve_use, trace_bytes, trace_const, trace_const_with_limit, trace_literal,
-    trace_u32val, CallIndex, CallSite, CfgEdge, CfgFacts, DefUseIndex, LoopForest, LoopId,
-    NaturalLoop, Resolver, TraceStop, UseSite, DEFAULT_MAX_DEPTH, DEFAULT_RESOLVE_DEPTH,
-    DEFAULT_USE_DEPTH,
+    trace_u32val, CallIndex, CallSite, CfgEdge, CfgFacts, DefUseIndex, HighUseIndex, HighUseSite,
+    InlineClass, InlinePlan, InlineSite, InlineStats, LoopForest, LoopId, NaturalLoop, Resolver,
+    TraceStop, UseSite, DEFAULT_MAX_DEPTH, DEFAULT_RESOLVE_DEPTH, DEFAULT_USE_DEPTH,
 };
 pub use declutter::{
     MergeBlockChainsPass, PruneTrivialPhisPass, ResolveAliasesPass, SweepDeadPass,
@@ -64,6 +65,7 @@ pub use recognizers::{
     TtlPass, UnrecognizedScanPass, ValEncodingPass,
 };
 pub use sordec_common::LiftDiagnostics;
+pub use treeify::TreeifyStatsPass;
 
 use sordec_ir::{HighIr, LiftedIr};
 
@@ -123,8 +125,11 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
 /// diagnostic for each host call still left as `SemanticOp::Unknown`
 /// (diagnostics-only, never rewrites). [`AuthFlowPass`] runs last of the
 /// rewriting passes,
-/// consuming `EnumKeyPass`'s resolved keys (hard dependencies both). No
-/// fixpoint group: the dependency chain is a straight line and every
+/// consuming `EnumKeyPass`'s resolved keys (hard dependencies both).
+/// [`TreeifyStatsPass`] is the true terminal: metrics-only, after every
+/// rewrite has settled, it reports how much of the final IR the B6
+/// inlinability analysis classifies foldable / effect-pinned / residue.
+/// No fixpoint group: the dependency chain is a straight line and every
 /// pass is idempotent.
 #[must_use]
 pub fn default_high_pipeline() -> Pipeline<HighIr> {
@@ -145,6 +150,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(ClientCallPass),
             Box::new(AuthFlowPass),
             Box::new(UnrecognizedScanPass),
+            Box::new(TreeifyStatsPass),
         ],
         vec![],
     )

@@ -136,6 +136,88 @@ pub enum Expr {
     },
 }
 
+impl Expr {
+    /// Visit every [`ValueId`] this expression **reads**, in field
+    /// declaration order. [`Expr::Semantic`] delegates to
+    /// [`super::semantic::KnownOp::for_each_value_use`]; a
+    /// [`Expr::Phi`]'s incoming values count as reads (they flow in at
+    /// predecessor edges).
+    ///
+    /// Same drift rule as the `KnownOp` visitor: every variant is
+    /// destructured without a `..` rest pattern, so a new field or
+    /// variant fails to compile here instead of silently under-counting
+    /// uses.
+    pub fn for_each_value_use<F: FnMut(ValueId)>(&self, mut f: F) {
+        match self {
+            Expr::Semantic(SemanticOp::Known(op)) => op.for_each_value_use(f),
+            Expr::Semantic(SemanticOp::Unknown {
+                host_module: _,
+                host_fn: _,
+                reason: _,
+                args,
+            }) => {
+                for &value in args {
+                    f(value);
+                }
+            }
+            Expr::Literal(_) => {}
+            Expr::Use(value) => f(*value),
+            Expr::Unary { op: _, value } => f(*value),
+            Expr::Binary { op: _, lhs, rhs } => {
+                f(*lhs);
+                f(*rhs);
+            }
+            Expr::Call { target: _, args } => {
+                for &value in args {
+                    f(value);
+                }
+            }
+            Expr::IndirectCall {
+                table: _,
+                sig: _,
+                callee,
+                args,
+            } => {
+                f(*callee);
+                for &value in args {
+                    f(value);
+                }
+            }
+            Expr::Phi { incoming } => {
+                for &(_block, value) in incoming {
+                    f(value);
+                }
+            }
+            Expr::GlobalGet { index: _ } => {}
+            Expr::Load {
+                addr,
+                offset: _,
+                width: _,
+                signed: _,
+                ty: _,
+            } => f(*addr),
+            Expr::Store {
+                addr,
+                value,
+                offset: _,
+                width: _,
+            } => {
+                f(*addr);
+                f(*value);
+            }
+            Expr::Unknown {
+                op_kind: _,
+                args,
+                reason: _,
+            } => {
+                for &value in args {
+                    f(value);
+                }
+            }
+        }
+    }
+}
+
 /// Byte width of a raw memory access, preserved from the WASM opcode.
 ///
 /// The lowering previously collapsed all 14 load / 9 store forms into

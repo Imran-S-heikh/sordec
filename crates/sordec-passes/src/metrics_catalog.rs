@@ -187,6 +187,19 @@ pub const DECLUTTER_DEAD_BLOCKS_CLEARED: &str = "declutter_dead_blocks_cleared";
 pub const DECLUTTER_DEAD_VALUES_UNSCHEDULED: &str = "declutter_dead_values_unscheduled";
 
 // ---------------------------------------------------------------------
+// Treeification analysis (Phase 3 B6). Same W8-surfacing status as the
+// declutter keys above.
+// ---------------------------------------------------------------------
+
+/// Bindings classified `Inline` (pure-total, single live use).
+pub const TREEIFY_INLINE: &str = "treeify_inline";
+/// Single-live-use bindings pinned only by their effects — the
+/// readability tax the K4 discipline pays.
+pub const TREEIFY_PINNED_SINGLE_USE: &str = "treeify_pinned_single_use";
+/// De-clutter residue bindings hidden as `Dead`.
+pub const TREEIFY_DEAD_RESIDUE: &str = "treeify_dead_residue";
+
+// ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)
 // ---------------------------------------------------------------------
 
