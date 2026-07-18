@@ -204,71 +204,7 @@ fn thread_function(func: &mut LiftedFunction) -> ThreadStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sordec_common::{Arena, FuncId, IrId};
-    use sordec_ir::{LiftedBlock, LiftedType, LiftedValue, LiftedValueDef, WasmOp};
-
-    fn v(idx: u32) -> ValueId {
-        ValueId::from_index(idx)
-    }
-
-    fn bb(idx: u32) -> BlockId {
-        BlockId::from_index(idx)
-    }
-
-    fn i32_const(value: u32) -> LiftedValueDef {
-        LiftedValueDef::Operator {
-            op: WasmOp(waffle::Operator::I32Const { value }),
-            args: vec![],
-        }
-    }
-
-    fn param(block: u32, index: u32) -> LiftedValueDef {
-        LiftedValueDef::BlockParam {
-            block: bb(block),
-            index,
-        }
-    }
-
-    fn target(block: u32, args: Vec<ValueId>) -> BlockTarget {
-        BlockTarget {
-            block: bb(block),
-            args,
-        }
-    }
-
-    fn func_with(defs: Vec<LiftedValueDef>, blocks_in: Vec<LiftedBlock>) -> LiftedFunction {
-        let mut values: Arena<ValueId, LiftedValue> = Arena::new();
-        for def in defs {
-            values.push(LiftedValue {
-                def,
-                types: vec![LiftedType::I32],
-            });
-        }
-        let mut blocks: Arena<BlockId, LiftedBlock> = Arena::new();
-        for b in blocks_in {
-            blocks.push(b);
-        }
-        LiftedFunction {
-            id: FuncId::from_index(0),
-            entry: bb(0),
-            blocks,
-            values,
-        }
-    }
-
-    fn block(
-        id: u32,
-        params: Vec<ValueId>,
-        instructions: Vec<ValueId>,
-        term: LiftedTerminator,
-    ) -> LiftedBlock {
-        LiftedBlock {
-            id: bb(id),
-            params,
-            instructions,
-            terminator: term,
-        }
-    }
+    use crate::test_util::{bb, block, func_with, i32_const, param, target, v};
 
     #[test]
     fn conditional_edge_threads_past_empty_forwarder_with_arg_mapping() {

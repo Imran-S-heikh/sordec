@@ -245,77 +245,8 @@ fn resolve(parent: &HashMap<ValueId, ValueId>, v: ValueId) -> ValueId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sordec_common::{Arena, FuncId, IrId};
-    use sordec_ir::{
-        BlockTarget, LiftedBlock, LiftedTerminator, LiftedType, LiftedValue, WasmOp,
-    };
-
-    fn v(idx: u32) -> ValueId {
-        ValueId::from_index(idx)
-    }
-
-    fn bb(idx: u32) -> BlockId {
-        BlockId::from_index(idx)
-    }
-
-    fn op(w: waffle::Operator, args: Vec<ValueId>) -> LiftedValueDef {
-        LiftedValueDef::Operator {
-            op: WasmOp(w),
-            args,
-        }
-    }
-
-    fn i32_const(value: u32) -> LiftedValueDef {
-        op(waffle::Operator::I32Const { value }, vec![])
-    }
-
-    fn param(block: u32, index: u32) -> LiftedValueDef {
-        LiftedValueDef::BlockParam {
-            block: bb(block),
-            index,
-        }
-    }
-
-    fn target(block: u32, args: Vec<ValueId>) -> BlockTarget {
-        BlockTarget {
-            block: bb(block),
-            args,
-        }
-    }
-
-    fn func_with(defs: Vec<LiftedValueDef>, blocks_in: Vec<LiftedBlock>) -> LiftedFunction {
-        let mut values: Arena<ValueId, LiftedValue> = Arena::new();
-        for def in defs {
-            values.push(LiftedValue {
-                def,
-                types: vec![LiftedType::I32],
-            });
-        }
-        let mut blocks: Arena<BlockId, LiftedBlock> = Arena::new();
-        for b in blocks_in {
-            blocks.push(b);
-        }
-        LiftedFunction {
-            id: FuncId::from_index(0),
-            entry: bb(0),
-            blocks,
-            values,
-        }
-    }
-
-    fn block(
-        id: u32,
-        params: Vec<ValueId>,
-        instructions: Vec<ValueId>,
-        term: LiftedTerminator,
-    ) -> LiftedBlock {
-        LiftedBlock {
-            id: bb(id),
-            params,
-            instructions,
-            terminator: term,
-        }
-    }
+    use crate::test_util::{bb, block, func_with, i32_const, op, param, target, v};
+    use sordec_ir::LiftedTerminator;
 
     /// Diamond where both edges into the merge pass the same value:
     /// v0 const; bb0 br_if(v0) -> bb1 / bb2; both branch to bb3(v0);

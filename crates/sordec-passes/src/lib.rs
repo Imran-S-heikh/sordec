@@ -40,6 +40,8 @@ pub mod metrics_catalog;
 pub mod pass;
 pub mod pipeline;
 pub mod recognizers;
+#[cfg(test)]
+mod test_util;
 pub mod treeify;
 pub mod val_abi;
 

@@ -202,69 +202,8 @@ fn is_pure_total(func: &LiftedFunction, value: ValueId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sordec_common::{Arena, FuncId};
-    use sordec_ir::{BlockTarget, LiftedBlock, LiftedType, LiftedValue, WasmOp};
+    use crate::test_util::{bb, block, func_with, i32_const, op, param, target, v};
     use waffle::entity::EntityRef as _;
-
-    fn v(idx: u32) -> ValueId {
-        ValueId::from_index(idx)
-    }
-
-    fn bb(idx: u32) -> BlockId {
-        BlockId::from_index(idx)
-    }
-
-    fn op(w: waffle::Operator, args: Vec<ValueId>) -> LiftedValueDef {
-        LiftedValueDef::Operator {
-            op: WasmOp(w),
-            args,
-        }
-    }
-
-    fn i32_const(value: u32) -> LiftedValueDef {
-        op(waffle::Operator::I32Const { value }, vec![])
-    }
-
-    fn target(block: u32, args: Vec<ValueId>) -> BlockTarget {
-        BlockTarget {
-            block: bb(block),
-            args,
-        }
-    }
-
-    fn func_with(defs: Vec<LiftedValueDef>, blocks_in: Vec<LiftedBlock>) -> LiftedFunction {
-        let mut values: Arena<ValueId, LiftedValue> = Arena::new();
-        for def in defs {
-            values.push(LiftedValue {
-                def,
-                types: vec![LiftedType::I32],
-            });
-        }
-        let mut blocks: Arena<BlockId, LiftedBlock> = Arena::new();
-        for b in blocks_in {
-            blocks.push(b);
-        }
-        LiftedFunction {
-            id: FuncId::from_index(0),
-            entry: bb(0),
-            blocks,
-            values,
-        }
-    }
-
-    fn block(
-        id: u32,
-        params: Vec<ValueId>,
-        instructions: Vec<ValueId>,
-        term: LiftedTerminator,
-    ) -> LiftedBlock {
-        LiftedBlock {
-            id: bb(id),
-            params,
-            instructions,
-            terminator: term,
-        }
-    }
 
     #[test]
     fn unreachable_block_is_cleared_to_a_tombstone() {
@@ -368,10 +307,7 @@ mod tests {
     fn terminator_reads_root_the_mark() {
         // v0 used only as a branch condition; v1 only as an edge arg.
         let mut func = func_with(
-            vec![i32_const(1), i32_const(2), LiftedValueDef::BlockParam {
-                block: bb(2),
-                index: 0,
-            }],
+            vec![i32_const(1), i32_const(2), param(2, 0)],
             vec![
                 block(
                     0,

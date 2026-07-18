@@ -130,59 +130,8 @@ fn resolve(map: &[ValueId], v: ValueId) -> ValueId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sordec_common::{Arena, BlockId, FuncId};
-    use sordec_ir::{
-        BlockTarget, LiftedBlock, LiftedTerminator, LiftedType, LiftedValue, WasmOp,
-    };
-
-    fn v(idx: u32) -> ValueId {
-        ValueId::from_index(idx)
-    }
-
-    fn bb(idx: u32) -> BlockId {
-        BlockId::from_index(idx)
-    }
-
-    fn op(w: waffle::Operator, args: Vec<ValueId>) -> LiftedValueDef {
-        LiftedValueDef::Operator {
-            op: WasmOp(w),
-            args,
-        }
-    }
-
-    fn i32_const(value: u32) -> LiftedValueDef {
-        op(waffle::Operator::I32Const { value }, vec![])
-    }
-
-    /// Function from raw defs + blocks (first block = entry).
-    fn func_with(defs: Vec<LiftedValueDef>, blocks_in: Vec<LiftedBlock>) -> LiftedFunction {
-        let mut values: Arena<ValueId, LiftedValue> = Arena::new();
-        for def in defs {
-            values.push(LiftedValue {
-                def,
-                types: vec![LiftedType::I32],
-            });
-        }
-        let mut blocks: Arena<BlockId, LiftedBlock> = Arena::new();
-        for b in blocks_in {
-            blocks.push(b);
-        }
-        LiftedFunction {
-            id: FuncId::from_index(0),
-            entry: bb(0),
-            blocks,
-            values,
-        }
-    }
-
-    fn block(id: u32, instructions: Vec<ValueId>, term: LiftedTerminator) -> LiftedBlock {
-        LiftedBlock {
-            id: bb(id),
-            params: vec![],
-            instructions,
-            terminator: term,
-        }
-    }
+    use crate::test_util::{bb, block, func_with, i32_const, op, target, v};
+    use sordec_ir::LiftedTerminator;
 
     #[test]
     fn operand_uses_rewritten_to_terminal() {
@@ -195,6 +144,7 @@ mod tests {
             ],
             vec![block(
                 0,
+                vec![],
                 vec![v(0), v(2)],
                 LiftedTerminator::Return { values: vec![] },
             )],
@@ -216,21 +166,16 @@ mod tests {
             vec![
                 block(
                     0,
+                    vec![],
                     vec![v(0)],
                     LiftedTerminator::BranchIf {
                         cond: v(1),
-                        if_true: BlockTarget {
-                            block: bb(1),
-                            args: vec![v(1)],
-                        },
-                        if_false: BlockTarget {
-                            block: bb(2),
-                            args: vec![],
-                        },
+                        if_true: target(1, vec![v(1)]),
+                        if_false: target(2, vec![]),
                     },
                 ),
-                block(1, vec![], LiftedTerminator::Return { values: vec![v(1)] }),
-                block(2, vec![], LiftedTerminator::Unreachable),
+                block(1, vec![], vec![], LiftedTerminator::Return { values: vec![v(1)] }),
+                block(2, vec![], vec![], LiftedTerminator::Unreachable),
             ],
         );
         let (rewritten, _) = resolve_function(&mut func);
@@ -262,6 +207,7 @@ mod tests {
             ],
             vec![block(
                 0,
+                vec![],
                 vec![v(0), v(3)],
                 LiftedTerminator::Return { values: vec![] },
             )],
@@ -288,6 +234,7 @@ mod tests {
             ],
             vec![block(
                 0,
+                vec![],
                 vec![v(0), v(2)],
                 LiftedTerminator::Return { values: vec![] },
             )],
@@ -303,6 +250,7 @@ mod tests {
             vec![i32_const(7)],
             vec![block(
                 0,
+                vec![],
                 vec![v(0)],
                 LiftedTerminator::Return { values: vec![] },
             )],
@@ -323,6 +271,7 @@ mod tests {
             ],
             vec![block(
                 0,
+                vec![],
                 vec![v(2)],
                 LiftedTerminator::Return { values: vec![] },
             )],
