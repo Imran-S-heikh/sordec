@@ -48,7 +48,10 @@ pub use dataflow::{
     NaturalLoop, Resolver, TraceStop, UseSite, DEFAULT_MAX_DEPTH, DEFAULT_RESOLVE_DEPTH,
     DEFAULT_USE_DEPTH,
 };
-pub use declutter::{PruneTrivialPhisPass, ResolveAliasesPass};
+pub use declutter::{
+    MergeBlockChainsPass, PruneTrivialPhisPass, ResolveAliasesPass, SweepDeadPass,
+    ThreadTrivialJumpsPass,
+};
 pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
 pub use lift::{lift_with_waffle, LiftOutput};
@@ -70,8 +73,11 @@ use sordec_ir::{HighIr, LiftedIr};
 /// [`ResolveAliasesPass`] runs once up front — no later pass creates a
 /// *used* alias (trivial-phi tombstones are born use-free). The
 /// remaining de-cluttering passes form a fixpoint group because they
-/// enable each other (see the [`declutter`] module docs for the
-/// termination measure). `--raw` CLI paths skip this pipeline entirely,
+/// enable each other: threading removes predecessors, which makes more
+/// phis trivial; pruning empties parameter lists, which unlocks chain
+/// merges; the dead sweep removes orphaned blocks' edges, which
+/// un-blocks both. See the [`declutter`] module docs for the
+/// termination measure. `--raw` CLI paths skip this pipeline entirely,
 /// preserving the pristine post-waffle view.
 #[must_use]
 #[allow(clippy::single_range_in_vec_init)] // fixpoint group, not a range literal
@@ -80,8 +86,11 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
         vec![
             Box::new(ResolveAliasesPass),
             Box::new(PruneTrivialPhisPass),
+            Box::new(ThreadTrivialJumpsPass),
+            Box::new(MergeBlockChainsPass),
+            Box::new(SweepDeadPass),
         ],
-        vec![1..2],
+        vec![1..5],
     )
 }
 

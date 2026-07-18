@@ -40,11 +40,17 @@
 //! Renderers hide residue behind honest count lines; ids stay stable
 //! across the whole pipeline for diffable dumps.
 
+mod merge_chains;
 mod prune_phis;
 mod resolve_aliases;
+mod sweep_dead;
+mod thread_jumps;
 
+pub use merge_chains::MergeBlockChainsPass;
 pub use prune_phis::PruneTrivialPhisPass;
 pub use resolve_aliases::ResolveAliasesPass;
+pub use sweep_dead::SweepDeadPass;
+pub use thread_jumps::ThreadTrivialJumpsPass;
 
 use sordec_common::ValueId;
 use sordec_ir::{BlockTarget, LiftedFunction, LiftedTerminator, LiftedValueDef};

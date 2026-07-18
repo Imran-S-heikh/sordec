@@ -172,6 +172,19 @@ pub const VAL_COMPARE: &str = "val_compare";
 pub const DECLUTTER_ALIASES_RESOLVED: &str = "declutter_aliases_resolved";
 /// Trivial block parameters removed (Braun-style pruning).
 pub const DECLUTTER_PHIS_PRUNED: &str = "declutter_phis_pruned";
+/// Edges retargeted past empty forwarding blocks.
+pub const DECLUTTER_JUMPS_THREADED: &str = "declutter_jumps_threaded";
+/// Unconditional branches to empty return blocks turned into `Return`
+/// (tail-merge undo — the early-return shape guard recovery feeds on).
+pub const DECLUTTER_RETURNS_INLINED: &str = "declutter_returns_inlined";
+/// Unconditional branches to empty `Unreachable` blocks inlined.
+pub const DECLUTTER_TRAPS_INLINED: &str = "declutter_traps_inlined";
+/// Single-predecessor block pairs spliced.
+pub const DECLUTTER_CHAINS_MERGED: &str = "declutter_chains_merged";
+/// Unreachable blocks cleared to tombstones.
+pub const DECLUTTER_DEAD_BLOCKS_CLEARED: &str = "declutter_dead_blocks_cleared";
+/// Pure-total zero-use instructions removed from the schedule.
+pub const DECLUTTER_DEAD_VALUES_UNSCHEDULED: &str = "declutter_dead_values_unscheduled";
 
 // ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)
