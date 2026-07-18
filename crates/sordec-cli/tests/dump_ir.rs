@@ -105,3 +105,52 @@ fn dump_ir_with_garbage_input_surfaces_invalid_wasm() {
 
     let _ = std::fs::remove_file(&tmp);
 }
+
+// ---------------------------------------------------------------------
+// W3 de-cluttering: default view vs --raw
+// ---------------------------------------------------------------------
+
+#[test]
+fn dump_ir_default_view_is_decluttered() {
+    // The default view is the lifted IR the pipeline actually consumes:
+    // dead blocks (waffle orphans + blocks emptied by threading) are
+    // hidden behind an honest count line, and waffle's synthetic
+    // return funnel is gone from at least one function (returns
+    // inlined into predecessors).
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-ir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "unreachable block(s) hidden (--raw shows them)",
+        ));
+}
+
+#[test]
+fn dump_ir_raw_flag_shows_the_pristine_lift() {
+    // --raw skips the de-cluttering pipeline entirely: no hidden-block
+    // notes, and the max-SSA clutter is visible again.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-ir", "--raw", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("unreachable block(s) hidden").not())
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn dump_ir_default_output_is_deterministic() {
+    // Two runs must be byte-identical — no hash-order leaks from the
+    // de-cluttering passes.
+    let run = || {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-ir", TOKEN_V23])
+            .output()
+            .expect("sordec runs")
+            .stdout
+    };
+    assert_eq!(run(), run(), "dump-ir output must be deterministic");
+}

@@ -50,6 +50,12 @@ pub struct RenderOptions {
     /// Prepend a module-info header (imports/exports counts + metadata
     /// presence) before rendering functions.
     pub with_header: bool,
+
+    /// Hide blocks unreachable from the entry, replacing them with one
+    /// honest count line per function. Set on the decluttered view
+    /// (dead blocks are empty tombstones there); the `--raw` view keeps
+    /// every block.
+    pub skip_unreachable: bool,
 }
 
 /// Render a [`LiftedIr`] to `out` in waffle-style text form.
@@ -77,9 +83,32 @@ pub fn render_lifted_ir(
         if i > 0 {
             writeln!(out)?;
         }
-        render_function(out, func, &ctx)?;
+        render_function(out, func, &ctx, options.skip_unreachable)?;
     }
     Ok(())
+}
+
+/// Per-block reachability from the entry, computed with a plain BFS
+/// over terminator targets. Local to the renderer on purpose — the
+/// full `CfgFacts` analysis would be overkill for a display decision.
+fn reachable_blocks(func: &LiftedFunction) -> Vec<bool> {
+    let mut reachable = vec![false; func.blocks.len()];
+    let mut worklist = vec![func.entry];
+    while let Some(block_id) = worklist.pop() {
+        let Some(slot) = reachable.get_mut(block_id.index() as usize) else {
+            continue;
+        };
+        if *slot {
+            continue;
+        }
+        *slot = true;
+        if let Some(block) = func.blocks.get(block_id) {
+            sordec_passes::for_each_target(&block.terminator, |target| {
+                worklist.push(target.block);
+            });
+        }
+    }
+    reachable
 }
 
 /// Module-wide rendering context threaded through every helper. Holds
@@ -180,6 +209,7 @@ fn render_function(
     out: &mut impl Write,
     func: &LiftedFunction,
     ctx: &RenderContext<'_>,
+    skip_unreachable: bool,
 ) -> io::Result<()> {
     let id_idx = func.id.index();
     if let Some(name) = ctx.exports_by_local_idx.get(&id_idx) {
@@ -188,13 +218,31 @@ fn render_function(
         writeln!(out, "function func_{id_idx} {{")?;
     }
 
+    let reachable = skip_unreachable.then(|| reachable_blocks(func));
+    let mut hidden = 0usize;
     let mut first = true;
     for (block_id, block) in func.blocks.iter() {
+        if let Some(reachable) = &reachable
+            && !reachable
+                .get(block_id.index() as usize)
+                .copied()
+                .unwrap_or(true)
+        {
+            hidden += 1;
+            continue;
+        }
         if !first {
             writeln!(out)?;
         }
         first = false;
         render_block(out, block_id, block, func, ctx)?;
+    }
+    if hidden > 0 {
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  ;; {hidden} unreachable block(s) hidden (--raw shows them)"
+        )?;
     }
 
     writeln!(out, "}}")?;

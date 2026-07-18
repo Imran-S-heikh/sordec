@@ -475,7 +475,7 @@ fn dump_hir_recognizes_symbol_dispatch_on_timelock() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "symbol_dispatch(v61) -> TimeBoundKind::{Before | After}",
+            "symbol_dispatch(v45) -> TimeBoundKind::{Before | After}",
         ))
         // Provenance names the dispatcher pass and the index->variant map.
         .stdout(predicate::str::contains(
@@ -688,7 +688,7 @@ fn dump_hir_names_enum_storage_keys_on_both_tokens() {
             .args(["dump-hir", wasm])
             .assert()
             .success()
-            .stdout(predicate::str::contains("storage_get<instance>(v30: DataKey::Admin)"))
+            .stdout(predicate::str::contains("storage_get<instance>(v9: DataKey::Admin)"))
             .stdout(predicate::str::contains(": DataKey::Balance(v"))
             .stdout(predicate::str::contains(": DataKey::Allowance(v"))
             // The provenance note records the evidence chain, including
@@ -711,7 +711,7 @@ fn dump_hir_names_enum_storage_keys_by_value_on_timelock_and_dex() {
         .args(["dump-hir", TIMELOCK])
         .assert()
         .success()
-        .stdout(predicate::str::contains("storage_get<instance>(v182: DataKey::Balance)"))
+        .stdout(predicate::str::contains("storage_get<instance>(v13: DataKey::Balance)"))
         .stdout(predicate::str::contains("storage_remove<instance>(v163: DataKey::Balance)"))
         .stdout(predicate::str::contains(": DataKey::Init").not());
 

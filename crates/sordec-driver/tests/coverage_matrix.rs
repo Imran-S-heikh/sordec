@@ -47,16 +47,23 @@ fn fixtures() -> Vec<(&'static str, &'static [u8])> {
     ]
 }
 
-/// Run the full high-IR pipeline over one fixture and aggregate every
-/// pass's metric counters into one `metric-key → total` map — the same
+/// Run the full pipeline — de-cluttering, lowering, recognizers — over
+/// one fixture and aggregate every pass's metric counters into one
+/// `metric-key → total` map — the same
 /// [`PipelineReport::metric_totals`] the `sordec coverage` CLI consumes
 /// (W7), exercised here across the whole corpus.
+///
+/// The declutter stage runs deliberately (W3): every recognizer-count
+/// assertion in this matrix doubles as the semantic-preservation net
+/// for the CFG surgery — a declutter bug that breaks a use chain shows
+/// up here as a dropped count.
 fn pipeline_metrics(name: &str, wasm: &[u8]) -> BTreeMap<&'static str, i64> {
     let parsed =
         sordec_frontend::parse(wasm).unwrap_or_else(|e| panic!("[{name}] parse: {e}"));
-    let lifted = lift_with_waffle(wasm, &parsed.wasm_facts, parsed.soroban_facts.as_ref())
+    let mut lifted = lift_with_waffle(wasm, &parsed.wasm_facts, parsed.soroban_facts.as_ref())
         .unwrap_or_else(|e| panic!("[{name}] lift: {e}"))
         .lifted;
+    sordec_passes::default_lifted_pipeline().run(&mut lifted);
     let mut ir = LiftToHigh
         .lower(lifted)
         .unwrap_or_else(|e| panic!("[{name}] lower: {e:?}"));

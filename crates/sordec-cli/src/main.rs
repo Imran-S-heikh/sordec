@@ -90,6 +90,13 @@ struct DumpIrArgs {
     /// presence) before rendering functions.
     #[arg(long)]
     with_header: bool,
+
+    /// Skip the de-cluttering pipeline and show the pristine post-lift
+    /// IR (waffle-shaped max-SSA: trivial phis, forwarding blocks, the
+    /// synthetic return funnel all intact). Useful for debugging the
+    /// lift and the de-cluttering passes themselves.
+    #[arg(long)]
+    raw: bool,
 }
 
 #[derive(clap::Args)]
@@ -97,9 +104,10 @@ struct DumpHirArgs {
     /// Path to the WASM module to inspect.
     wasm: PathBuf,
 
-    /// Skip the pattern-recovery pipeline and show the raw lowered IR
-    /// (the mechanical `LiftedIr → HighIr` output with no semantic
-    /// recognition). Useful for debugging the lowering itself.
+    /// Skip every pipeline — de-cluttering AND pattern recovery — and
+    /// show the raw lowered IR (the mechanical `LiftedIr → HighIr`
+    /// output of the pristine lift, with no semantic recognition).
+    /// Useful for debugging the lowering itself.
     #[arg(long)]
     raw: bool,
 }
@@ -203,7 +211,7 @@ fn run_dump_ir(args: &DumpIrArgs) -> u8 {
     };
 
     // 3. Lift.
-    let lift_output = match sordec_passes::lift_with_waffle(
+    let mut lift_output = match sordec_passes::lift_with_waffle(
         &bytes,
         &parse_output.wasm_facts,
         parse_output.soroban_facts.as_ref(),
@@ -215,22 +223,32 @@ fn run_dump_ir(args: &DumpIrArgs) -> u8 {
         }
     };
 
+    // 3b. De-clutter unless `--raw`: the default view is the lifted IR
+    //     the rest of the pipeline actually consumes.
+    let mut declutter_diagnostics = Vec::new();
+    if !args.raw {
+        let report = sordec_passes::default_lifted_pipeline().run(&mut lift_output.lifted);
+        declutter_diagnostics = report.diagnostics().cloned().collect();
+    }
+
     // 4. Render to stdout.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let options = pretty::RenderOptions {
         with_header: args.with_header,
+        skip_unreachable: !args.raw,
     };
     if let Err(e) = pretty::render_lifted_ir(&mut out, &lift_output.lifted, &options) {
         let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
         return EXIT_IO_ERR;
     }
 
-    // 5. Diagnostics from BOTH parse and lift on stderr, in pipeline
-    //    order (parse first, then lift). Concatenated into a single
-    //    pass so a downstream piping caller sees them together.
+    // 5. Diagnostics from parse, lift, and de-cluttering on stderr, in
+    //    pipeline order. Concatenated into a single pass so a
+    //    downstream piping caller sees them together.
     let mut combined = parse_output.diagnostics.into_vec();
     combined.extend(lift_output.diagnostics.into_vec());
+    combined.extend(declutter_diagnostics);
     diagnostics::print_diagnostics(&combined);
 
     EXIT_OK
@@ -260,7 +278,7 @@ fn run_dump_hir(args: &DumpHirArgs) -> u8 {
     };
 
     // 3. Lift.
-    let lift_output = match sordec_passes::lift_with_waffle(
+    let mut lift_output = match sordec_passes::lift_with_waffle(
         &bytes,
         &parse_output.wasm_facts,
         parse_output.soroban_facts.as_ref(),
@@ -271,6 +289,14 @@ fn run_dump_hir(args: &DumpHirArgs) -> u8 {
             return EXIT_PIPELINE_ERR;
         }
     };
+
+    // 3b. De-clutter the lifted IR unless `--raw` (which shows the
+    //     mechanical lowering of the pristine lift).
+    let mut pipeline_diagnostics = Vec::new();
+    if !args.raw {
+        let report = sordec_passes::default_lifted_pipeline().run(&mut lift_output.lifted);
+        pipeline_diagnostics.extend(report.diagnostics().cloned());
+    }
 
     // 4. Lower to HighIr (mechanical boundary step). Consumes the lifted
     //    IR by value per the `LoweringStep` contract.
@@ -285,10 +311,9 @@ fn run_dump_hir(args: &DumpHirArgs) -> u8 {
     // 4b. Run the pattern-recovery pipeline unless `--raw`. Recognizers
     //     rewrite bindings into semantic ops in place; `--raw` preserves
     //     the mechanical lowering view for debugging.
-    let mut pipeline_diagnostics = Vec::new();
     if !args.raw {
         let report = sordec_passes::default_high_pipeline().run(&mut high);
-        pipeline_diagnostics = report.diagnostics().cloned().collect();
+        pipeline_diagnostics.extend(report.diagnostics().cloned());
     }
 
     // 5. Render to stdout.
@@ -333,7 +358,7 @@ fn run_coverage(args: &CoverageArgs) -> u8 {
     };
 
     // 3. Lift.
-    let lift_output = match sordec_passes::lift_with_waffle(
+    let mut lift_output = match sordec_passes::lift_with_waffle(
         &bytes,
         &parse_output.wasm_facts,
         parse_output.soroban_facts.as_ref(),
@@ -345,12 +370,18 @@ fn run_coverage(args: &CoverageArgs) -> u8 {
         }
     };
 
+    // 3b. De-clutter: coverage always reports on the IR the real
+    //     pipeline consumes. The declutter counters ride along in
+    //     `metric_totals` (surfacing is a W8 concern).
+    let declutter_report =
+        sordec_passes::default_lifted_pipeline().run(&mut lift_output.lifted);
+
     // 4. Run the recogniser pipeline (on a lowered clone of the lifted
     //    IR; the original is borrowed by `compute_coverage`) and harvest
     //    both signals from the one report: per-code diagnostics (the
     //    E3/F9 signal) and per-pass metric totals (the F1–F8 + headline
     //    signal).
-    let (recognizer_diagnostics, metric_totals) =
+    let (recognizer_diagnostics, mut metric_totals) =
         match sordec_passes::LiftToHigh.lower(lift_output.lifted.clone()) {
             Ok(mut high) => {
                 let report = sordec_passes::default_high_pipeline().run(&mut high);
@@ -363,6 +394,9 @@ fn run_coverage(args: &CoverageArgs) -> u8 {
                 std::collections::BTreeMap::new(),
             ),
         };
+    for (key, value) in declutter_report.metric_totals() {
+        *metric_totals.entry(key).or_insert(0) += value;
+    }
 
     // 5. Compute the report. Pure — no failure modes.
     let report = coverage::compute_coverage(
