@@ -41,9 +41,10 @@ pub mod recognizers;
 pub mod val_abi;
 
 pub use dataflow::{
-    resolve_use, trace_bytes, trace_const, trace_const_with_limit, trace_literal, trace_u32val,
-    CallIndex, CallSite, DefUseIndex, Resolver, TraceStop, UseSite, DEFAULT_MAX_DEPTH,
-    DEFAULT_RESOLVE_DEPTH, DEFAULT_USE_DEPTH,
+    for_each_target, resolve_use, trace_bytes, trace_const, trace_const_with_limit, trace_literal,
+    trace_u32val, CallIndex, CallSite, CfgEdge, CfgFacts, DefUseIndex, LoopForest, LoopId,
+    NaturalLoop, Resolver, TraceStop, UseSite, DEFAULT_MAX_DEPTH, DEFAULT_RESOLVE_DEPTH,
+    DEFAULT_USE_DEPTH,
 };
 pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};

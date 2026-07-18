@@ -28,10 +28,19 @@
 //!   check pattern collapses hinge on.
 //! - [`UseSite`] — where a use occurs (a value's definition or a block
 //!   terminator).
+//! - [`CfgFacts`] / [`LoopForest`] — control-flow-graph facts (deduped
+//!   adjacency, reverse postorder, immediate dominators, reducibility)
+//!   and the natural-loop nesting derived from them; the substrate the
+//!   Phase-3 structurer and cleanup passes stand on.
+//! - [`for_each_target`] — raw terminator-target enumeration with
+//!   multiplicity, in the order [`CfgFacts`]'s RPO is defined by.
+//! - [`CfgEdge`] — one directed CFG edge (back edges, irreducibility
+//!   witnesses).
 //!
 //! Additional analyses (fixpoint driver, expression visitor) land here
 //! as Phase 2 recognizers require them.
 
+pub mod cfg;
 pub mod const_prop;
 pub mod def_use;
 pub mod frame_facts;
@@ -39,6 +48,7 @@ pub mod high;
 pub mod trace_bytes;
 pub mod trace_const;
 
+pub use cfg::{for_each_target, CfgEdge, CfgFacts, LoopForest, LoopId, NaturalLoop};
 pub use const_prop::{CallIndex, CallSite, Resolver, DEFAULT_RESOLVE_DEPTH};
 pub use def_use::{DefUseIndex, UseSite};
 pub use frame_facts::{
