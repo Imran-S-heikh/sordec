@@ -12,6 +12,16 @@
 //!    subtrees and duplicated subtrees, and this catches both;
 //! 3. zero `StructuringFallback` diagnostics from the high pipeline —
 //!    the diagnostic-side statement of the same invariant.
+//!
+//! Alongside the locks lives the **skeleton cross-check** (C4): one
+//! `wasmparser` scan of the *original* binary — an oracle independent
+//! of both waffle's frontend and our lift — asserting per-function
+//! parity between original `loop`/`br_table` opcode counts and derived
+//! `Region::Loop`/`Region::Switch` node counts. Block and `return`
+//! counts are deliberately NOT compared (chain merging and
+//! return-funnel inlining legitimately change them), and the corpus has
+//! zero `if` opcodes (census R3). Structuring depth metrics are the
+//! A6/W8 coverage surface, not asserted here.
 
 mod common;
 
@@ -100,5 +110,75 @@ fn corpus_structures_with_zero_unstructured_regions() {
             fallbacks.is_empty(),
             "[{name}] StructuringFallback on corpus input: {fallbacks:?}",
         );
+    }
+}
+
+/// Original-binary control-flow skeleton of one defined function.
+struct OpcodeCensus {
+    /// `loop` opcodes in the function body.
+    loops: u32,
+    /// `br_table` opcodes in the function body.
+    br_tables: u32,
+}
+
+/// Count `loop`/`br_table` opcodes per defined function by scanning the
+/// code section directly — no waffle, no lift.
+fn scan_code_section(wasm: &[u8]) -> Vec<OpcodeCensus> {
+    let mut census = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        let wasmparser::Payload::CodeSectionEntry(body) = payload.expect("fixture parses") else {
+            continue;
+        };
+        let mut counts = OpcodeCensus {
+            loops: 0,
+            br_tables: 0,
+        };
+        let mut ops = body
+            .get_operators_reader()
+            .expect("code entry has operators");
+        while !ops.eof() {
+            match ops.read().expect("operator decodes") {
+                wasmparser::Operator::Loop { .. } => counts.loops += 1,
+                wasmparser::Operator::BrTable { .. } => counts.br_tables += 1,
+                _ => {}
+            }
+        }
+        census.push(counts);
+    }
+    census
+}
+
+#[test]
+fn skeleton_matches_original_wasm_nesting() {
+    for (name, wasm) in FIXTURES {
+        let (_, high, _) = structure_fixture(wasm);
+        let originals = scan_code_section(wasm);
+        // Defined-function order is the correlation key: code-section
+        // entry i is lifted function i by construction of the lift.
+        assert_eq!(
+            originals.len(),
+            high.functions.len(),
+            "[{name}] defined-function count agrees with the lift",
+        );
+
+        for (high_func, original) in high.functions.iter().zip(&originals) {
+            let mut loops = 0u32;
+            let mut switches = 0u32;
+            high_func.region.for_each_node(|region| match region {
+                Region::Loop { .. } => loops += 1,
+                Region::Switch { .. } => switches += 1,
+                _ => {}
+            });
+            assert_eq!(
+                loops, original.loops,
+                "[{name}] {}: derived Loop regions vs original `loop` opcodes",
+                high_func.id,
+            );
+            assert_eq!(
+                switches, original.br_tables,
+                "[{name}] {}: derived Switch regions vs original `br_table` opcodes",
+                high_func.id,
+            );
+        }
     }
 }

@@ -21,6 +21,9 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 sordec-frontend.workspace = true
+# The structuring skeleton cross-check (C4) rescans the original code
+# section as an oracle independent of both waffle and our lift.
+wasmparser.workspace = true
 
 [lints]
 workspace = true

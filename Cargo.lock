@@ -1256,6 +1256,7 @@ dependencies = [
  "sordec-ir",
  "thiserror 2.0.18",
  "waffle",
+ "wasmparser 0.240.0",
 ]
 
 [[package]]
