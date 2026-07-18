@@ -176,6 +176,105 @@ pub enum Region {
     },
 }
 
+impl Region {
+    /// Visit every [`ValueId`] this region tree **reads**, in
+    /// depth-first pre-order.
+    ///
+    /// Reads are: [`Region::If`] conditions, [`Region::Switch`] indices
+    /// and `dispatch` bindings, the *source* side of every
+    /// [`PhiTransfer`] pair on [`Region::Break`] / [`Region::Continue`] /
+    /// [`Region::Transfer`], and [`Region::Return`] values.
+    ///
+    /// The *target* side of a transfer pair (the phi binding being
+    /// assigned) is deliberately **not** visited: it is an assignment
+    /// destination, not a read. A use-index built from this walk
+    /// therefore reports a phi that is written but never read as
+    /// unused — which is what deadness analyses need. Callers that need
+    /// the assignment side (e.g. the region validators) should walk the
+    /// transfer lists directly.
+    ///
+    /// Bindings scheduled inside a [`Region::Basic`] block are not
+    /// visited either — the region only references the block; binding
+    /// operands are indexed separately from
+    /// [`crate::HighBlock::bindings`].
+    ///
+    /// The internal match is exhaustive on purpose: adding a `Region`
+    /// variant without classifying its value reads fails to compile
+    /// here rather than silently under-counting uses.
+    pub fn for_each_value_use<F: FnMut(ValueId)>(&self, mut f: F) {
+        self.walk_value_uses(&mut f);
+    }
+
+    fn walk_value_uses<F: FnMut(ValueId)>(&self, f: &mut F) {
+        match self {
+            Region::Basic(_) => {}
+            Region::Sequence(items) => {
+                for item in items {
+                    item.walk_value_uses(f);
+                }
+            }
+            Region::Scope { out: _, body } => body.walk_value_uses(f),
+            Region::If {
+                cond,
+                then_region,
+                else_region,
+            } => {
+                f(*cond);
+                then_region.walk_value_uses(f);
+                if let Some(else_region) = else_region {
+                    else_region.walk_value_uses(f);
+                }
+            }
+            Region::Loop {
+                header: _,
+                body,
+                kind: _,
+            } => body.walk_value_uses(f),
+            Region::Switch {
+                index,
+                arms,
+                default,
+                dispatch,
+            } => {
+                f(*index);
+                if let Some(dispatch) = dispatch {
+                    f(*dispatch);
+                }
+                for arm in arms {
+                    arm.body.walk_value_uses(f);
+                }
+                default.walk_value_uses(f);
+            }
+            Region::Break {
+                target: _,
+                transfer,
+            }
+            | Region::Continue {
+                target: _,
+                transfer,
+            }
+            | Region::Transfer {
+                target: _,
+                transfer,
+            } => {
+                for (_phi, source) in transfer {
+                    f(*source);
+                }
+            }
+            Region::Return { values } => {
+                for value in values {
+                    f(*value);
+                }
+            }
+            Region::Unreachable => {}
+            Region::Unstructured {
+                entry: _,
+                reason: _,
+            } => {}
+        }
+    }
+}
+
 /// Source-level loop shape recorded on [`Region::Loop`].
 ///
 /// Written only by the loop-classification refinement pass; the
@@ -319,6 +418,85 @@ mod tests {
         };
         assert_eq!(arms[0].cases, vec![0, 2]);
         assert_eq!(arms[1].cases, vec![1]);
+    }
+
+    /// Collect the walker's visits in order.
+    fn value_uses(region: &Region) -> Vec<ValueId> {
+        let mut uses = Vec::new();
+        region.for_each_value_use(|v| uses.push(v));
+        uses
+    }
+
+    #[test]
+    fn guard_tree_visits_cond_transfer_source_and_return() {
+        // guard_tree reads: the If cond v4, the Break transfer SOURCE
+        // v7, and the Return value v9. The transfer TARGET v9 must not
+        // be visited from the Break — v9 appears exactly once, via
+        // Return.
+        assert_eq!(value_uses(&guard_tree()), vec![v(4), v(7), v(9)]);
+    }
+
+    #[test]
+    fn loop_continue_visits_cond_and_loop_carried_source() {
+        let region = Region::Loop {
+            header: bb(1),
+            body: Box::new(Region::Sequence(vec![
+                Region::Basic(bb(1)),
+                Region::If {
+                    cond: v(5),
+                    then_region: Box::new(Region::Continue {
+                        target: bb(1),
+                        transfer: vec![(v(2), v(6))],
+                    }),
+                    else_region: Some(Box::new(Region::Break {
+                        target: bb(3),
+                        transfer: vec![],
+                    })),
+                },
+            ])),
+            kind: LoopKind::Unclassified,
+        };
+        // cond v5, then the Continue's transfer source v6. The phi
+        // target v2 is an assignment destination, not a read.
+        assert_eq!(value_uses(&region), vec![v(5), v(6)]);
+    }
+
+    #[test]
+    fn switch_visits_index_dispatch_arms_and_default() {
+        let region = Region::Switch {
+            index: v(0),
+            arms: vec![
+                SwitchArm {
+                    cases: vec![0, 2],
+                    body: Region::Return { values: vec![v(3)] },
+                },
+                SwitchArm {
+                    cases: vec![1],
+                    body: Region::Basic(bb(2)),
+                },
+            ],
+            default: Box::new(Region::Transfer {
+                target: bb(4),
+                transfer: vec![(v(8), v(5))],
+            }),
+            dispatch: Some(v(1)),
+        };
+        // index, dispatch binding, arm bodies in order, then default.
+        assert_eq!(value_uses(&region), vec![v(0), v(1), v(3), v(5)]);
+    }
+
+    #[test]
+    fn leaves_visit_nothing() {
+        for region in [
+            Region::Basic(bb(0)),
+            Region::Unreachable,
+            Region::Unstructured {
+                entry: bb(0),
+                reason: UnknownReason::UpstreamUnknown,
+            },
+        ] {
+            assert_eq!(value_uses(&region), vec![], "{region:?}");
+        }
     }
 
     #[cfg(feature = "serde")]
