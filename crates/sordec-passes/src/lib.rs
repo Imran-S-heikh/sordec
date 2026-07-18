@@ -28,6 +28,7 @@
 //! Phase 2 as separate modules.
 
 pub mod dataflow;
+pub mod declutter;
 pub mod effects;
 pub mod error;
 pub mod host_calls;
@@ -47,6 +48,7 @@ pub use dataflow::{
     NaturalLoop, Resolver, TraceStop, UseSite, DEFAULT_MAX_DEPTH, DEFAULT_RESOLVE_DEPTH,
     DEFAULT_USE_DEPTH,
 };
+pub use declutter::{PruneTrivialPhisPass, ResolveAliasesPass};
 pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
 pub use lift::{lift_with_waffle, LiftOutput};
@@ -60,7 +62,28 @@ pub use recognizers::{
 };
 pub use sordec_common::LiftDiagnostics;
 
-use sordec_ir::HighIr;
+use sordec_ir::{HighIr, LiftedIr};
+
+/// Build the default lifted-IR de-cluttering pipeline.
+///
+/// Runs between [`lift_with_waffle`] and the [`LiftToHigh`] lowering.
+/// [`ResolveAliasesPass`] runs once up front — no later pass creates a
+/// *used* alias (trivial-phi tombstones are born use-free). The
+/// remaining de-cluttering passes form a fixpoint group because they
+/// enable each other (see the [`declutter`] module docs for the
+/// termination measure). `--raw` CLI paths skip this pipeline entirely,
+/// preserving the pristine post-waffle view.
+#[must_use]
+#[allow(clippy::single_range_in_vec_init)] // fixpoint group, not a range literal
+pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
+    Pipeline::new(
+        vec![
+            Box::new(ResolveAliasesPass),
+            Box::new(PruneTrivialPhisPass),
+        ],
+        vec![1..2],
+    )
+}
 
 /// Build the default high-IR pattern-recovery pipeline.
 ///

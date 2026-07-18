@@ -163,6 +163,17 @@ pub const VAL_DECODE_SMALL: &str = "val_decode_small";
 pub const VAL_COMPARE: &str = "val_compare";
 
 // ---------------------------------------------------------------------
+// Lifted-IR de-cluttering (Phase 3 W3). Registered here for the W8
+// coverage surface; deliberately absent from `surfaced_keys()` until
+// A6/F3 wires the structuring-metrics section.
+// ---------------------------------------------------------------------
+
+/// Alias uses rewritten to their terminal definition.
+pub const DECLUTTER_ALIASES_RESOLVED: &str = "declutter_aliases_resolved";
+/// Trivial block parameters removed (Braun-style pruning).
+pub const DECLUTTER_PHIS_PRUNED: &str = "declutter_phis_pruned";
+
+// ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)
 // ---------------------------------------------------------------------
 

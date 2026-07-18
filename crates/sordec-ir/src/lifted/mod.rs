@@ -147,7 +147,11 @@ pub struct LiftedValue {
 }
 
 /// Origin of a [`LiftedValue`].
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` is structural (via [`WasmOp`]'s inner-operator equality)
+/// and exists for test assertions and pass-internal comparisons — two
+/// equal defs in different functions are still different values.
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub enum LiftedValueDef {
     /// Result of a WASM operator with its operand value ids.
