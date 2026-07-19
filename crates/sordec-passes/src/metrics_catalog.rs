@@ -237,6 +237,11 @@ pub const REFINE_UNWRAPS: &str = "refine_unwraps";
 /// Switch arms structurally equal to their default, folded into the
 /// wildcard (W7 D5).
 pub const REFINE_SWITCH_ARMS_DEDUPED: &str = "refine_switch_arms_deduped";
+/// Shared-else diamonds merged into one `&&` guard (W7 D7).
+pub const REFINE_AND_MERGED: &str = "refine_and_merged";
+/// Diamonds matching the D7 shape but blocked by the effect or
+/// boolean-operand gate — the widening signal.
+pub const REFINE_AND_MERGE_BLOCKED: &str = "refine_and_merge_blocked";
 
 // ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)

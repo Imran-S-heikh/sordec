@@ -141,6 +141,19 @@ impl FoldCtx<'_> {
             let mut buf: Vec<u8> = Vec::new();
             let ok = match &binding.expr {
                 Expr::Literal(lit) => render_literal(&mut buf, lit).is_ok(),
+                // A Bool-typed bitwise `&` is the D7 refiner's
+                // recovered short-circuit conjunction (its only
+                // producer) — render the source's `&&`.
+                Expr::Binary {
+                    op: BinaryOp::BitAnd,
+                    lhs,
+                    rhs,
+                } if binding.ty == IrType::Known(KnownType::Bool) => {
+                    let text =
+                        format!("{} && {}", deeper.operand(*lhs), deeper.operand(*rhs));
+                    buf.extend_from_slice(text.as_bytes());
+                    true
+                }
                 expr => {
                     buf.push(b'(');
                     let ok = render_expr(&mut buf, expr, &deeper).is_ok();

@@ -33,6 +33,7 @@
 //!   (debug builds), so a bad splice fails at the pass that made it,
 //!   not three passes later.
 
+mod and_merge;
 mod dispatch_link;
 mod guard_clause;
 mod panic_recover;
@@ -40,6 +41,7 @@ mod polarity;
 mod switch_dedup;
 mod trap_inline;
 
+pub use and_merge::AndMergePass;
 pub use dispatch_link::DispatchLinkPass;
 pub use guard_clause::GuardClausePass;
 pub use panic_recover::PanicRecoverPass;
