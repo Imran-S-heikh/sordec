@@ -34,7 +34,9 @@ pub use lifted::{
     LiftedValueDef, WasmOp, WasmOpcodeKind,
 };
 pub use memory::{DataSegment, MemoryImage};
-pub use validate::{validate_high, validate_lifted, Validate, ValidateError};
+pub use validate::{
+    validate_high, validate_lifted, validate_lifted_function, Validate, ValidateError,
+};
 pub use wasm_facts::{
     ByteRange, CompositeType, CustomSection, EnumCase, EnumDef, EnvCompatibility, EventDef,
     EventParam, EventParamLocation, Export, ExportKind, FunctionParam, FunctionSignature, Import,

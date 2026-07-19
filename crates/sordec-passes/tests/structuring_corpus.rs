@@ -29,7 +29,7 @@ use std::collections::HashMap;
 
 use common::FIXTURES;
 use sordec_common::{BlockId, DiagnosticCode, LiftDiagnosticCode};
-use sordec_ir::{HighIr, LiftedIr, Region};
+use sordec_ir::{validate_high, validate_lifted, HighIr, LiftedIr, Region};
 use sordec_passes::{
     default_high_pipeline, default_lifted_pipeline, lift_with_waffle, CfgFacts, LiftToHigh,
     LoweringStep, PipelineReport,
@@ -51,6 +51,20 @@ fn structure_fixture(wasm: &[u8]) -> (LiftedIr, HighIr, PipelineReport) {
         .expect("boundary lowering succeeds");
     let report = default_high_pipeline().run(&mut high);
     (lifted, high, report)
+}
+
+#[test]
+fn corpus_satisfies_ir_validators() {
+    // The A5 validators run green over the whole corpus — the region
+    // structure (label enclosure, transfer integrity, no duplicate
+    // leaves) and region-order dominance the W6/W7 refinement passes
+    // will lean on.
+    for (name, wasm) in FIXTURES {
+        let (lifted, high, _) = structure_fixture(wasm);
+        validate_lifted(&lifted)
+            .unwrap_or_else(|e| panic!("[{name}] lifted validator: {e:?}"));
+        validate_high(&high).unwrap_or_else(|e| panic!("[{name}] high validator: {e:?}"));
+    }
 }
 
 #[test]
