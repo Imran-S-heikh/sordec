@@ -319,7 +319,12 @@ fn run_dump_hir(args: &DumpHirArgs) -> u8 {
     // 5. Render to stdout.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    if let Err(e) = pretty_hir::render_high_ir(&mut out, &high, !args.raw) {
+    let mode = if args.raw {
+        pretty_hir::RenderMode::Raw
+    } else {
+        pretty_hir::RenderMode::Structured
+    };
+    if let Err(e) = pretty_hir::render_high_ir(&mut out, &high, mode) {
         let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
         return EXIT_IO_ERR;
     }

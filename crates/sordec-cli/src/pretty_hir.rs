@@ -9,38 +9,60 @@
 //!
 //! # Output format
 //!
+//! The default [`RenderMode::Structured`] view walks the [`Region`] tree
+//! into nested `if` / `loop` / `match`, with Rust-native labeled scopes
+//! (`'bbN: { … break 'bbN }`) at forward merges and `;; bbN` breadcrumbs
+//! marking where each basic block's bindings begin:
+//!
 //! ```text
-//! function func_0 [exported as "add"] {
+//! function func_7 [exported as "transfer"] {
 //!   ;; region: structured
-//!   bb0:
-//!     v3: ? = i64.add(v1, v2)          ;; DataFlow: operator: Arithmetic
-//!     v6: ? = host:l:put_contract_data(v4, v5)   ;; DataFlow: operator: Call
+//!   'bb2: {
+//!     ;; bb0
+//!     v6: ? = require_auth(v1)              ;; HostFunctionAbi: auth require_auth
+//!     if (ne (and v1, 255i64), 77i64) {
+//!       break 'bb2
+//!     } else {
+//!       ;; bb3
+//!       v20: ? = storage_get<persistent>(v5)  ;; SdkPattern: storage-tier
+//!       return v20
+//!     }
+//!   }
+//!   ;; bb2
+//!   unreachable
 //!   ;; unscheduled bindings (block params / phis):
-//!     v0: ? = phi [bb1 -> v9]          ;; DataFlow: block param
+//!     v45: ? = phi [bb5 -> v19, bb6 -> v12]   ;; DataFlow: block param
 //! }
 //! ```
 //!
-//! Control flow is structured at the lowering boundary, but this
-//! renderer still shows the flat block listing with a one-line region
-//! banner — the nested `if`/`loop`/`match` rendering is the
-//! structured-renderer work (A4/W5). Block parameters (phi nodes) are
-//! not scheduled into any block's binding list, so they render in a
-//! trailing "unscheduled" section.
+//! Phi bindings stay in the trailing "unscheduled" section (their
+//! per-edge value flow already shows as `vPhi = vSrc` assignment lines
+//! before each `break`/`continue`); [`RenderMode::Raw`] (`--raw`) keeps
+//! the flat, unfolded block listing instead. A function whose region
+//! fell back to [`Region::Unstructured`] renders the flat body under the
+//! fallback banner even in structured mode.
+//!
+//! The tree is faithful to the structurer, not yet refined: guards are
+//! still `else`-nested and loops unclassified until the W6/W7 refinement
+//! passes land (as reviewed diffs against the [C5 locks](../tests)).
 //!
 //! # Folded rendering (W3/B6)
 //!
-//! On the default (non-`--raw`) path, bindings the
-//! [`InlinePlan`] treeification analysis classifies
-//! `Inline(ExprOperand)` — pure-total, read exactly once by another
-//! live binding — skip their own statement line and render nested
-//! inside their consumer instead: `v6 = sub v4, 48i32` rather than a
-//! separate `v5 = 48i32` line. De-clutter residue (`Dead`) is hidden
-//! behind one honest count line. The single choke point for operand
-//! text is [`FoldCtx::operand`] — every expression-position id goes
-//! through it, which is what guarantees a skipped line always
-//! reappears at its use site. Phi incomings are the deliberate
-//! exception (per-edge transfer assignments, A1 DD2); the plan never
-//! classifies a phi-consumed value `Inline`.
+//! On the structured path, bindings the [`InlinePlan`] treeification
+//! analysis classifies `Inline` — pure-total, read exactly once, either
+//! by another expression (`ExprOperand`) or by a region position like
+//! an `if` condition (`RegionUse`) — skip their own statement line and
+//! render nested inside their consumer instead: `if (ne (and v1,
+//! 255i64), 77i64)` rather than three separate binding lines. Only
+//! bindings still carrying their single lowering-provenance entry fold;
+//! anything a recognizer touched keeps its own line so its
+//! `;; SdkPattern: …` note stays visible. De-clutter residue (`Dead`)
+//! is hidden behind one honest count line. The single choke point for
+//! operand text is [`FoldCtx::operand`] — every expression-position id
+//! goes through it, which guarantees a skipped line always reappears at
+//! its use site. Phi incomings are the deliberate exception (per-edge
+//! transfer assignments, A1 DD2); the plan never classifies a
+//! phi-consumed value `Inline`.
 
 use std::collections::HashSet;
 use std::io::{self, Write};
@@ -51,7 +73,7 @@ use sordec_ir::{
     KnownTier, KnownType, Literal, MemWidth, Region, SemanticOp, StorageTier, UnaryOp,
 };
 use sordec_passes::host_calls;
-use sordec_passes::{InlineClass, InlinePlan, InlineSite};
+use sordec_passes::{InlineClass, InlinePlan};
 
 /// Defensive recursion bound for folded rendering. Well-formed SSA
 /// cannot cycle (an `Inline` chain is finite and single-use), so this
@@ -92,11 +114,13 @@ impl FoldCtx<'_> {
     /// folding would erase it. The Phase-4 emitter applies its own
     /// policy (J3) over the same plan.
     fn folds(&self, value: ValueId) -> bool {
+        // Both inline sites fold: an `ExprOperand` nests into its
+        // consuming expression, a `RegionUse` into the `if`/`match`/
+        // `return` position that reads it (the structured view's
+        // condition folding). The plan is absent on the raw path, so
+        // nothing folds there.
         self.plan.is_some_and(|plan| {
-            matches!(
-                plan.class(value),
-                InlineClass::Inline(InlineSite::ExprOperand { .. })
-            )
+            matches!(plan.class(value), InlineClass::Inline(_))
         }) && self
             .func
             .and_then(|f| f.bindings.get(value))
@@ -132,12 +156,23 @@ impl FoldCtx<'_> {
     }
 }
 
+/// How to render the high IR body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderMode {
+    /// Structured: walk the [`Region`] tree into nested
+    /// `if`/`loop`/`match` with folded operands. The default view.
+    Structured,
+    /// Raw: the flat block listing with no folding — the mechanical,
+    /// pre-structuring view reached by `--raw`.
+    Raw,
+}
+
 /// Render a [`HighIr`] to `out` as text.
 ///
 /// # Errors
 ///
 /// Returns the underlying [`io::Error`] when writing to `out` fails.
-pub fn render_high_ir(out: &mut impl Write, high: &HighIr, folded: bool) -> io::Result<()> {
+pub fn render_high_ir(out: &mut impl Write, high: &HighIr, mode: RenderMode) -> io::Result<()> {
     if high.functions.is_empty() {
         writeln!(out, ";; (module has no local functions)")?;
         return Ok(());
@@ -146,12 +181,12 @@ pub fn render_high_ir(out: &mut impl Write, high: &HighIr, folded: bool) -> io::
         if i > 0 {
             writeln!(out)?;
         }
-        render_function(out, func, folded)?;
+        render_function(out, func, mode)?;
     }
     Ok(())
 }
 
-fn render_function(out: &mut impl Write, func: &HighFunction, folded: bool) -> io::Result<()> {
+fn render_function(out: &mut impl Write, func: &HighFunction, mode: RenderMode) -> io::Result<()> {
     match &func.name {
         // The SDK's deploy-time constructor export (D6). Distinguished
         // from ordinary contract methods — its `#[contractimpl]`
@@ -171,6 +206,9 @@ fn render_function(out: &mut impl Write, func: &HighFunction, folded: bool) -> i
 
     render_region_banner(out, &func.region)?;
 
+    // Folding is the structured view's job; raw shows every binding on
+    // its own line.
+    let folded = mode == RenderMode::Structured;
     let plan = folded.then(|| InlinePlan::build(func));
     let ctx = FoldCtx {
         func: Some(func),
@@ -178,47 +216,75 @@ fn render_function(out: &mut impl Write, func: &HighFunction, folded: bool) -> i
         depth: 0,
     };
 
-    // Bindings grouped by block, in block order. Track which bindings we
-    // accounted for so phis/unscheduled values can be shown afterward.
-    // A binding that folds renders nested inside its consumer instead
-    // of on its own line.
+    // Track which bindings the body accounted for, so phis and other
+    // unscheduled values surface afterward. A folded binding counts as
+    // rendered (it appears inside its consumer, not on its own line).
     let mut rendered: HashSet<ValueId> = HashSet::new();
+    match mode {
+        // Structured, unless the function fell back to `Unstructured`
+        // (irreducible/malformed input) — then the honest view is the
+        // same flat listing raw shows, under the fallback banner.
+        RenderMode::Structured if !matches!(func.region, Region::Unstructured { .. }) => {
+            render_region(out, func, &func.region, &ctx, 1, &mut rendered)?;
+        }
+        _ => render_flat_body(out, func, &ctx, &mut rendered)?,
+    }
+
+    render_unscheduled_and_residue(out, func, &ctx, plan.as_ref(), &rendered)?;
+    writeln!(out, "}}")?;
+    Ok(())
+}
+
+/// The flat block listing: every block labeled, bindings in block order.
+fn render_flat_body(
+    out: &mut impl Write,
+    func: &HighFunction,
+    ctx: &FoldCtx<'_>,
+    rendered: &mut HashSet<ValueId>,
+) -> io::Result<()> {
     for (block_id, block) in func.blocks.iter() {
         writeln!(out, "  bb{}:", block_id.index())?;
         for &value_id in &block.bindings {
             if let Some(binding) = func.bindings.get(value_id) {
                 rendered.insert(value_id);
                 if !ctx.folds(value_id) {
-                    render_binding(out, binding, &ctx)?;
+                    render_binding(out, binding, ctx, 2)?;
                 }
             }
         }
     }
+    Ok(())
+}
 
-    // Bindings not scheduled into any block (block params / phis).
-    // De-clutter residue hides behind the count line; folded bindings
-    // render at their use site like their scheduled counterparts.
+/// The trailing sections shared by both views: unscheduled bindings
+/// (block params / phis) and the de-clutter residue count.
+fn render_unscheduled_and_residue(
+    out: &mut impl Write,
+    func: &HighFunction,
+    ctx: &FoldCtx<'_>,
+    plan: Option<&InlinePlan>,
+    rendered: &HashSet<ValueId>,
+) -> io::Result<()> {
     let mut dead_hidden = 0usize;
     let unscheduled: Vec<&Binding> = func
         .bindings
         .iter()
         .filter(|(id, _)| !rendered.contains(id))
-        .filter(|(id, _)| {
-            match plan.as_ref().map(|p| p.class(*id)) {
-                Some(InlineClass::Dead) => {
-                    dead_hidden += 1;
-                    false
-                }
-                Some(InlineClass::Inline(InlineSite::ExprOperand { .. })) => false,
-                _ => true,
+        .filter(|(id, _)| match plan.map(|p| p.class(*id)) {
+            Some(InlineClass::Dead) => {
+                dead_hidden += 1;
+                false
             }
+            // Any inlinable binding renders at its use site, not here.
+            Some(InlineClass::Inline(_)) => false,
+            _ => true,
         })
         .map(|(_, b)| b)
         .collect();
     if !unscheduled.is_empty() {
         writeln!(out, "  ;; unscheduled bindings (block params / phis):")?;
         for binding in unscheduled {
-            render_binding(out, binding, &ctx)?;
+            render_binding(out, binding, ctx, 2)?;
         }
     }
     if dead_hidden > 0 {
@@ -227,8 +293,144 @@ fn render_function(out: &mut impl Write, func: &HighFunction, folded: bool) -> i
             "  ;; {dead_hidden} pruning-residue binding(s) hidden (--raw shows them)"
         )?;
     }
+    Ok(())
+}
 
-    writeln!(out, "}}")?;
+/// Render one structured [`Region`] node at `level` nesting (two spaces
+/// each). Scheduled bindings fold via `ctx`; phis stay in the trailing
+/// unscheduled section. The match is exhaustive on purpose — a new
+/// `Region` variant must be given a rendering here, not silently
+/// dropped.
+fn render_region(
+    out: &mut impl Write,
+    func: &HighFunction,
+    region: &Region,
+    ctx: &FoldCtx<'_>,
+    level: usize,
+    rendered: &mut HashSet<ValueId>,
+) -> io::Result<()> {
+    let ind = indent(level);
+    match region {
+        Region::Basic(b) => {
+            // Breadcrumb tying emitted bindings back to their CFG block.
+            writeln!(out, "{ind};; bb{}", b.index())?;
+            if let Some(block) = func.blocks.get(*b) {
+                for &value_id in &block.bindings {
+                    if let Some(binding) = func.bindings.get(value_id) {
+                        rendered.insert(value_id);
+                        if !ctx.folds(value_id) {
+                            render_binding(out, binding, ctx, level)?;
+                        }
+                    }
+                }
+            }
+        }
+        Region::Sequence(items) => {
+            for item in items {
+                render_region(out, func, item, ctx, level, rendered)?;
+            }
+        }
+        Region::Scope { out: label, body } => {
+            writeln!(out, "{ind}'bb{}: {{", label.index())?;
+            render_region(out, func, body, ctx, level + 1, rendered)?;
+            writeln!(out, "{ind}}}")?;
+        }
+        Region::If {
+            cond,
+            then_region,
+            else_region,
+        } => {
+            writeln!(out, "{ind}if {} {{", ctx.operand(*cond))?;
+            render_region(out, func, then_region, ctx, level + 1, rendered)?;
+            if let Some(else_region) = else_region {
+                writeln!(out, "{ind}}} else {{")?;
+                render_region(out, func, else_region, ctx, level + 1, rendered)?;
+            }
+            writeln!(out, "{ind}}}")?;
+        }
+        Region::Loop {
+            header,
+            body,
+            kind: _,
+        } => {
+            // `kind` stays `Unclassified` until the D3 loop-classification
+            // pass; render a plain `loop`.
+            writeln!(out, "{ind}'bb{}: loop {{", header.index())?;
+            render_region(out, func, body, ctx, level + 1, rendered)?;
+            writeln!(out, "{ind}}}")?;
+        }
+        Region::Switch {
+            index,
+            arms,
+            default,
+            dispatch: _,
+        } => {
+            // `dispatch` names arms by enum variant once the D6 pass
+            // links it; until then the selector renders as integers.
+            writeln!(out, "{ind}match {} {{", ctx.operand(*index))?;
+            for arm in arms {
+                let cases = arm
+                    .cases
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                writeln!(out, "{ind}  {cases} => {{")?;
+                render_region(out, func, &arm.body, ctx, level + 2, rendered)?;
+                writeln!(out, "{ind}  }}")?;
+            }
+            writeln!(out, "{ind}  _ => {{")?;
+            render_region(out, func, default, ctx, level + 2, rendered)?;
+            writeln!(out, "{ind}  }}")?;
+            writeln!(out, "{ind}}}")?;
+        }
+        Region::Break { target, transfer } => {
+            render_transfer(out, transfer, ctx, level)?;
+            writeln!(out, "{ind}break 'bb{}", target.index())?;
+        }
+        Region::Continue { target, transfer } => {
+            render_transfer(out, transfer, ctx, level)?;
+            writeln!(out, "{ind}continue 'bb{}", target.index())?;
+        }
+        Region::Transfer { target, transfer } => {
+            render_transfer(out, transfer, ctx, level)?;
+            // A no-op transfer is elided by the structurer; annotate a
+            // bare fallthrough if one ever reaches here.
+            if transfer.is_empty() {
+                writeln!(out, "{ind};; fall through to bb{}", target.index())?;
+            }
+        }
+        Region::Return { values } => {
+            write!(out, "{ind}return")?;
+            for (i, value) in values.iter().enumerate() {
+                write!(out, "{} {}", if i > 0 { "," } else { "" }, ctx.operand(*value))?;
+            }
+            writeln!(out)?;
+        }
+        Region::Unreachable => writeln!(out, "{ind}unreachable")?,
+        Region::Unstructured { entry, .. } => {
+            // Not reached from render_function (it routes Unstructured
+            // roots to the flat body), but a nested Unstructured — if a
+            // future refinement ever produced one — renders honestly.
+            writeln!(out, "{ind};; <unstructured from bb{}>", entry.index())?;
+        }
+    }
+    Ok(())
+}
+
+/// Render a branch edge's phi assignments (`vPhi = vSrc`), the visible
+/// form of [`sordec_ir::PhiTransfer`] materialization (A1 DD2). Empty
+/// transfers — the common case post-declutter — render nothing.
+fn render_transfer(
+    out: &mut impl Write,
+    transfer: &[(ValueId, ValueId)],
+    ctx: &FoldCtx<'_>,
+    level: usize,
+) -> io::Result<()> {
+    let ind = indent(level);
+    for &(phi, source) in transfer {
+        writeln!(out, "{ind}v{} = {}", phi.index(), ctx.operand(source))?;
+    }
     Ok(())
 }
 
@@ -248,10 +450,16 @@ fn render_region_banner(out: &mut impl Write, region: &Region) -> io::Result<()>
     }
 }
 
-fn render_binding(out: &mut impl Write, binding: &Binding, ctx: &FoldCtx<'_>) -> io::Result<()> {
+fn render_binding(
+    out: &mut impl Write,
+    binding: &Binding,
+    ctx: &FoldCtx<'_>,
+    level: usize,
+) -> io::Result<()> {
     write!(
         out,
-        "    v{}: {} = ",
+        "{}v{}: {} = ",
+        indent(level),
         binding.id.index(),
         ir_type_str(&binding.ty)
     )?;
@@ -263,6 +471,11 @@ fn render_binding(out: &mut impl Write, binding: &Binding, ctx: &FoldCtx<'_>) ->
         provenance_source_str(prov.source),
         prov.note
     )
+}
+
+/// Leading whitespace for `level` nesting levels (two spaces each).
+fn indent(level: usize) -> String {
+    "  ".repeat(level)
 }
 
 fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Result<()> {
@@ -1051,7 +1264,7 @@ mod tests {
     }
 
     fn header_line(func: &HighFunction) -> String {
-        render_to_string(|w| render_function(w, func, false))
+        render_to_string(|w| render_function(w, func, RenderMode::Raw))
             .lines()
             .next()
             .unwrap()
