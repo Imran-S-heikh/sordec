@@ -23,15 +23,24 @@
 //! break site (SSA: a value read by the shared block dominates each of
 //! its predecessors).
 //!
-//! Shared out-blocks that *carry* bindings (a `fail_with_error` helper
-//! reached by several guards) are left labeled and counted by the
-//! `refine_shared_trap_with_bindings` metric; replicating them needs
-//! fresh value/block ids and lands only if a real fixture shows the
-//! shape. Single-predecessor trap blocks never reach this pass at all —
-//! the structurer inlines non-merge blocks at their branch site.
+//! Shared out-blocks that *carry* bindings (the panic-glue helper
+//! `call func_N; unreachable` reached by several guards) are
+//! **duplicated** under fresh value/block ids (W7 D2-ext) when the
+//! block is small and *externally closed* — no binding reads a value
+//! defined inside the block, so each clone keeps the original operand
+//! ids (SSA: externals dominate every break site) and no expression
+//! rewriting is needed. The W6 corpus measured every such block as
+//! exactly one zero-argument glue call; the closure/size gates bound
+//! the general case. Duplication is K4-path-equivalent — the block
+//! already executed after each break; only its region position moves.
+//! Blocks failing a gate stay labeled and counted. Single-predecessor
+//! trap blocks never reach this pass at all — the structurer inlines
+//! non-merge blocks at their branch site.
 
-use sordec_common::BlockId;
-use sordec_ir::{HighFunction, HighIr, Region};
+use std::collections::{HashMap, VecDeque};
+
+use sordec_common::{BlockId, IrId, Provenance, ProvenanceSource, ValueId};
+use sordec_ir::{Binding, HighBlock, HighFunction, HighIr, Region};
 
 use super::debug_validate;
 use crate::pass::{Pass, PassResult};
@@ -44,8 +53,17 @@ pub const PASS_NAME: &str = "refine-trap-inline";
 /// Break sites rewritten into an inline copy of the shared terminator.
 const M_INLINED: &str = "refine_traps_inlined";
 /// Shared terminating out-blocks left labeled because they carry
-/// bindings (the deferred full-duplication case).
+/// bindings that fail the duplication gates (intra-block references or
+/// over the size cap).
 const M_SHARED_WITH_BINDINGS: &str = "refine_shared_trap_with_bindings";
+/// Break sites rewritten into a fresh-id duplicate of a
+/// binding-carrying shared trap block (D2-ext).
+const M_DUPLICATED: &str = "refine_traps_duplicated";
+
+/// Readability cap on duplicated blocks: every corpus witness carries
+/// exactly one glue-call binding; the cap only bounds pathological
+/// helpers.
+const MAX_DUPLICATED_BINDINGS: usize = 4;
 
 /// The bounded trap-inlining pass. Stateless; see the module docs.
 #[derive(Debug, Default, Clone, Copy)]
@@ -67,6 +85,10 @@ impl Pass<HighIr> for TrapInlinePass {
             result.metrics.increment(M_INLINED, stats.inlined);
             result.changed = true;
         }
+        if stats.duplicated > 0 {
+            result.metrics.increment(M_DUPLICATED, stats.duplicated);
+            result.changed = true;
+        }
         if stats.shared_with_bindings > 0 {
             result
                 .metrics
@@ -80,13 +102,14 @@ impl Pass<HighIr> for TrapInlinePass {
 #[derive(Default)]
 struct Stats {
     inlined: i64,
+    duplicated: i64,
     shared_with_bindings: i64,
 }
 
 /// Bottom-up rewrite. The trap pattern lives at a sequence tail:
 /// `[…, Scope { out: T }, Basic(T), terminator]` — one scan per visit;
 /// cascades exposed by a splice converge through the fixpoint group.
-fn inline_traps(region: Region, func: &HighFunction, stats: &mut Stats) -> Region {
+fn inline_traps(region: Region, func: &mut HighFunction, stats: &mut Stats) -> Region {
     match region {
         Region::Sequence(items) => {
             let items: Vec<Region> = items
@@ -141,15 +164,28 @@ fn inline_traps(region: Region, func: &HighFunction, stats: &mut Stats) -> Regio
     }
 }
 
+/// How one matched tail pattern fires.
+enum Fire {
+    /// No match, or the gates refused.
+    No,
+    /// Zero-binding block: every break site gets the bare terminator.
+    Inline,
+    /// Binding-carrying externally-closed block: every break site gets
+    /// a fresh-id duplicate (D2-ext).
+    Duplicate,
+}
+
 /// Fire the tail pattern on one (already child-rewritten) sequence.
-fn rewrite_tail(mut items: Vec<Region>, func: &HighFunction, stats: &mut Stats) -> Region {
-    // `[…, Scope{out: T}, Basic(T), <Unreachable | Return>]` with the
-    // terminator as the final item.
-    let fires = items.len() >= 3 && {
+fn rewrite_tail(mut items: Vec<Region>, func: &mut HighFunction, stats: &mut Stats) -> Region {
+    // `[…, Scope{out: T}, Basic(T), <Unreachable | Panic | Return>]`
+    // with the terminator as the final item.
+    let fire = if items.len() < 3 {
+        Fire::No
+    } else {
         let n = items.len();
-        // `Panic` joins the terminator set for idempotent re-runs: the
-        // D8 pass may have typed the shared trap on a previous pipeline
-        // pass, and a typed trap inlines exactly like a bare one.
+        // `Panic` joins the terminator set: the D8 pass may have typed
+        // the shared trap on a previous pipeline pass, and a typed trap
+        // inlines exactly like a bare one.
         let terminator_ok = matches!(
             items[n - 1],
             Region::Unreachable | Region::Panic { .. } | Region::Return { .. }
@@ -170,20 +206,23 @@ fn rewrite_tail(mut items: Vec<Region>, func: &HighFunction, stats: &mut Stats) 
                     };
                     breaks_are_bare(body, out)
                 };
-                if zero_bindings && all_breaks_bare {
-                    true
+                if !all_breaks_bare {
+                    Fire::No
+                } else if zero_bindings {
+                    Fire::Inline
+                } else if duplication_gates_hold(func, out) {
+                    Fire::Duplicate
                 } else {
-                    if !zero_bindings && all_breaks_bare {
-                        // The deferred full-duplication shape.
-                        stats.shared_with_bindings += 1;
-                    }
-                    false
+                    // Intra-block references or over the cap: left
+                    // labeled, the remaining-work signal.
+                    stats.shared_with_bindings += 1;
+                    Fire::No
                 }
             }
-            _ => false,
+            _ => Fire::No,
         }
     };
-    if !fires {
+    if matches!(fire, Fire::No) {
         return seq(items);
     }
 
@@ -196,10 +235,123 @@ fn rewrite_tail(mut items: Vec<Region>, func: &HighFunction, stats: &mut Stats) 
     let Region::Scope { out, body } = scope else {
         unreachable!("matched above");
     };
-    // The zero-binding `Basic` carried no content; the scope dissolves
-    // and every break site gets its own copy of the terminator.
-    items.push(substitute_breaks(*body, out, &terminator, &mut stats.inlined));
+    // Pre-mint one replacement per break site (traversal order), then
+    // splice them in: the scope dissolves either way.
+    let sites = count_bare_breaks(&body, out);
+    let mut replacements: VecDeque<Region> = match fire {
+        Fire::Inline => {
+            stats.inlined += sites as i64;
+            (0..sites).map(|_| terminator.clone()).collect()
+        }
+        Fire::Duplicate => {
+            stats.duplicated += sites as i64;
+            // The first site reuses the original block — every
+            // reachable block keeps exactly one `Basic` in the tree
+            // (the corpus completeness lock) — and only the remaining
+            // sites mint fresh-id clones.
+            (0..sites)
+                .map(|site| {
+                    if site == 0 {
+                        seq(vec![Region::Basic(out), terminator.clone()])
+                    } else {
+                        duplicate_trap_block(func, out, &terminator)
+                    }
+                })
+                .collect()
+        }
+        Fire::No => unreachable!("early-returned above"),
+    };
+    items.push(substitute_breaks(*body, out, &mut replacements));
+    debug_assert!(replacements.is_empty(), "one replacement per site");
     seq(items)
+}
+
+/// D2-ext gates: the block is small and *externally closed* — no
+/// binding reads a value defined inside the block, so clones can keep
+/// original operand ids (externals dominate every break site by SSA).
+fn duplication_gates_hold(func: &HighFunction, block: BlockId) -> bool {
+    let Some(blk) = func.blocks.get(block) else {
+        return false;
+    };
+    if blk.bindings.is_empty() || blk.bindings.len() > MAX_DUPLICATED_BINDINGS {
+        return false;
+    }
+    let internal: std::collections::HashSet<ValueId> = blk.bindings.iter().copied().collect();
+    blk.bindings.iter().all(|&v| {
+        let Some(binding) = func.bindings.get(v) else {
+            return false;
+        };
+        let mut closed = true;
+        binding.expr.for_each_value_use(|u| {
+            if internal.contains(&u) {
+                closed = false;
+            }
+        });
+        closed
+    })
+}
+
+/// Mint one fresh-id duplicate of the shared trap block: a new
+/// `HighBlock` scheduling clones of the original bindings (identical
+/// expressions — the closure gate guarantees no intra-block operand
+/// needs rewriting), each stamped with duplication provenance, followed
+/// by the terminator with any `Return` operands remapped onto the
+/// clones.
+fn duplicate_trap_block(func: &mut HighFunction, block: BlockId, terminator: &Region) -> Region {
+    let template = func
+        .blocks
+        .get(block)
+        .expect("gate resolved this block")
+        .bindings
+        .clone();
+    let mut map: HashMap<ValueId, ValueId> = HashMap::new();
+    let mut fresh_schedule = Vec::with_capacity(template.len());
+    for old in template {
+        let original = func.bindings.get(old).expect("gate resolved bindings");
+        let mut clone = Binding::new(
+            ValueId::from_index(func.bindings.len() as u32),
+            original.ty.clone(),
+            original.expr.clone(),
+            original.latest_provenance().clone(),
+        );
+        clone.add_provenance(Provenance::new(
+            PASS_NAME,
+            ProvenanceSource::UpstreamRefinement,
+            format!("duplicated from the shared trap block bb{}", block.index()),
+        ));
+        let fresh = clone.id;
+        map.insert(old, fresh);
+        fresh_schedule.push(fresh);
+        func.bindings.push(clone);
+    }
+    let fresh_block = BlockId::from_index(func.blocks.len() as u32);
+    func.blocks.push(HighBlock {
+        id: fresh_block,
+        bindings: fresh_schedule,
+    });
+    let terminator = match terminator {
+        Region::Return { values } => Region::Return {
+            values: values
+                .iter()
+                .map(|v| map.get(v).copied().unwrap_or(*v))
+                .collect(),
+        },
+        other => other.clone(),
+    };
+    seq(vec![Region::Basic(fresh_block), terminator])
+}
+
+/// Count the bare `Break { target }` sites a substitution will rewrite.
+fn count_bare_breaks(region: &Region, target: BlockId) -> usize {
+    let mut count = 0;
+    region.for_each_node(|node| {
+        if let Region::Break { target: t, .. } = node
+            && *t == target
+        {
+            count += 1;
+        }
+    });
+    count
 }
 
 /// Every `Break { target }` inside `region` carries an empty transfer.
@@ -221,12 +373,13 @@ fn breaks_are_bare(region: &Region, target: BlockId) -> bool {
     bare
 }
 
-/// Replace every `Break { target }` with a clone of `replacement`.
+/// Replace every `Break { target }` with the next pre-minted
+/// replacement, in the same pre-order [`Region::for_each_node`] walks
+/// (which [`count_bare_breaks`] used to size the queue).
 fn substitute_breaks(
     region: Region,
     target: BlockId,
-    replacement: &Region,
-    inlined: &mut i64,
+    replacements: &mut VecDeque<Region>,
 ) -> Region {
     match region {
         Region::Break {
@@ -235,8 +388,7 @@ fn substitute_breaks(
         } => {
             if t == target {
                 debug_assert!(transfer.is_empty(), "gated by breaks_are_bare");
-                *inlined += 1;
-                replacement.clone()
+                replacements.pop_front().expect("one replacement per site")
             } else {
                 Region::Break {
                     target: t,
@@ -246,15 +398,15 @@ fn substitute_breaks(
         }
         Region::Sequence(items) => seq(items
             .into_iter()
-            .map(|item| substitute_breaks(item, target, replacement, inlined))
+            .map(|item| substitute_breaks(item, target, replacements))
             .collect()),
         Region::Scope { out, body } => Region::Scope {
             out,
-            body: Box::new(substitute_breaks(*body, target, replacement, inlined)),
+            body: Box::new(substitute_breaks(*body, target, replacements)),
         },
         Region::Loop { header, body, kind } => Region::Loop {
             header,
-            body: Box::new(substitute_breaks(*body, target, replacement, inlined)),
+            body: Box::new(substitute_breaks(*body, target, replacements)),
             kind,
         },
         Region::If {
@@ -263,9 +415,9 @@ fn substitute_breaks(
             else_region,
         } => Region::If {
             cond,
-            then_region: Box::new(substitute_breaks(*then_region, target, replacement, inlined)),
+            then_region: Box::new(substitute_breaks(*then_region, target, replacements)),
             else_region: else_region
-                .map(|e| Box::new(substitute_breaks(*e, target, replacement, inlined))),
+                .map(|e| Box::new(substitute_breaks(*e, target, replacements))),
         },
         Region::Switch {
             index,
@@ -277,11 +429,11 @@ fn substitute_breaks(
             arms: arms
                 .into_iter()
                 .map(|mut arm| {
-                    arm.body = substitute_breaks(arm.body, target, replacement, inlined);
+                    arm.body = substitute_breaks(arm.body, target, replacements);
                     arm
                 })
                 .collect(),
-            default: Box::new(substitute_breaks(*default, target, replacement, inlined)),
+            default: Box::new(substitute_breaks(*default, target, replacements)),
             dispatch,
         },
         leaf @ (Region::Basic(_)
@@ -446,18 +598,70 @@ mod tests {
         );
     }
 
-    #[test]
-    fn out_block_with_bindings_is_left_labeled_and_counted() {
-        // The shared block computes something (a panic helper): the
-        // deferred full-duplication case — untouched, metric bumped.
+    /// `shared_trap` with the out-block carrying one externally-closed
+    /// binding (the corpus's panic-glue-call shape).
+    fn shared_trap_with_binding() -> HighFunction {
         let mut f = shared_trap();
         f.blocks.get_mut(bb(2)).expect("bb2").bindings = vec![v(0)];
         // Keep IR valid: v0 must now be scheduled in bb2, not bb0.
         f.blocks.get_mut(bb(0)).expect("bb0").bindings = vec![v(1), v(2)];
         // …and the comparisons can't read v0 before it exists, so make
-        // them self-contained literals-comparisons via v1/v2 reading v1.
+        // them self-contained literals.
         f.bindings.get_mut(v(1)).expect("v1").expr = Expr::Literal(Literal::I64(1));
         f.bindings.get_mut(v(2)).expect("v2").expr = Expr::Literal(Literal::I64(2));
+        f
+    }
+
+    #[test]
+    fn out_block_with_bindings_duplicates_under_fresh_ids() {
+        // The D2-ext path: the first guard reuses the original block
+        // (every reachable block keeps exactly one `Basic`), the
+        // second gets a fresh-id clone; the shared scope dissolves.
+        let (f, result) = run_pass(shared_trap_with_binding());
+        assert!(result.changed);
+        assert_eq!(result.metrics.get(M_DUPLICATED), Some(2));
+        assert_eq!(result.metrics.get(M_SHARED_WITH_BINDINGS), None);
+
+        // One fresh block (bb3) scheduling one fresh clone of v0
+        // stamped with duplication provenance.
+        assert_eq!(f.blocks.len(), 4);
+        let clone_a = f.blocks.get(bb(3)).expect("minted duplicate").bindings[0];
+        let cloned = f.bindings.get(clone_a).expect("fresh binding");
+        assert!(matches!(cloned.expr, Expr::Literal(Literal::I64(5))));
+        assert_eq!(cloned.latest_provenance().pass, PASS_NAME);
+        assert_eq!(
+            f.region,
+            Region::Sequence(vec![
+                Region::Basic(bb(0)),
+                guard(
+                    1,
+                    Region::Sequence(vec![Region::Basic(bb(2)), Region::Unreachable]),
+                ),
+                Region::Basic(bb(1)),
+                guard(
+                    2,
+                    Region::Sequence(vec![Region::Basic(bb(3)), Region::Unreachable]),
+                ),
+                Region::Return { values: vec![] },
+            ])
+        );
+    }
+
+    #[test]
+    fn intra_block_references_stay_labeled_and_counted() {
+        // `v0 = literal; v3 = use-of-v0` inside the trap block: the
+        // closure gate refuses (a clone would need operand rewriting)
+        // and the remaining-work metric records it.
+        let mut f = shared_trap_with_binding();
+        f.bindings.push(binding(
+            3,
+            Expr::Binary {
+                op: BinaryOp::Ne,
+                lhs: v(0),
+                rhs: v(0),
+            },
+        ));
+        f.blocks.get_mut(bb(2)).expect("bb2").bindings = vec![v(0), v(3)];
         let before = f.region.clone();
         let (f, result) = run_pass(f);
         assert!(!result.changed);

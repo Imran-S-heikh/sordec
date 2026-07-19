@@ -56,12 +56,14 @@ fn structure_fixture(wasm: &[u8]) -> (LiftedIr, HighIr, PipelineReport) {
 #[test]
 fn refinement_recovers_the_measured_guard_shape() {
     // Coarse magnitude lock against silent no-op regressions in the
-    // W6 refinement group, mirroring the declutter floors. Measured
-    // 2026-07-19 on the pinned corpus:
-    //   guards_hoisted 467 · polarity_flipped 4 · traps_inlined 164 ·
-    //   shared_trap_with_bindings 38 (deferred full-duplication case —
-    //   real corpus signal for whether D2's fresh-id variant is worth
-    //   building).
+    // W6/W7 refinement passes, mirroring the declutter floors.
+    // Measured 2026-07-19 on the pinned corpus (post-W7):
+    //   guards_hoisted 468 · polarity_flipped 4 · traps_inlined 164 ·
+    //   traps_duplicated 60 (D2-ext: 20 of the 38 binding-carrying
+    //   patterns qualified) · shared_trap_with_bindings 18 (the
+    //   intra-block-reference remainder) · dispatch_linked 1 ·
+    //   bare_panics 242 · unwraps 85 · switch_arms_deduped 4 ·
+    //   loops_classified 26.
     // (The 4 flips disproved the planning guess that exit-in-else
     // never occurs in rustc output.) Floors sit below measured values
     // to tolerate benign fixture drift, not to excuse regressions.
@@ -93,6 +95,9 @@ fn refinement_recovers_the_measured_guard_shape() {
         // 6 with per-iteration effectful headers honestly stay
         // Unclassified.
         ("refine_loops_classified", 20),
+        // W7 D2-ext, measured 2026-07-19: 60 break sites duplicated
+        // out of the binding-carrying shared trap blocks.
+        ("refine_traps_duplicated", 40),
     ];
     for (key, floor) in floors {
         let got = totals.get(key).copied().unwrap_or(0);

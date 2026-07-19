@@ -222,10 +222,13 @@ pub const REFINE_GUARDS_HOISTED: &str = "refine_guards_hoisted";
 /// Break sites rewritten into an inline copy of a shared bare
 /// terminator (LLVM's tail-merge undone).
 pub const REFINE_TRAPS_INLINED: &str = "refine_traps_inlined";
-/// Shared terminating out-blocks left labeled because they carry
-/// bindings — the deferred full-duplication case (fresh-id minting
-/// lands only if a real fixture shows this shape).
+/// Shared terminating out-blocks left labeled because their bindings
+/// fail the D2-ext duplication gates (intra-block references or over
+/// the size cap) — the remaining-work signal.
 pub const REFINE_SHARED_TRAP_WITH_BINDINGS: &str = "refine_shared_trap_with_bindings";
+/// Break sites rewritten into a fresh-id duplicate of a
+/// binding-carrying shared trap block (W7 D2-ext).
+pub const REFINE_TRAPS_DUPLICATED: &str = "refine_traps_duplicated";
 /// Switches linked to a recovered `SymbolDispatch` table (W7 D6) — the
 /// renderer/emitter names those arms by enum variant.
 pub const REFINE_DISPATCH_LINKED: &str = "refine_dispatch_linked";
