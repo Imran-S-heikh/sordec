@@ -136,6 +136,7 @@ fn inline_traps(region: Region, func: &HighFunction, stats: &mut Stats) -> Regio
         | Region::Transfer { .. }
         | Region::Return { .. }
         | Region::Unreachable
+        | Region::Panic { .. }
         | Region::Unstructured { .. }) => leaf,
     }
 }
@@ -146,7 +147,13 @@ fn rewrite_tail(mut items: Vec<Region>, func: &HighFunction, stats: &mut Stats) 
     // terminator as the final item.
     let fires = items.len() >= 3 && {
         let n = items.len();
-        let terminator_ok = matches!(items[n - 1], Region::Unreachable | Region::Return { .. });
+        // `Panic` joins the terminator set for idempotent re-runs: the
+        // D8 pass may have typed the shared trap on a previous pipeline
+        // pass, and a typed trap inlines exactly like a bare one.
+        let terminator_ok = matches!(
+            items[n - 1],
+            Region::Unreachable | Region::Panic { .. } | Region::Return { .. }
+        );
         let scope_and_basic = match (&items[n - 3], &items[n - 2]) {
             (Region::Scope { out, .. }, Region::Basic(b)) if out == b => Some(*out),
             _ => None,
@@ -282,6 +289,7 @@ fn substitute_breaks(
         | Region::Transfer { .. }
         | Region::Return { .. }
         | Region::Unreachable
+        | Region::Panic { .. }
         | Region::Unstructured { .. }) => leaf,
     }
 }

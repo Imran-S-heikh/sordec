@@ -164,6 +164,21 @@ pub enum Region {
     /// Trap on execute.
     Unreachable,
 
+    /// A recognized source-level panic — a trap the D8 refinement pass
+    /// proved is a `panic!()` / tag-mismatch unwrap rather than an
+    /// anonymous `unreachable`.
+    ///
+    /// Control-flow-wise identical to [`Region::Unreachable`] (a
+    /// diverging leaf; a WASM `unreachable` still executes here); the
+    /// variant only preserves *what the source wrote* for the renderer
+    /// and the Phase-4 Rust emitter. Written only by the
+    /// panic-recovery refinement pass — the structurer always emits
+    /// `Unreachable`.
+    Panic {
+        /// Which source construct the trap was proven to be.
+        kind: PanicKind,
+    },
+
     /// Structuring fell back to a goto-style block reference. The
     /// [`UnknownReason`] explains why; the fallback surfaces a
     /// `StructuringFallback` diagnostic and renderers show the raw
@@ -231,6 +246,7 @@ impl Region {
             | Region::Transfer { .. }
             | Region::Return { .. }
             | Region::Unreachable
+            | Region::Panic { .. }
             | Region::Unstructured { .. } => {}
             Region::Sequence(items) => {
                 for item in items {
@@ -329,6 +345,7 @@ impl Region {
                 }
             }
             Region::Unreachable => {}
+            Region::Panic { kind: _ } => {}
             Region::Unstructured {
                 entry: _,
                 reason: _,
@@ -359,6 +376,23 @@ pub enum LoopKind {
     /// matches the latch condition on entry state — re-derivable as
     /// `while` / `for` at emit.
     GuardedDoWhile,
+}
+
+/// Source-level panic shape recorded on [`Region::Panic`].
+///
+/// Written only by the panic-recovery refinement pass (D8); the
+/// classification is a rendering/emit hint — consumers must treat every
+/// kind as the same diverging trap leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum PanicKind {
+    /// A bare `panic!()` / `unreachable!()` — the trap carries no
+    /// structured error code (`PanicWithoutErrorCode` diagnostic).
+    Bare,
+    /// An `.unwrap()`-shaped trap: the guarding condition is a `Val`
+    /// tag check or decoded-discriminant equality, so the source
+    /// unwrapped a value it had just type-tested.
+    Unwrap,
 }
 
 /// One arm of a [`Region::Switch`].
@@ -576,6 +610,12 @@ mod tests {
         for region in [
             Region::Basic(bb(0)),
             Region::Unreachable,
+            Region::Panic {
+                kind: PanicKind::Bare,
+            },
+            Region::Panic {
+                kind: PanicKind::Unwrap,
+            },
             Region::Unstructured {
                 entry: bb(0),
                 reason: UnknownReason::UpstreamUnknown,

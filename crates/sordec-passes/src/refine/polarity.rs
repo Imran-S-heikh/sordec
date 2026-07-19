@@ -122,6 +122,7 @@ fn normalize(
         | Region::Transfer { .. }
         | Region::Return { .. }
         | Region::Unreachable
+        | Region::Panic { .. }
         | Region::Unstructured { .. } => 0,
     }
 }

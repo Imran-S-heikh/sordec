@@ -70,7 +70,7 @@ use std::io::{self, Write};
 use sordec_common::{IrId, ProvenanceSource, ValueId};
 use sordec_ir::{
     BinaryOp, Binding, DispatchTable, EnumKey, Expr, HighFunction, HighIr, IrType, KnownOp,
-    KnownTier, KnownType, Literal, MemWidth, Region, SemanticOp, StorageTier, UnaryOp,
+    KnownTier, KnownType, Literal, MemWidth, PanicKind, Region, SemanticOp, StorageTier, UnaryOp,
 };
 use sordec_passes::host_calls;
 use sordec_passes::{InlineClass, InlinePlan};
@@ -417,6 +417,13 @@ fn render_region(
             writeln!(out)?;
         }
         Region::Unreachable => writeln!(out, "{ind}unreachable")?,
+        Region::Panic { kind } => match kind {
+            // A recognized trap names the source construct; the `;;`
+            // notes keep the WASM-level truth (an `unreachable`
+            // executes here) in view.
+            PanicKind::Bare => writeln!(out, "{ind}panic!()  ;; no error code")?,
+            PanicKind::Unwrap => writeln!(out, "{ind}panic!()  ;; unwrap: tag-checked trap")?,
+        },
         Region::Unstructured { entry, .. } => {
             // Not reached from render_function (it routes Unstructured
             // roots to the flat body), but a nested Unstructured — if a

@@ -54,7 +54,7 @@ use sordec_ir::{HighIr, Region, Validate as _};
 pub(crate) fn is_bare_exit(region: &Region) -> bool {
     match region {
         Region::Break { transfer, .. } | Region::Continue { transfer, .. } => transfer.is_empty(),
-        Region::Return { .. } | Region::Unreachable => true,
+        Region::Return { .. } | Region::Unreachable | Region::Panic { .. } => true,
         _ => false,
     }
 }
@@ -72,7 +72,8 @@ pub(crate) fn is_terminating(region: &Region) -> bool {
         Region::Break { .. }
         | Region::Continue { .. }
         | Region::Return { .. }
-        | Region::Unreachable => true,
+        | Region::Unreachable
+        | Region::Panic { .. } => true,
         Region::Sequence(items) => items.last().is_some_and(is_terminating),
         Region::If {
             then_region,

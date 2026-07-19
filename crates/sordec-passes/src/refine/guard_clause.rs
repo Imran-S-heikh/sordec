@@ -134,6 +134,7 @@ fn hoist(region: Region, hoisted: &mut i64) -> Region {
         | Region::Transfer { .. }
         | Region::Return { .. }
         | Region::Unreachable
+        | Region::Panic { .. }
         | Region::Unstructured { .. }) => leaf,
     }
 }

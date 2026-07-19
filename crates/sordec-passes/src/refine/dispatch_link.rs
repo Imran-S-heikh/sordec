@@ -115,6 +115,7 @@ fn link_switches(region: &mut Region, bindings: &Arena<ValueId, Binding>, linked
         | Region::Transfer { .. }
         | Region::Return { .. }
         | Region::Unreachable
+        | Region::Panic { .. }
         | Region::Unstructured { .. } => {}
     }
 }

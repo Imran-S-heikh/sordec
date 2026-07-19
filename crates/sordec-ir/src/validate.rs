@@ -389,7 +389,7 @@ fn check_region_structure(
                 }
             }
         }
-        Region::Unreachable => {}
+        Region::Unreachable | Region::Panic { .. } => {}
         Region::Unstructured { entry, reason: _ } => {
             // Defensive fallback: preserve the entry reference but do not
             // recurse — there is no structured subtree to check.
@@ -545,7 +545,7 @@ fn walk_dominance(
                 require(v, defined)?;
             }
         }
-        Region::Unreachable | Region::Unstructured { .. } => {}
+        Region::Unreachable | Region::Panic { .. } | Region::Unstructured { .. } => {}
     }
     Ok(())
 }
