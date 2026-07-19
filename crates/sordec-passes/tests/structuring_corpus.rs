@@ -58,7 +58,10 @@ fn refinement_recovers_the_measured_guard_shape() {
     // Coarse magnitude lock against silent no-op regressions in the
     // W6 refinement group, mirroring the declutter floors. Measured
     // 2026-07-19 on the pinned corpus:
-    //   guards_hoisted 467 · polarity_flipped 4.
+    //   guards_hoisted 467 · polarity_flipped 4 · traps_inlined 164 ·
+    //   shared_trap_with_bindings 38 (deferred full-duplication case —
+    //   real corpus signal for whether D2's fresh-id variant is worth
+    //   building).
     // (The 4 flips disproved the planning guess that exit-in-else
     // never occurs in rustc output.) Floors sit below measured values
     // to tolerate benign fixture drift, not to excuse regressions.
@@ -73,6 +76,7 @@ fn refinement_recovers_the_measured_guard_shape() {
     let floors: &[(&str, i64)] = &[
         ("refine_guards_hoisted", 400),
         ("refine_polarity_flipped", 1),
+        ("refine_traps_inlined", 120),
     ];
     for (key, floor) in floors {
         let got = totals.get(key).copied().unwrap_or(0);
@@ -112,9 +116,11 @@ fn corpus_structures_with_zero_unstructured_regions() {
                 );
             });
 
-            // Lock 2: every reachable block exactly once as a Basic
-            // leaf; unreachable blocks (declutter tombstones) never
-            // appear.
+            // Lock 2: every bindings-carrying reachable block exactly
+            // once as a Basic leaf; zero-binding blocks at most once —
+            // trap inlining (D2) legitimately dissolves a shared bare
+            // terminator's block, and only such blocks. Unreachable
+            // blocks (declutter tombstones) never appear.
             let cfg = CfgFacts::build(lifted_func);
             let mut basic_counts: HashMap<BlockId, u32> = HashMap::new();
             high_func.region.for_each_node(|region| {
@@ -122,18 +128,24 @@ fn corpus_structures_with_zero_unstructured_regions() {
                     *basic_counts.entry(*b).or_insert(0) += 1;
                 }
             });
-            for (block_id, _) in lifted_func.blocks.iter() {
+            for (block_id, lifted_block) in lifted_func.blocks.iter() {
                 let count = basic_counts.get(&block_id).copied().unwrap_or(0);
-                if cfg.is_reachable(block_id) {
+                if !cfg.is_reachable(block_id) {
                     assert_eq!(
-                        count, 1,
-                        "[{name}] {} reachable block {} appears {count} times in the region tree",
+                        count, 0,
+                        "[{name}] {} unreachable block {} leaked into the region tree",
+                        high_func.id, block_id,
+                    );
+                } else if lifted_block.instructions.is_empty() {
+                    assert!(
+                        count <= 1,
+                        "[{name}] {} zero-binding block {} appears {count} times",
                         high_func.id, block_id,
                     );
                 } else {
                     assert_eq!(
-                        count, 0,
-                        "[{name}] {} unreachable block {} leaked into the region tree",
+                        count, 1,
+                        "[{name}] {} reachable block {} appears {count} times in the region tree",
                         high_func.id, block_id,
                     );
                 }

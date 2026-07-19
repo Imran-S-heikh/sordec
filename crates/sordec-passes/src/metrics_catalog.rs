@@ -219,6 +219,13 @@ pub const REFINE_POLARITY_FLIPPED: &str = "refine_polarity_flipped";
 /// `else` bodies hoisted out from under a terminating `then` (guard
 /// clauses recovered).
 pub const REFINE_GUARDS_HOISTED: &str = "refine_guards_hoisted";
+/// Break sites rewritten into an inline copy of a shared bare
+/// terminator (LLVM's tail-merge undone).
+pub const REFINE_TRAPS_INLINED: &str = "refine_traps_inlined";
+/// Shared terminating out-blocks left labeled because they carry
+/// bindings — the deferred full-duplication case (fresh-id minting
+/// lands only if a real fixture shows this shape).
+pub const REFINE_SHARED_TRAP_WITH_BINDINGS: &str = "refine_shared_trap_with_bindings";
 
 // ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)

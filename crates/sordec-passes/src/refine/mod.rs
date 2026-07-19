@@ -29,9 +29,11 @@
 
 mod guard_clause;
 mod polarity;
+mod trap_inline;
 
 pub use guard_clause::GuardClausePass;
 pub use polarity::PolarityPass;
+pub use trap_inline::TrapInlinePass;
 
 use sordec_ir::{HighIr, Region, Validate as _};
 

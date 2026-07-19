@@ -910,18 +910,53 @@ fn dump_hir_hides_pruning_residue_behind_count_line() {
 
 #[test]
 fn dump_hir_structures_token_transfer_into_labeled_scopes() {
-    // token-v23 `transfer`: the merge structure renders as Rust-native
-    // labeled scopes with `break`, the tag guard folds into an `if`
-    // condition, and `;; bbN` breadcrumbs mark each block.
+    // token-v23 `transfer` after W6 refinement: the *value-merge*
+    // structure still renders as Rust-native labeled scopes with
+    // `break` (bb4's phi merge — trap scopes are gone, inlined by D2),
+    // the tag guard folds into an `if` condition, and `;; bbN`
+    // breadcrumbs mark each block.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", TOKEN_V23])
         .assert()
         .success()
-        .stdout(predicate::str::contains("'bb2: {"))
-        .stdout(predicate::str::contains("break 'bb"))
+        .stdout(predicate::str::contains("'bb4: {"))
+        .stdout(predicate::str::contains("break 'bb4"))
         .stdout(predicate::str::contains(";; bb0"))
         .stdout(predicate::str::contains("if (ne (and v1, 255i64), 77i64) {"));
+}
+
+#[test]
+fn dump_hir_recovers_guard_clauses_with_inline_traps() {
+    // The W6 payoff shape (D1 + D2): a guard is a flat, else-less `if`
+    // whose body is the inlined trap — no `break` to a labeled trap
+    // scope, no else-nesting. The muxed-address tag guard in token
+    // `transfer` is the canonical instance.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "if (ne (and v1, 255i64), 77i64) {\n    unreachable\n  }",
+        ));
+}
+
+#[test]
+fn dump_hir_flattens_timelock_claim_guard_cascade() {
+    // Pre-W6 `claim` nested ~7 levels of else; the cascade must now
+    // render as consecutive flat guard clauses with inline traps.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "if (ne (and v18, 255i64), 76i64) {\n        unreachable",
+        ))
+        .stdout(predicate::str::contains(
+            "if (eq v51, 1i32) {\n        unreachable",
+        ));
 }
 
 #[test]
