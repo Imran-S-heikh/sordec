@@ -234,6 +234,9 @@ pub const REFINE_DISPATCH_LINKED: &str = "refine_dispatch_linked";
 pub const REFINE_BARE_PANICS: &str = "refine_bare_panics";
 /// Trap leaves typed as unwrap-shaped, tag-checked panics (W7 D8).
 pub const REFINE_UNWRAPS: &str = "refine_unwraps";
+/// Switch arms structurally equal to their default, folded into the
+/// wildcard (W7 D5).
+pub const REFINE_SWITCH_ARMS_DEDUPED: &str = "refine_switch_arms_deduped";
 
 // ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)

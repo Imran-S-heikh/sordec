@@ -69,7 +69,8 @@ pub use recognizers::{
     TtlPass, UnrecognizedScanPass, ValEncodingPass,
 };
 pub use refine::{
-    DispatchLinkPass, GuardClausePass, PanicRecoverPass, PolarityPass, TrapInlinePass,
+    DispatchLinkPass, GuardClausePass, PanicRecoverPass, PolarityPass, SwitchDedupPass,
+    TrapInlinePass,
 };
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringStatsPass};
@@ -156,6 +157,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(PolarityPass),
             Box::new(GuardClausePass),
             Box::new(TrapInlinePass),
+            Box::new(SwitchDedupPass),
             // Recognizer chain (order rationale above).
             Box::new(ValEncodingPass),
             Box::new(StoragePass),
@@ -179,6 +181,6 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(UnrecognizedScanPass),
             Box::new(TreeifyStatsPass),
         ],
-        vec![1..4],
+        vec![1..5],
     )
 }

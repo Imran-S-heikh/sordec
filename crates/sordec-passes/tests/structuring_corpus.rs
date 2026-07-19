@@ -85,6 +85,9 @@ fn refinement_recovers_the_measured_guard_shape() {
         // switch-default exhaustiveness traps left).
         ("refine_bare_panics", 150),
         ("refine_unwraps", 60),
+        // W7 D5, measured 2026-07-19: 4 default-equal arms folded
+        // (token-v22/v23/v23-stripped + dex).
+        ("refine_switch_arms_deduped", 3),
     ];
     for (key, floor) in floors {
         let got = totals.get(key).copied().unwrap_or(0);

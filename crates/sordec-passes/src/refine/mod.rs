@@ -37,12 +37,14 @@ mod dispatch_link;
 mod guard_clause;
 mod panic_recover;
 mod polarity;
+mod switch_dedup;
 mod trap_inline;
 
 pub use dispatch_link::DispatchLinkPass;
 pub use guard_clause::GuardClausePass;
 pub use panic_recover::PanicRecoverPass;
 pub use polarity::PolarityPass;
+pub use switch_dedup::SwitchDedupPass;
 pub use trap_inline::TrapInlinePass;
 
 use sordec_ir::{HighIr, Region, Validate as _};
