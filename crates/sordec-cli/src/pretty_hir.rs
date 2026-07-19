@@ -363,16 +363,25 @@ fn render_region(
             index,
             arms,
             default,
-            dispatch: _,
+            dispatch,
         } => {
-            // `dispatch` names arms by enum variant once the D6 pass
-            // links it; until then the selector renders as integers.
+            // A dispatch slot linked by the D6 pass names arms by enum
+            // variant out of the recovered rodata table; an unlinked
+            // switch keeps raw integers.
+            let table = dispatch
+                .and_then(|d| func.bindings.get(d))
+                .and_then(|b| match &b.expr {
+                    Expr::Semantic(SemanticOp::Known(KnownOp::SymbolDispatch {
+                        table, ..
+                    })) => Some(table),
+                    _ => None,
+                });
             writeln!(out, "{ind}match {} {{", ctx.operand(*index))?;
             for arm in arms {
                 let cases = arm
                     .cases
                     .iter()
-                    .map(u32::to_string)
+                    .map(|&case| case_label(table, case))
                     .collect::<Vec<_>>()
                     .join(" | ");
                 writeln!(out, "{ind}  {cases} => {{")?;
@@ -416,6 +425,20 @@ fn render_region(
         }
     }
     Ok(())
+}
+
+/// Arm label for one `br_table` case: the linked dispatch table's
+/// variant name — qualified by the enum when the contractspec named it,
+/// bare for a stripped binary (None-is-honest) — or the raw integer
+/// when the switch is unlinked or the case falls outside the table.
+fn case_label(table: Option<&DispatchTable>, case: u32) -> String {
+    let Some(variant) = table.and_then(|t| t.cases.get(case as usize)) else {
+        return case.to_string();
+    };
+    match table.and_then(|t| t.enum_name.as_deref()) {
+        Some(enum_name) => format!("{enum_name}::{variant}"),
+        None => variant.clone(),
+    }
 }
 
 /// Render a branch edge's phi assignments (`vPhi = vSrc`), the visible
@@ -1891,5 +1914,26 @@ mod tests {
         }));
         let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "invoke_contract(v1, \"balance\", [v6])");
+    }
+
+    #[test]
+    fn case_labels_follow_the_dispatch_table() {
+        let table = DispatchTable {
+            cases: vec!["Before".to_string(), "After".to_string()],
+            enum_name: Some("TimeBoundKind".to_string()),
+        };
+        // Linked + named: enum-qualified variants.
+        assert_eq!(case_label(Some(&table), 0), "TimeBoundKind::Before");
+        assert_eq!(case_label(Some(&table), 1), "TimeBoundKind::After");
+        // Out-of-table case: the raw integer stays (honesty).
+        assert_eq!(case_label(Some(&table), 7), "7");
+        // Stripped binary (None-is-honest enum): bare variant names.
+        let stripped = DispatchTable {
+            cases: table.cases.clone(),
+            enum_name: None,
+        };
+        assert_eq!(case_label(Some(&stripped), 0), "Before");
+        // Unlinked switch: integers, as before D6.
+        assert_eq!(case_label(None, 2), "2");
     }
 }

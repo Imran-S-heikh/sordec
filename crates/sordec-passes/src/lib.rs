@@ -68,7 +68,7 @@ pub use recognizers::{
     ContextPass, CrossContractPass, DispatcherPass, EnumKeyPass, LinearMemoryPass, StoragePass,
     TtlPass, UnrecognizedScanPass, ValEncodingPass,
 };
-pub use refine::{GuardClausePass, PolarityPass, TrapInlinePass};
+pub use refine::{DispatchLinkPass, GuardClausePass, PolarityPass, TrapInlinePass};
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringStatsPass};
 pub use treeify::TreeifyStatsPass;
@@ -169,6 +169,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(EnumKeyPass),
             Box::new(ClientCallPass),
             Box::new(AuthFlowPass),
+            // Region-refinement wave 2: region rewrites that consume
+            // recognizer output, so they cannot join the pre-recognizer
+            // group above. Straight-line, no fixpoint.
+            Box::new(DispatchLinkPass),
             Box::new(UnrecognizedScanPass),
             Box::new(TreeifyStatsPass),
         ],

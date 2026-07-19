@@ -961,15 +961,17 @@ fn dump_hir_flattens_timelock_claim_guard_cascade() {
 
 #[test]
 fn dump_hir_renders_timelock_dispatcher_as_match() {
-    // The timelock dispatcher's br_table renders match-shaped with an
-    // integer selector and a wildcard default arm (variant naming
-    // arrives with the D6 pass).
+    // The timelock dispatcher's br_table renders match-shaped, and the
+    // D6 dispatch link names its arms out of the recovered rodata
+    // table (the K8 demo shape); the wildcard default arm stays.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", TIMELOCK])
         .assert()
         .success()
         .stdout(predicate::str::contains("match v"))
+        .stdout(predicate::str::contains("TimeBoundKind::Before => {"))
+        .stdout(predicate::str::contains("TimeBoundKind::After => {"))
         .stdout(predicate::str::contains("_ => {"));
 }
 

@@ -77,6 +77,9 @@ fn refinement_recovers_the_measured_guard_shape() {
         ("refine_guards_hoisted", 400),
         ("refine_polarity_flipped", 1),
         ("refine_traps_inlined", 120),
+        // W7 D6: timelock's symbol dispatcher is the corpus's one
+        // linkable switch — the floor equals the measured value.
+        ("refine_dispatch_linked", 1),
     ];
     for (key, floor) in floors {
         let got = totals.get(key).copied().unwrap_or(0);

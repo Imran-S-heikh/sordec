@@ -226,6 +226,9 @@ pub const REFINE_TRAPS_INLINED: &str = "refine_traps_inlined";
 /// bindings — the deferred full-duplication case (fresh-id minting
 /// lands only if a real fixture shows this shape).
 pub const REFINE_SHARED_TRAP_WITH_BINDINGS: &str = "refine_shared_trap_with_bindings";
+/// Switches linked to a recovered `SymbolDispatch` table (W7 D6) — the
+/// renderer/emitter names those arms by enum variant.
+pub const REFINE_DISPATCH_LINKED: &str = "refine_dispatch_linked";
 
 // ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)

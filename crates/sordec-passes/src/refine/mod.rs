@@ -9,6 +9,12 @@
 //! back to its guards), condition-polarity normalization (the exit arm
 //! reads without negation).
 //!
+//! Two waves, split by pipeline position: **wave 1** (polarity, guard
+//! clauses, trap inlining) reads only region shape and runs as a
+//! fixpoint group *before* the recognizer chain; **wave 2** (dispatch
+//! linking) consumes recognizer-produced bindings and therefore runs
+//! *after* the chain, as straight-line single passes.
+//!
 //! ## Discipline
 //!
 //! - **Undo, never invent** (research R2, SAILR): every rewrite here
@@ -27,10 +33,12 @@
 //!   (debug builds), so a bad splice fails at the pass that made it,
 //!   not three passes later.
 
+mod dispatch_link;
 mod guard_clause;
 mod polarity;
 mod trap_inline;
 
+pub use dispatch_link::DispatchLinkPass;
 pub use guard_clause::GuardClausePass;
 pub use polarity::PolarityPass;
 pub use trap_inline::TrapInlinePass;
