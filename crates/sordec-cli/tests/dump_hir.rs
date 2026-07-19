@@ -946,17 +946,19 @@ fn dump_hir_recovers_guard_clauses_with_inline_traps() {
 fn dump_hir_flattens_timelock_claim_guard_cascade() {
     // Pre-W6 `claim` nested ~7 levels of else; the cascade renders as
     // consecutive flat guard clauses whose traps D8 types — the tag
-    // guard as an unwrap, the discriminant check as a bare panic.
+    // guard as an unwrap, the discriminant check as a bare panic. D3's
+    // while recovery un-nested the surrounding copy-loop exit path, so
+    // the guards sit at function top level.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", TIMELOCK])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "if (ne (and v18, 255i64), 76i64) {\n        panic!()  ;; unwrap: tag-checked trap",
+            "if (ne (and v18, 255i64), 76i64) {\n    panic!()  ;; unwrap: tag-checked trap",
         ))
         .stdout(predicate::str::contains(
-            "if (eq v51, 1i32) {\n        panic!()  ;; no error code",
+            "if (eq v51, 1i32) {\n    panic!()  ;; no error code",
         ));
 }
 
@@ -978,13 +980,18 @@ fn dump_hir_renders_timelock_dispatcher_as_match() {
 
 #[test]
 fn dump_hir_renders_dex_loops_with_labeled_continue() {
-    // dex has the corpus's loops (allocator/Bytes helpers): they render
-    // as labeled `loop` blocks with `continue` back edges.
+    // dex exercises every D3 outcome: the argument copy loop proves
+    // `while` in the continue-in-then form (condition as-is), the
+    // Newton bisection loop in the exit-in-then form (comparator
+    // inverted, `le` -> `gt`), and the per-iteration-call loops
+    // honestly keep the labeled `loop` + `continue` back edge.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", DEX])
         .assert()
         .success()
+        .stdout(predicate::str::contains("'bb3: while (ne v14, 24i32) {"))
+        .stdout(predicate::str::contains("while (gt v79, v80) {"))
         .stdout(predicate::str::contains(": loop {"))
         .stdout(predicate::str::contains("continue 'bb"));
 }

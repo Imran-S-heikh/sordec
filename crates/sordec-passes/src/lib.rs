@@ -69,8 +69,8 @@ pub use recognizers::{
     TtlPass, UnrecognizedScanPass, ValEncodingPass,
 };
 pub use refine::{
-    AndMergePass, DispatchLinkPass, GuardClausePass, PanicRecoverPass, PolarityPass,
-    SwitchDedupPass, TrapInlinePass,
+    AndMergePass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
+    PolarityPass, SwitchDedupPass, TrapInlinePass,
 };
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringStatsPass};
@@ -159,6 +159,9 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(TrapInlinePass),
             Box::new(SwitchDedupPass),
             Box::new(AndMergePass),
+            // Loop classification: a single tag-only pass once the
+            // group above has settled the body shapes it reads.
+            Box::new(LoopClassifyPass),
             // Recognizer chain (order rationale above).
             Box::new(ValEncodingPass),
             Box::new(StoragePass),

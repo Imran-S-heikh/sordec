@@ -237,6 +237,8 @@ pub const REFINE_UNWRAPS: &str = "refine_unwraps";
 /// Switch arms structurally equal to their default, folded into the
 /// wildcard (W7 D5).
 pub const REFINE_SWITCH_ARMS_DEDUPED: &str = "refine_switch_arms_deduped";
+/// Loops proven to a source shape and `LoopKind`-tagged (W7 D3).
+pub const REFINE_LOOPS_CLASSIFIED: &str = "refine_loops_classified";
 /// Shared-else diamonds merged into one `&&` guard (W7 D7).
 pub const REFINE_AND_MERGED: &str = "refine_and_merged";
 /// Diamonds matching the D7 shape but blocked by the effect or

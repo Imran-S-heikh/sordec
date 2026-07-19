@@ -88,6 +88,11 @@ fn refinement_recovers_the_measured_guard_shape() {
         // W7 D5, measured 2026-07-19: 4 default-equal arms folded
         // (token-v22/v23/v23-stripped + dex).
         ("refine_switch_arms_deduped", 3),
+        // W7 D3, measured 2026-07-19: 26 of 32 loops proven WhileTop
+        // (the SDK tuple->vec copy loops in every fixture family); the
+        // 6 with per-iteration effectful headers honestly stay
+        // Unclassified.
+        ("refine_loops_classified", 20),
     ];
     for (key, floor) in floors {
         let got = totals.get(key).copied().unwrap_or(0);

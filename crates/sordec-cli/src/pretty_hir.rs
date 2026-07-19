@@ -67,10 +67,11 @@
 use std::collections::HashSet;
 use std::io::{self, Write};
 
-use sordec_common::{IrId, ProvenanceSource, ValueId};
+use sordec_common::{BlockId, IrId, ProvenanceSource, ValueId};
 use sordec_ir::{
     BinaryOp, Binding, DispatchTable, EnumKey, Expr, HighFunction, HighIr, IrType, KnownOp,
-    KnownTier, KnownType, Literal, MemWidth, PanicKind, Region, SemanticOp, StorageTier, UnaryOp,
+    KnownTier, KnownType, Literal, LoopKind, MemWidth, PanicKind, Region, SemanticOp, StorageTier,
+    UnaryOp,
 };
 use sordec_passes::host_calls;
 use sordec_passes::{InlineClass, InlinePlan};
@@ -361,16 +362,18 @@ fn render_region(
             }
             writeln!(out, "{ind}}}")?;
         }
-        Region::Loop {
-            header,
-            body,
-            kind: _,
-        } => {
-            // `kind` stays `Unclassified` until the D3 loop-classification
-            // pass; render a plain `loop`.
-            writeln!(out, "{ind}'bb{}: loop {{", header.index())?;
-            render_region(out, func, body, ctx, level + 1, rendered)?;
-            writeln!(out, "{ind}}}")?;
+        Region::Loop { header, body, kind } => {
+            // A `WhileTop` tag renders as `while` when the shape still
+            // re-verifies (defensive: any pass drift falls back to the
+            // faithful labeled `loop`). Other kinds keep the `loop`
+            // form — `DoWhileBottom` IS Rust's `loop { .. if { break } }`.
+            let rendered_while = *kind == LoopKind::WhileTop
+                && render_while(out, func, *header, body, ctx, level, rendered)?;
+            if !rendered_while {
+                writeln!(out, "{ind}'bb{}: loop {{", header.index())?;
+                render_region(out, func, body, ctx, level + 1, rendered)?;
+                writeln!(out, "{ind}}}")?;
+            }
         }
         Region::Switch {
             index,
@@ -459,6 +462,180 @@ fn case_label(table: Option<&DispatchTable>, case: u32) -> String {
         Some(enum_name) => format!("{enum_name}::{variant}"),
         None => variant.clone(),
     }
+}
+
+/// Render a `WhileTop`-tagged loop as `'bbN: while cond { … }`,
+/// re-deriving the D3 classifier's dual form from the tree. Returns
+/// `Ok(false)` — render nothing — when the shape no longer matches or
+/// the header/condition does not fold away; the caller then prints the
+/// faithful labeled `loop`.
+///
+/// Continue-in-then renders the condition as-is with the `then` arm as
+/// the body and the exit tail after the loop; exit-in-then renders the
+/// tail as the body under the arithmetically inverted comparator
+/// (`Eq↔Ne`, `Lt↔Ge`, `Le↔Gt` — never a synthesized `!`) with the exit
+/// arm after the loop. The trailing back edge is implicit in `while`,
+/// so only its phi assignments print; any *inner* back edge still
+/// renders as a labeled `continue`, which the kept `'bbN:` label
+/// serves.
+fn render_while(
+    out: &mut impl Write,
+    func: &HighFunction,
+    header: BlockId,
+    body: &Region,
+    ctx: &FoldCtx<'_>,
+    level: usize,
+    rendered: &mut HashSet<ValueId>,
+) -> io::Result<bool> {
+    let Region::Sequence(items) = body else {
+        return Ok(false);
+    };
+    let [Region::Basic(b), Region::If {
+        cond,
+        then_region,
+        else_region: None,
+    }, rest @ ..] = items.as_slice()
+    else {
+        return Ok(false);
+    };
+    // The header must vanish into the condition: every scheduled
+    // binding folds (an empty header trivially does).
+    let header_folds = func
+        .blocks
+        .get(*b)
+        .is_some_and(|blk| blk.bindings.iter().all(|&v| ctx.folds(v)));
+    if *b != header || rest.is_empty() || !header_folds {
+        return Ok(false);
+    }
+
+    let continue_in_then = ends_in_continue(then_region, header)
+        && !rest.iter().any(|r| contains_continue(r, header));
+    let exit_in_then = !continue_in_then
+        && !contains_continue(then_region, header)
+        && rest.last().is_some_and(|r| ends_in_continue(r, header));
+
+    let ind = indent(level);
+    if continue_in_then {
+        writeln!(
+            out,
+            "{ind}'bb{}: while {} {{",
+            header.index(),
+            ctx.operand(*cond)
+        )?;
+        render_region(out, func, &Region::Basic(*b), ctx, level + 1, rendered)?;
+        render_while_body(out, func, then_region, header, ctx, level + 1, rendered)?;
+        writeln!(out, "{ind}}}")?;
+        for item in rest {
+            render_region(out, func, item, ctx, level, rendered)?;
+        }
+        return Ok(true);
+    }
+    if exit_in_then {
+        let Some(cond_text) = inverted_condition(func, *cond, ctx) else {
+            return Ok(false);
+        };
+        writeln!(out, "{ind}'bb{}: while {} {{", header.index(), cond_text)?;
+        render_region(out, func, &Region::Basic(*b), ctx, level + 1, rendered)?;
+        for item in &rest[..rest.len() - 1] {
+            render_region(out, func, item, ctx, level + 1, rendered)?;
+        }
+        render_while_body(
+            out,
+            func,
+            rest.last().expect("checked non-empty"),
+            header,
+            ctx,
+            level + 1,
+            rendered,
+        )?;
+        writeln!(out, "{ind}}}")?;
+        render_region(out, func, then_region, ctx, level, rendered)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Render a while body whose trailing back edge is implicit: the final
+/// `Continue { header }` prints only its phi assignments (the
+/// loop-carried updates), everything else renders normally.
+fn render_while_body(
+    out: &mut impl Write,
+    func: &HighFunction,
+    region: &Region,
+    header: BlockId,
+    ctx: &FoldCtx<'_>,
+    level: usize,
+    rendered: &mut HashSet<ValueId>,
+) -> io::Result<()> {
+    match region {
+        Region::Continue { target, transfer } if *target == header => {
+            render_transfer(out, transfer, ctx, level)
+        }
+        Region::Sequence(items) => {
+            if let [head @ .., last] = items.as_slice() {
+                for item in head {
+                    render_region(out, func, item, ctx, level, rendered)?;
+                }
+                render_while_body(out, func, last, header, ctx, level, rendered)?;
+            }
+            Ok(())
+        }
+        other => render_region(out, func, other, ctx, level, rendered),
+    }
+}
+
+/// The exit test folded under the inverted comparator — the `while`
+/// continue-condition of an exit-in-then loop. `None` when the
+/// condition does not fold or is not an invertible comparison.
+fn inverted_condition(func: &HighFunction, cond: ValueId, ctx: &FoldCtx<'_>) -> Option<String> {
+    if !ctx.folds(cond) {
+        return None;
+    }
+    let Expr::Binary { op, lhs, rhs } = &func.bindings.get(cond)?.expr else {
+        return None;
+    };
+    let inverted = match op {
+        BinaryOp::Eq => BinaryOp::Ne,
+        BinaryOp::Ne => BinaryOp::Eq,
+        BinaryOp::Lt => BinaryOp::Ge,
+        BinaryOp::Ge => BinaryOp::Lt,
+        BinaryOp::Le => BinaryOp::Gt,
+        BinaryOp::Gt => BinaryOp::Le,
+        _ => return None,
+    };
+    Some(format!(
+        "({} {}, {})",
+        binary_str(inverted),
+        ctx.operand(*lhs),
+        ctx.operand(*rhs)
+    ))
+}
+
+/// Does this region's final position (through nested sequences) hit the
+/// loop's back edge? (Render-side re-derivation, mirroring the D3
+/// classifier's own check by design — the renderer trusts shape, not
+/// tags alone.)
+fn ends_in_continue(region: &Region, header: BlockId) -> bool {
+    match region {
+        Region::Continue { target, .. } => *target == header,
+        Region::Sequence(items) => items
+            .last()
+            .is_some_and(|last| ends_in_continue(last, header)),
+        _ => false,
+    }
+}
+
+/// Does the subtree contain the loop's back edge anywhere?
+fn contains_continue(region: &Region, header: BlockId) -> bool {
+    let mut found = false;
+    region.for_each_node(|node| {
+        if let Region::Continue { target, .. } = node
+            && *target == header
+        {
+            found = true;
+        }
+    });
+    found
 }
 
 /// Render a branch edge's phi assignments (`vPhi = vSrc`), the visible
