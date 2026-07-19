@@ -80,6 +80,11 @@ fn refinement_recovers_the_measured_guard_shape() {
         // W7 D6: timelock's symbol dispatcher is the corpus's one
         // linkable switch — the floor equals the measured value.
         ("refine_dispatch_linked", 1),
+        // W7 D8, measured 2026-07-19: bare_panics 192 · unwraps 85
+        // (corpus-wide 277 typed traps, 2 honest `unreachable`
+        // switch-default exhaustiveness traps left).
+        ("refine_bare_panics", 150),
+        ("refine_unwraps", 60),
     ];
     for (key, floor) in floors {
         let got = totals.get(key).copied().unwrap_or(0);

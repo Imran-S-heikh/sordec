@@ -12,8 +12,8 @@
 //! Two waves, split by pipeline position: **wave 1** (polarity, guard
 //! clauses, trap inlining) reads only region shape and runs as a
 //! fixpoint group *before* the recognizer chain; **wave 2** (dispatch
-//! linking) consumes recognizer-produced bindings and therefore runs
-//! *after* the chain, as straight-line single passes.
+//! linking, panic recovery) consumes recognizer-produced bindings and
+//! therefore runs *after* the chain, as straight-line single passes.
 //!
 //! ## Discipline
 //!
@@ -35,11 +35,13 @@
 
 mod dispatch_link;
 mod guard_clause;
+mod panic_recover;
 mod polarity;
 mod trap_inline;
 
 pub use dispatch_link::DispatchLinkPass;
 pub use guard_clause::GuardClausePass;
+pub use panic_recover::PanicRecoverPass;
 pub use polarity::PolarityPass;
 pub use trap_inline::TrapInlinePass;
 

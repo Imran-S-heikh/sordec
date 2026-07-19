@@ -229,6 +229,11 @@ pub const REFINE_SHARED_TRAP_WITH_BINDINGS: &str = "refine_shared_trap_with_bind
 /// Switches linked to a recovered `SymbolDispatch` table (W7 D6) — the
 /// renderer/emitter names those arms by enum variant.
 pub const REFINE_DISPATCH_LINKED: &str = "refine_dispatch_linked";
+/// Trap leaves typed as bare `panic!()` sites (W7 D8) — each also
+/// emits the `PanicWithoutErrorCode` diagnostic.
+pub const REFINE_BARE_PANICS: &str = "refine_bare_panics";
+/// Trap leaves typed as unwrap-shaped, tag-checked panics (W7 D8).
+pub const REFINE_UNWRAPS: &str = "refine_unwraps";
 
 // ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)

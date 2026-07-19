@@ -329,8 +329,8 @@ pub enum LiftDiagnosticCode {
     /// Not yet emitted — see [`UnrecognisedPrngCall`].
     UnrecognisedCryptoCall,
     /// A `panic!` lowered to a bare `unreachable` with no structured
-    /// error code. Not yet emitted — bare-panic recovery (C16) is
-    /// deferred.
+    /// error code. Emitted by the panic-recovery refinement pass (D8)
+    /// for every trap it types as a bare panic.
     PanicWithoutErrorCode,
 }
 

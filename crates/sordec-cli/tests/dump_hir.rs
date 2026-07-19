@@ -928,34 +928,35 @@ fn dump_hir_structures_token_transfer_into_labeled_scopes() {
 
 #[test]
 fn dump_hir_recovers_guard_clauses_with_inline_traps() {
-    // The W6 payoff shape (D1 + D2): a guard is a flat, else-less `if`
-    // whose body is the inlined trap — no `break` to a labeled trap
-    // scope, no else-nesting. The muxed-address tag guard in token
-    // `transfer` is the canonical instance.
+    // The W6 payoff shape (D1 + D2), typed by W7's D8: a guard is a
+    // flat, else-less `if` whose body is the inlined trap — now named
+    // as the tag-checked unwrap it is. The muxed-address tag guard in
+    // token `transfer` is the canonical instance.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", TOKEN_V23])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "if (ne (and v1, 255i64), 77i64) {\n    unreachable\n  }",
+            "if (ne (and v1, 255i64), 77i64) {\n    panic!()  ;; unwrap: tag-checked trap\n  }",
         ));
 }
 
 #[test]
 fn dump_hir_flattens_timelock_claim_guard_cascade() {
-    // Pre-W6 `claim` nested ~7 levels of else; the cascade must now
-    // render as consecutive flat guard clauses with inline traps.
+    // Pre-W6 `claim` nested ~7 levels of else; the cascade renders as
+    // consecutive flat guard clauses whose traps D8 types — the tag
+    // guard as an unwrap, the discriminant check as a bare panic.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", TIMELOCK])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "if (ne (and v18, 255i64), 76i64) {\n        unreachable",
+            "if (ne (and v18, 255i64), 76i64) {\n        panic!()  ;; unwrap: tag-checked trap",
         ))
         .stdout(predicate::str::contains(
-            "if (eq v51, 1i32) {\n        unreachable",
+            "if (eq v51, 1i32) {\n        panic!()  ;; no error code",
         ));
 }
 

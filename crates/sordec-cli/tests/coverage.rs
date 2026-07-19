@@ -137,9 +137,12 @@ fn coverage_json_reports_recognizer_miss_diagnostics_on_token_v23() {
 }
 
 #[test]
-fn coverage_on_hello_add_reports_zero_diagnostics() {
+fn coverage_on_hello_add_reports_only_the_panic_lint() {
     // A fully-recovered contract: no recogniser misses, no surviving
-    // unknown host calls.
+    // unknown host calls. The only code present is the informational
+    // bare-panic lint the D8 pass wires (hello-add's decode guards,
+    // overflow check, and panic-glue wrappers = 5 sites) — any other
+    // code appearing here is a recovery regression.
     let out = Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["coverage", "--json", HELLO_ADD])
@@ -149,8 +152,13 @@ fn coverage_on_hello_add_reports_zero_diagnostics() {
         .stdout
         .clone();
     let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
-    assert_eq!(v["diagnostics"]["total"].as_u64(), Some(0));
-    assert!(v["diagnostics"]["by_code"].as_array().unwrap().is_empty());
+    let by_code = v["diagnostics"]["by_code"].as_array().unwrap();
+    assert_eq!(by_code.len(), 1, "only the panic lint fires: {by_code:?}");
+    assert_eq!(
+        by_code[0]["code"].as_str(),
+        Some("lift::panic_without_error_code")
+    );
+    assert_eq!(v["diagnostics"]["total"].as_u64(), Some(5));
 }
 
 #[test]

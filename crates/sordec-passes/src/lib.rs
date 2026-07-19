@@ -68,7 +68,9 @@ pub use recognizers::{
     ContextPass, CrossContractPass, DispatcherPass, EnumKeyPass, LinearMemoryPass, StoragePass,
     TtlPass, UnrecognizedScanPass, ValEncodingPass,
 };
-pub use refine::{DispatchLinkPass, GuardClausePass, PolarityPass, TrapInlinePass};
+pub use refine::{
+    DispatchLinkPass, GuardClausePass, PanicRecoverPass, PolarityPass, TrapInlinePass,
+};
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringStatsPass};
 pub use treeify::TreeifyStatsPass;
@@ -173,6 +175,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // recognizer output, so they cannot join the pre-recognizer
             // group above. Straight-line, no fixpoint.
             Box::new(DispatchLinkPass),
+            Box::new(PanicRecoverPass),
             Box::new(UnrecognizedScanPass),
             Box::new(TreeifyStatsPass),
         ],
