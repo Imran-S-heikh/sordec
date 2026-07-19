@@ -302,7 +302,10 @@ impl<'a> Walker<'a> {
 /// Sequence constructor that flattens directly-nested sequences and
 /// unwraps singletons, keeping the tree canonical: no `Sequence` as an
 /// immediate child of a `Sequence`, no one-element `Sequence`s.
-fn seq(items: Vec<Region>) -> Region {
+///
+/// `pub(crate)`: the region-refinement passes splice subtrees and reuse
+/// this to keep rebuilding against the same canonical form.
+pub(crate) fn seq(items: Vec<Region>) -> Region {
     let mut flat = Vec::with_capacity(items.len());
     for item in items {
         match item {

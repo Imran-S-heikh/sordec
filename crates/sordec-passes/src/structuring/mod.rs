@@ -59,6 +59,7 @@ mod stats;
 mod walk;
 
 pub use stats::StructuringStatsPass;
+pub(crate) use walk::seq;
 
 use sordec_common::BlockId;
 use sordec_ir::{LiftedFunction, Region};

@@ -216,6 +216,9 @@ pub const STRUCTURING_FALLBACK: &str = "structuring_fallback";
 
 /// Guard conditions inverted into the canonical exit-in-`then` form.
 pub const REFINE_POLARITY_FLIPPED: &str = "refine_polarity_flipped";
+/// `else` bodies hoisted out from under a terminating `then` (guard
+/// clauses recovered).
+pub const REFINE_GUARDS_HOISTED: &str = "refine_guards_hoisted";
 
 // ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)

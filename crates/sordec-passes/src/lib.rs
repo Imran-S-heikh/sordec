@@ -68,7 +68,7 @@ pub use recognizers::{
     ContextPass, CrossContractPass, DispatcherPass, EnumKeyPass, LinearMemoryPass, StoragePass,
     TtlPass, UnrecognizedScanPass, ValEncodingPass,
 };
-pub use refine::PolarityPass;
+pub use refine::{GuardClausePass, PolarityPass};
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringStatsPass};
 pub use treeify::TreeifyStatsPass;
@@ -152,6 +152,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(StructuringStatsPass),
             // Region-refinement fixpoint group (D-category, wave 1).
             Box::new(PolarityPass),
+            Box::new(GuardClausePass),
             // Recognizer chain (order rationale above).
             Box::new(ValEncodingPass),
             Box::new(StoragePass),
@@ -170,6 +171,6 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(UnrecognizedScanPass),
             Box::new(TreeifyStatsPass),
         ],
-        vec![1..2],
+        vec![1..3],
     )
 }

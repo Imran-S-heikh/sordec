@@ -27,8 +27,10 @@
 //!   (debug builds), so a bad splice fails at the pass that made it,
 //!   not three passes later.
 
+mod guard_clause;
 mod polarity;
 
+pub use guard_clause::GuardClausePass;
 pub use polarity::PolarityPass;
 
 use sordec_ir::{HighIr, Region, Validate as _};
@@ -44,6 +46,42 @@ pub(crate) fn is_bare_exit(region: &Region) -> bool {
         Region::Break { transfer, .. } | Region::Continue { transfer, .. } => transfer.is_empty(),
         Region::Return { .. } | Region::Unreachable => true,
         _ => false,
+    }
+}
+
+/// Does control never fall out of `region` onto its successor in the
+/// parent sequence?
+///
+/// The guard-clause rewrite hoists an `else` body after its `if`, which
+/// is sound only when the `then` provably leaves the context. The
+/// analysis is conservative: `Scope` reports `false` (a `Break` to its
+/// own `out` resumes exactly at the successor), and so does anything
+/// unknown.
+pub(crate) fn is_terminating(region: &Region) -> bool {
+    match region {
+        Region::Break { .. }
+        | Region::Continue { .. }
+        | Region::Return { .. }
+        | Region::Unreachable => true,
+        Region::Sequence(items) => items.last().is_some_and(is_terminating),
+        Region::If {
+            then_region,
+            else_region,
+            ..
+        } => else_region
+            .as_ref()
+            .is_some_and(|e| is_terminating(then_region) && is_terminating(e)),
+        Region::Switch { arms, default, .. } => {
+            arms.iter().all(|arm| is_terminating(&arm.body)) && is_terminating(default)
+        }
+        // A well-formed loop body always ends in its back edge or an
+        // exit through an enclosing label — control never falls to the
+        // loop's successor. A body that would fall through (ill-formed)
+        // reports false, which only suppresses the rewrite.
+        Region::Loop { body, .. } => is_terminating(body),
+        // Breaks to this scope's own `out` resume at the successor.
+        Region::Scope { .. } => false,
+        Region::Basic(_) | Region::Transfer { .. } | Region::Unstructured { .. } => false,
     }
 }
 

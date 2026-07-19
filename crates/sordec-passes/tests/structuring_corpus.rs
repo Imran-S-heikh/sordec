@@ -54,6 +54,36 @@ fn structure_fixture(wasm: &[u8]) -> (LiftedIr, HighIr, PipelineReport) {
 }
 
 #[test]
+fn refinement_recovers_the_measured_guard_shape() {
+    // Coarse magnitude lock against silent no-op regressions in the
+    // W6 refinement group, mirroring the declutter floors. Measured
+    // 2026-07-19 on the pinned corpus:
+    //   guards_hoisted 467 · polarity_flipped 4.
+    // (The 4 flips disproved the planning guess that exit-in-else
+    // never occurs in rustc output.) Floors sit below measured values
+    // to tolerate benign fixture drift, not to excuse regressions.
+    let mut totals: std::collections::BTreeMap<&'static str, i64> =
+        std::collections::BTreeMap::new();
+    for (_, wasm) in FIXTURES {
+        let (_, _, report) = structure_fixture(wasm);
+        for (key, value) in report.metric_totals() {
+            *totals.entry(key).or_insert(0) += value;
+        }
+    }
+    let floors: &[(&str, i64)] = &[
+        ("refine_guards_hoisted", 400),
+        ("refine_polarity_flipped", 1),
+    ];
+    for (key, floor) in floors {
+        let got = totals.get(key).copied().unwrap_or(0);
+        assert!(
+            got >= *floor,
+            "corpus-wide `{key}` = {got}, expected at least {floor}",
+        );
+    }
+}
+
+#[test]
 fn corpus_satisfies_ir_validators() {
     // The A5 validators run green over the whole corpus — the region
     // structure (label enclosure, transfer integrity, no duplicate
