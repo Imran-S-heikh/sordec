@@ -899,3 +899,82 @@ fn dump_hir_hides_pruning_residue_behind_count_line() {
             "pruning-residue binding(s) hidden (--raw shows them)",
         ));
 }
+
+// ---------------------------------------------------------------------
+// Structured rendering (A4/C5). These pin the shape of the structured
+// view — labeled scopes, loops, match, block marks — so the W6/W7
+// refinement passes land as reviewed diffs against a locked baseline.
+// The output is deliberately unrefined (else-nested guards, unclassified
+// loops); refinement flattens it later.
+// ---------------------------------------------------------------------
+
+#[test]
+fn dump_hir_structures_token_transfer_into_labeled_scopes() {
+    // token-v23 `transfer`: the merge structure renders as Rust-native
+    // labeled scopes with `break`, the tag guard folds into an `if`
+    // condition, and `;; bbN` breadcrumbs mark each block.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("'bb2: {"))
+        .stdout(predicate::str::contains("break 'bb"))
+        .stdout(predicate::str::contains(";; bb0"))
+        .stdout(predicate::str::contains("if (ne (and v1, 255i64), 77i64) {"));
+}
+
+#[test]
+fn dump_hir_renders_timelock_dispatcher_as_match() {
+    // The timelock dispatcher's br_table renders match-shaped with an
+    // integer selector and a wildcard default arm (variant naming
+    // arrives with the D6 pass).
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("match v"))
+        .stdout(predicate::str::contains("_ => {"));
+}
+
+#[test]
+fn dump_hir_renders_dex_loops_with_labeled_continue() {
+    // dex has the corpus's loops (allocator/Bytes helpers): they render
+    // as labeled `loop` blocks with `continue` back edges.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", DEX])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(": loop {"))
+        .stdout(predicate::str::contains("continue 'bb"));
+}
+
+#[test]
+fn dump_hir_keeps_straight_line_function_flat() {
+    // hello-add's `add` is straight-line: it structures to a `return`
+    // with no `match` and no loop labels.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", HELLO_ADD])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("return "))
+        .stdout(predicate::str::contains(": loop {").not());
+}
+
+#[test]
+fn dump_hir_raw_flag_keeps_flat_block_listing() {
+    // `--raw` is the structured view's inverse: flat `bbN:` labels, no
+    // labeled scopes, no `match`, no `break`/`continue`.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", "--raw", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bb0:"))
+        .stdout(predicate::str::contains("break 'bb").not())
+        .stdout(predicate::str::contains(": loop {").not())
+        .stdout(predicate::str::contains("match v").not());
+}
