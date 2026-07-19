@@ -40,6 +40,7 @@ pub mod metrics_catalog;
 pub mod pass;
 pub mod pipeline;
 pub mod recognizers;
+pub mod refine;
 pub mod structuring;
 #[cfg(test)]
 mod test_util;
@@ -67,6 +68,7 @@ pub use recognizers::{
     ContextPass, CrossContractPass, DispatcherPass, EnumKeyPass, LinearMemoryPass, StoragePass,
     TtlPass, UnrecognizedScanPass, ValEncodingPass,
 };
+pub use refine::PolarityPass;
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringStatsPass};
 pub use treeify::TreeifyStatsPass;
@@ -133,13 +135,24 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
 /// [`TreeifyStatsPass`] is the true terminal: metrics-only, after every
 /// rewrite has settled, it reports how much of the final IR the B6
 /// inlinability analysis classifies foldable / effect-pinned / residue.
-/// No fixpoint group: the dependency chain is a straight line and every
-/// pass is idempotent.
+///
+/// The **region-refinement group** sits between the structuring report
+/// and the recognizers: the D-category passes rewrite the region tree
+/// toward source shape (guard clauses, inlined traps, canonical
+/// polarity) and iterate to a fixpoint because each transform exposes
+/// work for the others. Recognizers read bindings, not regions, so the
+/// ordering between the group and the recognizer chain is by clarity,
+/// not dependency. The recognizer chain itself needs no fixpoint: its
+/// dependencies are a straight line and every pass is idempotent.
 #[must_use]
+#[allow(clippy::single_range_in_vec_init)] // fixpoint group, not a range literal
 pub fn default_high_pipeline() -> Pipeline<HighIr> {
     Pipeline::new(
         vec![
             Box::new(StructuringStatsPass),
+            // Region-refinement fixpoint group (D-category, wave 1).
+            Box::new(PolarityPass),
+            // Recognizer chain (order rationale above).
             Box::new(ValEncodingPass),
             Box::new(StoragePass),
             Box::new(AuthPass),
@@ -157,6 +170,6 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(UnrecognizedScanPass),
             Box::new(TreeifyStatsPass),
         ],
-        vec![],
+        vec![1..2],
     )
 }

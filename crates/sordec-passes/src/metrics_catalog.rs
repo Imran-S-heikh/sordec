@@ -210,6 +210,14 @@ pub const TREEIFY_DEAD_RESIDUE: &str = "treeify_dead_residue";
 pub const STRUCTURING_FALLBACK: &str = "structuring_fallback";
 
 // ---------------------------------------------------------------------
+// Region refinement (Phase 3 D-category, W6). Same W8-surfacing status
+// as the declutter/structuring keys above.
+// ---------------------------------------------------------------------
+
+/// Guard conditions inverted into the canonical exit-in-`then` form.
+pub const REFINE_POLARITY_FLIPPED: &str = "refine_polarity_flipped";
+
+// ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)
 // ---------------------------------------------------------------------
 
