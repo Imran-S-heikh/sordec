@@ -230,6 +230,88 @@ fn coverage_matrix_prints_and_holds_invariants() {
     let (resolved, attempted) = deep_facts("token-v23", &matrix);
     assert_eq!(attempted, 20, "token-v23 deep facts attempted");
     assert_eq!(resolved, 15, "token-v23 deep facts resolved");
+
+    // --- A6/H3: structuring coverage columns (measured 2026-07-20) ---
+    //
+    // Per-fixture structuring census (`StructuringCensusPass`). This
+    // driver test is the home for the exact numbers; the CLI e2e test
+    // only anchors the section structure. Each lookup routes through an
+    // `mc::` const, so a renamed census counter reads zero and fails
+    // here — the same drift guard the recognizer keys rely on.
+    //
+    // Columns: functions (total, structured); loops (while_top,
+    // unclassified); switches; dispatch_linked. The other three loop
+    // kinds (do_while_bottom / guarded_do_while / infinite) are zero
+    // corpus-wide — the classifier declines a shape it cannot prove
+    // rather than guessing — and are asserted zero in the loop below.
+    let structuring: &[(&str, i64, i64, i64, i64, i64, i64)] = &[
+        // fixture,           f_total, f_struct, while_top, unclass, switches, dispatch_linked
+        ("hello-add", 5, 5, 0, 0, 0, 0),
+        ("token-v22", 48, 48, 6, 1, 1, 0),
+        ("token-v23", 46, 46, 6, 1, 2, 0),
+        ("token-v23-stripped", 46, 46, 6, 1, 2, 0),
+        ("timelock", 18, 18, 4, 1, 1, 1),
+        ("dex-liquidity-pool", 50, 50, 4, 2, 1, 0),
+        ("attestation", 8, 8, 0, 0, 0, 0),
+    ];
+    for &(fx, f_total, f_struct, while_top, unclass, switches, dispatch_linked) in structuring {
+        // Every function structured — the metric-side twin of the K3
+        // zero-Unstructured lock, pinned per fixture.
+        assert!(count(fx, mc::STRUCTURING_FUNCTIONS_TOTAL) >= 1, "{fx} has functions");
+        assert_eq!(count(fx, mc::STRUCTURING_FUNCTIONS_TOTAL), f_total, "{fx} functions_total");
+        assert_eq!(
+            count(fx, mc::STRUCTURING_FUNCTIONS_STRUCTURED),
+            f_struct,
+            "{fx} functions_structured"
+        );
+        assert_eq!(
+            count(fx, mc::STRUCTURING_FUNCTIONS_STRUCTURED),
+            count(fx, mc::STRUCTURING_FUNCTIONS_TOTAL),
+            "{fx} must be 100% structured (K3)"
+        );
+
+        // Loop-kind breakdown. Only WhileTop and Unclassified occur on
+        // the corpus; the other three are pinned to zero (no witness).
+        assert_eq!(count(fx, mc::STRUCTURING_LOOPS_WHILE_TOP), while_top, "{fx} while_top");
+        assert_eq!(count(fx, mc::STRUCTURING_LOOPS_UNCLASSIFIED), unclass, "{fx} unclassified");
+        assert_eq!(count(fx, mc::STRUCTURING_LOOPS_DO_WHILE_BOTTOM), 0, "{fx} no do_while");
+        assert_eq!(count(fx, mc::STRUCTURING_LOOPS_GUARDED_DO_WHILE), 0, "{fx} no guarded do_while");
+        assert_eq!(count(fx, mc::STRUCTURING_LOOPS_INFINITE), 0, "{fx} no infinite loop");
+
+        // Census/classifier drift guard: the census's non-Unclassified
+        // loop count equals the `LoopClassifyPass` event counter. Both
+        // run once, so neither is inflated by the fixpoint group.
+        let classified = count(fx, mc::STRUCTURING_LOOPS_WHILE_TOP)
+            + count(fx, mc::STRUCTURING_LOOPS_DO_WHILE_BOTTOM)
+            + count(fx, mc::STRUCTURING_LOOPS_GUARDED_DO_WHILE)
+            + count(fx, mc::STRUCTURING_LOOPS_INFINITE);
+        assert_eq!(
+            classified,
+            count(fx, mc::REFINE_LOOPS_CLASSIFIED),
+            "{fx} census vs classifier loop-count drift"
+        );
+
+        // Recovered `match` count. The skeleton cross-check proves
+        // Switch nodes == the original `br_table` opcode count, so these
+        // are stable pins.
+        assert_eq!(count(fx, mc::STRUCTURING_SWITCHES), switches, "{fx} switches recovered");
+
+        // Cascade→match: only timelock links a switch to a recovered
+        // `SymbolDispatch` enum (D6).
+        assert_eq!(count(fx, mc::REFINE_DISPATCH_LINKED), dispatch_linked, "{fx} dispatch_linked");
+    }
+
+    // Corpus loop totals: 32 loops = 26 WhileTop + 6 Unclassified.
+    let corpus = |key| structuring.iter().map(|s| count(s.0, key)).sum::<i64>();
+    assert_eq!(corpus(mc::STRUCTURING_LOOPS_WHILE_TOP), 26, "corpus while loops");
+    assert_eq!(corpus(mc::STRUCTURING_LOOPS_UNCLASSIFIED), 6, "corpus unclassified loops");
+    assert_eq!(corpus(mc::STRUCTURING_SWITCHES), 7, "corpus recovered switches");
+
+    // D5 evidence: the token contracts and dex fold at least one switch
+    // arm into the wildcard default (timelock's dispatch switch does not).
+    for fx in ["token-v22", "token-v23", "token-v23-stripped", "dex-liquidity-pool"] {
+        assert!(count(fx, mc::REFINE_SWITCH_ARMS_DEDUPED) >= 1, "{fx} switch-arm dedup");
+    }
 }
 
 /// Sum the W7 deep-facts `(resolved, attempted)` over the five

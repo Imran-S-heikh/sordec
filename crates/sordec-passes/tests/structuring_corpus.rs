@@ -102,6 +102,10 @@ fn refinement_recovers_the_measured_guard_shape() {
         // (dex + timelock) recover elements through the copy loop —
         // every corpus invoke now carries its full element list.
         ("client_args_via_copy_loop", 2),
+        // W8 A6, measured 2026-07-20: the census counts 26 WhileTop
+        // loops corpus-wide (same 26 the D3 classifier proves); floor
+        // matches the `refine_loops_classified` floor above.
+        ("structuring_loops_while_top", 20),
     ];
     for (key, floor) in floors {
         let got = totals.get(key).copied().unwrap_or(0);
@@ -110,6 +114,26 @@ fn refinement_recovers_the_measured_guard_shape() {
             "corpus-wide `{key}` = {got}, expected at least {floor}",
         );
     }
+
+    // W8 A6 invariant (not a floor): every corpus function structures
+    // fully — the metric-side statement of the K3 zero-Unstructured lock
+    // (see `corpus_structures_with_zero_unstructured_regions`). Measured
+    // 2026-07-20: 221 functions, all structured; the two counters must
+    // stay equal even as fixtures change.
+    let functions_total = totals.get("structuring_functions_total").copied().unwrap_or(0);
+    let functions_structured = totals
+        .get("structuring_functions_structured")
+        .copied()
+        .unwrap_or(0);
+    assert!(functions_total > 0, "corpus has functions");
+    assert_eq!(
+        functions_structured, functions_total,
+        "every corpus function must structure fully (K3)",
+    );
+    // The labeled-exit census is a readability *meter*, not a recovery
+    // claim, so it carries no floor/ceiling (a bound would either be
+    // meaningless or break on benign fixture drift). Measured 2026-07-20
+    // for the record: 258 labeled breaks, 32 labeled continues.
 }
 
 #[test]
