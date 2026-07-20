@@ -15,10 +15,13 @@
 //! 2. **Elements** (`resolved_args`): the element array is written in
 //!    the same block as the vec construction, so the frame-facts
 //!    tracker recovers every slot value (all-or-nothing). Holds where
-//!    construction is block-local (dex's `balance`); the SDK's
-//!    tuple→vec **copy loop** on multi-arg calls kills the facts and
-//!    those sites honestly keep `resolved_args: None` — crossing the
-//!    loop needs iteration semantics, a structuring-era concern.
+//!    construction is block-local (dex's `balance`). **Tier 2b**
+//!    (W7 D9): where the SDK's tuple→vec **copy loop** on multi-arg
+//!    calls kills the block-local facts, the loop idiom is traced
+//!    structurally back to the block that stored the source slots —
+//!    Inferred-grade evidence, noted in provenance (see
+//!    [`resolve_through_copy_loop`]). Sites matching neither honestly
+//!    keep `resolved_args: None`.
 //! 3. **Interface** (`interface`): the resolved callee name + arity
 //!    match a known interface table
 //!    ([`interfaces::sep41_lookup`](crate::interfaces::sep41_lookup)).
@@ -34,17 +37,19 @@
 use std::collections::HashMap;
 
 use sordec_common::{
-    Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, ProvenanceSource, ValueId,
+    BlockId, Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, ProvenanceSource, ValueId,
 };
 use sordec_ir::{
-    ClientInterface, Expr, HighFunction, HighIr, KnownOp, MemWidth, SemanticOp,
+    BinaryOp, ClientInterface, Expr, HighFunction, HighIr, KnownOp, MemWidth, SemanticOp,
 };
 
 use super::wrappers::{chase_value, wrapper_params};
 use super::{apply_rewrites, Rewrite};
 use crate::dataflow::{
-    block_containing, canon_addr, facts_before, resolve_use, CallIndex, Resolver,
+    block_containing, canon_addr, facts_at_end, facts_before, resolve_use, trace_int, CallIndex,
+    Resolver,
 };
+use crate::effects::expr_effects;
 use crate::interfaces::sep41_lookup;
 use crate::pass::{Pass, PassResult};
 
@@ -56,6 +61,9 @@ pub const PASS_NAME: &str = "client-call";
 const M_ARITY: &str = "client_arity_resolved";
 /// Invokes whose full element list was recovered.
 const M_ARGS: &str = "client_args_resolved";
+/// Elements recovered by the tier-2b copy-loop trace (a subset of
+/// [`M_ARGS`]).
+const M_ARGS_LOOP: &str = "client_args_via_copy_loop";
 /// Invokes matched against a known interface.
 const M_IFACE: &str = "client_iface_matched";
 /// Invokes whose args-vec construction stayed unproven (the
@@ -98,9 +106,13 @@ impl Pass<HighIr> for ClientCallPass {
                 match try_resolve_args(ir, &mut resolver, func, handle) {
                     Some(recovered) => {
                         let elements_resolved = recovered.elements.is_some();
+                        let via_copy_loop = recovered.via_copy_loop;
                         let (upgraded, note, iface_matched) = upgrade(op, recovered);
                         if elements_resolved {
                             result.metrics.increment(M_ARGS, 1);
+                        }
+                        if via_copy_loop {
+                            result.metrics.increment(M_ARGS_LOOP, 1);
                         }
                         if iface_matched {
                             result.metrics.increment(M_IFACE, 1);
@@ -152,6 +164,9 @@ impl Pass<HighIr> for ClientCallPass {
 struct Recovered {
     arity: u32,
     elements: Option<Vec<ValueId>>,
+    /// Elements came from the tier-2b copy-loop trace (Inferred-grade
+    /// structural evidence, noted in provenance).
+    via_copy_loop: bool,
 }
 
 /// The args-vec handle of an invoke op still awaiting arity recovery.
@@ -194,9 +209,10 @@ fn upgrade(op: &KnownOp, recovered: Recovered) -> (KnownOp, String, bool) {
     };
 
     *arg_count = Some(recovered.arity);
-    let elements_note = match &recovered.elements {
-        Some(_) => ", elements recovered",
-        None => ", elements unproven (multi-block construction)",
+    let elements_note = match (&recovered.elements, recovered.via_copy_loop) {
+        (Some(_), true) => ", elements traced through the copy loop (structural)",
+        (Some(_), false) => ", elements recovered",
+        (None, _) => ", elements unproven (multi-block construction)",
     };
     *resolved_args = recovered.elements;
 
@@ -258,12 +274,12 @@ fn try_resolve_args(
 
     // Tier 2 — elements from the frame facts at the construction site.
     // The pointer may arrive Val-encoded (inlined VecNew) — peel first.
+    let (base, k) = canon_addr(func, peel_encode(func, ptr));
     let elements = (|| {
         if arity == 0 {
             // An empty vec has no elements to prove.
             return Some(Vec::new());
         }
-        let (base, k) = canon_addr(func, peel_encode(func, ptr));
         let block_id = block_containing(func, site)?;
         let block = func.blocks.get(block_id)?;
         let facts = facts_before(func, block, site, base);
@@ -272,10 +288,251 @@ fn try_resolve_args(
             .collect()
     })();
 
+    // Tier 2b — trace the SDK's tuple→vec copy loop back to the block
+    // that stored the source slots (W7 D9).
+    let (elements, via_copy_loop) = match elements {
+        Some(elements) => (Some(elements), false),
+        None => match resolve_through_copy_loop(func, base, k, arity) {
+            Some(elements) => (Some(elements), true),
+            None => (None, false),
+        },
+    };
+
     Some(Recovered {
         arity,
         elements,
+        via_copy_loop,
     })
+}
+
+/// Tier 2b (W7 D9): recover elements through the SDK's tuple→vec copy
+/// loop.
+///
+/// Multi-arg client calls stage their element `Val`s in one frame
+/// array, then a compiler-emitted loop copies them 8 bytes at a time
+/// into the constructor's array:
+/// `while (i != arity*8) { *(dst+i) = *(src+i); i += 8 }`. This tier
+/// matches that idiom structurally — a lone W8 load/store pair over
+/// the same induction phi (init 0, step +8, `!= arity*8` exit
+/// witness), a pure-only loop block, and a single block writing the
+/// source slots — and reads the source block's final frame facts.
+/// **Inferred-grade** evidence (the loop's execution order is
+/// structural, not proven against the CFG), recorded as such in the
+/// provenance note, matching the interface tier's discipline.
+fn resolve_through_copy_loop(
+    func: &HighFunction,
+    dst_root: ValueId,
+    k_dst: u32,
+    arity: u32,
+) -> Option<Vec<ValueId>> {
+    if arity == 0 {
+        return None;
+    }
+    let (copy_block, shape) = func.blocks.iter().find_map(|(id, block)| {
+        let shape = match_copy_block(func, block)?;
+        (shape.dst_root == dst_root && shape.k_dst == k_dst).then_some((id, shape))
+    })?;
+    if !induction_covers_slots(func, shape.induction, arity) {
+        return None;
+    }
+    let writer = single_source_writer(func, copy_block, shape.src_root, shape.k_src, arity)?;
+    let facts = facts_at_end(func, func.blocks.get(writer)?, shape.src_root);
+    (0..arity)
+        .map(|i| facts.value_at(shape.k_src.checked_add(i.checked_mul(8)?)?, MemWidth::W8))
+        .collect()
+}
+
+/// The decomposed copy-loop body: `*(dst_root + k_dst + i) =
+/// *(src_root + k_src + i)` over induction value `i`.
+struct CopyShape {
+    src_root: ValueId,
+    k_src: u32,
+    dst_root: ValueId,
+    k_dst: u32,
+    induction: ValueId,
+}
+
+/// Match one block against the copy-loop body idiom: exactly one W8
+/// load and one W8 store forwarding it, both indexed by the same
+/// induction value, and nothing else but pure-total arithmetic.
+fn match_copy_block(func: &HighFunction, block: &sordec_ir::HighBlock) -> Option<CopyShape> {
+    let mut load: Option<(ValueId, ValueId, u32, ValueId)> = None;
+    let mut store: Option<(ValueId, u32, ValueId, ValueId)> = None;
+    for &id in &block.bindings {
+        let binding = func.bindings.get(id)?;
+        match &binding.expr {
+            Expr::Load {
+                addr,
+                offset,
+                width: MemWidth::W8,
+                ..
+            } => {
+                if load.is_some() {
+                    return None;
+                }
+                let (root, off, ind) = split_addr(func, *addr, *offset)?;
+                load = Some((id, root, off, ind?));
+            }
+            Expr::Store {
+                addr,
+                value,
+                offset,
+                width: MemWidth::W8,
+            } => {
+                if store.is_some() {
+                    return None;
+                }
+                let (root, off, ind) = split_addr(func, *addr, *offset)?;
+                store = Some((root, off, ind?, *value));
+            }
+            expr => {
+                if !expr_effects(expr).is_pure_total() {
+                    return None;
+                }
+            }
+        }
+    }
+    let (load_id, src_root, k_src, load_ind) = load?;
+    let (dst_root, k_dst, store_ind, stored) = store?;
+    if load_ind != store_ind || resolve_use(func, stored) != load_id {
+        return None;
+    }
+    Some(CopyShape {
+        src_root,
+        k_src,
+        dst_root,
+        k_dst,
+        induction: load_ind,
+    })
+}
+
+/// Decompose an address (+ instruction-baked offset) into
+/// `(root, constant offset, at-most-one non-constant induction term)`,
+/// peeling `Add` chains. The induction side must resolve to a phi (the
+/// loop-carried counter); a second non-constant term refuses.
+fn split_addr(
+    func: &HighFunction,
+    addr: ValueId,
+    baked: u32,
+) -> Option<(ValueId, u32, Option<ValueId>)> {
+    let mut current = addr;
+    let mut offset = baked;
+    let mut induction = None;
+    for _ in 0..PEEL_DEPTH {
+        let terminal = resolve_use(func, current);
+        let Some(binding) = func.bindings.get(terminal) else {
+            return Some((terminal, offset, induction));
+        };
+        let Expr::Binary {
+            op: BinaryOp::Add,
+            lhs,
+            rhs,
+        } = &binding.expr
+        else {
+            return Some((terminal, offset, induction));
+        };
+        let const_fold = [(lhs, rhs), (rhs, lhs)].into_iter().find_map(|(k, rest)| {
+            let konst = u32::try_from(trace_int(func, *k)?).ok()?;
+            Some((*rest, offset.checked_add(konst)?))
+        });
+        if let Some((rest, total)) = const_fold {
+            offset = total;
+            current = rest;
+            continue;
+        }
+        if induction.is_some() {
+            return None;
+        }
+        let (phi_side, rest) = [(lhs, rhs), (rhs, lhs)].into_iter().find(|(cand, _)| {
+            func.bindings
+                .get(resolve_use(func, **cand))
+                .is_some_and(|b| matches!(b.expr, Expr::Phi { .. }))
+        })?;
+        induction = Some(resolve_use(func, *phi_side));
+        current = *rest;
+    }
+    None
+}
+
+/// The induction value walks exactly the element slots: a two-input
+/// phi with a constant-0 initial, an `i + 8` step, and an exit
+/// comparison of `i` against `arity*8` somewhere in the function
+/// (either polarity — rustc emits `ne` for continue-in-then loops and
+/// `eq` for the rotated exit-in-then dual).
+fn induction_covers_slots(func: &HighFunction, induction: ValueId, arity: u32) -> bool {
+    let Some(binding) = func.bindings.get(induction) else {
+        return false;
+    };
+    let Expr::Phi { incoming } = &binding.expr else {
+        return false;
+    };
+    if incoming.len() != 2 {
+        return false;
+    }
+    let resolved: Vec<ValueId> = incoming
+        .iter()
+        .map(|(_, v)| resolve_use(func, *v))
+        .collect();
+    let init_ok = resolved.iter().any(|&v| trace_int(func, v) == Some(0));
+    let is_step = |v: ValueId| {
+        func.bindings.get(v).is_some_and(|b| {
+            matches!(
+                &b.expr,
+                Expr::Binary { op: BinaryOp::Add, lhs, rhs }
+                    if (resolve_use(func, *lhs) == induction && trace_int(func, *rhs) == Some(8))
+                        || (resolve_use(func, *rhs) == induction
+                            && trace_int(func, *lhs) == Some(8))
+            )
+        })
+    };
+    let step_ok = resolved.iter().any(|&v| is_step(v));
+    let bound = i128::from(arity) * 8;
+    let bound_ok = func.bindings.iter().any(|(_, b)| {
+        matches!(
+            &b.expr,
+            Expr::Binary { op: BinaryOp::Ne | BinaryOp::Eq, lhs, rhs }
+                if (resolve_use(func, *lhs) == induction && trace_int(func, *rhs) == Some(bound))
+                    || (resolve_use(func, *rhs) == induction
+                        && trace_int(func, *lhs) == Some(bound))
+        )
+    });
+    init_ok && step_ok && bound_ok
+}
+
+/// The single block (outside the copy loop) storing into the source
+/// slot range — `None` when no block, or more than one, writes it.
+fn single_source_writer(
+    func: &HighFunction,
+    copy_block: BlockId,
+    src_root: ValueId,
+    k_src: u32,
+    arity: u32,
+) -> Option<BlockId> {
+    let end = k_src.checked_add(arity.checked_mul(8)?)?;
+    let mut writer = None;
+    for (block_id, block) in func.blocks.iter() {
+        if block_id == copy_block {
+            continue;
+        }
+        for &id in &block.bindings {
+            let Some(binding) = func.bindings.get(id) else {
+                continue;
+            };
+            let Expr::Store { addr, offset, .. } = &binding.expr else {
+                continue;
+            };
+            let (root, off) = canon_addr(func, *addr);
+            let total = off.checked_add(*offset)?;
+            if root == src_root && total >= k_src && total < end {
+                match writer {
+                    None => writer = Some(block_id),
+                    Some(existing) if existing == block_id => {}
+                    Some(_) => return None,
+                }
+            }
+        }
+    }
+    writer
 }
 
 /// Peel the C1 `ValEncodeSmall` wrapper and pure width conversions off

@@ -98,6 +98,10 @@ fn refinement_recovers_the_measured_guard_shape() {
         // W7 D2-ext, measured 2026-07-19: 60 break sites duplicated
         // out of the binding-carrying shared trap blocks.
         ("refine_traps_duplicated", 40),
+        // W7 D9, measured 2026-07-20: both multi-arg transfer sites
+        // (dex + timelock) recover elements through the copy loop —
+        // every corpus invoke now carries its full element list.
+        ("client_args_via_copy_loop", 2),
     ];
     for (key, floor) in floors {
         let got = totals.get(key).copied().unwrap_or(0);

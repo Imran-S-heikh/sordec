@@ -229,6 +229,9 @@ pub const REFINE_SHARED_TRAP_WITH_BINDINGS: &str = "refine_shared_trap_with_bind
 /// Break sites rewritten into a fresh-id duplicate of a
 /// binding-carrying shared trap block (W7 D2-ext).
 pub const REFINE_TRAPS_DUPLICATED: &str = "refine_traps_duplicated";
+/// Client-call element lists recovered by the tier-2b copy-loop trace
+/// (W7 D9) — a subset of `client_args_resolved`.
+pub const CLIENT_ARGS_VIA_COPY_LOOP: &str = "client_args_via_copy_loop";
 /// Switches linked to a recovered `SymbolDispatch` table (W7 D6) — the
 /// renderer/emitter names those arms by enum variant.
 pub const REFINE_DISPATCH_LINKED: &str = "refine_dispatch_linked";

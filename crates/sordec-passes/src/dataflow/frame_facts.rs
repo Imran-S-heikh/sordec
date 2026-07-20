@@ -223,6 +223,37 @@ pub fn facts_before(
     FrameFacts::default()
 }
 
+/// Compute the facts about `base` visible at the **end** of `block` —
+/// the same forward scan as [`facts_before`] run to completion. Used by
+/// analyses (the client-call copy-loop tier) that prove a later reader
+/// observes this block's final frame state.
+#[must_use]
+pub fn facts_at_end(func: &HighFunction, block: &HighBlock, base: ValueId) -> FrameFacts {
+    let mut facts = FrameFacts::default();
+    for &id in &block.bindings {
+        let Some(binding) = func.bindings.get(id) else {
+            facts.kill_all();
+            continue;
+        };
+        if let Expr::Store {
+            addr,
+            value,
+            offset,
+            width,
+        } = &binding.expr
+        {
+            let (store_base, addr_off) = canon_addr(func, *addr);
+            match u32::checked_add(addr_off, *offset) {
+                Some(total) if store_base == base => facts.record(total, *width, *value),
+                _ => facts.kill_all(),
+            }
+        } else if may_write_memory(&binding.expr) {
+            facts.kill_all();
+        }
+    }
+    facts
+}
+
 /// Whether an expression may write linear memory — the module's shared
 /// kill predicate (stores are handled separately by [`facts_before`],
 /// which needs their address; this classifies everything else).

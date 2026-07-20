@@ -615,12 +615,12 @@ fn dump_hir_raw_flag_preserves_raw_cross_contract_calls() {
 
 #[test]
 fn dump_hir_types_cross_contract_client_calls() {
-    // W2/D2.4: invoke ops are typed against the SEP-41 interface by
-    // callee name + arity. dex `balance` is a single-block
-    // construction, so its element list is fully recovered; the
+    // W2/D2.4 + W7 D9: invoke ops are typed against the SEP-41
+    // interface by callee name + arity. dex `balance` is a
+    // single-block construction (element list recovered in-block); the
     // multi-arg `transfer` sites build the vec via an out-of-block
-    // copy loop, so they carry arity + interface but keep the raw
-    // handle (elements honestly unproven).
+    // copy loop, which the D9 tier traces back to the source slots —
+    // full element lists with the structural-evidence note.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", DEX])
@@ -631,9 +631,11 @@ fn dump_hir_types_cross_contract_client_calls() {
         .stdout(predicate::str::contains(
             "sep41 balance(id) (callee+arity match, structural)",
         ))
-        // Arity tier (transfer/3).
-        .stdout(predicate::str::contains("\"transfer\", v"))
-        .stdout(predicate::str::contains("3 args"))
+        // Copy-loop tier (transfer/3).
+        .stdout(predicate::str::contains("\"transfer\", [v1, v2, v9]"))
+        .stdout(predicate::str::contains(
+            "elements traced through the copy loop (structural)",
+        ))
         .stdout(predicate::str::contains(
             "sep41 transfer(from, to, amount)",
         ));
@@ -643,7 +645,10 @@ fn dump_hir_types_cross_contract_client_calls() {
         .args(["dump-hir", TIMELOCK])
         .assert()
         .success()
-        .stdout(predicate::str::contains("3 args"))
+        .stdout(predicate::str::contains("\"transfer\", [v1, v2, v16]"))
+        .stdout(predicate::str::contains(
+            "elements traced through the copy loop (structural)",
+        ))
         .stdout(predicate::str::contains(
             "sep41 transfer(from, to, amount)",
         ));

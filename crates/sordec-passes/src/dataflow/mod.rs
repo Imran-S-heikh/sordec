@@ -54,7 +54,8 @@ pub use cfg::{for_each_target, CfgEdge, CfgFacts, LoopForest, LoopId, NaturalLoo
 pub use const_prop::{CallIndex, CallSite, Resolver, DEFAULT_RESOLVE_DEPTH};
 pub use def_use::{DefUseIndex, UseSite};
 pub use frame_facts::{
-    block_containing, canon_addr, facts_before, may_write_memory, FrameFacts, SlotFact,
+    block_containing, canon_addr, facts_at_end, facts_before, may_write_memory, FrameFacts,
+    SlotFact,
 };
 pub use high::{resolve_use, trace_int, trace_literal, DEFAULT_USE_DEPTH};
 pub use high_uses::{HighUseIndex, HighUseSite};
