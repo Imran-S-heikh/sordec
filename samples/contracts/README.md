@@ -127,6 +127,42 @@ Reading the table:
   surviving unknown host calls** — that is the 100% "host interactions"
   figure in `sordec coverage`.
 
+## Structuring coverage
+
+The Phase-3 control-flow view: the structuring census over the settled
+region trees. Like the recogniser matrix above, this is the
+human-readable projection of the machine-checked columns in
+`crates/sordec-driver/tests/coverage_matrix.rs`, and it matches the
+`structuring:` section of `sordec coverage <fixture>.wasm`. Measured
+2026-07-20.
+
+| Fixture | functions structured | loops (while / unclassified) | switches | dispatch-linked |
+|---------|:-------------------:|:----------------------------:|:--------:|:---------------:|
+| hello-add          | 5 / 5   | 0 / 0 | 0 | – |
+| token-v22          | 48 / 48 | 6 / 1 | 1 | – |
+| token-v23          | 46 / 46 | 6 / 1 | 2 | – |
+| token-v23-stripped | 46 / 46 | 6 / 1 | 2 | – |
+| timelock           | 18 / 18 | 4 / 1 | 1 | ✓ |
+| dex-liquidity-pool | 50 / 50 | 4 / 2 | 1 | – |
+| attestation        | 8 / 8   | 0 / 0 | 0 | – |
+
+Reading the table:
+
+- **100% structured, corpus-wide.** Every function in every fixture
+  reduces to a fully structured region tree with zero `Unstructured`
+  fallback — the Phase-3 K3 lock (reducible rustc output always
+  structures). All 221 corpus functions structure.
+- **26 `while` loops, 6 unclassified.** The `while` column counts loops
+  proven `WhileTop` (recovered as `while cond { .. }`); the
+  `unclassified` remainder is loops with per-iteration effectful headers
+  the classifier soundly declines to reshape rather than guess. No
+  fixture exhibits a `do_while` / guarded / infinite loop.
+- **Dispatch-linking is a timelock singleton.** Only timelock links a
+  recovered `Switch` to a `SymbolDispatch` enum (its `TimeBoundKind`
+  decode), so its `match` arms render by variant name; the other
+  switches are plain integer `match`es. Switch counts equal the original
+  `br_table` opcode counts (skeleton cross-check).
+
 ## Adding a new fixture
 
 Future tasks (Phase 2+ semantic recovery, Phase 3 event/error reconstruction)

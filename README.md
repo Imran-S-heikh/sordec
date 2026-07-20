@@ -2,31 +2,35 @@
 
 A WebAssembly decompiler specialized for [Soroban](https://stellar.org/soroban) smart contracts.
 
-> **Status: Phase 1 of 4 — Foundation Complete**
+> **Status: Phase 2 of 4 complete — Phase 3 (control-flow structuring) in progress**
 >
-> Phase 1 ships an inspection toolkit: parse a Soroban `.wasm`, lift it
-> to a typed CFG/SSA IR, and report what we understand about it. Rust
-> source generation lands in Phase 3. See [PHASE_1.md](PHASE_1.md) for
-> the deliverable summary, verification recipe, and acceptance evidence.
+> Phases 1–2 ship an inspection toolkit: parse a Soroban `.wasm`, lift it
+> to a typed CFG/SSA IR, recover the multi-instruction Soroban SDK idioms,
+> and report what we understand about it. Phase 3 adds control-flow
+> structuring (`if`/`while`/`match` reconstruction) — surfaced today in
+> `sordec dump-hir` and the `coverage` structuring section — with Rust
+> source generation to follow. See [PHASE_1.md](PHASE_1.md) and
+> [PHASE_2.md](PHASE_2.md) for the per-phase deliverable summaries,
+> verification recipes, and acceptance evidence.
 
 ## What it does today
 
-Three CLI subcommands, all read-only inspection. None of these mutate
+Four CLI subcommands, all read-only inspection. None of these mutate
 your `.wasm` or write outside of stdout.
 
 | Subcommand | Output | Use case |
 |---|---|---|
 | `sordec dump-facts <wasm>`  | JSON | What we extracted: imports, exports, decoded Soroban metadata, contract spec, custom sections |
 | `sordec dump-ir <wasm>`     | Text | Waffle-style CFG/SSA IR with **named host calls** (e.g. `host:l:put_contract_data`) |
-| `sordec coverage <wasm>`    | Text or `--json` | How much of the contract our pipeline understands: per-pattern recognition (storage tiers, enum keys, TTL, client calls, …), a two-number semantic-recovery headline, host-call recognition %, and recogniser-miss diagnostics |
+| `sordec dump-hir <wasm>`    | Text | Structured HighIR: recovered control flow (`if`/`while`/`match`, named match arms, typed panics) plus the Phase-2 semantic operations |
+| `sordec coverage <wasm>`    | Text or `--json` | How much of the contract our pipeline understands: control-flow **structuring** coverage (functions structured, loop shapes, labeled-exit tax), per-pattern recognition (storage tiers, enum keys, TTL, client calls, …), a two-number semantic-recovery headline, host-call recognition %, and recogniser-miss diagnostics |
 
 What's coming next:
 
-- **Phase 2** — multi-instruction pattern recovery (storage tier resolution, auth chain recognition, cross-contract clients, Val encoding/decoding)
-- **Phase 3** — control-flow structuring (`if`/`while`/`match` reconstruction) + Rust source emit
+- **Phase 3 (in progress)** — control-flow structuring (`if`/`while`/`match` reconstruction, shipping now in `dump-hir` + `coverage`), annotated WAT emit, then Rust source emit
 - **Phase 4** — accuracy framework, multi-version protocol catalog, polish
 
-Each phase ships when it's ready and verified end-to-end (see `PHASE_N.md` per phase). Phase 2 is the next deliverable.
+Each phase ships when it's ready and verified end-to-end (see `PHASE_N.md` per phase). Phase 3 is the current deliverable.
 
 ## Quick start
 
@@ -57,6 +61,16 @@ coverage report — token-v23.wasm
                      call (local):     116
                      call indirect:      0
                      other:            934
+  structuring:
+    functions:      46 / 46 structured        (100.0%)   fallback regions ×0
+    loops:          6 / 7 classified          (85.7%)
+                    while ×6, do_while ×0, guarded ×0, infinite ×0, unclassified ×1
+    switches:       2 match recovered   (dispatch-linked ×0, arms deduped ×1)
+    traps:          inlined ×37, duplicated ×0, shared+bindings ×6, panic! ×37, unwrap ×23
+    labeled exits:  break ×43, continue ×7   (readability tax; while back edges not counted)
+    refinements:    guards ×83, polarity ×0, &&-merge ×0 (blocked ×0), loop tags ×6, copy-loop args ×0
+    declutter:      aliases ×12, phis ×467, jumps ×2, returns ×28, traps ×1, chains ×0, dead blocks ×41, dead vals ×0
+    treeify:        inline ×532, effect-pinned ×120, residue ×869
   recognition:
     storage:        tiers 8 / 10 resolved     (80.0%)
                     get ×4, set ×4, has ×1, remove ×0, extend_ttl ×2
@@ -74,7 +88,8 @@ coverage report — token-v23.wasm
     host interactions:  35 / 35 recognized       (100.0%)
     deep facts:         15 / 20 resolved         (75.0%)
     note: structural accuracy vs source (>=90% AST node-count, D4.1) is a Phase-4 metric built on the Phase-3 Rust emitter — not yet computable
-  diagnostics:     5 total (recogniser misses)
+  diagnostics:     42 total (recogniser misses)
+                     lift::panic_without_error_code (×37)
                      lift::non_constant_durability_arg (×2)
                      lift::unrecognised_storage_pattern (×2)
                      lift::non_constant_ttl_amount (×1)
@@ -92,6 +107,17 @@ where a pass emits a real miss counter; the other rows are counts with a
 note on where their misses would surface. Neither number is the RFP's
 contractual accuracy score — that is structural AST-diff against source,
 a Phase-4 artifact over the Phase-3 Rust emitter.
+
+**Reading the structuring section.** *Functions structured* is 100%
+across all seven fixtures (the Phase-3 K3 lock: reducible rustc output
+always structures), so the interesting rows are the shape breakdowns.
+*Loops* reports how many were proven to a source shape — `while ×N`
+means recovered `while` loops; the honest `unclassified ×N` remainder
+is loops with per-iteration effectful headers the classifier declines
+to reshape rather than guess. *Labeled exits* is a readability-tax
+meter, not a recovery claim: fewer `break`/`continue` labels means
+source closer to idiomatic Rust. The `declutter` / `treeify` rows are
+the structuring precursors (CFG cleanup and inlinability analysis).
 
 ## Architecture
 
@@ -134,7 +160,7 @@ crates/
 ├── sordec-passes/    — Lifter + analysis passes + Soroban host-call catalog
 ├── sordec-backend/   — Rust + WAT emitters (Phase 3)
 ├── sordec-driver/    — Pipeline orchestration + corpus integration tests
-└── sordec-cli/       — `sordec` binary (dump-facts, dump-ir, coverage)
+└── sordec-cli/       — `sordec` binary (dump-facts, dump-ir, dump-hir, coverage)
 ```
 
 Per-crate rustdoc:
@@ -145,7 +171,7 @@ cargo doc --workspace --no-deps --open
 
 ## Test corpus
 
-[`samples/contracts/`](samples/contracts/) holds six real-world Soroban
+[`samples/contracts/`](samples/contracts/) holds seven real-world Soroban
 contracts used by the integration test suite, each with pinned source +
 toolchain + sha256-verified WASM bytes:
 
@@ -157,8 +183,9 @@ toolchain + sha256-verified WASM bytes:
 | `token-v23-stripped/`  | soroban-examples 23.0.1  | 6.0 KB | token-v23 with custom sections removed |
 | `timelock/`            | soroban-examples 23.0.1  | 3.7 KB | Time-bounded claimable balance, cross-contract token calls |
 | `dex-liquidity-pool/`  | soroban-examples 23.0.1  | 11 KB  | Constant-product AMM, largest fixture |
+| `attestation/`         | first-party (SDK 23.5.3) | 2.4 KB | Storage-free; crypto (sha256/keccak256/ed25519) + PRNG + `#[contracterror]` + long `Symbol` |
 
-Verify all six against their committed sha256s:
+Verify all seven against their committed sha256s:
 
 ```bash
 bash tools/verify-fixtures.sh
@@ -176,20 +203,21 @@ full layout convention and feature-coverage matrix.
 ## Running the test suite
 
 ```bash
-cargo test --workspace                                       # 121 tests
+cargo test --workspace                                       # 769 tests
 cargo clippy --workspace --all-features --all-targets -- -D warnings
 cargo doc --workspace --no-deps                              # no broken intra-doc links
-bash tools/verify-fixtures.sh                                # 6/6 sha256 OK
+bash tools/verify-fixtures.sh                                # 7/7 sha256 OK
 ```
 
 All gates green at every commit on `main`. No CI workflow yet; the
 verification recipe is the contract.
 
-## Phase 1 status
+## Phase status
 
-See [PHASE_1.md](PHASE_1.md) for the Phase 1 scope, the verification
-recipe (≤ 5 min from a clean clone), and the acceptance evidence
-(110 tests, 6 fixtures, 100% host-call recognition across the corpus).
+See [PHASE_1.md](PHASE_1.md) and [PHASE_2.md](PHASE_2.md) for the
+per-phase scope, the verification recipe (≤ 5 min from a clean clone),
+and the acceptance evidence (100% host-call recognition across all seven
+fixtures). Phase 3 (control-flow structuring) is in progress on `main`.
 
 ## License
 
