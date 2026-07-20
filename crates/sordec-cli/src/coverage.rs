@@ -16,6 +16,12 @@
 //!    was Soroban metadata present and decoded). Always-yes for real
 //!    contracts; tracked for completeness.
 //!
+//! Plus the **structuring** section (A6/W8): control-flow structuring
+//! coverage — per-function structured ratio, the loop-kind breakdown,
+//! recovered `match` count, the labeled-exit readability tax, and the
+//! region-refinement / declutter / treeify counters — also drawn from
+//! the pipeline's [`PassMetrics`](sordec_passes::PassMetrics).
+//!
 //! Plus the **recognition** section (W7): per-pattern recovery counts
 //! and ratios (storage tiers, enum keys, TTL, client calls, dispatcher,
 //! auth, events, collections, panics, Val boilerplate) drawn from the
@@ -78,6 +84,10 @@ pub struct CoverageReport {
     /// Operator counts by kind. Closed total: the four numbered buckets
     /// sum to `total`.
     pub operators: OperatorBreakdown,
+    /// Control-flow structuring coverage (A6): per-function structured
+    /// ratio, loop-kind breakdown, recovered switches, labeled-exit tax,
+    /// and the region-refinement / declutter / treeify counters.
+    pub structuring: StructuringCoverage,
     /// Per-pattern recognition counts and ratios (F1–F8 + beyond-kickoff).
     pub recognition: RecognitionCoverage,
     /// The two-number semantic-recovery headline (W7).
@@ -178,6 +188,167 @@ pub struct OperatorBreakdown {
     pub call_indirect: usize,
     /// Every other operator (arithmetic, memory, control flow, etc.).
     pub other: usize,
+}
+
+/// Control-flow structuring coverage (A6/W8).
+///
+/// Drawn from the pipeline's structuring counters
+/// ([`sordec_passes::metrics_catalog`]): the terminal
+/// `StructuringCensusPass` supplies the census fields (functions, loops,
+/// switches, labeled exits) over the *settled* region trees, while the
+/// refinement / declutter / treeify passes supply the rewrite-event
+/// counters. Grouped by A6 deliverable so each subsection maps to a
+/// milestone bullet; every counter appears exactly once.
+#[derive(Debug, Clone, Serialize)]
+pub struct StructuringCoverage {
+    /// Per-function structured ratio (`%functions_structured`).
+    pub functions: StructuredFunctions,
+    /// Per-`LoopKind` breakdown + loop→shape classification ratio.
+    pub loops: LoopClassification,
+    /// Recovered `match` count + the switch-refinement counters.
+    pub switches: SwitchRecovery,
+    /// Trap-leaf refinement counts (inline / duplicate / panic typing).
+    pub traps: TrapRefinement,
+    /// Labeled break / continue census — the readability-tax meter.
+    pub labeled_exits: LabeledExits,
+    /// The remaining region-refinement counters (guards, polarity, &&).
+    pub refinements: RefinementCounts,
+    /// Lifted-IR de-cluttering counters (W3), the structuring precursor.
+    pub declutter: DeclutterCounts,
+    /// Treeification (inlinability) analysis counters (B6).
+    pub treeify: TreeifyCounts,
+}
+
+/// Per-function structuring outcome (`%functions_structured`).
+#[derive(Debug, Clone, Serialize)]
+pub struct StructuredFunctions {
+    /// Local functions in the high IR (the ratio denominator).
+    pub total: i64,
+    /// Functions with zero `Region::Unstructured` nodes (the numerator).
+    pub structured: i64,
+    /// `structured / total`; `None` when `total == 0`. Corpus-locked to
+    /// 1.0 (K3).
+    pub ratio: Option<f64>,
+    /// `Region::Unstructured` *nodes* across all functions (the
+    /// `structuring_fallback` counter). Node-level, so it may exceed
+    /// `total - structured` when one function has several fragments.
+    pub fallback_regions: i64,
+}
+
+/// Per-`LoopKind` census + classification ratio.
+///
+/// `total` is the closed sum of the five kinds; a new `LoopKind` variant
+/// is a compile error in the census pass, so the breakdown stays
+/// exhaustive.
+#[derive(Debug, Clone, Serialize)]
+pub struct LoopClassification {
+    /// All `Region::Loop` nodes (sum of the five kinds below).
+    pub total: i64,
+    /// Loops rendered as `while cond { .. }`.
+    pub while_top: i64,
+    /// Rotated do-while loops (exit test at the latch).
+    pub do_while_bottom: i64,
+    /// Guarded rotated do-while loops re-derivable as `while` / `for`.
+    pub guarded_do_while: i64,
+    /// Loops with no conditional exit (`loop { .. }`).
+    pub infinite: i64,
+    /// Loops the classifier soundly left unproven (never guessed).
+    pub unclassified: i64,
+    /// `(total - unclassified) / total`; `None` when there are no loops.
+    pub classified_ratio: Option<f64>,
+}
+
+/// Recovered-`match` count and the switch-refinement counters.
+#[derive(Debug, Clone, Serialize)]
+pub struct SwitchRecovery {
+    /// `Region::Switch` nodes — recovered `match` constructs.
+    pub recovered: i64,
+    /// Switches linked to a recovered `SymbolDispatch` enum (D6) — arms
+    /// render by variant name.
+    pub dispatch_linked: i64,
+    /// Arms folded into the wildcard because they equal the default (D5).
+    pub arms_deduped: i64,
+}
+
+/// Trap-leaf refinement counts (D2 / D8).
+#[derive(Debug, Clone, Serialize)]
+pub struct TrapRefinement {
+    /// Break sites rewritten into an inline copy of a shared bare
+    /// terminator (LLVM tail-merge undone).
+    pub inlined: i64,
+    /// Break sites rewritten into a fresh-id duplicate of a
+    /// binding-carrying shared trap block (D2-ext).
+    pub duplicated: i64,
+    /// Shared out-blocks left labeled because their bindings failed the
+    /// duplication gates — the remaining-work signal.
+    pub shared_with_bindings: i64,
+    /// Trap leaves typed as bare `panic!()` sites (D8).
+    pub bare_panics: i64,
+    /// Trap leaves typed as unwrap-shaped, tag-checked panics (D8).
+    pub unwraps: i64,
+}
+
+/// Labeled break / continue census — the readability-tax meter.
+#[derive(Debug, Clone, Serialize)]
+pub struct LabeledExits {
+    /// `Region::Break` nodes (all render label-carrying).
+    pub breaks: i64,
+    /// `Region::Continue` nodes. Upper bound on *rendered* labeled
+    /// continues: a `WhileTop` loop's back-edge continue is elided by
+    /// `render_while` but still counted here.
+    pub continues: i64,
+}
+
+/// The remaining region-refinement counters not grouped above.
+#[derive(Debug, Clone, Serialize)]
+pub struct RefinementCounts {
+    /// Guard conditions inverted into canonical exit-in-`then` form (D4).
+    pub polarity_flipped: i64,
+    /// `else` bodies hoisted out from under a terminating `then` (D1).
+    pub guards_hoisted: i64,
+    /// Shared-else diamonds merged into one `&&` guard (D7).
+    pub and_merged: i64,
+    /// Diamonds matching the D7 shape but blocked by a gate — the
+    /// widening signal.
+    pub and_merge_blocked: i64,
+    /// Loops proven to a source shape and `LoopKind`-tagged (D3). Should
+    /// equal `loops.total - loops.unclassified`.
+    pub loops_classified: i64,
+    /// Client-call element lists recovered by the copy-loop trace (D9).
+    pub client_args_via_copy_loop: i64,
+}
+
+/// Lifted-IR de-cluttering counters (W3).
+#[derive(Debug, Clone, Serialize)]
+pub struct DeclutterCounts {
+    /// Alias uses rewritten to their terminal definition.
+    pub aliases_resolved: i64,
+    /// Trivial block parameters removed (Braun-style pruning).
+    pub phis_pruned: i64,
+    /// Edges retargeted past empty forwarding blocks.
+    pub jumps_threaded: i64,
+    /// Branches to empty return blocks turned into `Return`.
+    pub returns_inlined: i64,
+    /// Branches to empty `Unreachable` blocks inlined.
+    pub traps_inlined: i64,
+    /// Single-predecessor block pairs spliced.
+    pub chains_merged: i64,
+    /// Unreachable blocks cleared to tombstones.
+    pub dead_blocks_cleared: i64,
+    /// Pure-total zero-use instructions removed from the schedule.
+    pub dead_values_unscheduled: i64,
+}
+
+/// Treeification (inlinability) analysis counters (B6).
+#[derive(Debug, Clone, Serialize)]
+pub struct TreeifyCounts {
+    /// Bindings classified `Inline` (pure-total, single live use).
+    pub inline: i64,
+    /// Single-live-use bindings pinned only by their effects — the K4
+    /// readability tax.
+    pub pinned_single_use: i64,
+    /// De-clutter residue bindings hidden as `Dead`.
+    pub dead_residue: i64,
 }
 
 /// Per-pattern recognition counts and ratios (spec F1–F8, plus the
@@ -582,6 +753,7 @@ pub fn compute_coverage(
             call_indirect,
             other: other_ops,
         },
+        structuring: build_structuring(metric_totals),
         recognition: build_recognition(metric_totals),
         headline: build_headline(metric_totals, call_to_import),
         diagnostics: build_diagnostic_coverage(recognizer_diagnostics),
@@ -734,6 +906,85 @@ fn build_recognition(t: &BTreeMap<&'static str, i64>) -> RecognitionCoverage {
             encode_u32: metric(t, mc::VAL_ENCODE_U32),
             decode_small: metric(t, mc::VAL_DECODE_SMALL),
             compare: metric(t, mc::VAL_COMPARE),
+        },
+    }
+}
+
+/// Build the structuring section (A6) from the pipeline's per-pass
+/// counter totals. Every counter is looked up by a `metrics_catalog`
+/// const — no raw key strings (same discipline as [`build_recognition`]).
+///
+/// The census counters (`structuring_*`) come from the terminal
+/// `StructuringCensusPass` and are true census values; the `refine_*` /
+/// `declutter_*` / `treeify_*` counters are rewrite-event totals summed
+/// across pipeline invocations. The classification ratio is derived from
+/// the census, not the `refine_loops_classified` event count, so it
+/// stays correct regardless of fixpoint iteration counts.
+fn build_structuring(t: &BTreeMap<&'static str, i64>) -> StructuringCoverage {
+    let functions_total = metric(t, mc::STRUCTURING_FUNCTIONS_TOTAL);
+    let functions_structured = metric(t, mc::STRUCTURING_FUNCTIONS_STRUCTURED);
+
+    let while_top = metric(t, mc::STRUCTURING_LOOPS_WHILE_TOP);
+    let do_while_bottom = metric(t, mc::STRUCTURING_LOOPS_DO_WHILE_BOTTOM);
+    let guarded_do_while = metric(t, mc::STRUCTURING_LOOPS_GUARDED_DO_WHILE);
+    let infinite = metric(t, mc::STRUCTURING_LOOPS_INFINITE);
+    let unclassified = metric(t, mc::STRUCTURING_LOOPS_UNCLASSIFIED);
+    let loops_total = while_top + do_while_bottom + guarded_do_while + infinite + unclassified;
+
+    StructuringCoverage {
+        functions: StructuredFunctions {
+            total: functions_total,
+            structured: functions_structured,
+            ratio: ratio(functions_structured, functions_total),
+            fallback_regions: metric(t, mc::STRUCTURING_FALLBACK),
+        },
+        loops: LoopClassification {
+            total: loops_total,
+            while_top,
+            do_while_bottom,
+            guarded_do_while,
+            infinite,
+            unclassified,
+            classified_ratio: ratio(loops_total - unclassified, loops_total),
+        },
+        switches: SwitchRecovery {
+            recovered: metric(t, mc::STRUCTURING_SWITCHES),
+            dispatch_linked: metric(t, mc::REFINE_DISPATCH_LINKED),
+            arms_deduped: metric(t, mc::REFINE_SWITCH_ARMS_DEDUPED),
+        },
+        traps: TrapRefinement {
+            inlined: metric(t, mc::REFINE_TRAPS_INLINED),
+            duplicated: metric(t, mc::REFINE_TRAPS_DUPLICATED),
+            shared_with_bindings: metric(t, mc::REFINE_SHARED_TRAP_WITH_BINDINGS),
+            bare_panics: metric(t, mc::REFINE_BARE_PANICS),
+            unwraps: metric(t, mc::REFINE_UNWRAPS),
+        },
+        labeled_exits: LabeledExits {
+            breaks: metric(t, mc::STRUCTURING_LABELED_BREAKS),
+            continues: metric(t, mc::STRUCTURING_LABELED_CONTINUES),
+        },
+        refinements: RefinementCounts {
+            polarity_flipped: metric(t, mc::REFINE_POLARITY_FLIPPED),
+            guards_hoisted: metric(t, mc::REFINE_GUARDS_HOISTED),
+            and_merged: metric(t, mc::REFINE_AND_MERGED),
+            and_merge_blocked: metric(t, mc::REFINE_AND_MERGE_BLOCKED),
+            loops_classified: metric(t, mc::REFINE_LOOPS_CLASSIFIED),
+            client_args_via_copy_loop: metric(t, mc::CLIENT_ARGS_VIA_COPY_LOOP),
+        },
+        declutter: DeclutterCounts {
+            aliases_resolved: metric(t, mc::DECLUTTER_ALIASES_RESOLVED),
+            phis_pruned: metric(t, mc::DECLUTTER_PHIS_PRUNED),
+            jumps_threaded: metric(t, mc::DECLUTTER_JUMPS_THREADED),
+            returns_inlined: metric(t, mc::DECLUTTER_RETURNS_INLINED),
+            traps_inlined: metric(t, mc::DECLUTTER_TRAPS_INLINED),
+            chains_merged: metric(t, mc::DECLUTTER_CHAINS_MERGED),
+            dead_blocks_cleared: metric(t, mc::DECLUTTER_DEAD_BLOCKS_CLEARED),
+            dead_values_unscheduled: metric(t, mc::DECLUTTER_DEAD_VALUES_UNSCHEDULED),
+        },
+        treeify: TreeifyCounts {
+            inline: metric(t, mc::TREEIFY_INLINE),
+            pinned_single_use: metric(t, mc::TREEIFY_PINNED_SINGLE_USE),
+            dead_residue: metric(t, mc::TREEIFY_DEAD_RESIDUE),
         },
     }
 }
@@ -897,6 +1148,7 @@ pub fn render_text(out: &mut impl Write, r: &CoverageReport) -> io::Result<()> {
         r.operators.other
     )?;
 
+    render_structuring(out, &r.structuring)?;
     render_recognition(out, &r.recognition)?;
     render_headline(out, &r.headline)?;
 
@@ -928,6 +1180,103 @@ fn fmt_pct(ratio: Option<f64>) -> String {
         Some(r) => format!("{:.1}%", r * 100.0),
         None => "n/a".to_string(),
     }
+}
+
+/// Render the A6 structuring section — per-function structured ratio,
+/// loop-kind breakdown, recovered switches, labeled-exit tax, and the
+/// refinement / declutter / treeify counters. Fixed shape: every row
+/// renders even at zero (the `loops` row degrades to `no loops`), so the
+/// report stays a stable artifact.
+fn render_structuring(out: &mut impl Write, s: &StructuringCoverage) -> io::Result<()> {
+    writeln!(out, "  structuring:")?;
+
+    let f = &s.functions;
+    writeln!(
+        out,
+        "    functions:      {} / {} structured        ({})   fallback regions ×{}",
+        f.structured,
+        f.total,
+        fmt_pct(f.ratio),
+        f.fallback_regions,
+    )?;
+
+    let l = &s.loops;
+    if l.total == 0 {
+        writeln!(out, "    loops:          no loops in this contract")?;
+    } else {
+        writeln!(
+            out,
+            "    loops:          {} / {} classified          ({})",
+            l.total - l.unclassified,
+            l.total,
+            fmt_pct(l.classified_ratio),
+        )?;
+        writeln!(
+            out,
+            "                    while ×{}, do_while ×{}, guarded ×{}, infinite ×{}, unclassified ×{}",
+            l.while_top, l.do_while_bottom, l.guarded_do_while, l.infinite, l.unclassified,
+        )?;
+    }
+
+    let sw = &s.switches;
+    if sw.recovered == 0 {
+        writeln!(out, "    switches:       no match sites")?;
+    } else {
+        writeln!(
+            out,
+            "    switches:       {} match recovered   (dispatch-linked ×{}, arms deduped ×{})",
+            sw.recovered, sw.dispatch_linked, sw.arms_deduped,
+        )?;
+    }
+
+    let tr = &s.traps;
+    writeln!(
+        out,
+        "    traps:          inlined ×{}, duplicated ×{}, shared+bindings ×{}, panic! ×{}, unwrap ×{}",
+        tr.inlined, tr.duplicated, tr.shared_with_bindings, tr.bare_panics, tr.unwraps,
+    )?;
+
+    let le = &s.labeled_exits;
+    writeln!(
+        out,
+        "    labeled exits:  break ×{}, continue ×{}   (readability tax; while back edges not counted)",
+        le.breaks, le.continues,
+    )?;
+
+    let re = &s.refinements;
+    writeln!(
+        out,
+        "    refinements:    guards ×{}, polarity ×{}, &&-merge ×{} (blocked ×{}), loop tags ×{}, copy-loop args ×{}",
+        re.guards_hoisted,
+        re.polarity_flipped,
+        re.and_merged,
+        re.and_merge_blocked,
+        re.loops_classified,
+        re.client_args_via_copy_loop,
+    )?;
+
+    let dc = &s.declutter;
+    writeln!(
+        out,
+        "    declutter:      aliases ×{}, phis ×{}, jumps ×{}, returns ×{}, traps ×{}, chains ×{}, dead blocks ×{}, dead vals ×{}",
+        dc.aliases_resolved,
+        dc.phis_pruned,
+        dc.jumps_threaded,
+        dc.returns_inlined,
+        dc.traps_inlined,
+        dc.chains_merged,
+        dc.dead_blocks_cleared,
+        dc.dead_values_unscheduled,
+    )?;
+
+    let tf = &s.treeify;
+    writeln!(
+        out,
+        "    treeify:        inline ×{}, effect-pinned ×{}, residue ×{}",
+        tf.inline, tf.pinned_single_use, tf.dead_residue,
+    )?;
+
+    Ok(())
 }
 
 /// Render the W7 recognition section — per-pattern counts and ratios.
@@ -1337,6 +1686,7 @@ mod tests {
             "lift",
             "host_calls",
             "operators",
+            "structuring",
             "recognition",
             "headline",
         ] {
@@ -1451,6 +1801,70 @@ mod tests {
         assert!(r.recognition.client_calls.typed_ratio.is_none());
         assert!(r.recognition.dispatcher.ratio.is_none());
         assert!(r.headline.deep_facts.ratio.is_none());
+    }
+
+    #[test]
+    fn structuring_section_computed_from_metric_totals() {
+        use sordec_passes::metrics_catalog as mc;
+        // Synthetic counters exercising the derived fields: a closed loop
+        // total across two kinds, the classification ratio, the
+        // function-structured ratio, and passthrough of a declutter and a
+        // treeify counter.
+        let totals = BTreeMap::from([
+            (mc::STRUCTURING_FUNCTIONS_TOTAL, 10i64),
+            (mc::STRUCTURING_FUNCTIONS_STRUCTURED, 9),
+            (mc::STRUCTURING_FALLBACK, 1),
+            (mc::STRUCTURING_LOOPS_WHILE_TOP, 3),
+            (mc::STRUCTURING_LOOPS_UNCLASSIFIED, 1),
+            (mc::STRUCTURING_SWITCHES, 2),
+            (mc::STRUCTURING_LABELED_BREAKS, 5),
+            (mc::STRUCTURING_LABELED_CONTINUES, 2),
+            (mc::REFINE_DISPATCH_LINKED, 1),
+            (mc::DECLUTTER_PHIS_PRUNED, 42),
+            (mc::TREEIFY_INLINE, 100),
+        ]);
+        let ir = empty_lifted_ir(vec![]);
+        let r =
+            compute_coverage(Path::new("t.wasm"), &[], true, &ir, &[], &BTreeMap::new(), &totals);
+
+        let st = &r.structuring;
+        assert_eq!(st.functions.ratio, Some(0.9), "9/10 structured");
+        assert_eq!(st.functions.fallback_regions, 1);
+        assert_eq!(st.loops.total, 4, "closed sum of the five kinds");
+        assert_eq!(st.loops.classified_ratio, Some(0.75), "3/4 classified");
+        assert_eq!(st.switches.recovered, 2);
+        assert_eq!(st.switches.dispatch_linked, 1);
+        assert_eq!(st.labeled_exits.breaks, 5);
+        assert_eq!(st.labeled_exits.continues, 2);
+        assert_eq!(st.declutter.phis_pruned, 42);
+        assert_eq!(st.treeify.inline, 100);
+    }
+
+    #[test]
+    fn structuring_ratios_are_none_on_zero_denominator() {
+        // No counters at all — both structuring ratios null, never NaN,
+        // and the text render must contain no NaN/inf.
+        let ir = empty_lifted_ir(vec![]);
+        let r = compute_coverage(
+            Path::new("t.wasm"),
+            &[],
+            true,
+            &ir,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        assert!(r.structuring.functions.ratio.is_none());
+        assert!(r.structuring.loops.classified_ratio.is_none());
+        assert_eq!(r.structuring.loops.total, 0);
+
+        let mut buf = Vec::new();
+        render_text(&mut buf, &r).expect("render");
+        let text = String::from_utf8(buf).expect("utf8");
+        assert!(!text.contains("NaN"), "no NaN in render");
+        assert!(!text.contains("inf"), "no inf in render");
+        assert!(text.contains("no loops in this contract"));
+        assert!(text.contains("no match sites"));
     }
 
     #[test]

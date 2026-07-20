@@ -38,10 +38,14 @@ fn coverage_on_hello_add_succeeds_with_clean_lift() {
         .stdout(predicate::str::contains("catalog:"))
         .stdout(predicate::str::contains("lift:"))
         .stdout(predicate::str::contains("100.0%"))
-        // Hard NaN/inf negative — must never render either even on
-        // tiny contracts. Denominator-zero is covered by unit tests.
+        // Hard NaN/inf negative — must never render either even on tiny
+        // contracts. Denominator-zero is covered by unit tests. Ratios
+        // are the only floats and all carry a `%` suffix via `fmt_pct`,
+        // so the infinity token is `inf%` — checking bare `inf` would
+        // false-positive on the structuring section's `infinite` loop
+        // kind.
         .stdout(predicate::str::contains("NaN").not())
-        .stdout(predicate::str::contains("inf").not())
+        .stdout(predicate::str::contains("inf%").not())
         .stderr(predicate::str::is_empty());
 }
 
@@ -89,6 +93,7 @@ fn coverage_with_json_emits_parseable_json() {
         "lift",
         "host_calls",
         "operators",
+        "structuring",
         "diagnostics",
     ] {
         assert!(v.get(key).is_some(), "missing top-level key {key:?}");
@@ -211,7 +216,7 @@ fn coverage_on_token_v23_renders_recognition_and_headline_sections() {
         // is never mistaken for the RFP accuracy score.
         .stdout(predicate::str::contains("Phase-4"))
         .stdout(predicate::str::contains("NaN").not())
-        .stdout(predicate::str::contains("inf").not())
+        .stdout(predicate::str::contains("inf%").not())
         .stderr(predicate::str::is_empty());
 }
 
@@ -256,6 +261,67 @@ fn coverage_json_exposes_recognition_and_headline_on_token_v23() {
 }
 
 #[test]
+fn coverage_renders_structuring_section_on_token_v23() {
+    // A6/W8: the structuring section renders on a real contract. Anchor
+    // on the subsection labels, not the counts (exact numbers live in
+    // the driver coverage-matrix test).
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["coverage", TOKEN_V23])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("structuring:"))
+        .stdout(predicate::str::contains("functions:"))
+        .stdout(predicate::str::contains("structured"))
+        .stdout(predicate::str::contains("loops:"))
+        .stdout(predicate::str::contains("switches:"))
+        .stdout(predicate::str::contains("labeled exits:"))
+        .stdout(predicate::str::contains("declutter:"))
+        .stdout(predicate::str::contains("treeify:"))
+        .stdout(predicate::str::contains("NaN").not())
+        .stdout(predicate::str::contains("inf%").not())
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn coverage_json_reports_full_structuring_on_token_v23() {
+    let out = Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["coverage", "--json", TOKEN_V23])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+
+    let st = &v["structuring"];
+    // 100% structured is a corpus-locked claim (K3) — safe to pin here,
+    // like the host-interactions ratio above. Exact loop/switch counts
+    // stay in the driver matrix.
+    assert_eq!(
+        st["functions"]["ratio"].as_f64(),
+        Some(1.0),
+        "every token-v23 function structures"
+    );
+    assert!(st["functions"]["total"].as_i64().unwrap() >= 1);
+    // Loop classification ratio is null-or-finite (token-v23 has loops,
+    // so it should be finite), never NaN.
+    let loop_ratio = &st["loops"]["classified_ratio"];
+    assert!(
+        loop_ratio.is_null() || loop_ratio.is_number(),
+        "classified_ratio null-or-number, got {loop_ratio:?}"
+    );
+    // Every grouped subsection is present and numeric-shaped.
+    for group in ["switches", "traps", "labeled_exits", "refinements", "declutter", "treeify"] {
+        assert!(st[group].is_object(), "structuring.{group} object present");
+    }
+    assert!(st["labeled_exits"]["breaks"].is_number());
+    assert!(st["declutter"]["phis_pruned"].is_number());
+    assert!(st["treeify"]["inline"].is_number());
+}
+
+#[test]
 fn coverage_on_dex_types_its_cross_contract_calls() {
     // The dex fixture is the corpus's cross-contract witness: it calls
     // SEP-41 token clients, so the client-calls ratio must be non-null
@@ -290,7 +356,7 @@ fn coverage_on_hello_add_renders_degenerate_recognition_without_nan() {
         .stdout(predicate::str::contains("semantic recovery:"))
         .stdout(predicate::str::contains("n/a"))
         .stdout(predicate::str::contains("NaN").not())
-        .stdout(predicate::str::contains("inf").not())
+        .stdout(predicate::str::contains("inf%").not())
         .stderr(predicate::str::is_empty());
 }
 
