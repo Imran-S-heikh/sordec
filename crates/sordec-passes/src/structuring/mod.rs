@@ -54,10 +54,12 @@
 //! succeeds; [`StructureError`] is a defensive net for malformed IR,
 //! and the corpus lock asserts it never fires on real contracts.
 
+mod census;
 mod classify;
 mod stats;
 mod walk;
 
+pub use census::StructuringCensusPass;
 pub use stats::StructuringStatsPass;
 pub(crate) use walk::seq;
 

@@ -73,7 +73,7 @@ pub use refine::{
     PolarityPass, SwitchDedupPass, TrapInlinePass,
 };
 pub use sordec_common::LiftDiagnostics;
-pub use structuring::{structure, StructureError, StructuringStatsPass};
+pub use structuring::{structure, StructureError, StructuringCensusPass, StructuringStatsPass};
 pub use treeify::TreeifyStatsPass;
 
 use sordec_ir::{HighIr, LiftedIr};
@@ -135,9 +135,14 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
 /// (diagnostics-only, never rewrites). [`AuthFlowPass`] runs last of the
 /// rewriting passes,
 /// consuming `EnumKeyPass`'s resolved keys (hard dependencies both).
-/// [`TreeifyStatsPass`] is the true terminal: metrics-only, after every
-/// rewrite has settled, it reports how much of the final IR the B6
-/// inlinability analysis classifies foldable / effect-pinned / residue.
+/// The two terminal passes are metrics-only, after every rewrite has
+/// settled: [`TreeifyStatsPass`] reports how much of the final IR the B6
+/// inlinability analysis classifies foldable / effect-pinned / residue,
+/// and [`StructuringCensusPass`] emits the A6 structuring coverage
+/// counters (per-function structured ratio, loop-kind breakdown,
+/// recovered switches, labeled-exit tax) over the settled region trees.
+/// Both must stay outside the fixpoint group so their census counters
+/// are not multiplied by the iteration count.
 ///
 /// The **region-refinement group** sits between the structuring report
 /// and the recognizers: the D-category passes rewrite the region tree
@@ -184,6 +189,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(PanicRecoverPass),
             Box::new(UnrecognizedScanPass),
             Box::new(TreeifyStatsPass),
+            Box::new(StructuringCensusPass),
         ],
         vec![1..6],
     )

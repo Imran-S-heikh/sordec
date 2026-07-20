@@ -8,8 +8,12 @@
 //! (kickoff K3 — on reducible rustc output a correct structurer never
 //! fails); it exists so exotic input degrades loudly instead of
 //! silently. It never rewrites the IR (`changed: false`), so it is a
-//! safe idempotent head step, and it is the natural home for the
-//! structuring coverage metrics landing with A6 (W8).
+//! safe idempotent head step. The A6 (W8) structuring coverage
+//! metrics — per-function structured ratio, loop-kind breakdown,
+//! labeled-exit census — live in the terminal
+//! [`StructuringCensusPass`](super::StructuringCensusPass) instead,
+//! which observes the *settled* region tree; this pass owns only the
+//! node-level fallback count and its diagnostics.
 
 use sordec_common::{Diagnostic, LiftDiagnosticCode, Location};
 use sordec_ir::{HighIr, Region};

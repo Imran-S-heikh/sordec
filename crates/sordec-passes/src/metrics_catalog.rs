@@ -163,9 +163,8 @@ pub const VAL_DECODE_SMALL: &str = "val_decode_small";
 pub const VAL_COMPARE: &str = "val_compare";
 
 // ---------------------------------------------------------------------
-// Lifted-IR de-cluttering (Phase 3 W3). Registered here for the W8
-// coverage surface; deliberately absent from `surfaced_keys()` until
-// A6/F3 wires the structuring-metrics section.
+// Lifted-IR de-cluttering (Phase 3 W3). Surfaced by the W8 structuring
+// coverage section (A6/F3).
 // ---------------------------------------------------------------------
 
 /// Alias uses rewritten to their terminal definition.
@@ -187,8 +186,8 @@ pub const DECLUTTER_DEAD_BLOCKS_CLEARED: &str = "declutter_dead_blocks_cleared";
 pub const DECLUTTER_DEAD_VALUES_UNSCHEDULED: &str = "declutter_dead_values_unscheduled";
 
 // ---------------------------------------------------------------------
-// Treeification analysis (Phase 3 B6). Same W8-surfacing status as the
-// declutter keys above.
+// Treeification analysis (Phase 3 B6). Surfaced by the W8 structuring
+// coverage section (A6/F3).
 // ---------------------------------------------------------------------
 
 /// Bindings classified `Inline` (pure-total, single live use).
@@ -200,18 +199,59 @@ pub const TREEIFY_PINNED_SINGLE_USE: &str = "treeify_pinned_single_use";
 pub const TREEIFY_DEAD_RESIDUE: &str = "treeify_dead_residue";
 
 // ---------------------------------------------------------------------
-// Control-flow structuring (Phase 3 C2). Same W8-surfacing status as
-// the declutter keys above; the full structuring coverage set (A6)
-// lands with W8.
+// Control-flow structuring (Phase 3 C2). Surfaced by the W8 structuring
+// coverage section (A6/F3).
 // ---------------------------------------------------------------------
 
 /// Functions whose control flow fell back to `Region::Unstructured` —
-/// corpus-locked to zero (K3); non-zero only on exotic input.
+/// corpus-locked to zero (K3); non-zero only on exotic input. This is a
+/// *node-level* count (one per `Region::Unstructured`), emitted with a
+/// diagnostic by `structuring::StructuringStatsPass`; the *function*-level
+/// view is [`STRUCTURING_FUNCTIONS_STRUCTURED`] below.
 pub const STRUCTURING_FALLBACK: &str = "structuring_fallback";
 
 // ---------------------------------------------------------------------
-// Region refinement (Phase 3 D-category, W6). Same W8-surfacing status
-// as the declutter/structuring keys above.
+// Structuring census (Phase 3 A6, W8). Emitted once over the settled
+// region trees by `structuring::StructuringCensusPass` (the terminal
+// pipeline pass), not per fixpoint iteration — these are census values,
+// not rewrite-event counts.
+// ---------------------------------------------------------------------
+
+/// Local functions in the high IR — the `%functions_structured`
+/// denominator.
+pub const STRUCTURING_FUNCTIONS_TOTAL: &str = "structuring_functions_total";
+/// Functions with zero `Region::Unstructured` nodes — the
+/// `%functions_structured` numerator. Corpus-locked equal to
+/// [`STRUCTURING_FUNCTIONS_TOTAL`] (K3).
+pub const STRUCTURING_FUNCTIONS_STRUCTURED: &str = "structuring_functions_structured";
+/// `Region::Loop` nodes tagged `LoopKind::WhileTop` — the only kind the
+/// renderer prints as `while` (the loop→while recovery rate numerator).
+pub const STRUCTURING_LOOPS_WHILE_TOP: &str = "structuring_loops_while_top";
+/// `Region::Loop` nodes tagged `LoopKind::DoWhileBottom`.
+pub const STRUCTURING_LOOPS_DO_WHILE_BOTTOM: &str = "structuring_loops_do_while_bottom";
+/// `Region::Loop` nodes tagged `LoopKind::GuardedDoWhile`.
+pub const STRUCTURING_LOOPS_GUARDED_DO_WHILE: &str = "structuring_loops_guarded_do_while";
+/// `Region::Loop` nodes tagged `LoopKind::Infinite`.
+pub const STRUCTURING_LOOPS_INFINITE: &str = "structuring_loops_infinite";
+/// `Region::Loop` nodes left `LoopKind::Unclassified` — honestly
+/// unproven loops the classifier declined to shape (never guessed).
+pub const STRUCTURING_LOOPS_UNCLASSIFIED: &str = "structuring_loops_unclassified";
+/// `Region::Switch` nodes — recovered `match` constructs. Corpus-locked
+/// equal to the original `br_table` opcode count by the skeleton
+/// cross-check.
+pub const STRUCTURING_SWITCHES: &str = "structuring_switches";
+/// `Region::Break` nodes in the final trees — the readability-tax meter.
+/// Every break renders label-carrying (`break 'bbN`), so this is the
+/// rendered labeled-break count.
+pub const STRUCTURING_LABELED_BREAKS: &str = "structuring_labeled_breaks";
+/// `Region::Continue` nodes in the final trees. An upper bound on
+/// *rendered* labeled continues: `render_while` elides a `WhileTop`
+/// loop's back-edge continue, which is still counted here.
+pub const STRUCTURING_LABELED_CONTINUES: &str = "structuring_labeled_continues";
+
+// ---------------------------------------------------------------------
+// Region refinement (Phase 3 D-category, W6). Surfaced by the W8
+// structuring coverage section (A6/F3).
 // ---------------------------------------------------------------------
 
 /// Guard conditions inverted into the canonical exit-in-`then` form.
@@ -279,9 +319,14 @@ pub const DEEP_FACT_PAIRS: &[(&str, &str)] = &[
 /// construction, context accessors, and the const-prop internals are
 /// intentionally absent, being either W9-deferred surfaces or internal
 /// resolver signals).
+///
+/// Grouped by coverage section: the recognition/headline keys (F1–F8)
+/// first, then the structuring section keys (A6/W8) — declutter,
+/// treeify, structuring fallback + census, and region refinement.
 #[must_use]
 pub fn surfaced_keys() -> &'static [&'static str] {
     &[
+        // Recognition + headline (F1–F8).
         STORAGE_GET,
         STORAGE_SET,
         STORAGE_HAS,
@@ -322,6 +367,45 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         VAL_DECODE_SMALL,
         VAL_COMPARE,
         UNRECOGNISED_HOST_CALL,
+        // Structuring section — de-cluttering (W3).
+        DECLUTTER_ALIASES_RESOLVED,
+        DECLUTTER_PHIS_PRUNED,
+        DECLUTTER_JUMPS_THREADED,
+        DECLUTTER_RETURNS_INLINED,
+        DECLUTTER_TRAPS_INLINED,
+        DECLUTTER_CHAINS_MERGED,
+        DECLUTTER_DEAD_BLOCKS_CLEARED,
+        DECLUTTER_DEAD_VALUES_UNSCHEDULED,
+        // Structuring section — treeification (B6).
+        TREEIFY_INLINE,
+        TREEIFY_PINNED_SINGLE_USE,
+        TREEIFY_DEAD_RESIDUE,
+        // Structuring section — fallback + census (C2/A6).
+        STRUCTURING_FALLBACK,
+        STRUCTURING_FUNCTIONS_TOTAL,
+        STRUCTURING_FUNCTIONS_STRUCTURED,
+        STRUCTURING_LOOPS_WHILE_TOP,
+        STRUCTURING_LOOPS_DO_WHILE_BOTTOM,
+        STRUCTURING_LOOPS_GUARDED_DO_WHILE,
+        STRUCTURING_LOOPS_INFINITE,
+        STRUCTURING_LOOPS_UNCLASSIFIED,
+        STRUCTURING_SWITCHES,
+        STRUCTURING_LABELED_BREAKS,
+        STRUCTURING_LABELED_CONTINUES,
+        // Structuring section — region refinement (D-category).
+        REFINE_POLARITY_FLIPPED,
+        REFINE_GUARDS_HOISTED,
+        REFINE_TRAPS_INLINED,
+        REFINE_SHARED_TRAP_WITH_BINDINGS,
+        REFINE_TRAPS_DUPLICATED,
+        CLIENT_ARGS_VIA_COPY_LOOP,
+        REFINE_DISPATCH_LINKED,
+        REFINE_BARE_PANICS,
+        REFINE_UNWRAPS,
+        REFINE_SWITCH_ARMS_DEDUPED,
+        REFINE_LOOPS_CLASSIFIED,
+        REFINE_AND_MERGED,
+        REFINE_AND_MERGE_BLOCKED,
     ]
 }
 
