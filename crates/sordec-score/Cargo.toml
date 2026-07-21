@@ -11,7 +11,9 @@ repository.workspace = true
 # Pure source-to-source: the scorer parses both sides with `syn` and never
 # touches WASM or our IR. It stays decoupled from the pipeline crates on
 # purpose — the instrument must be independent of the pipeline it grades.
-syn.workspace = true
+# `visit` (on top of the workspace's `full`) drives the control-flow
+# skeleton walk; features are additive across the workspace.
+syn = { workspace = true, features = ["visit"] }
 quote.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

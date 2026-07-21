@@ -30,6 +30,7 @@ mod loader;
 pub mod metrics;
 mod report;
 mod semantic;
+mod simil;
 mod structure;
 
 use std::path::Path;
