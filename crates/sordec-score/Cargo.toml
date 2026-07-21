@@ -12,6 +12,7 @@ repository.workspace = true
 # touches WASM or our IR. It stays decoupled from the pipeline crates on
 # purpose — the instrument must be independent of the pipeline it grades.
 syn.workspace = true
+quote.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true

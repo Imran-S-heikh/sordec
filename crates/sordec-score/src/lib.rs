@@ -25,10 +25,13 @@
 mod compile;
 mod error;
 mod interface;
+mod loader;
 pub mod metrics;
 mod report;
 mod semantic;
 mod structure;
+
+use std::path::Path;
 
 pub use error::ScoreError;
 pub use report::{Categories, CategoryScore, ScoreReport, SCORER_VERSION};
@@ -69,6 +72,24 @@ pub fn score_files(
         compilation: compile::evaluate(reconstructed, original, opts.check_compile),
     };
     ScoreReport::aggregate(categories, opts.threshold)
+}
+
+/// Score two scoring inputs given by path. Each path may be a single
+/// `.rs` file or a source directory (flattened by the loader). The CLI
+/// entry point.
+///
+/// # Errors
+///
+/// [`ScoreError::Io`] if a path can't be read; [`ScoreError::Parse`] if
+/// either input is not parseable Rust (`side` names which one).
+pub fn score_paths(
+    reconstructed: &Path,
+    original: &Path,
+    opts: &ScoreOptions,
+) -> Result<ScoreReport, ScoreError> {
+    let recon = loader::load(reconstructed, "reconstructed")?;
+    let orig = loader::load(original, "original")?;
+    Ok(score_files(&recon, &orig, opts))
 }
 
 /// Parse two Rust sources and score them.

@@ -643,38 +643,19 @@ fn run_coverage(args: &CoverageArgs) -> u8 {
 }
 
 fn run_score(args: &ScoreArgs) -> u8 {
-    // 1. Read both inputs. I/O errors get the dedicated exit code so they
-    //    don't conflate with a scoring (parse) failure.
-    let reconstructed = match std::fs::read_to_string(&args.reconstructed) {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = writeln!(
-                std::io::stderr(),
-                "sordec: could not read {}: {e}",
-                args.reconstructed.display()
-            );
-            return EXIT_IO_ERR;
-        }
-    };
-    let original = match std::fs::read_to_string(&args.original) {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = writeln!(
-                std::io::stderr(),
-                "sordec: could not read {}: {e}",
-                args.original.display()
-            );
-            return EXIT_IO_ERR;
-        }
-    };
-
-    // 2. Score. A parse failure on either side is a pipeline error.
+    // 1. Load + score. The loader reads both inputs (a `.rs` file or a
+    //    source directory); an I/O failure gets the dedicated exit code so
+    //    it doesn't conflate with a parse failure.
     let opts = sordec_score::ScoreOptions {
         threshold: args.threshold,
         check_compile: args.check_compile,
     };
-    let report = match sordec_score::score_str(&reconstructed, &original, &opts) {
+    let report = match sordec_score::score_paths(&args.reconstructed, &args.original, &opts) {
         Ok(report) => report,
+        Err(e @ sordec_score::ScoreError::Io { .. }) => {
+            let _ = writeln!(std::io::stderr(), "sordec: {e}");
+            return EXIT_IO_ERR;
+        }
         Err(e) => {
             let _ = writeln!(std::io::stderr(), "sordec: scoring failed: {e}");
             return EXIT_PIPELINE_ERR;

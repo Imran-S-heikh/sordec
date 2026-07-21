@@ -13,6 +13,11 @@ const HELLO_ADD_SRC: &str = concat!(
     "/../../samples/contracts/hello-add/source/src/lib.rs"
 );
 
+const TOKEN_V23_SRC_DIR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../samples/contracts/token-v23/source/src"
+);
+
 #[test]
 fn score_identity_passes_and_reports_all_categories() {
     // Scoring a file against itself must pass, and the text report must
@@ -56,6 +61,20 @@ fn score_reports_compilation_unchecked_by_default() {
         // The compilation category is opt-in; by default it is excluded
         // from the mean, not silently scored zero.
         .stdout(predicate::str::contains("\"checked\": false"));
+}
+
+#[test]
+fn score_flattens_and_passes_a_multi_file_source_directory() {
+    // token-v23 is a real multi-file contract (lib.rs + contract.rs +
+    // admin.rs + …). The loader must flatten the directory and identity
+    // must still pass.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["score", TOKEN_V23_SRC_DIR, TOKEN_V23_SRC_DIR])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"))
+        .stderr(predicate::str::is_empty());
 }
 
 #[test]
