@@ -22,6 +22,7 @@
 //! See [`score_files`] for the entry point and [`ScoreReport`] for the
 //! output. The metric is frozen + versioned: see [`SCORER_VERSION`].
 
+mod canon;
 mod compile;
 mod error;
 mod interface;
