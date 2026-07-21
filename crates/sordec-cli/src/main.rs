@@ -11,6 +11,9 @@
 //! - `sordec dump-wat <wasm>` — run the full pipeline, then emit the
 //!   Soroban-annotated WAT (flat disassembly with recovered semantics as
 //!   `;;` comments) on stdout.
+//! - `sordec decompile <wasm> --out-dir <dir>` — run the full pipeline
+//!   via the [`sordec_driver::Driver`] and write `<dir>/<name>/<name>.wat`
+//!   (compilable Rust joins it in Phase 4).
 //! - `sordec coverage <wasm>` — parse + lift, then emit a coverage
 //!   report (host-call recognition %, lift completeness, parse +
 //!   metadata health) as text or `--json`.
@@ -71,6 +74,9 @@ enum Command {
     DumpHir(DumpHirArgs),
     /// Run the full pipeline and emit Soroban-annotated WAT on stdout.
     DumpWat(DumpWatArgs),
+    /// Decompile a WASM module, writing artifacts under `--out-dir`
+    /// (annotated WAT now; compilable Rust in Phase 4).
+    Decompile(DecompileArgs),
     /// Report how much of a contract this pipeline currently understands:
     /// per-pattern recognition (storage tiers, enum keys, TTL, client
     /// calls, dispatcher, auth, events, collections, panics, Val
@@ -124,6 +130,18 @@ struct DumpWatArgs {
 }
 
 #[derive(clap::Args)]
+struct DecompileArgs {
+    /// Path to the WASM module to decompile.
+    wasm: PathBuf,
+
+    /// Directory to write decompilation artifacts into. A per-contract
+    /// subdirectory `<name>/` is created inside it holding `<name>.wat`
+    /// (and, in Phase 4, `<name>.rs`).
+    #[arg(long)]
+    out_dir: PathBuf,
+}
+
+#[derive(clap::Args)]
 struct CoverageArgs {
     /// Path to the WASM module to inspect.
     wasm: PathBuf,
@@ -146,6 +164,7 @@ fn main() -> ExitCode {
         Command::DumpIr(args) => run_dump_ir(&args),
         Command::DumpHir(args) => run_dump_hir(&args),
         Command::DumpWat(args) => run_dump_wat(&args),
+        Command::Decompile(args) => run_decompile(&args),
         Command::Coverage(args) => run_coverage(&args),
     };
     ExitCode::from(exit)
@@ -421,6 +440,69 @@ fn run_dump_wat(args: &DumpWatArgs) -> u8 {
     combined.extend(declutter.diagnostics().cloned());
     combined.extend(recover.diagnostics().cloned());
     diagnostics::print_diagnostics(&combined);
+
+    EXIT_OK
+}
+
+fn run_decompile(args: &DecompileArgs) -> u8 {
+    // 1. Read the input file.
+    let bytes = match std::fs::read(&args.wasm) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "sordec: could not read {}: {e}",
+                args.wasm.display()
+            );
+            return EXIT_IO_ERR;
+        }
+    };
+
+    // 2. Run the whole pipeline through the driver.
+    let output = match sordec_driver::Driver::standard().run(&bytes) {
+        Ok(output) => output,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "sordec: decompile failed: {e}");
+            return EXIT_PIPELINE_ERR;
+        }
+    };
+
+    // 3. Write artifacts to `<out-dir>/<name>/`. `<name>` is the WASM
+    //    file stem; fall back to "contract" for a stemless path.
+    let name = args
+        .wasm
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("contract");
+    let contract_dir = args.out_dir.join(name);
+    if let Err(e) = std::fs::create_dir_all(&contract_dir) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "sordec: could not create {}: {e}",
+            contract_dir.display()
+        );
+        return EXIT_IO_ERR;
+    }
+    let wat_path = contract_dir.join(format!("{name}.wat"));
+    if let Err(e) = std::fs::write(&wat_path, output.wat.as_bytes()) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "sordec: could not write {}: {e}",
+            wat_path.display()
+        );
+        return EXIT_IO_ERR;
+    }
+
+    // 4. Report the written path on stdout; pipeline diagnostics on stderr.
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if let Err(e) = writeln!(out, "{}", wat_path.display()) {
+        let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
+        return EXIT_IO_ERR;
+    }
+    if let Some(report) = output.report {
+        diagnostics::print_diagnostics(&report.diagnostics);
+    }
 
     EXIT_OK
 }

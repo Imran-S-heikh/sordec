@@ -24,6 +24,7 @@ your `.wasm` or write outside of stdout.
 | `sordec dump-ir <wasm>`     | Text | Waffle-style CFG/SSA IR with **named host calls** (e.g. `host:l:put_contract_data`) |
 | `sordec dump-hir <wasm>`    | Text | Structured HighIR: recovered control flow (`if`/`while`/`match`, named match arms, typed panics) plus the Phase-2 semantic operations |
 | `sordec dump-wat <wasm>`    | Text | Soroban-**annotated WAT**: flat disassembly with a per-function header block listing the recovered operations (storage tier/key, auth, client calls, typed panics) and each host `call` labeled inline with its friendly name |
+| `sordec decompile <wasm> --out-dir <dir>` | Files | Run the full pipeline and write `<dir>/<name>/<name>.wat` (compilable Rust joins it in Phase 4). The path is echoed on stdout; pipeline diagnostics go to stderr |
 | `sordec coverage <wasm>`    | Text or `--json` | How much of the contract our pipeline understands: control-flow **structuring** coverage (functions structured, loop shapes, labeled-exit tax), per-pattern recognition (storage tiers, enum keys, TTL, client calls, …), a two-number semantic-recovery headline, host-call recognition %, and recogniser-miss diagnostics |
 
 What's coming next:
@@ -46,6 +47,9 @@ cargo build --release
 
 # Text: Soroban-annotated WAT
 ./target/release/sordec dump-wat samples/contracts/token-v23/token-v23.wasm | head -40
+
+# Files: decompile to a directory (writes out/token-v23/token-v23.wat)
+./target/release/sordec decompile samples/contracts/token-v23/token-v23.wasm --out-dir out/
 
 # Coverage report — the headline metric
 ./target/release/sordec coverage samples/contracts/token-v23/token-v23.wasm
@@ -164,7 +168,7 @@ crates/
 ├── sordec-passes/    — Lifter + analysis passes + Soroban host-call catalog
 ├── sordec-backend/   — Rust + WAT emitters (Phase 3)
 ├── sordec-driver/    — Pipeline orchestration + corpus integration tests
-└── sordec-cli/       — `sordec` binary (dump-facts, dump-ir, dump-hir, dump-wat, coverage)
+└── sordec-cli/       — `sordec` binary (dump-facts, dump-ir, dump-hir, dump-wat, decompile, coverage)
 ```
 
 Per-crate rustdoc:
