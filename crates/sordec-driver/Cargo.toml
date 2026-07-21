@@ -13,6 +13,7 @@ sordec-ir.workspace = true
 sordec-frontend.workspace = true
 sordec-passes.workspace = true
 sordec-backend.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
