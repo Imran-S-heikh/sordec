@@ -97,16 +97,17 @@ pub(crate) struct HostCallSite {
     pub func_index: u32,
 }
 
-/// Parse a flat-printed `call $#funcN` line, returning `N`.
+/// Parse a flat-printed `call N` line, returning the numeric callee index
+/// `N`.
 ///
-/// Only a bare `call` matters (never `call_indirect` / `return_call`), and
-/// only `name_unnamed`'s `$#funcN` form resolves to an index; a named
-/// callee (a module that kept its `name` section) yields `None` and is
-/// simply left unlabeled inline.
+/// Only a bare `call` matters (never `call_indirect` / `return_call`).
+/// With default (numeric) printing an unnamed callee prints as a bare
+/// index; a `$name` callee (a module that kept its `name` section) is not
+/// numeric and yields `None`, leaving that site unlabeled inline.
 fn parse_call_target(text: &str) -> Option<u32> {
     let rest = text.trim_start().strip_prefix("call ")?;
     let token = rest.split_whitespace().next()?;
-    token.strip_prefix("$#func")?.parse().ok()
+    token.parse().ok()
 }
 
 /// Host-call sites within one function's body, in printed (execution)
@@ -158,8 +159,8 @@ mod tests {
     fn anchors_header_before_first_in_range_line() {
         let lines = vec![
             line(None, "(module"),
-            line(Some(10), "  (func $#func0"),
-            line(Some(12), "    call $#func0"),
+            line(Some(10), "  (func (;0;) (type 0)"),
+            line(Some(12), "    call 0"),
             line(Some(20), "    end)"),
             line(None, ")"),
         ];
@@ -173,7 +174,7 @@ mod tests {
 
     #[test]
     fn parses_only_bare_host_calls() {
-        assert_eq!(parse_call_target("    call $#func3"), Some(3));
+        assert_eq!(parse_call_target("    call 3"), Some(3));
         assert_eq!(parse_call_target("  call_indirect (type 0)"), None);
         assert_eq!(parse_call_target("    i64.add"), None);
     }
@@ -181,9 +182,9 @@ mod tests {
     #[test]
     fn host_call_sites_filter_by_import_count() {
         let lines = vec![
-            line(Some(10), "  (func $#func2"),
-            line(Some(12), "    call $#func0"), // host (< 2)
-            line(Some(14), "    call $#func2"), // local (>= 2)
+            line(Some(10), "  (func (;2;) (type 0)"),
+            line(Some(12), "    call 0"), // host (< 2)
+            line(Some(14), "    call 2"), // local (>= 2)
             line(Some(16), "    end)"),
         ];
         let facts = facts_with_bodies(vec![(10, 20)]);

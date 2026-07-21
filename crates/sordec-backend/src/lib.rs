@@ -16,4 +16,4 @@ mod error;
 mod wat;
 
 pub use error::{BackendError, BackendResult};
-pub use wat::emit_annotated_wat;
+pub use wat::{emit_annotated_wat, extract_annotated_facts, AnnotatedFunction};

@@ -37,6 +37,7 @@ sordec-driver   = { path = "crates/sordec-driver" }
 # External crates — pinned to exact versions we've validated
 wasmparser    = "0.240"
 wasmprinter   = "0.240"
+wat           = "1.240"
 waffle        = "0.2.0"
 soroban-spec  = "25.3.0"
 soroban-meta  = "25.3.0"

@@ -62,11 +62,12 @@ fn function_title(func: &HighFunction, registry: &TypeRegistry, import_offset: u
     match &func.signature {
         Some(sig) => annotate::render_signature(sig, registry),
         None => {
-            // Match the printer's `$#funcN` module-global identifier.
+            // Reference the module-global function index the printer marks
+            // as `(func (;N;) …)`, so header and body cross-reference.
             let global = import_offset + func.id.index();
             match &func.name {
-                Some(name) => format!("fn {name} ($#func{global})"),
-                None => format!("fn $#func{global} (internal)"),
+                Some(name) => format!("fn {name} (#{global})"),
+                None => format!("fn #{global} (internal)"),
             }
         }
     }
@@ -168,7 +169,7 @@ mod tests {
 
         let facts = recovered_facts(&high_with(func));
         assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].title, "fn test_fn ($#func0)");
+        assert_eq!(facts[0].title, "fn test_fn (#0)");
         assert_eq!(facts[0].facts, vec!["storage_get<persistent> v1 [SdkPattern]"]);
     }
 }

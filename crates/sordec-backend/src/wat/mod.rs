@@ -18,6 +18,7 @@
 mod annotate;
 mod anchor;
 mod banner;
+mod extract;
 mod facts;
 mod print;
 
@@ -30,6 +31,8 @@ use sordec_ir::{HighIr, Import, ImportKind, WasmFacts};
 
 use crate::error::BackendResult;
 use crate::wat::facts::FunctionFacts;
+
+pub use extract::{extract_annotated_facts, AnnotatedFunction};
 
 /// Emit annotated WAT for `high`, disassembled from its original `wasm`
 /// bytes.

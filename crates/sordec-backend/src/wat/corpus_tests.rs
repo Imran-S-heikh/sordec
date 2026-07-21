@@ -7,9 +7,13 @@
 //! `wasmparser` rescan of the original code section as an independent
 //! oracle.
 
-use sordec_ir::WasmFacts;
+use sordec_ir::{HighIr, WasmFacts};
+use sordec_passes::LoweringStep;
 
+use crate::emit_annotated_wat;
+use crate::extract_annotated_facts;
 use crate::wat::anchor;
+use crate::wat::facts::recovered_facts;
 use crate::wat::print;
 
 /// Every committed fixture, as `(name, bytes)`.
@@ -44,6 +48,23 @@ fn parse_facts(wasm: &[u8]) -> WasmFacts {
     sordec_frontend::parse(wasm)
         .expect("fixture parses")
         .wasm_facts
+}
+
+/// Run the full front-to-high pipeline, mirroring the CLI's `dump-hir` path.
+fn build_high(wasm: &[u8]) -> HighIr {
+    let parsed = sordec_frontend::parse(wasm).expect("fixture parses");
+    let mut lift = sordec_passes::lift_with_waffle(
+        wasm,
+        &parsed.wasm_facts,
+        parsed.soroban_facts.as_ref(),
+    )
+    .expect("lift succeeds");
+    sordec_passes::default_lifted_pipeline().run(&mut lift.lifted);
+    let mut high = sordec_passes::LiftToHigh
+        .lower(lift.lifted)
+        .expect("lowering succeeds");
+    sordec_passes::default_high_pipeline().run(&mut high);
+    high
 }
 
 /// The ordered host-call callee indices of each local function, read
@@ -113,5 +134,44 @@ fn printed_host_call_order_matches_the_binary() {
             printed, binary,
             "{name}: anchored host-call sequence must equal the binary's, per function"
         );
+    }
+}
+
+#[test]
+fn extractor_round_trips_recovered_facts_losslessly() {
+    for (name, wasm) in fixtures() {
+        let high = build_high(wasm);
+        let wat = emit_annotated_wat(&high, wasm).expect("emits");
+
+        // Ground truth the emitter serialized, through the same `;)`/newline
+        // sanitizer the header lines went through.
+        let expected: Vec<(String, Vec<String>)> = recovered_facts(&high)
+            .into_iter()
+            .map(|f| {
+                (
+                    print::sanitize(&f.title),
+                    f.facts.iter().map(|s| print::sanitize(s)).collect(),
+                )
+            })
+            .collect();
+        let extracted: Vec<(String, Vec<String>)> = extract_annotated_facts(&wat)
+            .into_iter()
+            .map(|f| (f.title, f.facts))
+            .collect();
+
+        assert_eq!(
+            extracted, expected,
+            "{name}: extracted annotations must reproduce every recovered fact, in order"
+        );
+    }
+}
+
+#[test]
+fn emission_is_deterministic_across_the_corpus() {
+    for (name, wasm) in fixtures() {
+        let high = build_high(wasm);
+        let first = emit_annotated_wat(&high, wasm).expect("emits");
+        let second = emit_annotated_wat(&high, wasm).expect("emits");
+        assert_eq!(first, second, "{name}: emission must be deterministic");
     }
 }

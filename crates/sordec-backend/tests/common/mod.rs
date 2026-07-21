@@ -1,6 +1,10 @@
 //! Shared scaffolding for backend integration tests: build a fully
 //! recovered [`HighIr`] from fixture bytes by running the same pipeline
 //! the CLI does (parse → lift → declutter → lower → recognisers).
+//!
+//! Shared across integration-test binaries; not every binary uses every
+//! helper, so unused-item warnings here are expected.
+#![allow(dead_code)]
 
 use sordec_ir::HighIr;
 use sordec_passes::LoweringStep;

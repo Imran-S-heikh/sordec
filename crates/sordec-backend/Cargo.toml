@@ -26,9 +26,11 @@ prettyplease.workspace = true
 
 [dev-dependencies]
 # Test-only: parse fixtures into `WasmFacts` and rescan the original code
-# section to validate the printed-WAT ⇆ binary call-order invariant.
+# section to validate the printed-WAT ⇆ binary call-order invariant; `wat`
+# re-parses emitted annotated WAT for the K5 acceptance gates.
 sordec-frontend.workspace = true
 wasmparser.workspace = true
+wat.workspace = true
 
 [lints]
 workspace = true

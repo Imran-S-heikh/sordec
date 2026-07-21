@@ -7,8 +7,13 @@
 //!   Folded printing collapses instruction trees onto fewer lines, which
 //!   destroys the one-instruction-per-line anchoring the annotator relies
 //!   on (research finding R7).
-//! - **`name_unnamed`** on, so the stripped fixtures (no `name` custom
-//!   section) still get stable `$#funcN` identifiers to anchor against.
+//! - **Default (numeric) naming.** `name_unnamed` is deliberately *off*:
+//!   injecting synthetic `$#funcN` identifiers makes the assembler write a
+//!   `name` custom section the original never had — which both breaks the
+//!   K5 print∘parse fixpoint (wasmprinter mangles `$#label` names on the
+//!   way back) and adds a section, violating structural equality. Numeric
+//!   references (`call 20`, `(func (;20;) …)`) round-trip cleanly and match
+//!   the stripped original; the recovered names live in the annotations.
 //! - **Offsets captured out-of-band** via [`Config::offsets_and_lines`],
 //!   *not* printed inline ([`Config::print_offsets`] stays off) — inline
 //!   `(;@N;)` markers would corrupt both the text and the annotation
@@ -44,8 +49,9 @@ pub(crate) struct PrintedLine {
 /// Returns [`BackendError::Print`] if `wasmprinter` rejects the module
 /// (malformed binary that nonetheless reached the backend).
 pub(crate) fn print_flat(wasm: &[u8]) -> BackendResult<Vec<PrintedLine>> {
-    let mut config = wasmprinter::Config::new();
-    config.name_unnamed(true);
+    // Default config: flat (unfolded) and numeric (no synthetic names) —
+    // see the module docs for why `name_unnamed` must stay off.
+    let config = wasmprinter::Config::new();
 
     let mut storage = String::new();
     let lines = config
