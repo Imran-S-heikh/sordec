@@ -90,6 +90,36 @@ fn hello_add_has_local_function_type_indices() {
 }
 
 #[test]
+fn hello_add_records_one_body_range_per_local_function() {
+    let facts = parse(HELLO_ADD_WASM)
+        .expect("hello_add.wasm should parse")
+        .wasm_facts;
+
+    // The code section carries exactly one body per declared local
+    // function, so the two parallel vectors must have equal length.
+    assert_eq!(
+        facts.function_bodies.len(),
+        facts.function_type_indices.len(),
+        "one code-section body range per local function"
+    );
+
+    // Every range is non-empty, in-bounds, and the ranges appear in
+    // ascending, non-overlapping order (bodies are laid out sequentially
+    // in the code section).
+    let module_len = HELLO_ADD_WASM.len() as u64;
+    let mut prev_end = 0u64;
+    for body in &facts.function_bodies {
+        assert!(body.start < body.end, "body range must be non-empty");
+        assert!(body.end <= module_len, "body range must be within the module");
+        assert!(
+            body.start >= prev_end,
+            "body ranges must not overlap and must be ordered"
+        );
+        prev_end = body.end;
+    }
+}
+
+#[test]
 fn hello_add_metadata_includes_add_with_typed_u64_signature() {
     let soroban_facts = parse(HELLO_ADD_WASM)
         .expect("hello_add.wasm should parse")

@@ -46,6 +46,16 @@ pub struct WasmFacts {
     /// index into the type section describing its signature.
     pub function_type_indices: Vec<u32>,
 
+    /// Byte range `[start, end)` of each *local* function's code-section
+    /// body, in declaration order — parallel to [`function_type_indices`].
+    /// Recovered from `wasmparser`'s `FunctionBody::range()`. Empty for
+    /// modules with no code section.
+    ///
+    /// The annotated-WAT emitter uses these to anchor per-function
+    /// annotations to the offsets `wasmprinter` reports for the printed
+    /// text; nothing at parse time interprets them.
+    pub function_bodies: Vec<ByteRange>,
+
     /// Custom sections in declaration order. Soroban contracts contain at
     /// least one (`contractspecv0`); generic WASM may have none.
     pub custom_sections: Vec<CustomSection>,

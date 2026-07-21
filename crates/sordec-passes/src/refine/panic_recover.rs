@@ -363,6 +363,7 @@ mod tests {
                 imports: vec![],
                 exports: vec![],
                 function_type_indices: vec![],
+                function_bodies: vec![],
                 custom_sections: vec![],
             },
             soroban_facts: None,

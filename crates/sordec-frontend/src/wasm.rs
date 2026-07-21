@@ -29,6 +29,7 @@ pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
     let mut imports = Vec::<Import>::new();
     let mut exports = Vec::<Export>::new();
     let mut function_type_indices = Vec::<u32>::new();
+    let mut function_bodies = Vec::<ByteRange>::new();
     let mut custom_sections = Vec::<CustomSection>::new();
     let mut import_index: u32 = 0;
 
@@ -86,10 +87,26 @@ pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
                 });
             }
 
+            // Code-section bodies — record each local function's byte
+            // range so the emitter can anchor annotations to the printed
+            // WAT. Bodies appear in declaration order, parallel to
+            // `function_type_indices`. We keep only the span here; the
+            // Lifted IR pass revisits the binary for the actual bytecode.
+            Payload::CodeSectionEntry(body) => {
+                let range = body.range();
+                debug_assert!(
+                    range.start <= range.end,
+                    "wasmparser yielded a function body whose end < start"
+                );
+                function_bodies.push(ByteRange {
+                    start: range.start as u64,
+                    end: range.end as u64,
+                });
+            }
+
             // Sections we deliberately do not consume in detail. We only
             // care about their presence (most do not contribute to
-            // `WasmFacts` — the Lifted IR pass will revisit the binary
-            // for code-section bodies).
+            // `WasmFacts`).
             Payload::TypeSection(_)
             | Payload::TableSection(_)
             | Payload::MemorySection(_)
@@ -100,7 +117,6 @@ pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
             | Payload::DataSection(_)
             | Payload::DataCountSection { .. }
             | Payload::CodeSectionStart { .. }
-            | Payload::CodeSectionEntry(_)
             | Payload::Version { .. }
             | Payload::End(_) => {}
 
@@ -116,6 +132,7 @@ pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
         imports,
         exports,
         function_type_indices,
+        function_bodies,
         custom_sections,
     })
 }

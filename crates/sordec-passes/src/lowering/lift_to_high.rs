@@ -550,6 +550,7 @@ mod tests {
             imports,
             exports,
             function_type_indices: vec![],
+            function_bodies: vec![],
             custom_sections: vec![],
         }
     }
