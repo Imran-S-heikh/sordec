@@ -10,11 +10,25 @@ repository.workspace = true
 [dependencies]
 sordec-common.workspace = true
 sordec-ir.workspace = true
+# The WAT emitter reads the host-call catalog (`resolve_host_call`) to
+# label `call` sites with their friendly names by callee identity. This
+# is an acyclic dependency (passes never depends on backend); it trades
+# the plan's "backend → ir only" aspiration for sound, catalog-backed
+# inline naming instead of raw `module::name`.
+sordec-passes.workspace = true
 wasmprinter.workspace = true
+thiserror.workspace = true
+# Reserved for the Phase 4 Rust emitter (kept declared; unused by the WAT path).
 syn.workspace = true
 quote.workspace = true
 proc-macro2.workspace = true
 prettyplease.workspace = true
+
+[dev-dependencies]
+# Test-only: parse fixtures into `WasmFacts` and rescan the original code
+# section to validate the printed-WAT ⇆ binary call-order invariant.
+sordec-frontend.workspace = true
+wasmparser.workspace = true
 
 [lints]
 workspace = true

@@ -110,6 +110,27 @@ pub enum ProvenanceSource {
     UpstreamRefinement,
 }
 
+impl ProvenanceSource {
+    /// Stable, human-readable tag for this evidence bucket.
+    ///
+    /// Used verbatim by every renderer that surfaces provenance (the
+    /// `dump-hir` view and the annotated-WAT emitter), so the recognition
+    /// vocabulary reads identically across outputs. The strings are part
+    /// of the tool's contract — changing one changes annotated output.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            ProvenanceSource::Metadata => "Metadata",
+            ProvenanceSource::HostFunctionAbi => "HostFunctionAbi",
+            ProvenanceSource::SdkPattern => "SdkPattern",
+            ProvenanceSource::DataFlow => "DataFlow",
+            ProvenanceSource::TypePropagation => "TypePropagation",
+            ProvenanceSource::Default => "Default",
+            ProvenanceSource::UpstreamRefinement => "UpstreamRefinement",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

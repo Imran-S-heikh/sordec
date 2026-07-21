@@ -1180,8 +1180,12 @@ dependencies = [
  "proc-macro2",
  "quote",
  "sordec-common",
+ "sordec-frontend",
  "sordec-ir",
+ "sordec-passes",
  "syn 2.0.117",
+ "thiserror 2.0.18",
+ "wasmparser 0.240.0",
  "wasmprinter",
 ]
 

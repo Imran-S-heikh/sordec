@@ -1432,15 +1432,9 @@ fn unary_str(op: UnaryOp) -> &'static str {
 }
 
 fn provenance_source_str(source: ProvenanceSource) -> &'static str {
-    match source {
-        ProvenanceSource::Metadata => "Metadata",
-        ProvenanceSource::HostFunctionAbi => "HostFunctionAbi",
-        ProvenanceSource::SdkPattern => "SdkPattern",
-        ProvenanceSource::DataFlow => "DataFlow",
-        ProvenanceSource::TypePropagation => "TypePropagation",
-        ProvenanceSource::Default => "Default",
-        ProvenanceSource::UpstreamRefinement => "UpstreamRefinement",
-    }
+    // Delegates to the shared vocabulary so `dump-hir` and the annotated
+    // WAT emitter never drift on recognition-source labels.
+    source.label()
 }
 
 // ---------------------------------------------------------------------

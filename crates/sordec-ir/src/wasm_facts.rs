@@ -47,7 +47,7 @@ pub struct WasmFacts {
     pub function_type_indices: Vec<u32>,
 
     /// Byte range `[start, end)` of each *local* function's code-section
-    /// body, in declaration order — parallel to [`function_type_indices`].
+    /// body, in declaration order — parallel to `function_type_indices`.
     /// Recovered from `wasmparser`'s `FunctionBody::range()`. Empty for
     /// modules with no code section.
     ///
