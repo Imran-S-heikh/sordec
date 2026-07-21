@@ -1,0 +1,20 @@
+[package]
+name = "sordec-score"
+description = "Source-to-source accuracy scorer (reconstructed Rust vs original)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Pure source-to-source: the scorer parses both sides with `syn` and never
+# touches WASM or our IR. It stays decoupled from the pipeline crates on
+# purpose — the instrument must be independent of the pipeline it grades.
+syn.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

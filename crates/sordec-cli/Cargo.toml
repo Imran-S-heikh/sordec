@@ -15,6 +15,7 @@ path = "src/main.rs"
 sordec-common.workspace = true
 sordec-backend.workspace = true
 sordec-driver.workspace = true
+sordec-score.workspace = true
 sordec-frontend = { workspace = true, features = ["serde"] }
 sordec-ir = { workspace = true, features = ["serde"] }
 sordec-passes.workspace = true

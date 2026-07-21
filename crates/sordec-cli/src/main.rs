@@ -17,6 +17,10 @@
 //! - `sordec coverage <wasm>` — parse + lift, then emit a coverage
 //!   report (host-call recognition %, lift completeness, parse +
 //!   metadata health) as text or `--json`.
+//! - `sordec score <reconstructed.rs> <original.rs>` — score a
+//!   reconstructed Rust source against the original across four
+//!   categories (interface / structure / semantic / compilation) as text
+//!   or `--json`. The accuracy measuring instrument (D4.1).
 //!
 //! Output convention (Unix-standard):
 //!
@@ -84,6 +88,9 @@ enum Command {
     /// interactions vs deep facts), host-call recognition %, and
     /// recogniser-miss diagnostics by code.
     Coverage(CoverageArgs),
+    /// Score a reconstructed Rust source against the original across four
+    /// categories (interface / structure / semantic / compilation).
+    Score(ScoreArgs),
 }
 
 #[derive(clap::Args)]
@@ -153,6 +160,31 @@ struct CoverageArgs {
     json: bool,
 }
 
+#[derive(clap::Args)]
+struct ScoreArgs {
+    /// Path to the reconstructed Rust source (a `.rs` file; a source
+    /// directory once the multi-file loader lands).
+    reconstructed: PathBuf,
+
+    /// Path to the original Rust source to score against.
+    original: PathBuf,
+
+    /// Emit machine-readable JSON instead of the human-readable text
+    /// report. Schema is append-only across releases.
+    #[arg(long)]
+    json: bool,
+
+    /// Run the opt-in compilation category (`cargo check` against
+    /// `soroban-sdk`). Off by default so the fast path stays
+    /// toolchain-free.
+    #[arg(long)]
+    check_compile: bool,
+
+    /// Overall pass threshold. Defaults to the D4.1 contractual bar.
+    #[arg(long, default_value_t = 0.90)]
+    threshold: f64,
+}
+
 // ---------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------
@@ -166,6 +198,7 @@ fn main() -> ExitCode {
         Command::DumpWat(args) => run_dump_wat(&args),
         Command::Decompile(args) => run_decompile(&args),
         Command::Coverage(args) => run_coverage(&args),
+        Command::Score(args) => run_score(&args),
     };
     ExitCode::from(exit)
 }
@@ -607,4 +640,116 @@ fn run_coverage(args: &CoverageArgs) -> u8 {
     diagnostics::print_diagnostics(&combined);
 
     EXIT_OK
+}
+
+fn run_score(args: &ScoreArgs) -> u8 {
+    // 1. Read both inputs. I/O errors get the dedicated exit code so they
+    //    don't conflate with a scoring (parse) failure.
+    let reconstructed = match std::fs::read_to_string(&args.reconstructed) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "sordec: could not read {}: {e}",
+                args.reconstructed.display()
+            );
+            return EXIT_IO_ERR;
+        }
+    };
+    let original = match std::fs::read_to_string(&args.original) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "sordec: could not read {}: {e}",
+                args.original.display()
+            );
+            return EXIT_IO_ERR;
+        }
+    };
+
+    // 2. Score. A parse failure on either side is a pipeline error.
+    let opts = sordec_score::ScoreOptions {
+        threshold: args.threshold,
+        check_compile: args.check_compile,
+    };
+    let report = match sordec_score::score_str(&reconstructed, &original, &opts) {
+        Ok(report) => report,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "sordec: scoring failed: {e}");
+            return EXIT_PIPELINE_ERR;
+        }
+    };
+
+    // 3. Render to stdout. The `passed` verdict lives in the report; the
+    //    exit code reflects only whether scoring ran (Unix convention,
+    //    matching `coverage`).
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let render_result: io::Result<()> = if args.json {
+        match serde_json::to_writer_pretty(&mut out, &report) {
+            Ok(()) => writeln!(out),
+            Err(e) => Err(io::Error::other(e)),
+        }
+    } else {
+        render_score_text(&mut out, &report)
+    };
+    if let Err(e) = render_result {
+        let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
+        return EXIT_IO_ERR;
+    }
+
+    EXIT_OK
+}
+
+/// Render a [`sordec_score::ScoreReport`] as a human-readable report.
+fn render_score_text(
+    out: &mut impl Write,
+    report: &sordec_score::ScoreReport,
+) -> io::Result<()> {
+    use sordec_score::metrics;
+
+    writeln!(out, "scorer version: {}", report.scorer_version)?;
+    let verdict = if report.passed { "PASS" } else { "FAIL" };
+    writeln!(
+        out,
+        "overall:        {:.4}  (threshold {:.2})  {verdict}",
+        report.overall, report.threshold
+    )?;
+
+    let cats = &report.categories;
+    for (label, cat) in [
+        (metrics::INTERFACE, &cats.interface),
+        (metrics::STRUCTURE, &cats.structure),
+        (metrics::SEMANTIC, &cats.semantic),
+        (metrics::COMPILATION, &cats.compilation),
+    ] {
+        render_category_line(out, label, cat)?;
+    }
+
+    if !report.notes.is_empty() {
+        writeln!(out, "notes:")?;
+        for note in &report.notes {
+            writeln!(out, "  - {note}")?;
+        }
+    }
+    Ok(())
+}
+
+/// Render one category line: score + weight, or an em dash + reason when
+/// the category was not checked.
+fn render_category_line(
+    out: &mut impl Write,
+    label: &str,
+    cat: &sordec_score::CategoryScore,
+) -> io::Result<()> {
+    if cat.checked {
+        write!(out, "  {label:<13} {:.4}  (w {:.2})", cat.score, cat.weight)?;
+    } else {
+        write!(out, "  {label:<13} —       (w {:.2}, not checked)", cat.weight)?;
+    }
+    if let Some(note) = cat.notes.first() {
+        write!(out, "  {note}")?;
+    }
+    writeln!(out)
 }

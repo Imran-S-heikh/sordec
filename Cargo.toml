@@ -7,6 +7,7 @@ members = [
     "crates/sordec-passes",
     "crates/sordec-backend",
     "crates/sordec-driver",
+    "crates/sordec-score",
     "crates/sordec-cli",
 ]
 # Vendored fixture sources under `samples/contracts/<name>/source/` are
@@ -33,6 +34,7 @@ sordec-frontend = { path = "crates/sordec-frontend" }
 sordec-passes   = { path = "crates/sordec-passes" }
 sordec-backend  = { path = "crates/sordec-backend" }
 sordec-driver   = { path = "crates/sordec-driver" }
+sordec-score    = { path = "crates/sordec-score" }
 
 # External crates — pinned to exact versions we've validated
 wasmparser    = "0.240"
