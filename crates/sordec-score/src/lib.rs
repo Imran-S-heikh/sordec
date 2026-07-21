@@ -62,25 +62,25 @@ impl Default for ScoreOptions {
 }
 
 /// Score a reconstructed source file against the original, both already
-/// parsed. The primary entry point once inputs are loaded.
+/// parsed. The compilation category is reported *unchecked* here: it needs
+/// the reconstructed source *path* (see [`score_paths`]), which a parsed
+/// AST does not carry.
 #[must_use]
 pub fn score_files(
     reconstructed: &syn::File,
     original: &syn::File,
     opts: &ScoreOptions,
 ) -> ScoreReport {
-    let categories = Categories {
-        interface: interface::evaluate(reconstructed, original),
-        structure: structure::evaluate(reconstructed, original),
-        semantic: semantic::evaluate(reconstructed, original),
-        compilation: compile::evaluate(reconstructed, original, opts.check_compile),
-    };
-    ScoreReport::aggregate(categories, opts.threshold)
+    let compilation = CategoryScore::unchecked(
+        metrics::COMPILATION_WEIGHT,
+        "compile check needs a source path (use score_paths or the CLI)",
+    );
+    assemble(reconstructed, original, compilation, opts.threshold)
 }
 
 /// Score two scoring inputs given by path. Each path may be a single
 /// `.rs` file or a source directory (flattened by the loader). The CLI
-/// entry point.
+/// entry point; the only path that can run the compilation category.
 ///
 /// # Errors
 ///
@@ -93,7 +93,29 @@ pub fn score_paths(
 ) -> Result<ScoreReport, ScoreError> {
     let recon = loader::load(reconstructed, "reconstructed")?;
     let orig = loader::load(original, "original")?;
-    Ok(score_files(&recon, &orig, opts))
+    let compilation = if opts.check_compile {
+        compile::check(reconstructed)
+    } else {
+        CategoryScore::unchecked(metrics::COMPILATION_WEIGHT, "compile check not requested")
+    };
+    Ok(assemble(&recon, &orig, compilation, opts.threshold))
+}
+
+/// Assemble the three AST categories plus a supplied compilation category
+/// into a report.
+fn assemble(
+    reconstructed: &syn::File,
+    original: &syn::File,
+    compilation: CategoryScore,
+    threshold: f64,
+) -> ScoreReport {
+    let categories = Categories {
+        interface: interface::evaluate(reconstructed, original),
+        structure: structure::evaluate(reconstructed, original),
+        semantic: semantic::evaluate(reconstructed, original),
+        compilation,
+    };
+    ScoreReport::aggregate(categories, threshold)
 }
 
 /// Parse two Rust sources and score them.

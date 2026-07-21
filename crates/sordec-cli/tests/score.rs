@@ -78,6 +78,47 @@ fn score_flattens_and_passes_a_multi_file_source_directory() {
 }
 
 #[test]
+#[ignore = "shells out to cargo check against soroban-sdk (slow)"]
+fn score_check_compile_marks_compilation_checked() {
+    // A minimal soroban-sdk-only contract compiled against the cached SDK.
+    // Run with: cargo test -p sordec-cli --test score -- --ignored
+    let dir = std::env::temp_dir().join(format!("sordec_score_compile_e2e_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let src = dir.join("lib.rs");
+    std::fs::write(
+        &src,
+        r#"#![no_std]
+use soroban_sdk::{contract, contractimpl, Env};
+#[contract]
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn add(_e: Env, a: u32, b: u32) -> u32 { a + b }
+}
+"#,
+    )
+    .expect("write contract");
+
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args([
+            "score",
+            src.to_str().unwrap(),
+            src.to_str().unwrap(),
+            "--check-compile",
+            "--json",
+        ])
+        .assert()
+        .success()
+        // With the check requested and the SDK available, compilation is
+        // a checked category, not excluded.
+        .stdout(predicate::str::contains("\"compilation\""))
+        .stdout(predicate::str::contains("\"checked\": true"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn score_missing_input_is_an_io_error() {
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
