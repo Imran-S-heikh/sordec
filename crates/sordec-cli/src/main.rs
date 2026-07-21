@@ -8,6 +8,9 @@
 //!   text rendering of the CFG/SSA IR on stdout.
 //! - `sordec dump-hir <wasm>` — parse + lift + lower to HighIr, then
 //!   emit a text rendering of the typed bindings (with provenance).
+//! - `sordec dump-wat <wasm>` — run the full pipeline, then emit the
+//!   Soroban-annotated WAT (flat disassembly with recovered semantics as
+//!   `;;` comments) on stdout.
 //! - `sordec coverage <wasm>` — parse + lift, then emit a coverage
 //!   report (host-call recognition %, lift completeness, parse +
 //!   metadata health) as text or `--json`.
@@ -66,6 +69,8 @@ enum Command {
     DumpIr(DumpIrArgs),
     /// Lift + lower to HighIr and emit the typed bindings as text.
     DumpHir(DumpHirArgs),
+    /// Run the full pipeline and emit Soroban-annotated WAT on stdout.
+    DumpWat(DumpWatArgs),
     /// Report how much of a contract this pipeline currently understands:
     /// per-pattern recognition (storage tiers, enum keys, TTL, client
     /// calls, dispatcher, auth, events, collections, panics, Val
@@ -113,6 +118,12 @@ struct DumpHirArgs {
 }
 
 #[derive(clap::Args)]
+struct DumpWatArgs {
+    /// Path to the WASM module to decompile.
+    wasm: PathBuf,
+}
+
+#[derive(clap::Args)]
 struct CoverageArgs {
     /// Path to the WASM module to inspect.
     wasm: PathBuf,
@@ -134,6 +145,7 @@ fn main() -> ExitCode {
         Command::DumpFacts(args) => run_dump_facts(&args),
         Command::DumpIr(args) => run_dump_ir(&args),
         Command::DumpHir(args) => run_dump_hir(&args),
+        Command::DumpWat(args) => run_dump_wat(&args),
         Command::Coverage(args) => run_coverage(&args),
     };
     ExitCode::from(exit)
@@ -334,6 +346,80 @@ fn run_dump_hir(args: &DumpHirArgs) -> u8 {
     let mut combined = parse_output.diagnostics.into_vec();
     combined.extend(lift_output.diagnostics.into_vec());
     combined.extend(pipeline_diagnostics);
+    diagnostics::print_diagnostics(&combined);
+
+    EXIT_OK
+}
+
+fn run_dump_wat(args: &DumpWatArgs) -> u8 {
+    // 1. Read the input file.
+    let bytes = match std::fs::read(&args.wasm) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "sordec: could not read {}: {e}",
+                args.wasm.display()
+            );
+            return EXIT_IO_ERR;
+        }
+    };
+
+    // 2. Parse.
+    let parse_output = match sordec_frontend::parse(&bytes) {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "sordec: parse failed: {e}");
+            return EXIT_PIPELINE_ERR;
+        }
+    };
+
+    // 3. Lift.
+    let mut lift_output = match sordec_passes::lift_with_waffle(
+        &bytes,
+        &parse_output.wasm_facts,
+        parse_output.soroban_facts.as_ref(),
+    ) {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "sordec: lift failed: {e}");
+            return EXIT_PIPELINE_ERR;
+        }
+    };
+
+    // 4. De-clutter, lower to HighIr, and run pattern recovery — the full
+    //    pipeline the annotated WAT is a view of (no `--raw`: unrecognised
+    //    IR emits as honest `;; unrecognized` annotations, not a raw dump).
+    let declutter = sordec_passes::default_lifted_pipeline().run(&mut lift_output.lifted);
+    let mut high = match sordec_passes::LiftToHigh.lower(lift_output.lifted) {
+        Ok(high) => high,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "sordec: lowering failed: {e:?}");
+            return EXIT_PIPELINE_ERR;
+        }
+    };
+    let recover = sordec_passes::default_high_pipeline().run(&mut high);
+
+    // 5. Emit annotated WAT to stdout.
+    let wat = match sordec_backend::emit_annotated_wat(&high, &bytes) {
+        Ok(wat) => wat,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "sordec: WAT emission failed: {e}");
+            return EXIT_PIPELINE_ERR;
+        }
+    };
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if let Err(e) = out.write_all(wat.as_bytes()) {
+        let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
+        return EXIT_IO_ERR;
+    }
+
+    // 6. Pipeline diagnostics to stderr, after stdout.
+    let mut combined = parse_output.diagnostics.into_vec();
+    combined.extend(lift_output.diagnostics.into_vec());
+    combined.extend(declutter.diagnostics().cloned());
+    combined.extend(recover.diagnostics().cloned());
     diagnostics::print_diagnostics(&combined);
 
     EXIT_OK
