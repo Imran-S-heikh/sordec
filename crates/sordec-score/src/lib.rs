@@ -25,6 +25,8 @@
 mod canon;
 mod compile;
 mod error;
+mod extract;
+mod facts;
 mod interface;
 mod loader;
 pub mod metrics;
