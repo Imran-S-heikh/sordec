@@ -343,6 +343,29 @@ pub struct TypeRegistry {
     pub events: Vec<EventDef>,
 }
 
+impl TypeRegistry {
+    /// Resolve a [`TypeId`] to the declared name of the type it identifies,
+    /// searching every user-defined category (struct / union / enum / error
+    /// / event). Returns `None` when no registered type carries `id`.
+    ///
+    /// [`TypeId`] is module-global and assigned in decode order across all
+    /// categories, so resolution is a single linear scan — the registries
+    /// hold at most a handful of types per contract. Both the WAT annotator
+    /// and the Rust emitter resolve user-defined type references through
+    /// here, so the name a `UserDefined(id)` prints is defined in one place.
+    #[must_use]
+    pub fn name_of(&self, id: TypeId) -> Option<&str> {
+        self.structs
+            .iter()
+            .find(|d| d.id == id)
+            .map(|d| d.name.as_str())
+            .or_else(|| self.unions.iter().find(|d| d.id == id).map(|d| d.name.as_str()))
+            .or_else(|| self.enums.iter().find(|d| d.id == id).map(|d| d.name.as_str()))
+            .or_else(|| self.errors.iter().find(|d| d.id == id).map(|d| d.name.as_str()))
+            .or_else(|| self.events.iter().find(|d| d.id == id).map(|d| d.name.as_str()))
+    }
+}
+
 /// Soroban struct definition.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]

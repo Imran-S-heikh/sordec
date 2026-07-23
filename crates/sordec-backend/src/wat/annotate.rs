@@ -13,7 +13,7 @@ use sordec_ir::{
     ClientInterface, CompositeType, DispatchTable, EnumKey, FunctionSignature, KnownOp, KnownTier,
     PanicKind, PrimitiveType, StorageTier, TypeRef, TypeRegistry,
 };
-use sordec_common::{TypeId, ValueId};
+use sordec_common::ValueId;
 
 /// Render a function signature as `fn name(p: T, …) -> R`, resolving all
 /// user-defined types through `registry`. Shared by the module-header
@@ -239,7 +239,7 @@ pub(crate) fn type_ref_label(ty: &TypeRef, reg: &TypeRegistry) -> String {
     match ty {
         TypeRef::Primitive(p) => primitive_label(*p).to_string(),
         TypeRef::Composite(c) => composite_label(c, reg),
-        TypeRef::UserDefined(id) => udt_name(reg, *id).unwrap_or("<udt>").to_string(),
+        TypeRef::UserDefined(id) => reg.name_of(*id).unwrap_or("<udt>").to_string(),
         TypeRef::Unknown(_) => "?".to_string(),
     }
 }
@@ -260,17 +260,6 @@ fn composite_label(c: &CompositeType, reg: &TypeRegistry) -> String {
         }
         CompositeType::BytesN(n) => format!("BytesN<{n}>"),
     }
-}
-
-fn udt_name(reg: &TypeRegistry, id: TypeId) -> Option<&str> {
-    reg.structs
-        .iter()
-        .find(|d| d.id == id)
-        .map(|d| d.name.as_str())
-        .or_else(|| reg.unions.iter().find(|d| d.id == id).map(|d| d.name.as_str()))
-        .or_else(|| reg.enums.iter().find(|d| d.id == id).map(|d| d.name.as_str()))
-        .or_else(|| reg.errors.iter().find(|d| d.id == id).map(|d| d.name.as_str()))
-        .or_else(|| reg.events.iter().find(|d| d.id == id).map(|d| d.name.as_str()))
 }
 
 fn primitive_label(p: PrimitiveType) -> &'static str {
