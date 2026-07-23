@@ -49,6 +49,11 @@ pub(crate) struct FnCtx<'a> {
     /// Entry-parameter value → its signature identifier. Values not in
     /// this map render as `vN`.
     params: HashMap<ValueId, syn::Ident>,
+    /// Non-phi values whose uses escape the lexical block that defines them
+    /// (dominance holds, lexical scope does not). Declared once at the body
+    /// top and assigned at their definition site, so they stay in scope at
+    /// every use. See [`escaping_values`].
+    escaping: HashSet<ValueId>,
 }
 
 /// Emit the body of `func` as a `syn::Block`.
@@ -60,6 +65,7 @@ pub(crate) fn emit_body(
 ) -> syn::Block {
     let ctx = FnCtx::new(high, func, reg, policy);
     let mut stmts = ctx.phi_declarations();
+    stmts.extend(ctx.escaping_declarations());
     ctx.region_stmts(&func.region, &mut stmts);
     parse_quote!({ #(#stmts)* })
 }
@@ -77,12 +83,14 @@ impl<'a> FnCtx<'a> {
             .copied()
             .zip(sig::param_idents(func))
             .collect();
+        let escaping = escaping_values(func);
         Self {
             high,
             func,
             reg,
             policy,
             params,
+            escaping,
         }
     }
 
@@ -132,6 +140,25 @@ impl<'a> FnCtx<'a> {
                     None => self.policy.unknown_type(None),
                 };
                 parse_quote!(let mut #name: #ty;)
+            })
+            .collect()
+    }
+
+    /// `let vN: T;` for every value whose uses escape its defining scope,
+    /// hoisted to the body top so it is in scope at every use; the value is
+    /// assigned once at its definition site (see [`Self::basic_block_stmts`]).
+    /// No `mut` — single assignment. Sorted for deterministic emission.
+    fn escaping_declarations(&self) -> Vec<syn::Stmt> {
+        let mut ids: Vec<ValueId> = self.escaping.iter().copied().collect();
+        ids.sort_by_key(|v| v.index());
+        ids.into_iter()
+            .map(|vid| {
+                let name = value_ident(vid);
+                let ty = match self.func.bindings.get(vid) {
+                    Some(b) => ir_type(&b.ty, self.reg, self.policy),
+                    None => self.policy.unknown_type(None),
+                };
+                parse_quote!(let #name: #ty;)
             })
             .collect()
     }
@@ -243,7 +270,13 @@ impl<'a> FnCtx<'a> {
             }
             let name = value_ident(vid);
             let value = expr::binding_expr(self, binding);
-            out.push(parse_quote!(let #name = #value;));
+            // An escaping value was declared at the body top; assign it here.
+            // A value that stays in scope is a plain inline `let`.
+            if self.escaping.contains(&vid) {
+                out.push(parse_quote!(#name = #value;));
+            } else {
+                out.push(parse_quote!(let #name = #value;));
+            }
         }
     }
 
@@ -279,4 +312,201 @@ fn value_ident(vid: ValueId) -> syn::Ident {
 /// The Rust lifetime label a block's scope/loop is named by: `'bb{index}`.
 fn block_label(bid: BlockId) -> syn::Lifetime {
     syn::Lifetime::new(&format!("'bb{}", bid.index()), proc_macro2::Span::call_site())
+}
+
+/// The non-phi values whose uses escape the lexical block that defines
+/// them, and so must be hoisted to a scope that dominates every use.
+///
+/// A `let` in a structured block is visible only in that block and its
+/// nested blocks, but the CFG lets a value defined in one block be used in
+/// any block it *dominates* — including a later sibling, once the defining
+/// block's `{}` has closed. Such a value escapes. (Phis are handled
+/// separately; function parameters are always in scope and never escape.)
+fn escaping_values(func: &HighFunction) -> HashSet<ValueId> {
+    let mut analysis = EscapeAnalysis::default();
+    analysis.walk(func, &func.region, ROOT_SCOPE);
+    analysis.finish()
+}
+
+/// Root lexical scope: the function body block itself.
+const ROOT_SCOPE: usize = 0;
+
+/// Assigns a lexical-scope id to every region and records, per value, the
+/// scope it is defined in and the scopes it is read in — the inputs to the
+/// escape test.
+struct EscapeAnalysis {
+    /// `parent[s]` is scope `s`'s enclosing scope; the root is its own parent.
+    parent: Vec<usize>,
+    /// Non-phi value → the scope of the `Basic` block that defines it.
+    def_scope: HashMap<ValueId, usize>,
+    /// Every `(value read, scope of the read)` pair.
+    uses: Vec<(ValueId, usize)>,
+}
+
+impl Default for EscapeAnalysis {
+    fn default() -> Self {
+        Self {
+            parent: vec![ROOT_SCOPE], // root's parent is itself
+            def_scope: HashMap::new(),
+            uses: Vec::new(),
+        }
+    }
+}
+
+impl EscapeAnalysis {
+    /// Open a fresh child scope of `parent` and return its id.
+    fn child_of(&mut self, parent: usize) -> usize {
+        let id = self.parent.len();
+        self.parent.push(parent);
+        id
+    }
+
+    /// Record `region`'s defs and uses at lexical scope `scope`. Only the
+    /// scope-opening variants (`Scope`/`If`/`Loop`/`Switch`) start a new
+    /// child scope; a `Sequence` shares its parent's scope. Exhaustive on
+    /// purpose — a new `Region` variant must be classified here.
+    fn walk(&mut self, func: &HighFunction, region: &Region, scope: usize) {
+        match region {
+            Region::Basic(b) => {
+                let Some(block) = func.blocks.get(*b) else {
+                    return;
+                };
+                for &vid in &block.bindings {
+                    let Some(binding) = func.bindings.get(vid) else {
+                        continue;
+                    };
+                    binding.expr.for_each_value_use(|u| self.uses.push((u, scope)));
+                    if !matches!(binding.expr, Expr::Phi { .. }) {
+                        self.def_scope.insert(vid, scope);
+                    }
+                }
+            }
+            Region::Sequence(items) => {
+                for item in items {
+                    self.walk(func, item, scope);
+                }
+            }
+            Region::Scope { body, .. } => {
+                let inner = self.child_of(scope);
+                self.walk(func, body, inner);
+            }
+            Region::If { cond, then_region, else_region } => {
+                self.uses.push((*cond, scope));
+                let t = self.child_of(scope);
+                self.walk(func, then_region, t);
+                if let Some(er) = else_region {
+                    let e = self.child_of(scope);
+                    self.walk(func, er, e);
+                }
+            }
+            Region::Loop { body, .. } => {
+                let inner = self.child_of(scope);
+                self.walk(func, body, inner);
+            }
+            Region::Switch { index, arms, default, dispatch } => {
+                self.uses.push((*index, scope));
+                if let Some(d) = dispatch {
+                    self.uses.push((*d, scope));
+                }
+                for arm in arms {
+                    let s = self.child_of(scope);
+                    self.walk(func, &arm.body, s);
+                }
+                let s = self.child_of(scope);
+                self.walk(func, default, s);
+            }
+            Region::Break { transfer, .. }
+            | Region::Continue { transfer, .. }
+            | Region::Transfer { transfer, .. } => {
+                for &(_phi, source) in transfer {
+                    self.uses.push((source, scope));
+                }
+            }
+            Region::Return { values } => {
+                for &v in values {
+                    self.uses.push((v, scope));
+                }
+            }
+            Region::Unreachable | Region::Panic { .. } | Region::Unstructured { .. } => {}
+        }
+    }
+
+    /// A value escapes if any use is in a scope not visible from its
+    /// definition — i.e. `def_scope` is not an ancestor-or-equal of the use
+    /// scope. Values with no recorded def (phis, parameters) never escape.
+    fn finish(self) -> HashSet<ValueId> {
+        let mut escaping = HashSet::new();
+        for (value, use_scope) in &self.uses {
+            if let Some(&def) = self.def_scope.get(value)
+                && !self.is_ancestor_or_equal(def, *use_scope)
+            {
+                escaping.insert(*value);
+            }
+        }
+        escaping
+    }
+
+    /// Whether scope `ancestor` encloses `scope` (or is it) — walk the
+    /// parent chain to the root.
+    fn is_ancestor_or_equal(&self, ancestor: usize, mut scope: usize) -> bool {
+        loop {
+            if scope == ancestor {
+                return true;
+            }
+            let parent = self.parent[scope];
+            if parent == scope {
+                return false; // reached the root without meeting `ancestor`
+            }
+            scope = parent;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(i: u32) -> ValueId {
+        ValueId::new(i)
+    }
+
+    #[test]
+    fn a_value_used_in_a_sibling_scope_escapes() {
+        // The token pattern: defined in one scope, used in a later sibling.
+        let mut a = EscapeAnalysis::default();
+        let bb7 = a.child_of(ROOT_SCOPE);
+        let bb9 = a.child_of(ROOT_SCOPE);
+        a.def_scope.insert(v(32), bb7);
+        a.uses.push((v(32), bb9));
+        assert!(a.finish().contains(&v(32)));
+    }
+
+    #[test]
+    fn a_value_used_in_its_own_or_a_nested_scope_does_not_escape() {
+        let mut a = EscapeAnalysis::default();
+        let outer = a.child_of(ROOT_SCOPE);
+        let inner = a.child_of(outer);
+        a.def_scope.insert(v(10), outer);
+        a.uses.push((v(10), outer)); // same scope
+        a.uses.push((v(10), inner)); // nested — a nested block sees the outer let
+        assert!(!a.finish().contains(&v(10)));
+    }
+
+    #[test]
+    fn root_scope_values_never_escape() {
+        let mut a = EscapeAnalysis::default();
+        let child = a.child_of(ROOT_SCOPE);
+        a.def_scope.insert(v(1), ROOT_SCOPE);
+        a.uses.push((v(1), child)); // root dominates every scope
+        assert!(!a.finish().contains(&v(1)));
+    }
+
+    #[test]
+    fn a_value_with_no_recorded_def_is_never_escaping() {
+        // Phis and parameters have no `def_scope` entry.
+        let mut a = EscapeAnalysis::default();
+        let child = a.child_of(ROOT_SCOPE);
+        a.uses.push((v(7), child));
+        assert!(a.finish().is_empty());
+    }
 }

@@ -80,6 +80,21 @@ fn token_v23_emits_soroban_idioms() {
     assert!(src.contains("e.events().publish("), "event publish:\n{src}");
 }
 
+/// Values whose uses cross a structured scope boundary are hoisted:
+/// declared (typed, no initializer, no `mut`) at the body top and assigned
+/// at their def site, so they stay in scope at the later use. This clears
+/// the `E0425 cannot find value` class the W3 compile measurement flagged.
+/// (`let mut vN: T;` are phis; a plain `let vN: T;` is a hoisted escapee.)
+#[test]
+fn escaping_values_are_hoisted() {
+    let src = emit_rust(&common::build_high(common::TOKEN_V23)).expect("emits");
+    let has_hoisted_escapee = src.lines().any(|line| {
+        let t = line.trim();
+        t.starts_with("let v") && t.contains(':') && !t.contains('=') && t.ends_with(';')
+    });
+    assert!(has_hoisted_escapee, "expected a hoisted escaping-value decl:\n{src}");
+}
+
 /// Every fixture emits real body statements — the emitter is past the W1
 /// `todo!()`-stub skeleton across the whole corpus.
 #[test]
