@@ -48,8 +48,9 @@ fn hello_add_emits_a_real_add_body() {
     assert!(src.starts_with("#![no_std]"), "no_std module attribute:\n{src}");
     assert!(src.contains("#[contract]\npub struct Contract;"), "contract struct:\n{src}");
     // The synthesized `Env` leads the signature (host ops root on it).
+    // `Env` is imported and written short after the R3 collapse pass.
     assert!(
-        src.contains("pub fn add(e: soroban_sdk::Env, a: u64, b: u64) -> u64 {"),
+        src.contains("pub fn add(e: Env, a: u64, b: u64) -> u64 {"),
         "spec method signature with env:\n{src}"
     );
     // SSA destruction: a hoisted `let mut` phi, assigned and returned.
@@ -153,6 +154,23 @@ fn escaping_values_are_hoisted() {
     assert!(has_hoisted_escapee, "expected a hoisted escaping-value decl:\n{src}");
 }
 
+/// R3: soroban-sdk type paths are collapsed into a single `use` list and
+/// written short in the body; the only `soroban_sdk::` left is the import
+/// line itself. Keeps the emitted source reading like hand-written Soroban.
+#[test]
+fn token_v23_collapses_soroban_imports() {
+    let src = emit_rust(&common::build_high(common::TOKEN_V23)).expect("emits");
+
+    assert!(src.contains("use soroban_sdk::{"), "single soroban_sdk use list:\n{src}");
+    // Common types are imported, so bodies/signatures write them short.
+    assert!(src.contains("e: Env"), "Env written short:\n{src}");
+    assert!(src.contains(": Address"), "Address written short:\n{src}");
+    // The `use` line is the only place a `soroban_sdk::` prefix survives.
+    for line in src.lines().filter(|l| l.contains("soroban_sdk::")) {
+        assert!(line.trim_start().starts_with("use soroban_sdk::{"), "stray qualified path:\n{line}");
+    }
+}
+
 /// Every fixture emits real body statements — the emitter is past the W1
 /// `todo!()`-stub skeleton across the whole corpus.
 #[test]
@@ -239,7 +257,8 @@ fn token_v23_reconstructs_contract_types() {
 
     assert!(src.contains("#[contracttype]"), "has contracttype defs:\n{src}");
     // The DataKey enum: mixed unit + payload variants, exactly as in source.
+    // Soroban types are imported and written short after the R3 collapse.
     assert!(src.contains("pub enum DataKey"), "DataKey enum present:\n{src}");
-    assert!(src.contains("Balance(soroban_sdk::Address)"), "payload variant:\n{src}");
+    assert!(src.contains("Balance(Address)"), "payload variant:\n{src}");
     assert!(src.contains("Admin,"), "unit variant:\n{src}");
 }

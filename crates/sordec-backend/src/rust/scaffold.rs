@@ -18,10 +18,13 @@ use crate::rust::ty::ident;
 /// The synthesized `#[contract]` type name.
 const CONTRACT_TYPE: &str = "Contract";
 
-/// The `use soroban_sdk::{…};` importing exactly the attribute macros the
-/// emitted module uses, or `None` when it uses none (e.g. a stripped module
-/// with only free functions and fully-qualified type paths).
-pub(crate) fn use_item(types: Option<&TypeRegistry>, has_impl: bool) -> Option<syn::Item> {
+/// The attribute-macro names the emitted module needs
+/// (`contract`/`contractimpl`/`contracttype`/…), driven by what was actually
+/// reconstructed. These are merged with the type/macro names the
+/// [`imports`](super::imports) collapse pass collects into one
+/// `use soroban_sdk::{…}`; unlike type paths they are emitted bare
+/// (`#[contract]`), so they must always be imported.
+pub(crate) fn macro_imports(types: Option<&TypeRegistry>, has_impl: bool) -> Vec<syn::Ident> {
     let mut names: Vec<syn::Ident> = Vec::new();
     if has_impl {
         names.push(ident("contract"));
@@ -38,10 +41,7 @@ pub(crate) fn use_item(types: Option<&TypeRegistry>, has_impl: bool) -> Option<s
             names.push(ident("contractevent"));
         }
     }
-    if names.is_empty() {
-        return None;
-    }
-    Some(parse_quote!(use soroban_sdk::{#(#names),*};))
+    names
 }
 
 /// `#[contract] pub struct Contract;`.
@@ -100,21 +100,22 @@ fn sdk_semver(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quote::ToTokens;
 
     #[test]
-    fn imports_are_minimal_and_sorted_by_need() {
+    fn macro_imports_are_minimal_by_need() {
         // Impl present, no user types → only the two impl macros.
-        let item = use_item(Some(&TypeRegistry::default()), true).expect("some imports");
-        let out = item.to_token_stream().to_string();
-        assert!(out.contains("contract"), "{out}");
-        assert!(out.contains("contractimpl"), "{out}");
-        assert!(!out.contains("contracttype"), "{out}");
+        let names: Vec<String> = macro_imports(Some(&TypeRegistry::default()), true)
+            .iter()
+            .map(|i| i.to_string())
+            .collect();
+        assert!(names.contains(&"contract".to_string()), "{names:?}");
+        assert!(names.contains(&"contractimpl".to_string()), "{names:?}");
+        assert!(!names.contains(&"contracttype".to_string()), "{names:?}");
     }
 
     #[test]
-    fn no_imports_when_nothing_is_used() {
-        assert!(use_item(None, false).is_none());
+    fn no_macro_imports_when_nothing_is_used() {
+        assert!(macro_imports(None, false).is_empty());
     }
 
     #[test]

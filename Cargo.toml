@@ -44,7 +44,7 @@ waffle        = "0.2.0"
 soroban-spec  = "25.3.0"
 soroban-meta  = "25.3.0"
 stellar-xdr   = { version = "=25.0.0", default-features = false, features = ["curr", "std"] }
-syn           = { version = "2.0", features = ["full"] }
+syn           = { version = "2.0", features = ["full", "visit-mut"] }
 quote         = "1.0"
 proc-macro2   = "1.0"
 prettyplease  = "0.2"

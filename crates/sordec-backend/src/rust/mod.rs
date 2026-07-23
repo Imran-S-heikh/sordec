@@ -16,6 +16,7 @@ mod expr;
 mod func;
 mod hole;
 mod idiom;
+mod imports;
 mod liveness;
 mod naming;
 mod scaffold;
@@ -75,17 +76,29 @@ fn build_file(high: &HighIr, policy: &dyn HolePolicy) -> syn::File {
         }
     }
 
-    // Order: imports · types · contract struct+impl · free helpers.
+    // Assemble the body (types · contract struct+impl · free helpers) with
+    // fully-qualified soroban paths, as each emitter piece produces them.
+    let has_impl = !methods.is_empty();
+    let mut body: Vec<syn::Item> = Vec::new();
+    body.extend(type_items);
+    if has_impl {
+        body.push(scaffold::contract_struct());
+        body.push(scaffold::contract_impl(methods));
+    }
+    body.extend(free_fns);
+
+    // Collapse `soroban_sdk::…` paths to short names, then build the single
+    // `use` merging the collected types/macros with the attribute macros the
+    // scaffold needs (those are emitted bare, so must always be imported).
+    let mut import_names = imports::collapse(&mut body);
+    import_names.extend(scaffold::macro_imports(types, has_impl).iter().map(ToString::to_string));
+
+    // Order: imports · body.
     let mut items: Vec<syn::Item> = Vec::new();
-    if let Some(use_item) = scaffold::use_item(types, !methods.is_empty()) {
+    if let Some(use_item) = imports::use_item(&import_names) {
         items.push(use_item);
     }
-    items.extend(type_items);
-    if !methods.is_empty() {
-        items.push(scaffold::contract_struct());
-        items.push(scaffold::contract_impl(methods));
-    }
-    items.extend(free_fns);
+    items.extend(body);
 
     syn::File {
         shebang: None,
