@@ -27,9 +27,8 @@ fn dump_rust_emits_hello_add_skeleton() {
         .success()
         .stdout(predicate::str::starts_with("#![no_std]"))
         .stdout(predicate::str::contains("#[contract]\npub struct Contract;"))
-        .stdout(predicate::str::contains(
-            "pub fn add(e: soroban_sdk::Env, a: u64, b: u64) -> u64",
-        ))
+        // Soroban types are imported and written short (R3 collapse pass).
+        .stdout(predicate::str::contains("pub fn add(e: Env, a: u64, b: u64) -> u64"))
         .stderr(predicate::str::contains("[error]").not());
 }
 
@@ -42,7 +41,7 @@ fn dump_rust_reconstructs_token_contract_types() {
         .success()
         .stdout(predicate::str::contains("#[contracttype]"))
         .stdout(predicate::str::contains("pub enum DataKey"))
-        .stdout(predicate::str::contains("Balance(soroban_sdk::Address)"))
+        .stdout(predicate::str::contains("Balance(Address)"))
         .stderr(predicate::str::contains("[error]").not());
 }
 
