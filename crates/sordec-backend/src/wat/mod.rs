@@ -15,7 +15,7 @@
 //! the L1 header, where it is unambiguous — the emitter never guesses a
 //! line-to-fact mapping it cannot prove.
 
-mod annotate;
+pub(crate) mod annotate;
 mod anchor;
 mod banner;
 mod extract;

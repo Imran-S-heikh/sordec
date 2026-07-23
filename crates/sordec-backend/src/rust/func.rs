@@ -2,10 +2,10 @@
 
 use syn::parse_quote;
 
-use sordec_ir::{HighFunction, TypeRegistry};
+use sordec_ir::{HighFunction, HighIr, TypeRegistry};
 
 use crate::rust::hole::HolePolicy;
-use crate::rust::sig;
+use crate::rust::{body, sig};
 
 /// One function rendered either as a contract method or a free function.
 pub(crate) enum Emitted {
@@ -17,32 +17,21 @@ pub(crate) enum Emitted {
 
 /// Emit one function. A function present in `contractspecv0`
 /// (`signature.is_some()`) becomes a public contract method; every other
-/// function becomes a free helper.
-///
-/// W1 bodies are uniformly `todo!()` — this is the single site the W2
-/// region → expression walk replaces. `todo!()` types as `!` and coerces
-/// to any return type, so the skeleton is already shape-correct.
+/// function becomes a free helper. The body is the region → `syn` walk
+/// ([`body::emit_body`]); `high` is needed to resolve call targets to
+/// their emitted names.
 pub(crate) fn emit_function(
+    high: &HighIr,
     func: &HighFunction,
     reg: &TypeRegistry,
     policy: &dyn HolePolicy,
 ) -> Emitted {
-    match &func.signature {
-        Some(spec) => {
-            let signature = sig::spec_signature(spec, reg, policy);
-            Emitted::Method(Box::new(parse_quote! {
-                pub #signature {
-                    todo!()
-                }
-            }))
-        }
-        None => {
-            let signature = sig::helper_signature(func, reg, policy);
-            Emitted::Free(Box::new(parse_quote! {
-                #signature {
-                    todo!()
-                }
-            }))
-        }
+    let block = body::emit_body(high, func, reg, policy);
+    if func.signature.is_some() {
+        let signature = sig::spec_signature(func, reg, policy);
+        Emitted::Method(Box::new(parse_quote!(pub #signature #block)))
+    } else {
+        let signature = sig::helper_signature(func, reg, policy);
+        Emitted::Free(Box::new(parse_quote!(#signature #block)))
     }
 }

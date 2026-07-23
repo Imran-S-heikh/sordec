@@ -10,7 +10,9 @@
 //! signature with a `todo!()` body. Bodies (the region → expression walk)
 //! land in W2 at the single body site in [`func`].
 
+mod body;
 mod contract_type;
+mod expr;
 mod func;
 mod hole;
 mod scaffold;
@@ -64,7 +66,7 @@ fn build_file(high: &HighIr, policy: &dyn HolePolicy) -> syn::File {
     let mut methods: Vec<syn::ImplItemFn> = Vec::new();
     let mut free_fns: Vec<syn::Item> = Vec::new();
     for func in &high.functions {
-        match func::emit_function(func, reg, policy) {
+        match func::emit_function(high, func, reg, policy) {
             Emitted::Method(m) => methods.push(*m),
             Emitted::Free(f) => free_fns.push(*f),
         }

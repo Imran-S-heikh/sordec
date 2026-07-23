@@ -26,6 +26,7 @@
 //! reason as a `todo!("…")` **string literal**, which *does* survive
 //! printing because it is part of the AST.
 
+use proc_macro2::Literal;
 use sordec_common::UnknownReason;
 use syn::parse_quote;
 
@@ -41,6 +42,18 @@ pub(crate) trait HolePolicy {
     /// the site; policies may branch on it. The return must be a real,
     /// compilable type.
     fn unknown_type(&self, reason: Option<&UnknownReason>) -> syn::Type;
+
+    /// The `syn::Expr` to emit in place of a value the IR could not
+    /// recover — an unrecognised operation, a raw memory access, a
+    /// host-call whose idiom is not yet materialised.
+    ///
+    /// `label` is a short description of what was there (e.g. the
+    /// recovered-op label, or the WASM opcode kind). It is carried into
+    /// the emitted expression so the gap is visible in the source: a
+    /// `todo!("…")` **string literal survives `prettyplease`** (a bare
+    /// `//` comment would not), which is how W2 honours the "surface every
+    /// hole" rule for expression-position gaps.
+    fn unknown_expr(&self, label: &str) -> syn::Expr;
 }
 
 /// The Phase-4 launch policy: **never guess**.
@@ -53,5 +66,15 @@ pub(crate) struct StrictNoGuess;
 impl HolePolicy for StrictNoGuess {
     fn unknown_type(&self, _reason: Option<&UnknownReason>) -> syn::Type {
         parse_quote!(soroban_sdk::Val)
+    }
+
+    fn unknown_expr(&self, label: &str) -> syn::Expr {
+        // `todo!("<label>")`: diverges (`!`), so it type-checks in any
+        // position, and the label is preserved verbatim as a string
+        // literal. The `todo!` token here is quoted into the emitted AST,
+        // not a real invocation in this crate, so `clippy::todo` does not
+        // fire on it.
+        let label = Literal::string(label);
+        parse_quote!(todo!(#label))
     }
 }

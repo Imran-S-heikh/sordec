@@ -35,27 +35,45 @@ fn emission_is_deterministic() {
     );
 }
 
-/// The canonical acceptance shape: hello-add reconstructs its `#[contract]`
-/// scaffold and its one spec method exactly. Asserted by containment of the
-/// stable contract-facing fragment rather than a full-file snapshot, so
-/// incidental internal-helper numbering does not make the lock brittle.
+/// hello-add reconstructs its `#[contract]` scaffold and its one spec
+/// method — now with a **real body** (W2), not a `todo!()` stub. Asserted
+/// by robust markers (SSA-destructed phi, a helper call threading a
+/// parameter name, structured control flow, an explicit return) rather
+/// than a brittle full-file snapshot.
 #[test]
-fn hello_add_skeleton_shape() {
+fn hello_add_emits_a_real_add_body() {
     let (_, wasm) = common::fixtures()[0];
-    let high = common::build_high(wasm);
-    let src = emit_rust(&high).expect("emits");
+    let src = emit_rust(&common::build_high(wasm)).expect("emits");
 
     assert!(src.starts_with("#![no_std]"), "no_std module attribute:\n{src}");
     assert!(src.contains("#[contract]\npub struct Contract;"), "contract struct:\n{src}");
+    assert!(src.contains("pub fn add(a: u64, b: u64) -> u64 {"), "spec method signature:\n{src}");
 
-    let expected_method = "\
-#[contractimpl]
-impl Contract {
-    pub fn add(a: u64, b: u64) -> u64 {
-        todo!()
+    // The body is real, not the W1 `{ todo!() }` stub.
+    assert!(
+        !src.contains("pub fn add(a: u64, b: u64) -> u64 {\n        todo!()\n    }"),
+        "add is no longer a stub:\n{src}"
+    );
+    // SSA destruction: a hoisted `let mut` phi, assigned and returned.
+    assert!(src.contains("let mut v"), "phi hoisted as let mut:\n{src}");
+    assert!(src.contains("return v"), "explicit return of a value:\n{src}");
+    // A helper call threading a recovered parameter name.
+    assert!(src.contains("func0(v5, a)"), "call threads param name `a`:\n{src}");
+    // Structured control flow survived the walk.
+    assert!(src.contains("if v"), "if present:\n{src}");
+    assert!(src.contains("break 'bb"), "labeled break present:\n{src}");
+    // Host-call sites are honest holes carrying their recovered label.
+    assert!(src.contains("todo!(\"memory load\")"), "host/memory hole labeled:\n{src}");
+}
+
+/// Every fixture emits real body statements — the emitter is past the W1
+/// `todo!()`-stub skeleton across the whole corpus.
+#[test]
+fn every_fixture_emits_real_bodies() {
+    for (name, wasm) in common::fixtures() {
+        let src = emit_rust(&common::build_high(wasm)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(src.contains("let "), "{name}: expected real body statements");
     }
-}";
-    assert!(src.contains(expected_method), "spec method not emitted verbatim:\n{src}");
 }
 
 /// The generated `Cargo.toml` is a buildable cdylib crate manifest pinning

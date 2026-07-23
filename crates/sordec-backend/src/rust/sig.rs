@@ -14,23 +14,40 @@ use quote::quote;
 use syn::parse_quote;
 
 use sordec_common::{IrId, ValueId};
-use sordec_ir::{FunctionSignature, HighFunction, TypeRef, TypeRegistry};
+use sordec_ir::{HighFunction, TypeRef, TypeRegistry};
 
 use crate::rust::hole::HolePolicy;
 use crate::rust::ty::{ident, ir_type, type_ref};
 
+/// The parameter identifiers of a function, in order: the recovered names
+/// for a `contractspecv0` function, positional `arg{i}` for an internal
+/// helper. The single source of parameter names — signature emission and
+/// the body's value naming both consume it, so a parameter's name in the
+/// signature and its name in the body cannot drift.
+pub(crate) fn param_idents(func: &HighFunction) -> Vec<syn::Ident> {
+    match &func.signature {
+        Some(sig) => sig.inputs.iter().map(|p| ident(&p.name)).collect(),
+        None => (0..func.params.len())
+            .map(|i| ident(&format!("arg{i}")))
+            .collect(),
+    }
+}
+
 /// `fn name(p: T, …) -> R` for a `contractspecv0` function.
 pub(crate) fn spec_signature(
-    sig: &FunctionSignature,
+    func: &HighFunction,
     reg: &TypeRegistry,
     policy: &dyn HolePolicy,
 ) -> syn::Signature {
+    let sig = func
+        .signature
+        .as_ref()
+        .expect("spec_signature requires a contractspec signature");
     let name = ident(&sig.name);
-    let params: Vec<_> = sig
-        .inputs
+    let params: Vec<_> = param_idents(func)
         .iter()
-        .map(|p| {
-            let pn = ident(&p.name);
+        .zip(&sig.inputs)
+        .map(|(pn, p)| {
             let pt = type_ref(&p.ty, reg, policy);
             quote!(#pn: #pt)
         })
@@ -51,9 +68,8 @@ pub(crate) fn helper_signature(
     let params: Vec<_> = func
         .params
         .iter()
-        .enumerate()
-        .map(|(i, vid)| {
-            let pn = ident(&format!("arg{i}"));
+        .zip(param_idents(func))
+        .map(|(vid, pn)| {
             let pt = value_type(func, *vid, reg, policy);
             quote!(#pn: #pt)
         })
