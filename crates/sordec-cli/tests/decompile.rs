@@ -20,7 +20,7 @@ fn scratch(tag: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn decompile_writes_nested_annotated_wat() {
+fn decompile_writes_a_buildable_crate() {
     let out = scratch("token");
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
@@ -28,19 +28,28 @@ fn decompile_writes_nested_annotated_wat() {
         .arg(&out)
         .assert()
         .success()
-        // stdout reports the written path.
-        .stdout(predicate::str::contains("token-v23.wat"));
+        // stdout reports all three written paths.
+        .stdout(predicate::str::contains("token-v23.wat"))
+        .stdout(predicate::str::contains("Cargo.toml"))
+        .stdout(predicate::str::contains("lib.rs"));
 
-    // Nested per-contract layout: <out>/<name>/<name>.wat.
-    let wat = out.join("token-v23").join("token-v23.wat");
-    assert!(wat.exists(), "nested annotated WAT must be written");
+    let dir = out.join("token-v23");
 
+    // Nested per-contract layout: <out>/<name>/{<name>.wat, Cargo.toml, src/lib.rs}.
+    let wat = dir.join("token-v23.wat");
     let content = std::fs::read_to_string(&wat).expect("read wat");
-    assert!(
-        content.contains("Soroban annotated WAT"),
-        "written file is the annotated WAT"
-    );
+    assert!(content.contains("Soroban annotated WAT"), "the annotated WAT");
     assert!(content.contains(";; ── fn "), "carries per-function headers");
+
+    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).expect("read Cargo.toml");
+    assert!(manifest.contains("crate-type = [\"cdylib\"]"), "cdylib manifest");
+    assert!(manifest.contains("soroban-sdk = "), "depends on soroban-sdk");
+
+    let lib = std::fs::read_to_string(dir.join("src").join("lib.rs")).expect("read src/lib.rs");
+    assert!(lib.starts_with("#![no_std]"), "the reconstructed module");
+    // A recovered idiom is present (proves the Rust half is real). Parse
+    // validity itself is covered by sordec-backend's rust_emit corpus gate.
+    assert!(lib.contains(".require_auth()"), "recovered a Soroban idiom");
 
     let _ = std::fs::remove_dir_all(&out);
 }

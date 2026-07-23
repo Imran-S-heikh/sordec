@@ -120,8 +120,11 @@ impl Driver {
         // Stage 5: high-IR pipeline (structuring + semantic recovery).
         let high_report = self.high_pipeline.run(&mut high);
 
-        // Stage 6: emit annotated WAT (Rust emit is Phase 4).
+        // Stage 6: emit both artifacts — annotated WAT and compilable Rust
+        // (source + its crate manifest).
         let wat = sordec_backend::emit_annotated_wat(&high, wasm)?;
+        let rust = sordec_backend::emit_rust(&high)?;
+        let cargo_toml = sordec_backend::emit_cargo_toml(&high);
 
         // Surface every non-fatal diagnostic in pipeline order.
         let mut diagnostics = parse_output.diagnostics.into_vec();
@@ -131,7 +134,8 @@ impl Driver {
 
         Ok(DecompileOutput {
             wat,
-            rust: String::new(),
+            rust,
+            cargo_toml,
             report: Some(DriverReport {
                 diagnostics,
                 lifted: Some(lifted_report),
@@ -164,16 +168,17 @@ impl Driver {
 }
 
 /// Output of a successful [`Driver::run`].
-///
-/// Currently a placeholder. The backend that populates these fields
-/// does not yet exist.
 #[derive(Debug, Default, Clone)]
 pub struct DecompileOutput {
-    /// Annotated WebAssembly Text. Empty until the WAT emitter lands.
+    /// Annotated WebAssembly Text.
     pub wat: String,
 
-    /// Compilable Rust source. Empty until the Rust emitter lands.
+    /// Reconstructed Rust source (the contents of `src/lib.rs`).
     pub rust: String,
+
+    /// The `Cargo.toml` for the reconstructed contract crate, so
+    /// [`rust`](Self::rust) can be written as a buildable crate.
+    pub cargo_toml: String,
 
     /// Per-stage diagnostics from the pipeline.
     pub report: Option<DriverReport>,

@@ -48,8 +48,16 @@ fn standard_driver_decompiles_every_fixture_to_annotated_wat() {
             output.wat.contains("(module"),
             "{name}: output wraps the disassembled module"
         );
-        // Rust emit is Phase 4 — empty for now.
-        assert!(output.rust.is_empty(), "{name}: no Rust output yet");
+        // The driver now emits both artifacts: reconstructed Rust and its
+        // crate manifest, alongside the annotated WAT.
+        assert!(
+            output.rust.starts_with("#![no_std]"),
+            "{name}: reconstructed Rust module present"
+        );
+        assert!(
+            output.cargo_toml.contains("crate-type = [\"cdylib\"]"),
+            "{name}: a buildable crate manifest"
+        );
         // The report is populated (diagnostics + per-pipeline reports).
         assert!(output.report.is_some(), "{name}: run produces a report");
     }

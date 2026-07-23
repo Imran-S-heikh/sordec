@@ -27,7 +27,9 @@ fn dump_rust_emits_hello_add_skeleton() {
         .success()
         .stdout(predicate::str::starts_with("#![no_std]"))
         .stdout(predicate::str::contains("#[contract]\npub struct Contract;"))
-        .stdout(predicate::str::contains("pub fn add(a: u64, b: u64) -> u64"))
+        .stdout(predicate::str::contains(
+            "pub fn add(e: soroban_sdk::Env, a: u64, b: u64) -> u64",
+        ))
         .stderr(predicate::str::contains("[error]").not());
 }
 

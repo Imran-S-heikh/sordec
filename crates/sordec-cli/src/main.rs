@@ -603,22 +603,41 @@ fn run_decompile(args: &DecompileArgs) -> u8 {
         );
         return EXIT_IO_ERR;
     }
-    let wat_path = contract_dir.join(format!("{name}.wat"));
-    if let Err(e) = std::fs::write(&wat_path, output.wat.as_bytes()) {
+    // Artifacts: `<name>.wat`, the crate manifest, and `src/lib.rs` — a
+    // buildable crate directory (`cargo build` from `<out-dir>/<name>`).
+    let src_dir = contract_dir.join("src");
+    if let Err(e) = std::fs::create_dir_all(&src_dir) {
         let _ = writeln!(
             std::io::stderr(),
-            "sordec: could not write {}: {e}",
-            wat_path.display()
+            "sordec: could not create {}: {e}",
+            src_dir.display()
         );
         return EXIT_IO_ERR;
     }
+    let artifacts = [
+        (contract_dir.join(format!("{name}.wat")), &output.wat),
+        (contract_dir.join("Cargo.toml"), &output.cargo_toml),
+        (src_dir.join("lib.rs"), &output.rust),
+    ];
+    for (path, contents) in &artifacts {
+        if let Err(e) = std::fs::write(path, contents.as_bytes()) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "sordec: could not write {}: {e}",
+                path.display()
+            );
+            return EXIT_IO_ERR;
+        }
+    }
 
-    // 4. Report the written path on stdout; pipeline diagnostics on stderr.
+    // 4. Report the written paths on stdout; pipeline diagnostics on stderr.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    if let Err(e) = writeln!(out, "{}", wat_path.display()) {
-        let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
-        return EXIT_IO_ERR;
+    for (path, _) in &artifacts {
+        if let Err(e) = writeln!(out, "{}", path.display()) {
+            let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
+            return EXIT_IO_ERR;
+        }
     }
     if let Some(report) = output.report {
         diagnostics::print_diagnostics(&report.diagnostics);

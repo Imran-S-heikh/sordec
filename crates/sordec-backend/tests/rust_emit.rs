@@ -47,23 +47,37 @@ fn hello_add_emits_a_real_add_body() {
 
     assert!(src.starts_with("#![no_std]"), "no_std module attribute:\n{src}");
     assert!(src.contains("#[contract]\npub struct Contract;"), "contract struct:\n{src}");
-    assert!(src.contains("pub fn add(a: u64, b: u64) -> u64 {"), "spec method signature:\n{src}");
-
-    // The body is real, not the W1 `{ todo!() }` stub.
+    // The synthesized `Env` leads the signature (host ops root on it).
     assert!(
-        !src.contains("pub fn add(a: u64, b: u64) -> u64 {\n        todo!()\n    }"),
-        "add is no longer a stub:\n{src}"
+        src.contains("pub fn add(e: soroban_sdk::Env, a: u64, b: u64) -> u64 {"),
+        "spec method signature with env:\n{src}"
     );
     // SSA destruction: a hoisted `let mut` phi, assigned and returned.
     assert!(src.contains("let mut v"), "phi hoisted as let mut:\n{src}");
     assert!(src.contains("return v"), "explicit return of a value:\n{src}");
-    // A helper call threading a recovered parameter name.
-    assert!(src.contains("func0(v5, a)"), "call threads param name `a`:\n{src}");
+    // A helper call threading the env and a recovered parameter name.
+    assert!(src.contains("func0(e, v5, a)"), "call threads env + param `a`:\n{src}");
     // Structured control flow survived the walk.
     assert!(src.contains("if v"), "if present:\n{src}");
     assert!(src.contains("break 'bb"), "labeled break present:\n{src}");
     // Host-call sites are honest holes carrying their recovered label.
     assert!(src.contains("todo!(\"memory load\")"), "host/memory hole labeled:\n{src}");
+}
+
+/// The idiom table (P5): token-v23's storage/auth/event ops render as the
+/// exact SDK method chains the scorer's extractor recognises (K4).
+#[test]
+fn token_v23_emits_soroban_idioms() {
+    let src = emit_rust(&common::build_high(common::TOKEN_V23)).expect("emits");
+
+    // Storage across all three tiers, keyed by the recovered enum variants.
+    assert!(src.contains("e.storage().persistent().get(&DataKey::Balance"), "persistent get:\n{src}");
+    assert!(src.contains("e.storage().instance().get(&DataKey::Admin"), "instance get:\n{src}");
+    assert!(src.contains("e.storage().temporary().get(&DataKey::Allowance"), "temporary get:\n{src}");
+    assert!(src.contains(".set(&DataKey::"), "a keyed set:\n{src}");
+    // Auth, events, ledger context.
+    assert!(src.contains(".require_auth()"), "require_auth:\n{src}");
+    assert!(src.contains("e.events().publish("), "event publish:\n{src}");
 }
 
 /// Every fixture emits real body statements — the emitter is past the W1
@@ -74,6 +88,59 @@ fn every_fixture_emits_real_bodies() {
         let src = emit_rust(&common::build_high(wasm)).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert!(src.contains("let "), "{name}: expected real body statements");
     }
+}
+
+/// Measurement (not a gate): emit token-v23 as a crate and run
+/// `cargo check` against the cached `soroban-sdk`, reporting the outcome.
+/// This is W3's honest "compile rate measured" deliverable — expected
+/// **partial** while ABI-marshalling residue and `Unknown` types remain.
+/// Slow + toolchain-dependent, so `#[ignore]`d out of the fast suite:
+///   cargo test -p sordec-backend -- --ignored --nocapture
+#[test]
+#[ignore = "shells out to cargo check against soroban-sdk (slow, toolchain-dependent)"]
+// This test's entire purpose is to *report* a measurement to the operator.
+#[allow(clippy::print_stdout)]
+fn token_v23_cargo_check_rate() {
+    let high = common::build_high(common::TOKEN_V23);
+    let rust = emit_rust(&high).expect("emits");
+    let cargo_toml = emit_cargo_toml(&high);
+
+    let dir = std::env::temp_dir().join(format!("sordec-w3-check-{}", std::process::id()));
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).expect("scratch dir");
+    // Append a `[workspace]` table so cargo treats this as standalone.
+    std::fs::write(dir.join("Cargo.toml"), format!("{cargo_toml}\n[workspace]\n")).unwrap();
+    std::fs::write(src.join("lib.rs"), &rust).unwrap();
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let output = std::process::Command::new(cargo)
+        .args(["check", "--offline", "--quiet", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => println!("token-v23 cargo check: PASS"),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let errors = stderr
+                .lines()
+                .filter(|l| l.trim_start().starts_with("error"))
+                .count();
+            println!("token-v23 cargo check: PARTIAL — {errors} error line(s). First diagnostics:");
+            for line in stderr
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    t.starts_with("error") || t.starts_with("-->")
+                })
+                .take(12)
+            {
+                println!("  {}", line.trim());
+            }
+        }
+        Err(e) => println!("token-v23 cargo check: UNAVAILABLE ({e})"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The generated `Cargo.toml` is a buildable cdylib crate manifest pinning

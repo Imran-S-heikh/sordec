@@ -15,6 +15,7 @@ mod contract_type;
 mod expr;
 mod func;
 mod hole;
+mod idiom;
 mod scaffold;
 mod sig;
 mod ty;

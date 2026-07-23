@@ -13,7 +13,7 @@ use sordec_ir::{BinaryOp, Binding, Expr, HighIr, Literal, SemanticOp, UnaryOp};
 use syn::parse_quote;
 
 use crate::rust::body::FnCtx;
-use crate::rust::{sig, ty};
+use crate::rust::{idiom, sig, ty};
 use crate::wat::annotate;
 
 /// The right-hand side expression for one binding.
@@ -27,12 +27,20 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
         }
         Expr::Call { target, args } => {
             let path = callee_path(ctx.high, *target);
+            // Every emitted function takes `Env` as its leading parameter,
+            // so every internal call threads it as the first argument.
+            let env = ctx.env();
             let a: Vec<syn::Expr> = args.iter().map(|v| ctx.value_ref(*v)).collect();
-            parse_quote!(#path(#(#a),*))
+            parse_quote!(#path(#env, #(#a),*))
         }
-        // Holes — the source idiom is recovered in a later wave. The label
-        // is carried into the `todo!("…")` so the gap stays visible.
-        Expr::Semantic(op) => ctx.policy.unknown_expr(&semantic_label(op)),
+        // A recovered Soroban op renders as its idiomatic method chain when
+        // the idiom table can build one honestly; otherwise it is a labeled
+        // hole (an unmapped op, or an `Unknown` storage tier).
+        Expr::Semantic(SemanticOp::Known(known)) => idiom::known_op_expr(ctx, known)
+            .unwrap_or_else(|| ctx.policy.unknown_expr(&annotate::label_known_op(known))),
+        Expr::Semantic(op @ SemanticOp::Unknown { .. }) => {
+            ctx.policy.unknown_expr(&semantic_label(op))
+        }
         Expr::Load { .. } => ctx.policy.unknown_expr("memory load"),
         Expr::Store { .. } => ctx.policy.unknown_expr("memory store"),
         Expr::GlobalGet { index } => ctx.policy.unknown_expr(&format!("global.get {index}")),

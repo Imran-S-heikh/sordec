@@ -52,10 +52,20 @@ pub(crate) fn spec_signature(
             quote!(#pn: #pt)
         })
         .collect();
+    let env = env_param();
     match spec_return(&sig.outputs, reg, policy) {
-        Some(ret) => parse_quote!(fn #name(#(#params),*) -> #ret),
-        None => parse_quote!(fn #name(#(#params),*)),
+        Some(ret) => parse_quote!(fn #name(#env, #(#params),*) -> #ret),
+        None => parse_quote!(fn #name(#env, #(#params),*)),
     }
+}
+
+/// The synthesized leading `e: Env` parameter every emitted function
+/// carries. Host operations reach the `Env` through the VM, so it is not a
+/// WASM argument and never appears in the IR — the emitter supplies it, and
+/// the body walk roots every host idiom on it. Fully qualified so no import
+/// is required.
+fn env_param() -> proc_macro2::TokenStream {
+    quote!(e: soroban_sdk::Env)
 }
 
 /// A synthesized `fn func{id}(arg0: T, …) -> R` for a non-spec function.
@@ -74,9 +84,10 @@ pub(crate) fn helper_signature(
             quote!(#pn: #pt)
         })
         .collect();
+    let env = env_param();
     match helper_return(func, reg, policy) {
-        Some(ret) => parse_quote!(fn #name(#(#params),*) -> #ret),
-        None => parse_quote!(fn #name(#(#params),*)),
+        Some(ret) => parse_quote!(fn #name(#env, #(#params),*) -> #ret),
+        None => parse_quote!(fn #name(#env, #(#params),*)),
     }
 }
 

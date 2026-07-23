@@ -86,6 +86,12 @@ impl<'a> FnCtx<'a> {
         }
     }
 
+    /// The synthesized `Env` value every function carries as its leading
+    /// parameter (see `sig::env_param`). Host idioms root on it.
+    pub(crate) fn env(&self) -> syn::Expr {
+        parse_quote!(e)
+    }
+
     /// Render a `ValueId`: its parameter name when it is an entry
     /// parameter, else `vN`.
     pub(crate) fn value_ref(&self, vid: ValueId) -> syn::Expr {
