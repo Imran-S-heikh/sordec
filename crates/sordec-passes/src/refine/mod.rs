@@ -51,7 +51,7 @@ pub use polarity::PolarityPass;
 pub use switch_dedup::SwitchDedupPass;
 pub use trap_inline::TrapInlinePass;
 
-use sordec_ir::{HighIr, Region, Validate as _};
+use sordec_ir::{HighIr, Region};
 
 /// Is `region` a *bare exit* — one node that leaves the enclosing
 /// context carrying no values: an empty-transfer `Break`/`Continue`, a
@@ -110,8 +110,13 @@ pub(crate) fn is_terminating(region: &Region) -> bool {
 /// the pass that made it. Release builds skip the walk.
 pub(crate) fn debug_validate(ir: &HighIr, pass: &'static str) {
     #[cfg(debug_assertions)]
-    if let Err(e) = ir.validate() {
-        panic!("refinement pass `{pass}` broke an IR invariant: {e:?}");
+    {
+        // Scoped to the debug build: in release the `Validate` trait is
+        // otherwise an unused import (the call below is compiled out).
+        use sordec_ir::Validate as _;
+        if let Err(e) = ir.validate() {
+            panic!("refinement pass `{pass}` broke an IR invariant: {e:?}");
+        }
     }
     #[cfg(not(debug_assertions))]
     let _ = (ir, pass);

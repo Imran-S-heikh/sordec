@@ -6,7 +6,7 @@
 //!
 //! ## How to construct
 //!
-//! Inline the variant at the call site that produces the [`Unknown`]:
+//! Inline the variant at the call site that produces the [`UnknownReason`]:
 //!
 //! ```
 //! use sordec_common::UnknownReason;

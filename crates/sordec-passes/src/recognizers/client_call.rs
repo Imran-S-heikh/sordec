@@ -20,7 +20,7 @@
 //!    calls kills the block-local facts, the loop idiom is traced
 //!    structurally back to the block that stored the source slots —
 //!    Inferred-grade evidence, noted in provenance (see
-//!    [`resolve_through_copy_loop`]). Sites matching neither honestly
+//!    `resolve_through_copy_loop`). Sites matching neither honestly
 //!    keep `resolved_args: None`.
 //! 3. **Interface** (`interface`): the resolved callee name + arity
 //!    match a known interface table

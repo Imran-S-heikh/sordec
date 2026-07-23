@@ -257,7 +257,7 @@ pub enum TypeRef {
 
 /// Soroban primitive types.
 ///
-/// Mirrors [`stellar_xdr::ScSpecTypeDef`]'s primitive variants
+/// Mirrors `stellar_xdr::ScSpecTypeDef`'s primitive variants
 /// (everything except `Option`, `Result`, `Vec`, `Map`, `Tuple`, `BytesN`,
 /// `Udt`, which are composite or user-defined). Listing them as a
 /// dedicated enum lets passes pattern-match exhaustively rather than

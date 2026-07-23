@@ -8,7 +8,7 @@
 //! group.
 //!
 //! One resident is not a recognizer: [`const_prop`] is an *upgrade*
-//! pass that deliberately bypasses the shared [`is_recognized`] skip
+//! pass that deliberately bypasses the shared `is_recognized` skip
 //! guard — its domain is already-`Known` ops carrying an
 //! honestly-unresolved slot (`tier: Unknown`, `resolved: None`), which
 //! it refines in place. It obeys the same monotonicity and idempotency

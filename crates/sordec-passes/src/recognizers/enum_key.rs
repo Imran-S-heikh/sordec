@@ -11,7 +11,7 @@
 //!   pointer. No register-level channel ever sees the variant choice —
 //!   it travels through memory, which is why this pass rides on
 //!   [`frame_facts`](crate::dataflow::frame_facts) rather than the
-//!   [`Resolver`](crate::dataflow::Resolver) alone.
+//!   [`Resolver`] alone.
 //! - **By value** (all-unit enums — timelock, dex): the discriminant
 //!   arrives in a register argument, resolvable by the `Resolver`.
 //!

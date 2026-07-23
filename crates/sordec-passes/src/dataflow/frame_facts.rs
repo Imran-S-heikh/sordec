@@ -23,7 +23,7 @@
 //!   host call → kill. A recognized host op kills iff it is one of the
 //!   linear-memory writers (`*_copy_to_linear_memory`,
 //!   `*_unpack_to_linear_memory`). Raw WASM operators kill by
-//!   [`WasmOpcodeKind`] class, matched exhaustively so a new class
+//!   `WasmOpcodeKind` class, matched exhaustively so a new class
 //!   forces an explicit decision here; unclassified (`Other`) kills.
 //! - **Width discipline**: a fact records the store's exact byte range
 //!   ([`MemWidth`] from S1); queries must match offset *and* width

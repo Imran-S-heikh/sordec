@@ -125,7 +125,7 @@ pub struct HighFunction {
 
     /// The function's parameters, in declaration order: the binding ids
     /// of the *entry block's* block params (each an
-    /// [`Expr::Phi`](crate::Expr::Phi) with no intra-procedural
+    /// [`Expr::Phi`] with no intra-procedural
     /// incoming edges). Preserved from the lifted entry block by the
     /// boundary lowering — WASM erases parameter identity otherwise —
     /// so inter-procedural analyses can bind a caller's positional

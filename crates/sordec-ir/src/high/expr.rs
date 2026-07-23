@@ -2,9 +2,9 @@
 //!
 //! [`Expr`] is what gets emitted as Rust code by the backend. Every
 //! [`crate::Binding`] has exactly one. Pattern matchers in `sordec-passes`
-//! progressively replace lower-level [`Expr::WasmOp`] / [`Expr::Load`]
-//! variants with the richer [`Expr::Semantic`] when they recognise a
-//! pattern.
+//! progressively replace lower-level [`Expr::Unknown`] / [`Expr::Load`]
+//! expressions with recovered semantic operations (`KnownOp`) when they
+//! recognise a pattern.
 
 use sordec_common::{FuncId, UnknownReason, ValueId};
 

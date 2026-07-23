@@ -19,7 +19,7 @@
 //! to a locally-constant `(pos, len)` slice that passes the `Symbol`
 //! grammar, or the site stays a plain `BufOp` (no partial/guessed list).
 //! The enum *name* follows the None-is-honest discipline — filled only on
-//! a unique union match (shared gate in [`super::symbols`]), left `None`
+//! a unique union match (shared gate in `super::symbols`), left `None`
 //! for a stripped binary or an ambiguous match.
 //!
 //! ## What it does NOT do

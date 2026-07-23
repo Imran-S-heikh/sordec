@@ -305,7 +305,7 @@ pub enum LiftDiagnosticCode {
     NonConstantSymbolArg,
     /// A cross-contract call resolved its callee but the contract had no
     /// `contractspecv0` interface to type the client against. Not yet
-    /// emitted — folded into [`UnresolvedCrossContractCallee`] for now.
+    /// emitted — folded into `UnresolvedCrossContractCallee` for now.
     ContractSpecMissingForClient,
     /// A `Result` `Ok`/`Err` tag could not be disambiguated. Not yet
     /// emitted — result-tag recovery (C18) is deferred.
@@ -323,10 +323,10 @@ pub enum LiftDiagnosticCode {
     AuthContextArgsMismatch,
     /// A PRNG host call fell outside the recognised `p`-module catalog.
     /// Not yet emitted — such a call currently surfaces via
-    /// [`UnrecognisedHostCall`]; reserved for a specific PRNG diagnostic.
+    /// `UnrecognisedHostCall`; reserved for a specific PRNG diagnostic.
     UnrecognisedPrngCall,
     /// A crypto host call fell outside the recognised `c`-module catalog.
-    /// Not yet emitted — see [`UnrecognisedPrngCall`].
+    /// Not yet emitted — see `UnrecognisedPrngCall`.
     UnrecognisedCryptoCall,
     /// A `panic!` lowered to a bare `unreachable` with no structured
     /// error code. Emitted by the panic-recovery refinement pass (D8)
