@@ -77,7 +77,13 @@ fn token_v23_emits_soroban_idioms() {
     assert!(src.contains(".set(&DataKey::"), "a keyed set:\n{src}");
     // Auth, events, ledger context.
     assert!(src.contains(".require_auth()"), "require_auth:\n{src}");
-    assert!(src.contains("e.events().publish("), "event publish:\n{src}");
+    // R1: topics are a tuple. A single topic must render the 1-tuple
+    // `(t,)` (trailing comma), not the parenthesised expr `(t)`.
+    assert!(
+        src.lines()
+            .any(|l| l.contains(".events().publish((") && l.contains(",),")),
+        "single-topic publish renders a 1-tuple:\n{src}"
+    );
 }
 
 /// R2: local temporaries are named from unambiguous structure — a storage

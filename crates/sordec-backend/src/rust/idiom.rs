@@ -84,7 +84,11 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         KnownOp::PublishEvent { topics, data } => {
             let topics: Vec<syn::Expr> = topics.iter().map(|v| ctx.value_ref(*v)).collect();
             let data = ctx.value_ref(*data);
-            Some(parse_quote!(#e.events().publish((#(#topics),*), #data)))
+            // Topics are a tuple. The trailing comma is what makes a single
+            // topic the 1-tuple `(t,)` Soroban's `Topics` needs, rather than
+            // a parenthesised expression `(t)`; it is equally valid for the
+            // multi-topic `(a, b,)` and zero-topic `()` forms.
+            Some(parse_quote!(#e.events().publish((#(#topics,)*), #data)))
         }
 
         // ---- Cross-contract (SEP-41 client) ----
