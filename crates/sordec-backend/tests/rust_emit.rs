@@ -103,6 +103,35 @@ fn token_v23_names_locals_from_structure() {
     assert!(src.contains("return admin;"), "named local reused at its use:\n{src}");
 }
 
+/// R3: a value that is never read is not bound. An unused *effectful*
+/// expression (a unit-returning idiom, an unused helper call) is re-emitted
+/// as a bare statement so its effect survives; the dead `let vN =` name is
+/// gone. Nothing that carries an effect is dropped.
+#[test]
+fn token_v23_eliminates_dead_bindings() {
+    let src = emit_rust(&common::build_high(common::TOKEN_V23)).expect("emits");
+
+    // No unit-returning idiom is bound to a dead name any more...
+    for chain in [".set(", ".require_auth()", "events().publish("] {
+        assert!(
+            !src.lines().any(|l| {
+                let t = l.trim_start();
+                t.starts_with("let ") && t.contains(chain)
+            }),
+            "dead `let` binding a unit idiom (`{chain}`) should be gone:\n{src}"
+        );
+    }
+    // ...but the effect itself is still emitted, as a statement.
+    assert!(
+        src.lines().any(|l| l.trim_start().starts_with("e.storage().instance().set(")),
+        "storage set retained as a statement:\n{src}"
+    );
+    assert!(
+        src.lines().any(|l| l.trim_start().ends_with(".require_auth();")),
+        "require_auth retained as a statement:\n{src}"
+    );
+}
+
 /// Values whose uses cross a structured scope boundary are hoisted:
 /// declared (typed, no initializer, no `mut`) at the body top and assigned
 /// at their def site, so they stay in scope at the later use. This clears

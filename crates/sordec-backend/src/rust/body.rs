@@ -29,6 +29,7 @@ use sordec_ir::{Expr, HighFunction, HighIr, Region, TypeRegistry};
 
 use crate::rust::expr;
 use crate::rust::hole::HolePolicy;
+use crate::rust::liveness::{self, Liveness};
 use crate::rust::naming::ValueNames;
 use crate::rust::ty::ir_type;
 
@@ -48,6 +49,8 @@ pub(crate) struct FnCtx<'a> {
     /// The single source of every value's emitted identifier (parameters,
     /// hinted locals, and the `vN` fallback). See [`ValueNames`].
     names: ValueNames,
+    /// Read counts, driving dead-binding cleanup. See [`Liveness`].
+    liveness: Liveness,
     /// Non-phi values whose uses escape the lexical block that defines them
     /// (dominance holds, lexical scope does not). Declared once at the body
     /// top and assigned at their definition site, so they stay in scope at
@@ -77,6 +80,7 @@ impl<'a> FnCtx<'a> {
         policy: &'a dyn HolePolicy,
     ) -> Self {
         let names = ValueNames::build(func);
+        let liveness = Liveness::build(func);
         let escaping = escaping_values(func);
         Self {
             high,
@@ -84,6 +88,7 @@ impl<'a> FnCtx<'a> {
             reg,
             policy,
             names,
+            liveness,
             escaping,
         }
     }
@@ -260,14 +265,26 @@ impl<'a> FnCtx<'a> {
             if matches!(binding.expr, Expr::Phi { .. }) {
                 continue;
             }
-            let name = self.value_ident(vid);
             let value = expr::binding_expr(self, binding);
-            // An escaping value was declared at the body top; assign it here.
-            // A value that stays in scope is a plain inline `let`.
-            if self.escaping.contains(&vid) {
-                out.push(parse_quote!(#name = #value;));
+            // A value that is never read binds nothing: keep it only as a
+            // statement when it carries an effect (a host call, a trap),
+            // and drop it entirely when it is pure. A read value binds
+            // normally — assigning a body-top-hoisted escapee, or a plain
+            // inline `let`.
+            if self.liveness.is_unused(vid) {
+                // Escaping ⇒ read in a sibling scope ⇒ not unused, so an
+                // eliminated value never leaves a hoisted decl unassigned.
+                debug_assert!(!self.escaping.contains(&vid), "escaping value must be used");
+                if liveness::is_effectful(&binding.expr) {
+                    out.push(parse_quote!(#value;));
+                }
             } else {
-                out.push(parse_quote!(let #name = #value;));
+                let name = self.value_ident(vid);
+                if self.escaping.contains(&vid) {
+                    out.push(parse_quote!(#name = #value;));
+                } else {
+                    out.push(parse_quote!(let #name = #value;));
+                }
             }
         }
     }
