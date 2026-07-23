@@ -13,7 +13,9 @@
 //! vocabulary without entangling the two output formats.
 
 mod error;
+mod rust;
 mod wat;
 
 pub use error::{BackendError, BackendResult};
+pub use rust::{emit_cargo_toml, emit_rust};
 pub use wat::{emit_annotated_wat, extract_annotated_facts, AnnotatedFunction};
