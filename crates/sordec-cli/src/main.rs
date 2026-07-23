@@ -11,6 +11,9 @@
 //! - `sordec dump-wat <wasm>` — run the full pipeline, then emit the
 //!   Soroban-annotated WAT (flat disassembly with recovered semantics as
 //!   `;;` comments) on stdout.
+//! - `sordec dump-rust <wasm>` — run the full pipeline, then emit the
+//!   reconstructed Rust (`src/lib.rs`) on stdout. Debug view of the Rust
+//!   emitter; `decompile` writes it to disk.
 //! - `sordec decompile <wasm> --out-dir <dir>` — run the full pipeline
 //!   via the [`sordec_driver::Driver`] and write `<dir>/<name>/<name>.wat`
 //!   (compilable Rust joins it in Phase 4).
@@ -78,6 +81,9 @@ enum Command {
     DumpHir(DumpHirArgs),
     /// Run the full pipeline and emit Soroban-annotated WAT on stdout.
     DumpWat(DumpWatArgs),
+    /// Run the full pipeline and emit reconstructed Rust (`src/lib.rs`) on
+    /// stdout. Debug view of the emitter; `decompile` writes it to disk.
+    DumpRust(DumpRustArgs),
     /// Decompile a WASM module, writing artifacts under `--out-dir`
     /// (annotated WAT now; compilable Rust in Phase 4).
     Decompile(DecompileArgs),
@@ -132,6 +138,12 @@ struct DumpHirArgs {
 
 #[derive(clap::Args)]
 struct DumpWatArgs {
+    /// Path to the WASM module to decompile.
+    wasm: PathBuf,
+}
+
+#[derive(clap::Args)]
+struct DumpRustArgs {
     /// Path to the WASM module to decompile.
     wasm: PathBuf,
 }
@@ -196,6 +208,7 @@ fn main() -> ExitCode {
         Command::DumpIr(args) => run_dump_ir(&args),
         Command::DumpHir(args) => run_dump_hir(&args),
         Command::DumpWat(args) => run_dump_wat(&args),
+        Command::DumpRust(args) => run_dump_rust(&args),
         Command::Decompile(args) => run_decompile(&args),
         Command::Coverage(args) => run_coverage(&args),
         Command::Score(args) => run_score(&args),
@@ -463,6 +476,80 @@ fn run_dump_wat(args: &DumpWatArgs) -> u8 {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     if let Err(e) = out.write_all(wat.as_bytes()) {
+        let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
+        return EXIT_IO_ERR;
+    }
+
+    // 6. Pipeline diagnostics to stderr, after stdout.
+    let mut combined = parse_output.diagnostics.into_vec();
+    combined.extend(lift_output.diagnostics.into_vec());
+    combined.extend(declutter.diagnostics().cloned());
+    combined.extend(recover.diagnostics().cloned());
+    diagnostics::print_diagnostics(&combined);
+
+    EXIT_OK
+}
+
+fn run_dump_rust(args: &DumpRustArgs) -> u8 {
+    // 1. Read the input file.
+    let bytes = match std::fs::read(&args.wasm) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "sordec: could not read {}: {e}",
+                args.wasm.display()
+            );
+            return EXIT_IO_ERR;
+        }
+    };
+
+    // 2. Parse.
+    let parse_output = match sordec_frontend::parse(&bytes) {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "sordec: parse failed: {e}");
+            return EXIT_PIPELINE_ERR;
+        }
+    };
+
+    // 3. Lift.
+    let mut lift_output = match sordec_passes::lift_with_waffle(
+        &bytes,
+        &parse_output.wasm_facts,
+        parse_output.soroban_facts.as_ref(),
+    ) {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "sordec: lift failed: {e}");
+            return EXIT_PIPELINE_ERR;
+        }
+    };
+
+    // 4. De-clutter, lower to HighIr, and run pattern recovery — the full
+    //    pipeline the emitter consumes (unrecovered facts degrade to honest
+    //    holes, never a raw dump).
+    let declutter = sordec_passes::default_lifted_pipeline().run(&mut lift_output.lifted);
+    let mut high = match sordec_passes::LiftToHigh.lower(lift_output.lifted) {
+        Ok(high) => high,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "sordec: lowering failed: {e:?}");
+            return EXIT_PIPELINE_ERR;
+        }
+    };
+    let recover = sordec_passes::default_high_pipeline().run(&mut high);
+
+    // 5. Emit reconstructed Rust to stdout.
+    let rust = match sordec_backend::emit_rust(&high) {
+        Ok(rust) => rust,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "sordec: Rust emission failed: {e}");
+            return EXIT_PIPELINE_ERR;
+        }
+    };
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if let Err(e) = out.write_all(rust.as_bytes()) {
         let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
         return EXIT_IO_ERR;
     }
