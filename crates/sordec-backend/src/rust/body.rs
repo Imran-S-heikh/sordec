@@ -22,7 +22,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use quote::format_ident;
 use syn::parse_quote;
 
 use sordec_common::{BlockId, IrId, ValueId};
@@ -30,7 +29,7 @@ use sordec_ir::{Expr, HighFunction, HighIr, Region, TypeRegistry};
 
 use crate::rust::expr;
 use crate::rust::hole::HolePolicy;
-use crate::rust::sig;
+use crate::rust::naming::ValueNames;
 use crate::rust::ty::ir_type;
 
 /// Codegen context for one function body: the IR it walks plus the
@@ -46,9 +45,9 @@ pub(crate) struct FnCtx<'a> {
     pub(crate) reg: &'a TypeRegistry,
     /// The active hole strategy.
     pub(crate) policy: &'a dyn HolePolicy,
-    /// Entry-parameter value → its signature identifier. Values not in
-    /// this map render as `vN`.
-    params: HashMap<ValueId, syn::Ident>,
+    /// The single source of every value's emitted identifier (parameters,
+    /// hinted locals, and the `vN` fallback). See [`ValueNames`].
+    names: ValueNames,
     /// Non-phi values whose uses escape the lexical block that defines them
     /// (dominance holds, lexical scope does not). Declared once at the body
     /// top and assigned at their definition site, so they stay in scope at
@@ -77,19 +76,14 @@ impl<'a> FnCtx<'a> {
         reg: &'a TypeRegistry,
         policy: &'a dyn HolePolicy,
     ) -> Self {
-        let params = func
-            .params
-            .iter()
-            .copied()
-            .zip(sig::param_idents(func))
-            .collect();
+        let names = ValueNames::build(func);
         let escaping = escaping_values(func);
         Self {
             high,
             func,
             reg,
             policy,
-            params,
+            names,
             escaping,
         }
     }
@@ -100,16 +94,14 @@ impl<'a> FnCtx<'a> {
         parse_quote!(e)
     }
 
-    /// Render a `ValueId`: its parameter name when it is an entry
-    /// parameter, else `vN`.
+    /// Render a `ValueId` as an expression, via the one naming authority.
     pub(crate) fn value_ref(&self, vid: ValueId) -> syn::Expr {
-        match self.params.get(&vid) {
-            Some(name) => parse_quote!(#name),
-            None => {
-                let name = value_ident(vid);
-                parse_quote!(#name)
-            }
-        }
+        self.names.expr(vid)
+    }
+
+    /// The identifier a `ValueId` is bound and referenced under.
+    fn value_ident(&self, vid: ValueId) -> syn::Ident {
+        self.names.ident(vid)
     }
 
     /// `let mut vP: T;` for every phi that receives a value across some
@@ -134,7 +126,7 @@ impl<'a> FnCtx<'a> {
         targets
             .into_iter()
             .map(|vid| {
-                let name = value_ident(vid);
+                let name = self.value_ident(vid);
                 let ty = match self.func.bindings.get(vid) {
                     Some(b) => ir_type(&b.ty, self.reg, self.policy),
                     None => self.policy.unknown_type(None),
@@ -153,7 +145,7 @@ impl<'a> FnCtx<'a> {
         ids.sort_by_key(|v| v.index());
         ids.into_iter()
             .map(|vid| {
-                let name = value_ident(vid);
+                let name = self.value_ident(vid);
                 let ty = match self.func.bindings.get(vid) {
                     Some(b) => ir_type(&b.ty, self.reg, self.policy),
                     None => self.policy.unknown_type(None),
@@ -268,7 +260,7 @@ impl<'a> FnCtx<'a> {
             if matches!(binding.expr, Expr::Phi { .. }) {
                 continue;
             }
-            let name = value_ident(vid);
+            let name = self.value_ident(vid);
             let value = expr::binding_expr(self, binding);
             // An escaping value was declared at the body top; assign it here.
             // A value that stays in scope is a plain inline `let`.
@@ -283,7 +275,7 @@ impl<'a> FnCtx<'a> {
     /// Phi assignments for one edge: `vP = <source>;` per transfer pair.
     fn emit_transfers(&self, transfer: &[(ValueId, ValueId)], out: &mut Vec<syn::Stmt>) {
         for &(phi, source) in transfer {
-            let lhs = value_ident(phi);
+            let lhs = self.value_ident(phi);
             let rhs = self.value_ref(source);
             out.push(parse_quote!(#lhs = #rhs;));
         }
@@ -302,11 +294,6 @@ impl<'a> FnCtx<'a> {
             }
         }
     }
-}
-
-/// The local binding identifier for a value: `v{index}`.
-fn value_ident(vid: ValueId) -> syn::Ident {
-    format_ident!("v{}", vid.index())
 }
 
 /// The Rust lifetime label a block's scope/loop is named by: `'bb{index}`.

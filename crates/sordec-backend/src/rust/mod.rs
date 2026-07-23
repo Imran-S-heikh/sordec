@@ -16,6 +16,7 @@ mod expr;
 mod func;
 mod hole;
 mod idiom;
+mod naming;
 mod scaffold;
 mod sig;
 mod ty;
