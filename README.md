@@ -2,21 +2,22 @@
 
 A WebAssembly decompiler specialized for [Soroban](https://stellar.org/soroban) smart contracts.
 
-> **Status: Phase 2 of 4 complete — Phase 3 (control-flow structuring) in progress**
+> **Status: Phase 3 of 4 complete (SCF Tranche 2) — Phase 4 (Rust emit) next**
 >
-> Phases 1–2 ship an inspection toolkit: parse a Soroban `.wasm`, lift it
-> to a typed CFG/SSA IR, recover the multi-instruction Soroban SDK idioms,
-> and report what we understand about it. Phase 3 adds control-flow
-> structuring (`if`/`while`/`match` reconstruction) — surfaced today in
-> `sordec dump-hir` and the `coverage` structuring section — with Rust
-> source generation to follow. See [PHASE_1.md](PHASE_1.md) and
-> [PHASE_2.md](PHASE_2.md) for the per-phase deliverable summaries,
+> Phases 1–3 ship a decompiler that parses a Soroban `.wasm`, lifts it to a
+> typed CFG/SSA IR, recovers the multi-instruction Soroban SDK idioms,
+> reconstructs control flow (`if`/`while`/`match`), and emits Soroban-annotated
+> WAT. An accuracy scorer (`sordec score`) was built ahead of schedule so the
+> Phase-4 Rust emitter is measurable from day one. Phase 4 adds compilable
+> Rust source. See [PHASE_1.md](PHASE_1.md), [PHASE_2.md](PHASE_2.md), and
+> [PHASE_3.md](PHASE_3.md) for the per-phase deliverable summaries,
 > verification recipes, and acceptance evidence.
 
 ## What it does today
 
-Four CLI subcommands, all read-only inspection. None of these mutate
-your `.wasm` or write outside of stdout.
+Seven CLI subcommands. The inspection commands are read-only (stdout only);
+`decompile` writes WAT files under `--out-dir`, and `score` compares two Rust
+sources.
 
 | Subcommand | Output | Use case |
 |---|---|---|
@@ -26,13 +27,13 @@ your `.wasm` or write outside of stdout.
 | `sordec dump-wat <wasm>`    | Text | Soroban-**annotated WAT**: flat disassembly with a per-function header block listing the recovered operations (storage tier/key, auth, client calls, typed panics) and each host `call` labeled inline with its friendly name |
 | `sordec decompile <wasm> --out-dir <dir>` | Files | Run the full pipeline and write `<dir>/<name>/<name>.wat` (compilable Rust joins it in Phase 4). The path is echoed on stdout; pipeline diagnostics go to stderr |
 | `sordec coverage <wasm>`    | Text or `--json` | How much of the contract our pipeline understands: control-flow **structuring** coverage (functions structured, loop shapes, labeled-exit tax), per-pattern recognition (storage tiers, enum keys, TTL, client calls, …), a two-number semantic-recovery headline, host-call recognition %, and recogniser-miss diagnostics |
+| `sordec score <reconstructed> <original>` | Text or `--json` | Accuracy of a reconstructed Rust source (file or directory) against the original: four independently-reported categories (interface / structure / semantic / compilation), an overall weighted score, and pass/fail against a threshold. `--check-compile` runs a real `cargo check`. The measuring instrument for the Phase-4 Rust emitter |
 
 What's coming next:
 
-- **Phase 3 (in progress)** — control-flow structuring (`if`/`while`/`match` reconstruction, shipping now in `dump-hir` + `coverage`), annotated WAT emit, then Rust source emit
-- **Phase 4** — accuracy framework, multi-version protocol catalog, polish
+- **Phase 4** — the compilable Rust source emitter, the `≥90%` reconstruction report scored by `sordec score`, `for`/iterator-loop recovery, and a multi-version protocol catalog
 
-Each phase ships when it's ready and verified end-to-end (see `PHASE_N.md` per phase). Phase 3 is the current deliverable.
+Each phase ships when it's ready and verified end-to-end (see `PHASE_N.md` per phase). Phase 4 is the current deliverable.
 
 ## Quick start
 
@@ -53,6 +54,11 @@ cargo build --release
 
 # Coverage report — the headline metric
 ./target/release/sordec coverage samples/contracts/token-v23/token-v23.wasm
+
+# Score a reconstruction against the original (identity is 1.0)
+./target/release/sordec score \
+  samples/contracts/token-v23/source/src \
+  samples/contracts/token-v23/source/src
 ```
 
 Sample `coverage` output on the canonical SEP-41 token fixture:
@@ -150,7 +156,7 @@ WASM bytes
 └───────────────────┘
     │
     ▼
-Annotated WAT + recovered Rust (Phase 3)
+Annotated WAT (Phase 3) + compilable Rust (Phase 4)
 ```
 
 Each transformation between layers is a `Pass` in a `Pipeline`, with
@@ -166,9 +172,10 @@ crates/
 ├── sordec-ir/        — Three typed IR layers (WasmFacts, LiftedIr, HighIr)
 ├── sordec-frontend/  — WASM parsing + Soroban metadata (contractspecv0 etc.)
 ├── sordec-passes/    — Lifter + analysis passes + Soroban host-call catalog
-├── sordec-backend/   — Rust + WAT emitters (Phase 3)
+├── sordec-backend/   — Annotated-WAT emitter (Rust emitter lands in Phase 4)
 ├── sordec-driver/    — Pipeline orchestration + corpus integration tests
-└── sordec-cli/       — `sordec` binary (dump-facts, dump-ir, dump-hir, dump-wat, decompile, coverage)
+├── sordec-score/     — Source-to-source accuracy scorer (`sordec score`)
+└── sordec-cli/       — `sordec` binary (dump-facts, dump-ir, dump-hir, dump-wat, decompile, coverage, score)
 ```
 
 Per-crate rustdoc:
@@ -211,21 +218,28 @@ full layout convention and feature-coverage matrix.
 ## Running the test suite
 
 ```bash
-cargo test --workspace                                       # 769 tests
+bash tools/gate.sh   # the full gate, in order (see below)
+
+# …or step by step:
+cargo build --workspace
+RUSTFLAGS="-D warnings" cargo build --release --workspace     # release-only warnings
+cargo test --workspace                                        # 869 tests
 cargo clippy --workspace --all-features --all-targets -- -D warnings
-cargo doc --workspace --no-deps                              # no broken intra-doc links
-bash tools/verify-fixtures.sh                                # 7/7 sha256 OK
+cargo doc --workspace --no-deps                               # warning-free
+bash tools/verify-fixtures.sh                                 # 7/7 sha256 OK
 ```
 
-All gates green at every commit on `main`. No CI workflow yet; the
-verification recipe is the contract.
+All gates green at every commit on `main`. No CI workflow yet; `tools/gate.sh`
+is the contract — it includes a warnings-as-errors *release* build, which
+catches warnings the dev-profile clippy run cannot see.
 
 ## Phase status
 
-See [PHASE_1.md](PHASE_1.md) and [PHASE_2.md](PHASE_2.md) for the
-per-phase scope, the verification recipe (≤ 5 min from a clean clone),
-and the acceptance evidence (100% host-call recognition across all seven
-fixtures). Phase 3 (control-flow structuring) is in progress on `main`.
+See [PHASE_1.md](PHASE_1.md), [PHASE_2.md](PHASE_2.md), and
+[PHASE_3.md](PHASE_3.md) for the per-phase scope, the verification recipe
+(≤ 5 min from a clean clone), and the acceptance evidence. Phase 3
+(control-flow structuring + annotated WAT) is complete on `main`; Phase 4
+(compilable Rust) is next.
 
 ## License
 
