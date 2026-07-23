@@ -80,6 +80,29 @@ fn token_v23_emits_soroban_idioms() {
     assert!(src.contains("e.events().publish("), "event publish:\n{src}");
 }
 
+/// R2: local temporaries are named from unambiguous structure — a storage
+/// read takes the name of the enum variant it is keyed by, a ledger read the
+/// quantity it fetches. The name is used consistently (the binding and its
+/// reads all agree), which is what keeps the scorer's key-resolution correct.
+#[test]
+fn token_v23_names_locals_from_structure() {
+    let src = emit_rust(&common::build_high(common::TOKEN_V23)).expect("emits");
+
+    // Storage reads named after their resolved key variant.
+    assert!(
+        src.contains("let admin = e.storage().instance().get(&DataKey::Admin)"),
+        "storage read named `admin`:\n{src}"
+    );
+    assert!(
+        src.contains("let balance = e.storage().persistent().get(&DataKey::Balance"),
+        "storage read named `balance`:\n{src}"
+    );
+    // A ledger-context read named after the quantity it returns.
+    assert!(src.contains("let sequence = e.ledger().sequence()"), "ledger read named:\n{src}");
+    // The name is consistent at the use site, not just the binding.
+    assert!(src.contains("return admin;"), "named local reused at its use:\n{src}");
+}
+
 /// Values whose uses cross a structured scope boundary are hoisted:
 /// declared (typed, no initializer, no `mut`) at the body top and assigned
 /// at their def site, so they stay in scope at the later use. This clears
