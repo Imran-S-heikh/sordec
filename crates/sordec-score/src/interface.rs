@@ -20,6 +20,16 @@
 //! wrong signature hurts both. Parameter names are intentionally excluded
 //! from the signature value: types are the reliable interface identity, and
 //! a `e`-vs-`env` receiver name should not cost score.
+//!
+//! ## Deferred to Phase 4
+//!
+//! This category compares two Rust sources symmetrically. When a `.wasm` is
+//! also available, the binary's declared `contractspecv0` is the *ground
+//! truth* interface, and the reconstruction could be scored against it
+//! directly (via the frontend's `soroban_spec` parse → `FunctionSignature` /
+//! `TypeRegistry` path). That `--spec <wasm>` anchor is left as a seam so the
+//! Phase-3 scorer stays a pure, pipeline-decoupled source-to-source tool; it
+//! wires in with the Phase-4 Rust emitter, whose output it will grade.
 
 use std::collections::BTreeMap;
 

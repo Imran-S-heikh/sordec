@@ -20,6 +20,17 @@
 //! contract that pulls extra crates (e.g. `soroban-token-sdk`) reports
 //! *unavailable*, not *failed* — the harness cannot vouch for a compile it
 //! could not attempt.
+//!
+//! ## Deferred to Phase 4
+//!
+//! - **Differential execution.** Recompilation proves the reconstruction is
+//!   well-formed Soroban code, not that it *behaves* like the original.
+//!   Executing both against the same inputs and comparing results is the
+//!   true behavioral check — a Phase-4 extension once the Rust emitter exists.
+//! - **Baseline-to-beat.** The prior-generation decompiler's Rust output is
+//!   the intended baseline; regenerating it needs that older codebase's
+//!   toolchain restored (a transitive dependency no longer compiles under the
+//!   current Rust release). Recorded in `docs/scoring_metric.md` §7.
 
 use std::path::Path;
 use std::process::Command;
