@@ -28,7 +28,7 @@
 //! Unlike [`enum_key`], the discriminant here is *witnessed* (it is the
 //! literal's own bits, not a declaration-order inference), so a match is
 //! `HostFunctionAbi`-grade. Idempotent: the rewritten binding is a
-//! `Semantic(Known(_))`, which [`is_recognized`] skips on a second run.
+//! `Semantic(Known(_))`, which `is_recognized` skips on a second run.
 //!
 //! [`enum_key`]: super::enum_key
 //! [`TypeRegistry::variant_by_value`]: sordec_ir::TypeRegistry::variant_by_value
