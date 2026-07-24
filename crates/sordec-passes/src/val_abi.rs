@@ -224,6 +224,35 @@ pub fn small_tag_payload_type(tag: u8) -> Option<KnownType> {
     })
 }
 
+/// `ScErrorType::Contract` — the error type carried by a user
+/// `#[contracterror]` value (the first `ScErrorType` variant in
+/// `stellar-xdr`). Only `Contract`-type errors map to a user error enum;
+/// other types (`WasmVm`, `Storage`, `Auth`, …) are host errors.
+pub const SC_ERROR_TYPE_CONTRACT: u32 = 0;
+
+/// Decode a constant `Error` `Val`'s raw bits to its **contract** error
+/// code, or `None` when the value is not a small `Error` of
+/// `ScErrorType::Contract`.
+///
+/// An `Error` `Val` packs `tag = bits[0..8] == `[`TAG_ERROR`], the error
+/// *type* in the minor field (`bits[8..32]`), and the error *code* in the
+/// major field (`bits[32..64]`). A `#[contracterror]` value is exactly a
+/// `Contract`-type error (minor [`SC_ERROR_TYPE_CONTRACT`]); this returns
+/// its `u32` code. Host error types return `None` — they are not user
+/// variants and must never be mapped to one.
+#[must_use]
+pub fn decode_contract_error(bits: u64) -> Option<u32> {
+    if (bits & TAG_MASK) as u8 != TAG_ERROR {
+        return None;
+    }
+    let minor = ((bits >> TAG_BITS) & ((1u64 << MINOR_BITS) - 1)) as u32;
+    if minor != SC_ERROR_TYPE_CONTRACT {
+        return None;
+    }
+    // The code occupies the top `MAJOR_BITS` (32); `as u32` keeps exactly it.
+    Some((bits >> (TAG_BITS + MINOR_BITS)) as u32)
+}
+
 // ---------------------------------------------------------------------
 // i-module conversion functions
 // ---------------------------------------------------------------------

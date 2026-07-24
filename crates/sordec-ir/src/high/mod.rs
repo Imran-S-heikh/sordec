@@ -25,7 +25,7 @@ pub use expr::{BinaryOp, Expr, Literal, MemWidth, UnaryOp};
 pub use region::{LoopKind, PanicKind, PhiTransfer, Region, SwitchArm};
 pub use semantic::{
     AddressOpKind, BufOpKind, ClientInterface, CryptoOpKind, DeployOpKind, DispatchTable, EnumKey,
-    KnownOp, MapOpKind, PrngOpKind, SemanticOp, TestOpKind, ValObjectKind, VecOpKind,
+    ErrorVariant, KnownOp, MapOpKind, PrngOpKind, SemanticOp, TestOpKind, ValObjectKind, VecOpKind,
 };
 pub use storage::{KnownTier, StorageTier};
 pub use ty::{IrType, KnownType};

@@ -66,8 +66,8 @@ pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
     AbiSweepPass, AuthFlowPass, AuthPass, ClientCallPass, CollectionsPass, ConstPropPass,
-    ContextPass, CrossContractPass, DispatcherPass, EnumKeyPass, LinearMemoryPass, StoragePass,
-    TtlPass, UnrecognizedScanPass, ValEncodingPass,
+    ContextPass, CrossContractPass, DispatcherPass, EnumKeyPass, ErrorConstPass, LinearMemoryPass,
+    StoragePass, TtlPass, UnrecognizedScanPass, ValEncodingPass,
 };
 pub use refine::{
     AndMergePass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
@@ -182,6 +182,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(ConstPropPass),
             Box::new(TtlPass),
             Box::new(EnumKeyPass),
+            // Decode constant contract-error Vals to named variants — needs
+            // const-folding done (ConstPropPass) + the declared error enums,
+            // and must precede TypeInferPass so the Error type is planted.
+            Box::new(ErrorConstPass),
             Box::new(ClientCallPass),
             Box::new(AuthFlowPass),
             // Region-refinement wave 2: region rewrites that consume
