@@ -364,6 +364,31 @@ impl TypeRegistry {
             .or_else(|| self.errors.iter().find(|d| d.id == id).map(|d| d.name.as_str()))
             .or_else(|| self.events.iter().find(|d| d.id == id).map(|d| d.name.as_str()))
     }
+
+    /// Resolve a `#[contracterror]` discriminant to its `(enum, variant)`
+    /// name, searching every declared error enum for a case with that value.
+    ///
+    /// Returns `Some` only on a **unique** match: if two error enums both
+    /// declare a case with `code`, the mapping is ambiguous and the caller
+    /// must not guess — resolution is `None`. (Discriminants are unique
+    /// within one enum by construction, so this only guards cross-enum
+    /// collisions.) This is the never-guess gate the `error_const` recognizer
+    /// relies on when decoding a constant Error `Val`.
+    #[must_use]
+    pub fn variant_by_value(&self, code: u32) -> Option<(&str, &str)> {
+        let mut hit: Option<(&str, &str)> = None;
+        for enum_def in &self.errors {
+            for case in &enum_def.cases {
+                if case.value == code {
+                    if hit.is_some() {
+                        return None; // ambiguous across enums — never guess
+                    }
+                    hit = Some((enum_def.name.as_str(), case.name.as_str()));
+                }
+            }
+        }
+        hit
+    }
 }
 
 /// Soroban struct definition.
@@ -479,4 +504,46 @@ pub enum EventParamLocation {
     Topic,
     /// Parameter goes into the data payload.
     Data,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn error_enum(id: u32, name: &str, cases: &[(&str, u32)]) -> EnumDef {
+        EnumDef {
+            id: TypeId::new(id),
+            name: name.to_string(),
+            cases: cases
+                .iter()
+                .map(|(n, v)| EnumCase { name: (*n).to_string(), value: *v })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn variant_by_value_resolves_a_declared_code() {
+        let mut reg = TypeRegistry::default();
+        reg.errors.push(error_enum(1, "Error", &[("EmptyMessage", 1), ("DigestMismatch", 2)]));
+        assert_eq!(reg.variant_by_value(1), Some(("Error", "EmptyMessage")));
+        assert_eq!(reg.variant_by_value(2), Some(("Error", "DigestMismatch")));
+    }
+
+    #[test]
+    fn variant_by_value_is_none_for_an_absent_code() {
+        let mut reg = TypeRegistry::default();
+        reg.errors.push(error_enum(1, "Error", &[("EmptyMessage", 1)]));
+        assert_eq!(reg.variant_by_value(99), None);
+        // No error enums at all → nothing resolves (stripped build).
+        assert_eq!(TypeRegistry::default().variant_by_value(1), None);
+    }
+
+    #[test]
+    fn variant_by_value_never_guesses_across_a_collision() {
+        // Two error enums both declare code 1 → ambiguous → None (never guess).
+        let mut reg = TypeRegistry::default();
+        reg.errors.push(error_enum(1, "ErrorA", &[("Foo", 1)]));
+        reg.errors.push(error_enum(2, "ErrorB", &[("Bar", 1)]));
+        assert_eq!(reg.variant_by_value(1), None);
+    }
 }
