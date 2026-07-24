@@ -107,13 +107,15 @@ impl FoldCtx<'_> {
     /// rendering its own line? The exact predicate the line-skip and
     /// operand rendering share.
     ///
-    /// Renderer policy on top of the [`InlinePlan`] capability: only
-    /// bindings still carrying their **single initial provenance
-    /// entry** (the mechanical lowering's) fold. A binding any
-    /// recognizer touched keeps its own line — its provenance note is
-    /// the visible recognition surface (`;; SdkPattern: …`), and
-    /// folding would erase it. The Phase-4 emitter applies its own
-    /// policy (J3) over the same plan.
+    /// Renderer policy on top of the [`InlinePlan`] capability: a binding
+    /// folds only while its provenance carries no **recognition surface** —
+    /// the initial mechanical-lowering entry, plus any number of
+    /// [`ProvenanceSource::TypePropagation`] annotations (a recovered type
+    /// alone is not a note the reader must see, and it is still counted by
+    /// the typedness metric). A binding a recognizer/refinement touched
+    /// keeps its own line — its note is the visible recognition surface
+    /// (`;; SdkPattern: …`) and folding would erase it. The Phase-4 emitter
+    /// applies its own policy (J3) over the same plan.
     fn folds(&self, value: ValueId) -> bool {
         // Both inline sites fold: an `ExprOperand` nests into its
         // consuming expression, a `RegionUse` into the `if`/`match`/
@@ -125,7 +127,12 @@ impl FoldCtx<'_> {
         }) && self
             .func
             .and_then(|f| f.bindings.get(value))
-            .is_some_and(|b| b.provenance().len() == 1)
+            .is_some_and(|b| {
+                b.provenance()
+                    .iter()
+                    .skip(1)
+                    .all(|p| p.source == ProvenanceSource::TypePropagation)
+            })
     }
 
     /// Operand text: `vN`, or the folded expression when `value`'s

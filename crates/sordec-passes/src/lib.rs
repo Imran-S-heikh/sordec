@@ -45,6 +45,7 @@ pub mod structuring;
 #[cfg(test)]
 mod test_util;
 pub mod treeify;
+pub mod type_infer;
 pub mod val_abi;
 
 pub use dataflow::{
@@ -75,6 +76,7 @@ pub use refine::{
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringCensusPass, StructuringStatsPass};
 pub use treeify::TreeifyStatsPass;
+pub use type_infer::TypeInferPass;
 
 use sordec_ir::{HighIr, LiftedIr};
 
@@ -188,6 +190,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(DispatchLinkPass),
             Box::new(PanicRecoverPass),
             Box::new(UnrecognizedScanPass),
+            // General type propagation — runs once the recognizers have
+            // planted their host-call/val result types, flowing them
+            // through params, arithmetic, phis, and returns.
+            Box::new(TypeInferPass),
             Box::new(TreeifyStatsPass),
             Box::new(StructuringCensusPass),
         ],
