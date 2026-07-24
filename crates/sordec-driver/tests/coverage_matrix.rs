@@ -307,6 +307,37 @@ fn coverage_matrix_prints_and_holds_invariants() {
     assert_eq!(corpus(mc::STRUCTURING_LOOPS_UNCLASSIFIED), 6, "corpus unclassified loops");
     assert_eq!(corpus(mc::STRUCTURING_SWITCHES), 7, "corpus recovered switches");
 
+    // --- Type recovery: the Tranche 2 "typed program" evidence ---
+    // After the type-infer pass a majority of every fixture's bindings
+    // carry a type (baseline was ~7% corpus-wide), and the `known`
+    // (proven) count is far beyond the handful of ABI parameters — i.e.
+    // the IR is typed *beyond* the public signatures. Floors are
+    // conservative against the 2026-07 measurement (dex 54% low,
+    // attestation 78% high; even the stripped fixture, with no
+    // contractspec, reaches 65% by propagation).
+    let all_fixtures = [
+        "hello-add",
+        "token-v23",
+        "token-v22",
+        "token-v23-stripped",
+        "timelock",
+        "dex-liquidity-pool",
+        "attestation",
+    ];
+    for fx in all_fixtures {
+        let known = count(fx, mc::TYPES_KNOWN);
+        let inferred = count(fx, mc::TYPES_INFERRED);
+        let total = known + inferred + count(fx, mc::TYPES_UNKNOWN);
+        assert!(total > 0, "{fx} has bindings");
+        let typed_pct = 100 * (known + inferred) / total;
+        assert!(typed_pct >= 50, "{fx} typedness {typed_pct}% below the 50% floor");
+        assert!(known >= 15, "{fx} proven types {known} below floor (beyond-ABI evidence)");
+    }
+    let ty_corpus = |key| all_fixtures.iter().map(|f| count(f, key)).sum::<i64>();
+    let (k, i) = (ty_corpus(mc::TYPES_KNOWN), ty_corpus(mc::TYPES_INFERRED));
+    let ty_total = k + i + ty_corpus(mc::TYPES_UNKNOWN);
+    assert!(100 * (k + i) / ty_total >= 55, "corpus typedness below the 55% floor");
+
     // D5 evidence: the token contracts and dex fold at least one switch
     // arm into the wildcard default (timelock's dispatch switch does not).
     for fx in ["token-v22", "token-v23", "token-v23-stripped", "dex-liquidity-pool"] {

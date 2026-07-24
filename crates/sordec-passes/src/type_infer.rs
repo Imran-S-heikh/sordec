@@ -27,21 +27,15 @@ use std::collections::HashMap;
 
 use sordec_common::{Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
-    BinaryOp, CompositeType, Expr, FunctionSignature, HighFunction, HighIr, IrType, KnownType,
-    Literal, PrimitiveType, TypeRef, UnaryOp,
+    BinaryOp, CompositeType, Expr, FunctionSignature, HighFunction, HighIr, IrType, KnownOp,
+    KnownType, Literal, PrimitiveType, SemanticOp, TypeRef, UnaryOp, ValObjectKind,
 };
 
+use crate::metrics_catalog as mc;
 use crate::pass::{Pass, PassResult};
 
 /// Unique pipeline name of this pass.
 pub const PASS_NAME: &str = "type-infer";
-
-/// Bindings with a proven [`IrType::Known`] type.
-const M_TYPES_KNOWN: &str = "types_known";
-/// Bindings with a derived [`IrType::Inferred`] type.
-const M_TYPES_INFERRED: &str = "types_inferred";
-/// Bindings still [`IrType::Unknown`] after propagation.
-const M_TYPES_UNKNOWN: &str = "types_unknown";
 
 /// Safety bound on propagation rounds. The lattice is monotonic so this is
 /// never the reason a run stops in practice; it caps a pathological input.
@@ -66,9 +60,9 @@ impl Pass<HighIr> for TypeInferPass {
         for func in &ir.functions {
             for (_, binding) in func.bindings.iter() {
                 match binding.ty {
-                    IrType::Known(_) => result.metrics.increment(M_TYPES_KNOWN, 1),
-                    IrType::Inferred(_) => result.metrics.increment(M_TYPES_INFERRED, 1),
-                    IrType::Unknown(_) => result.metrics.increment(M_TYPES_UNKNOWN, 1),
+                    IrType::Known(_) => result.metrics.increment(mc::TYPES_KNOWN, 1),
+                    IrType::Inferred(_) => result.metrics.increment(mc::TYPES_INFERRED, 1),
+                    IrType::Unknown(_) => result.metrics.increment(mc::TYPES_UNKNOWN, 1),
                 }
             }
         }
@@ -178,6 +172,14 @@ fn backward(func: &HighFunction, types: &mut HashMap<ValueId, IrType>) -> bool {
                     changed |= improve(types, *rhs, IrType::Inferred(base));
                 }
             }
+            // Host-call arguments and conversions: back-type the operands
+            // the recovered op's ABI pins (Mo's "host-call arguments" +
+            // "conversions" categories).
+            Expr::Semantic(SemanticOp::Known(op)) => {
+                for (arg, ty) in semantic_arg_types(op) {
+                    changed |= improve(types, arg, IrType::Inferred(ty));
+                }
+            }
             _ => {}
         }
     }
@@ -239,6 +241,45 @@ fn binary_result(op: BinaryOp, lhs: Option<&IrType>, rhs: Option<&IrType>) -> Op
     // Arithmetic / bitwise: the result is the shared integer type of the
     // operands (whichever side is known).
     base_of(lhs).or_else(|| base_of(rhs)).map(IrType::Inferred)
+}
+
+/// ABI-pinned types of a recovered op's operands: the "host-call
+/// arguments" and "conversions" Mo named. Only the unambiguous ones — an
+/// address that must be an `Address`, a callee symbol, a scalar being
+/// wrapped into a Val object. Ops whose operand types the ABI does not fix
+/// return nothing (left to flow propagation, honestly).
+fn semantic_arg_types(op: &KnownOp) -> Vec<(ValueId, KnownType)> {
+    use KnownOp as K;
+    match op {
+        // Val encode: the packed value IS the tag's payload type.
+        K::ValEncodeSmall { ty, value } => vec![(*value, ty.clone())],
+        // Auth: the receiver is an Address.
+        K::RequireAuth { address } => vec![(*address, KnownType::Address)],
+        K::RequireAuthForArgs { address, .. } => vec![(*address, KnownType::Address)],
+        // Cross-contract: callee address + function symbol.
+        K::InvokeContract { contract, function, .. }
+        | K::TryInvokeContract { contract, function, .. } => {
+            vec![(*contract, KnownType::Address), (*function, KnownType::Symbol)]
+        }
+        // Object conversions: the scalar side of a 1-arg `obj_from_*`.
+        K::ValObject { kind, args } => obj_from_scalar_type(*kind)
+            .and_then(|ty| args.first().map(|a| (*a, ty)))
+            .into_iter()
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// The scalar operand type of a single-argument `obj_from_*` conversion, or
+/// `None` for the multi-piece / `obj_to_*` forms (whose operand is itself a
+/// Val handle, not an informative scalar).
+fn obj_from_scalar_type(kind: ValObjectKind) -> Option<KnownType> {
+    use ValObjectKind as K;
+    Some(match kind {
+        K::ObjFromU64 | K::TimepointObjFromU64 | K::DurationObjFromU64 => KnownType::U64,
+        K::ObjFromI64 => KnownType::I64,
+        _ => return None,
+    })
 }
 
 fn is_arithmetic(op: BinaryOp) -> bool {
@@ -500,6 +541,39 @@ mod tests {
             phi_join(&[(BlockId::from_index(0), a), (BlockId::from_index(1), ValueId::from_index(9))], &types),
             None
         );
+    }
+
+    #[test]
+    fn semantic_ops_pin_their_argument_types() {
+        let (addr, sym, val) = (ValueId::from_index(1), ValueId::from_index(2), ValueId::from_index(3));
+        // require_auth's receiver is an Address.
+        assert_eq!(
+            semantic_arg_types(&KnownOp::RequireAuth { address: addr }),
+            vec![(addr, KnownType::Address)]
+        );
+        // A cross-contract call pins the callee address + function symbol.
+        let invoke = KnownOp::InvokeContract {
+            contract: addr,
+            function: sym,
+            resolved_callee: None,
+            arg_count: None,
+            resolved_args: None,
+            interface: None,
+            args: vec![],
+        };
+        assert_eq!(
+            semantic_arg_types(&invoke),
+            vec![(addr, KnownType::Address), (sym, KnownType::Symbol)]
+        );
+        // A val-encode pins the packed value to its tag payload type.
+        assert_eq!(
+            semantic_arg_types(&KnownOp::ValEncodeSmall { ty: KnownType::U64, value: val }),
+            vec![(val, KnownType::U64)]
+        );
+        // obj_from_u64's scalar arg is u64; obj_to_u64's arg is a Val handle
+        // (no informative scalar).
+        assert_eq!(obj_from_scalar_type(ValObjectKind::ObjFromU64), Some(KnownType::U64));
+        assert_eq!(obj_from_scalar_type(ValObjectKind::ObjToU64), None);
     }
 
     // ---- contractspec mapping ----

@@ -299,6 +299,14 @@ pub const REFINE_AND_MERGE_BLOCKED: &str = "refine_and_merge_blocked";
 /// headline "host interactions" miss channel (spec E2).
 pub const UNRECOGNISED_HOST_CALL: &str = "unrecognised_host_call";
 
+// ---- Type recovery (the `type-infer` pass) ----
+/// Bindings with a proven [`sordec_ir::IrType::Known`] type.
+pub const TYPES_KNOWN: &str = "types_known";
+/// Bindings with a propagation-derived [`sordec_ir::IrType::Inferred`] type.
+pub const TYPES_INFERRED: &str = "types_inferred";
+/// Bindings still [`sordec_ir::IrType::Unknown`] after propagation.
+pub const TYPES_UNKNOWN: &str = "types_unknown";
+
 /// The five resolved/miss counter pairs that define the headline
 /// **deep-facts** ratio: `(resolved, unresolved)`. Membership is the
 /// W7-locked set — storage-tier, enum-key, TTL, client (arity vs
@@ -382,6 +390,10 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         TREEIFY_DEAD_RESIDUE,
         // Structuring section — fallback + census (C2/A6).
         STRUCTURING_FALLBACK,
+        // Type recovery (the `type-infer` pass).
+        TYPES_KNOWN,
+        TYPES_INFERRED,
+        TYPES_UNKNOWN,
         STRUCTURING_FUNCTIONS_TOTAL,
         STRUCTURING_FUNCTIONS_STRUCTURED,
         STRUCTURING_LOOPS_WHILE_TOP,
