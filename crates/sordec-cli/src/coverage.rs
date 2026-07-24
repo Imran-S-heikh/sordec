@@ -88,6 +88,9 @@ pub struct CoverageReport {
     /// ratio, loop-kind breakdown, recovered switches, labeled-exit tax,
     /// and the region-refinement / declutter / treeify counters.
     pub structuring: StructuringCoverage,
+    /// Binding-level type recovery: how much of the IR is actually typed
+    /// (beyond the public ABI signatures) after type propagation.
+    pub types: TypeCoverage,
     /// Per-pattern recognition counts and ratios (F1–F8 + beyond-kickoff).
     pub recognition: RecognitionCoverage,
     /// The two-number semantic-recovery headline (W7).
@@ -188,6 +191,27 @@ pub struct OperatorBreakdown {
     pub call_indirect: usize,
     /// Every other operator (arithmetic, memory, control flow, etc.).
     pub other: usize,
+}
+
+/// Binding-level type recovery.
+///
+/// The evidence that the recovered HighIR is *typed* beyond the public ABI
+/// signatures: a census of every binding's certainty after the `type-infer`
+/// pass. `known` = proven (ABI / literal / host identity), `inferred` =
+/// derived by propagation, `unknown` = honestly undetermined.
+#[derive(Debug, Clone, Serialize)]
+pub struct TypeCoverage {
+    /// Bindings with a proven [`sordec_ir::IrType::Known`] type.
+    pub known: i64,
+    /// Bindings with a propagation-derived [`sordec_ir::IrType::Inferred`] type.
+    pub inferred: i64,
+    /// Bindings still [`sordec_ir::IrType::Unknown`].
+    pub unknown: i64,
+    /// Total bindings (`known + inferred + unknown`).
+    pub total: i64,
+    /// Fraction carrying a type (`(known + inferred) / total`), or `None`
+    /// when there are no bindings.
+    pub typed_ratio: Option<f64>,
 }
 
 /// Control-flow structuring coverage (A6/W8).
@@ -754,6 +778,7 @@ pub fn compute_coverage(
             other: other_ops,
         },
         structuring: build_structuring(metric_totals),
+        types: build_types(metric_totals),
         recognition: build_recognition(metric_totals),
         headline: build_headline(metric_totals, call_to_import),
         diagnostics: build_diagnostic_coverage(recognizer_diagnostics),
@@ -989,6 +1014,23 @@ fn build_structuring(t: &BTreeMap<&'static str, i64>) -> StructuringCoverage {
     }
 }
 
+/// Build the type-recovery section from the pipeline's per-pass counters
+/// (emitted by the terminal `type-infer` pass). A census, not an event
+/// sum, so the ratios are exact regardless of fixpoint iteration counts.
+fn build_types(t: &BTreeMap<&'static str, i64>) -> TypeCoverage {
+    let known = metric(t, mc::TYPES_KNOWN);
+    let inferred = metric(t, mc::TYPES_INFERRED);
+    let unknown = metric(t, mc::TYPES_UNKNOWN);
+    let total = known + inferred + unknown;
+    TypeCoverage {
+        known,
+        inferred,
+        unknown,
+        total,
+        typed_ratio: ratio(known + inferred, total),
+    }
+}
+
 /// Turn the pipeline's per-code diagnostic counts into the report
 /// section: total plus a list sorted by descending count, then code.
 fn build_diagnostic_coverage(counts: &BTreeMap<&'static str, usize>) -> DiagnosticCoverage {
@@ -1149,6 +1191,7 @@ pub fn render_text(out: &mut impl Write, r: &CoverageReport) -> io::Result<()> {
     )?;
 
     render_structuring(out, &r.structuring)?;
+    render_types(out, &r.types)?;
     render_recognition(out, &r.recognition)?;
     render_headline(out, &r.headline)?;
 
@@ -1187,6 +1230,23 @@ fn fmt_pct(ratio: Option<f64>) -> String {
 /// refinement / declutter / treeify counters. Fixed shape: every row
 /// renders even at zero (the `loops` row degrades to `no loops`), so the
 /// report stays a stable artifact.
+/// Render the binding-level type-recovery section: the typed ratio and the
+/// Known / Inferred / Unknown census.
+fn render_types(out: &mut impl Write, ty: &TypeCoverage) -> io::Result<()> {
+    writeln!(out, "  types:")?;
+    writeln!(
+        out,
+        "    typed:          {} / {} bindings          ({})",
+        ty.known + ty.inferred,
+        ty.total,
+        fmt_pct(ty.typed_ratio),
+    )?;
+    writeln!(out, "      known:        {} (proven: ABI / literal / host identity)", ty.known)?;
+    writeln!(out, "      inferred:     {} (propagated)", ty.inferred)?;
+    writeln!(out, "    unknown:        {} (honestly undetermined)", ty.unknown)?;
+    Ok(())
+}
+
 fn render_structuring(out: &mut impl Write, s: &StructuringCoverage) -> io::Result<()> {
     writeln!(out, "  structuring:")?;
 
@@ -1666,7 +1726,10 @@ mod tests {
             "expected zero-host-call text, got:\n{s}"
         );
         assert!(!s.contains("NaN"), "must never render NaN, got:\n{s}");
-        assert!(!s.contains("inf"), "must never render inf, got:\n{s}");
+        // `inf%` is the token a divide-by-zero ratio would render; a bare
+        // "inf" substring collides with legitimate words ("inferred",
+        // "infinite"), so guard on the formatted float token precisely.
+        assert!(!s.contains("inf%"), "must never render inf, got:\n{s}");
     }
 
     #[test]
@@ -1864,7 +1927,7 @@ mod tests {
         render_text(&mut buf, &r).expect("render");
         let text = String::from_utf8(buf).expect("utf8");
         assert!(!text.contains("NaN"), "no NaN in render");
-        assert!(!text.contains("inf"), "no inf in render");
+        assert!(!text.contains("inf%"), "no inf in render");
         assert!(text.contains("no loops in this contract"));
         assert!(text.contains("no match sites"));
     }
