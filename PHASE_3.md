@@ -97,6 +97,28 @@ sign-off (see *Known limitations*).
 | Four categories | interface (ABI F1), structure (control-flow-skeleton similarity), semantic (recovered-fact precision/recall), compilation (opt-in `cargo check`) | `b175a7f`, `655eba8`, `7ea1198`, `ecb6c32` |
 | Calibration + freeze | identity / invariance / mutation battery; a versioned, golden-snapshot-frozen metric | `956c388`, `45efe9b`, `ce72834` |
 
+### D3.2 (completion) — general type recovery
+
+Tranche 2 asks for a **typed**, AST-like program. The type *system*
+landed in Phase 2 (`IrType` with explicit `Known` / `Inferred` /
+`Unknown` certainty and provenance); this completes it with the general
+**type-propagation pass** that populates it — so the IR is typed in fact,
+not only in capability, and beyond the public ABI signatures.
+
+| Piece | What landed | Anchor |
+|---|---|---|
+| `type-infer` pass | seeds from the `contractspecv0` ABI, integer/bool literals, and the host-call ABI tables (`val_abi`); propagates through `Use`, arithmetic, comparisons, phis, conversions, and returned values to a monotonic fixpoint | `cf4b96a` |
+| Host-call args + conversions | `require_auth` → `Address`, cross-contract → callee `Address` + `Symbol`, `val`/`obj` conversions → their scalar operand type | `533ce01` |
+| Certainty discipline | `Known` only from a proven source; propagation yields `Inferred`; genuine ambiguity stays `Unknown` — no guessing, every update `TypePropagation`-provenance-tracked | `cf4b96a` |
+| Typedness metric | `sordec coverage` gains a `types:` section (text + JSON): the `Known` / `Inferred` / `Unknown` census + typed ratio per contract; per-fixture floors locked in the coverage matrix | `533ce01` |
+
+**Binding typedness rose from ~7% to 54–78% per fixture** (token-v23 67%,
+timelock 70%, attestation 78%; ~62% corpus-wide). The proven-`Known` count
+runs into the hundreds per contract — far past the dozen-odd ABI
+parameters — which is the "typed beyond the public signatures" bar.
+Reproduce: `sordec coverage samples/contracts/token-v23/token-v23.wasm`
+(the `types:` section).
+
 ---
 
 ## Verification recipe (≤ 5 min on a laptop)
@@ -138,6 +160,7 @@ the dev profile and cannot see it).
 
 | Deliverable | Status | Evidence |
 |---|---|---|
+| Typed IR (D3.2) | ✅ | general type propagation; binding typedness ~7% → 54–78% per fixture (beyond ABI signatures); `sordec coverage` `types:` census, floors locked |
 | Explicit control flow (D3.3) | ✅ | `dump-hir` renders `if`/`while`/`match`/`return`; `Unstructured = 0` locked on all 7 fixtures; skeleton parity vs the original binary |
 | Annotated WAT (D3.4) | ✅ | `decompile` writes annotated WAT; the five-check acceptance suite passes 7/7 |
 | `decompile` CLI, WAT half (D3.6) | ✅ | one-command pipeline → `<name>.wat` on every fixture |
