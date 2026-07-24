@@ -121,6 +121,16 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             Some(parse_quote!(soroban_sdk::panic_with_error!(#e, #err)))
         }
 
+        // ---- Recovered contract-error constant ----
+        // A resolved `#[contracterror]` variant renders as its path; an
+        // unresolved code falls through to an honest hole (the pass only
+        // ever produces resolved variants today).
+        KnownOp::MakeError { resolved: Some(ev), .. } => {
+            let enum_name = ident(&ev.enum_name);
+            let variant = ident(&ev.variant);
+            Some(parse_quote!(#enum_name::#variant))
+        }
+
         // Everything else stays an honest hole (later waves).
         _ => None,
     }

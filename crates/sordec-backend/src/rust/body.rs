@@ -25,12 +25,13 @@ use std::collections::{HashMap, HashSet};
 use syn::parse_quote;
 
 use sordec_common::{BlockId, IrId, ValueId};
-use sordec_ir::{Expr, HighFunction, HighIr, Region, TypeRegistry};
+use sordec_ir::{Expr, HighFunction, HighIr, IrType, KnownType, Region, TypeRegistry};
 
 use crate::rust::expr;
 use crate::rust::hole::HolePolicy;
 use crate::rust::liveness::{self, Liveness};
 use crate::rust::naming::ValueNames;
+use crate::rust::sig;
 use crate::rust::ty::ir_type;
 
 /// Codegen context for one function body: the IR it walks plus the
@@ -302,13 +303,42 @@ impl<'a> FnCtx<'a> {
         match values {
             [] => parse_quote!(return;),
             [one] => {
-                let v = self.value_ref(*one);
+                let v = self.return_expr(*one);
                 parse_quote!(return #v;)
             }
             many => {
                 let vs: Vec<syn::Expr> = many.iter().map(|v| self.value_ref(*v)).collect();
                 parse_quote!(return (#(#vs),*);)
             }
+        }
+    }
+
+    /// The expression for a single returned value, wrapping it in `Ok`/`Err`
+    /// when the function returns a `Result` and the value's recovered type
+    /// says which. Four cases, all honoring never-guess:
+    ///
+    /// - an `Error` value → `Err(v)` (the recovered `#[contracterror]`);
+    /// - an already-`Result` value → returned bare (a propagated `Result`,
+    ///   which Rust returns without re-wrapping);
+    /// - an `Unknown` value (a hole) → returned bare — a diverging `todo!`
+    ///   compiles under any return type, and claiming `Ok` for a value we did
+    ///   not recover would be a guess;
+    /// - any other recovered payload → `Ok(v)`, or `Ok(())` when the `Ok`
+    ///   type is unit.
+    fn return_expr(&self, vid: ValueId) -> syn::Expr {
+        let v = self.value_ref(vid);
+        let Some(ok_ty) = sig::result_ok_type(self.func) else {
+            return v; // not a Result-returning entrypoint
+        };
+        match self.func.bindings.get(vid).map(|b| &b.ty) {
+            Some(IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error)) => {
+                parse_quote!(Err(#v))
+            }
+            Some(IrType::Known(KnownType::Result(..)) | IrType::Inferred(KnownType::Result(..)))
+            | Some(IrType::Unknown(_))
+            | None => v,
+            Some(_) if sig::is_unit(ok_ty) => parse_quote!(Ok(())),
+            Some(_) => parse_quote!(Ok(#v)),
         }
     }
 }

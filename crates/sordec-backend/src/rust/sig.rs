@@ -14,7 +14,7 @@ use quote::quote;
 use syn::parse_quote;
 
 use sordec_common::{IrId, ValueId};
-use sordec_ir::{HighFunction, TypeRef, TypeRegistry};
+use sordec_ir::{CompositeType, HighFunction, PrimitiveType, TypeRef, TypeRegistry};
 
 use crate::rust::hole::HolePolicy;
 use crate::rust::ty::{ident, ir_type, type_ref};
@@ -66,6 +66,21 @@ pub(crate) fn spec_signature(
 /// is required.
 fn env_param() -> proc_macro2::TokenStream {
     quote!(e: soroban_sdk::Env)
+}
+
+/// The `Ok` type of a `Result<Ok, Err>` entrypoint — `Some` only when the
+/// function's single `contractspecv0` output is a `Result`. Drives the body
+/// walk's `Ok(..)`/`Err(..)` return wrapping ([`super::body`]).
+pub(crate) fn result_ok_type(func: &HighFunction) -> Option<&TypeRef> {
+    match func.signature.as_ref()?.outputs.as_slice() {
+        [TypeRef::Composite(CompositeType::Result(ok, _))] => Some(ok.as_ref()),
+        _ => None,
+    }
+}
+
+/// Whether a `contractspecv0` type is the unit type `()`.
+pub(crate) fn is_unit(ty: &TypeRef) -> bool {
+    matches!(ty, TypeRef::Primitive(PrimitiveType::Void))
 }
 
 /// A synthesized `fn func{id}(arg0: T, …) -> R` for a non-spec function.
