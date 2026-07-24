@@ -147,6 +147,10 @@ pub(crate) fn label_known_op(op: &KnownOp) -> String {
         KnownOp::GetMaxLiveUntilLedger => "max_live_until_ledger".to_string(),
         KnownOp::ValCompare { a, b } => format!("val_compare({a}, {b})"),
         KnownOp::PanicWithError { error } => format!("panic_with_error({error})"),
+        KnownOp::MakeError { code, resolved } => match resolved {
+            Some(v) => format!("make_error {}::{}", v.enum_name, v.variant),
+            None => format!("make_error(code={code})"),
+        },
         KnownOp::CryptoOp { kind, .. } => format!("crypto::{kind:?}"),
         KnownOp::PrngOp { kind, .. } => format!("prng::{kind:?}"),
         KnownOp::TestOp { kind, .. } => format!("test::{kind:?}"),

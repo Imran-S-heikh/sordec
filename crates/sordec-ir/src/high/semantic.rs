@@ -52,6 +52,25 @@ pub struct EnumKey {
     pub payload: Vec<ValueId>,
 }
 
+/// A recovered `#[contracterror]` enum variant — the resolved identity of an
+/// `Error`-tagged `Val` constant.
+///
+/// Filled by the `error_const` recognizer when a constant `Error` `Val`
+/// decodes to a `Contract`-type error whose code matches exactly one declared
+/// `contractspecv0` error variant (`TypeRegistry::variant_by_value`). Carried
+/// on [`KnownOp::MakeError`] so the emitter can render `Enum::Variant`; shaped
+/// so a future `Err`-return or `PanicWithError` resolution can reuse it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ErrorVariant {
+    /// Error enum type name from `contractspecv0` (e.g. `"Error"`).
+    // JUSTIFY: Type names are arbitrary user-defined identifiers.
+    pub enum_name: String,
+    /// Variant name (e.g. `"EmptyMessage"`).
+    // JUSTIFY: Variant names are arbitrary user-defined identifiers.
+    pub variant: String,
+}
+
 /// A decoded symbol-dispatch table — the ground truth behind the SDK's
 /// `#[contracttype]` enum-from-`Val` decoder.
 ///
@@ -491,6 +510,23 @@ pub enum KnownOp {
     PanicWithError {
         /// The `Error` value the contract fails with.
         error: ValueId,
+    },
+
+    /// A constant Soroban `Error` `Val` — a `#[contracterror]` value the
+    /// contract constructs (e.g. as an `Err(..)` return), recovered from the
+    /// folded constant `(code << 32) | TAG_ERROR`.
+    ///
+    /// `code` is the *witnessed* contract-error discriminant. `resolved` is
+    /// the declared enum variant it maps to, filled by the `error_const`
+    /// recognizer only when the code resolves uniquely against
+    /// `contractspecv0` (`None` is honest — a `Contract` error whose code the
+    /// spec does not declare, rendered `Error::from_contract_error(code)`).
+    /// Produces one value and reads none.
+    MakeError {
+        /// The contract-error discriminant.
+        code: u32,
+        /// The resolved `#[contracterror]` variant, when it uniquely matches.
+        resolved: Option<ErrorVariant>,
     },
 
     // ---- Crypto / PRNG / test / deploy (recognized by AbiSweepPass) ----
@@ -968,6 +1004,8 @@ impl KnownOp {
                 f(*table_pos);
                 f(*len);
             }
+            // A recovered Error constant reads no values (its code is data).
+            KnownOp::MakeError { code: _, resolved: _ } => {}
             // Nullary context accessors: no operands.
             KnownOp::GetCurrentContractAddress
             | KnownOp::GetLedgerSequence

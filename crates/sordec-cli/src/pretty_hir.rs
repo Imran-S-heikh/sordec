@@ -1009,6 +1009,10 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io:
         KnownOp::PanicWithError { error } => {
             write!(out, "panic_with_error({})", ctx.operand(*error))
         }
+        KnownOp::MakeError { code, resolved } => match resolved {
+            Some(v) => write!(out, "make_error({}::{})", v.enum_name, v.variant),
+            None => write!(out, "make_error(code={code})"),
+        },
         // ---- Linear-memory constructors ----
         // Resolved literals render as the recovered value; unresolved ones
         // show the raw (pos, len) operands the const-prop engine will later

@@ -731,6 +731,9 @@ pub fn known_op_effects(op: &KnownOp) -> Effects {
         KnownOp::ValEncodeSmall { .. }
         | KnownOp::ValDecodeSmall { .. }
         | KnownOp::ValTagCheck { .. } => Effects::PURE,
+        // A recovered constant Error `Val` — pure, like the folded literal it
+        // replaces; the host `fail_with_error` is the separate PanicWithError.
+        KnownOp::MakeError { .. } => Effects::PURE,
         // Linear-memory constructors (b.j/i/3, v.g, m.9) read guest
         // memory; SymbolDispatch is the recognized (b.m) lookup.
         KnownOp::SymbolNew { .. }
