@@ -181,6 +181,84 @@ fn every_fixture_emits_real_bodies() {
     }
 }
 
+/// S2b (D4.4): a `Result<T, Error>` entrypoint reconstructs its Ok/Err
+/// returns. attestation's `digest_keccak` recovers the error constant as
+/// `Error::EmptyMessage` and wraps the guard return as `Err(..)`; an
+/// unrecovered value is never given a fake `Ok`.
+#[test]
+fn attestation_reconstructs_result_returns() {
+    let src = emit_rust(&common::build_high(common::ATTESTATION)).expect("emits");
+
+    // The #[contracterror] enum + the Result return type still reconstruct;
+    // the Result error side is the user enum (the ABI-erased generic `Error`
+    // resolves to the sole declared error enum), so `Err(Error::Variant)`
+    // type-checks and no `soroban_sdk::Error` import collides with the enum.
+    assert!(src.contains("#[contracterror]"), "contracterror enum:\n{src}");
+    assert!(src.contains("-> Result<BytesN<32>, Error>"), "Result return type:\n{src}");
+    let use_line = src.lines().find(|l| l.contains("use soroban_sdk::{")).unwrap_or("");
+    assert!(!use_line.contains("Error"), "user `Error` enum must not collide with an import:\n{use_line}");
+    // The Err constant is decoded to its variant and wrapped in Err(..).
+    assert!(src.contains("= Error::EmptyMessage;"), "error constant named:\n{src}");
+    assert!(
+        src.lines().any(|l| l.trim() == "return Err(v6);" || l.trim().starts_with("return Err(")),
+        "guard return wrapped in Err:\n{src}"
+    );
+    // Honesty: a Result body must not manufacture `.unwrap()`/`.expect()`
+    // (phantom panic facts the original never had).
+    assert!(!src.contains(".unwrap()"), "no phantom unwrap in Result body:\n{src}");
+    assert!(!src.contains(".expect("), "no phantom expect in Result body:\n{src}");
+}
+
+/// Measurement (not a gate): emit attestation as a crate and `cargo check`
+/// it. This is W5's honest deliverable — with S2b the `Result` entrypoints
+/// type-check their returns; unrecovered host ops remain diverging `todo!`
+/// holes, so the crate is expected to **compile**. Slow + toolchain-dependent:
+///   cargo test -p sordec-backend -- --ignored --nocapture attestation_cargo_check
+#[test]
+#[ignore = "shells out to cargo check against soroban-sdk (slow, toolchain-dependent)"]
+#[allow(clippy::print_stdout)]
+fn attestation_cargo_check() {
+    let high = common::build_high(common::ATTESTATION);
+    let rust = emit_rust(&high).expect("emits");
+    let cargo_toml = emit_cargo_toml(&high);
+
+    let dir = std::env::temp_dir().join(format!("sordec-w5-check-{}", std::process::id()));
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).expect("scratch dir");
+    std::fs::write(dir.join("Cargo.toml"), format!("{cargo_toml}\n[workspace]\n")).unwrap();
+    std::fs::write(src.join("lib.rs"), &rust).unwrap();
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let output = std::process::Command::new(cargo)
+        .args(["check", "--offline", "--quiet", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => println!("attestation cargo check: PASS"),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let errors = stderr
+                .lines()
+                .filter(|l| l.trim_start().starts_with("error"))
+                .count();
+            println!("attestation cargo check: PARTIAL — {errors} error line(s). First diagnostics:");
+            for line in stderr
+                .lines()
+                .filter(|l| {
+                    let t = l.trim_start();
+                    t.starts_with("error") || t.starts_with("-->")
+                })
+                .take(12)
+            {
+                println!("  {}", line.trim());
+            }
+        }
+        Err(e) => println!("attestation cargo check: UNAVAILABLE ({e})"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Measurement (not a gate): emit token-v23 as a crate and run
 /// `cargo check` against the cached `soroban-sdk`, reporting the outcome.
 /// This is W3's honest "compile rate measured" deliverable — expected

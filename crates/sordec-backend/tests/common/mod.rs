@@ -58,3 +58,7 @@ pub fn fixtures() -> Vec<(&'static str, &'static [u8])> {
 
 /// The SEP-41 token fixture — the canonical benchmark.
 pub const TOKEN_V23: &[u8] = fixture_bytes!("token-v23");
+
+/// The attestation fixture — the corpus's `#[contracterror]` + `Result`
+/// contract (the S2b error-return benchmark).
+pub const ATTESTATION: &[u8] = fixture_bytes!("attestation");

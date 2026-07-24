@@ -365,6 +365,23 @@ impl TypeRegistry {
             .or_else(|| self.events.iter().find(|d| d.id == id).map(|d| d.name.as_str()))
     }
 
+    /// The name of the single declared `#[contracterror]` enum, or `None`
+    /// when there are zero or several.
+    ///
+    /// The `contractspecv0` ABI erases a `Result<T, MyError>`'s error type to
+    /// the generic `Error`; when a contract declares exactly one error enum,
+    /// that erased type reconstructs to it (the faithful, compilable choice —
+    /// the emitted `Err(MyError::Variant)` values then match the return type).
+    /// Zero or several declared error enums is ambiguous, so this returns
+    /// `None` and the generic `soroban_sdk::Error` stands (never guess).
+    #[must_use]
+    pub fn sole_error_enum(&self) -> Option<&str> {
+        match self.errors.as_slice() {
+            [only] => Some(only.name.as_str()),
+            _ => None,
+        }
+    }
+
     /// Resolve a `#[contracterror]` discriminant to its `(enum, variant)`
     /// name, searching every declared error enum for a case with that value.
     ///
@@ -536,6 +553,18 @@ mod tests {
         assert_eq!(reg.variant_by_value(99), None);
         // No error enums at all → nothing resolves (stripped build).
         assert_eq!(TypeRegistry::default().variant_by_value(1), None);
+    }
+
+    #[test]
+    fn sole_error_enum_only_when_exactly_one() {
+        assert_eq!(TypeRegistry::default().sole_error_enum(), None);
+        let mut one = TypeRegistry::default();
+        one.errors.push(error_enum(1, "Error", &[("EmptyMessage", 1)]));
+        assert_eq!(one.sole_error_enum(), Some("Error"));
+        // Two error enums → ambiguous → None (never guess which is the E).
+        let mut two = one;
+        two.errors.push(error_enum(2, "OtherError", &[("Nope", 1)]));
+        assert_eq!(two.sole_error_enum(), None);
     }
 
     #[test]

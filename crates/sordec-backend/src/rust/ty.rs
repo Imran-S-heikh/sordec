@@ -54,6 +54,21 @@ pub(crate) fn named(name: &str) -> syn::Type {
     parse_quote!(#id)
 }
 
+/// The error side of a `Result` return type. The `contractspecv0` ABI erases
+/// a `#[contracterror]` enum to the generic `Error`; when the contract
+/// declares exactly one such enum, reconstruct it (see
+/// [`TypeRegistry::sole_error_enum`]) so the emitted `Err(Enum::Variant)`
+/// values type-check against the return. Otherwise the generic
+/// `soroban_sdk::Error` stands.
+fn result_error(e: &TypeRef, reg: &TypeRegistry, policy: &dyn HolePolicy) -> syn::Type {
+    if matches!(e, TypeRef::Primitive(PrimitiveType::Error))
+        && let Some(name) = reg.sole_error_enum()
+    {
+        return named(name);
+    }
+    type_ref(e, reg, policy)
+}
+
 /// Build an identifier from a recovered name, falling back to a raw
 /// identifier (`r#name`) if it collides with a Rust keyword. Names come
 /// from `contractspecv0`, i.e. originally-valid Rust source, so the
@@ -94,7 +109,7 @@ fn composite(c: &CompositeType, reg: &TypeRegistry, policy: &dyn HolePolicy) -> 
         }
         CompositeType::Result(t, e) => {
             let ok = type_ref(t, reg, policy);
-            let err = type_ref(e, reg, policy);
+            let err = result_error(e, reg, policy);
             parse_quote!(Result<#ok, #err>)
         }
         CompositeType::Vec(t) => {
