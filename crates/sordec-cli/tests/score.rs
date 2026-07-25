@@ -44,6 +44,7 @@ fn score_json_emits_the_report_schema() {
         .assert()
         .success()
         .stdout(predicate::str::contains("\"scorer_version\""))
+        .stdout(predicate::str::contains("\"weights_profile\""))
         .stdout(predicate::str::contains("\"overall\""))
         .stdout(predicate::str::contains("\"passed\": true"))
         .stdout(predicate::str::contains("\"categories\""))

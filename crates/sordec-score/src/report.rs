@@ -6,19 +6,24 @@
 //!
 //! Every report carries [`SCORER_VERSION`]. The metric is *frozen +
 //! versioned* (K6): once the Phase 4 emitter is scored against it, the
-//! algorithm and weights do not change without bumping this string. A
-//! golden-snapshot test (added with the calibration battery) pins the
-//! version to a recorded calibration vector so an accidental change trips
-//! at test time.
+//! algorithm and the *default* weights do not change without bumping this
+//! string. A non-default weights profile is recorded per-report in
+//! [`ScoreReport::weights_profile`] and takes the score outside the frozen
+//! default contract. A golden-snapshot test (added with the calibration
+//! battery) pins the version to a recorded calibration vector so an
+//! accidental change trips at test time.
 
 use serde::Serialize;
 
 use crate::config::WeightProfile;
 use crate::metrics;
 
-/// Version of the scoring algorithm + weights. Bumped on any change that
-/// can move a score (a new category, a re-weighting, a canonicalization or
-/// extractor change). Stamped into every [`ScoreReport`].
+/// Version of the scoring algorithm + the default weights. Bumped on any
+/// change that can move the *default* score (a new category, a
+/// canonicalization or extractor change, a change to the default weights).
+/// A custom weights profile is recorded per-report in
+/// [`ScoreReport::weights_profile`], not by this string. Stamped into every
+/// [`ScoreReport`].
 pub const SCORER_VERSION: &str = "score-1.0.0";
 
 /// One category's contribution to the overall score.
@@ -125,6 +130,9 @@ impl Categories {
 pub struct ScoreReport {
     /// The scoring algorithm version this report was produced by.
     pub scorer_version: &'static str,
+    /// The weights profile this report was scored under. Together with
+    /// `scorer_version` it reproduces the score.
+    pub weights_profile: String,
     /// Weighted mean of the *checked* category sub-scores.
     pub overall: f64,
     /// `overall >= threshold`.
@@ -172,6 +180,7 @@ impl ScoreReport {
         };
         Self {
             scorer_version: SCORER_VERSION,
+            weights_profile: profile.name.clone(),
             overall,
             passed: overall >= threshold,
             threshold,
@@ -292,5 +301,27 @@ mod tests {
         let b = ScoreReport::aggregate(cats(), &heavy_structure, 0.90);
         assert!((a.overall - 1.0).abs() < 1e-9, "all weight on the perfect category");
         assert!((b.overall - 0.0).abs() < 1e-9, "all weight on the zero category");
+    }
+
+    #[test]
+    fn aggregate_records_the_profile_name() {
+        let cats = || Categories {
+            interface: cat(1.0),
+            structure: cat(1.0),
+            semantic: cat(1.0),
+            compilation: CategoryScore::unchecked("skipped"),
+        };
+        let default = ScoreReport::aggregate(cats(), &WeightProfile::rfp_default(), 0.90);
+        assert_eq!(default.weights_profile, "rfp-default");
+
+        let named = WeightProfile {
+            name: "aggressive".to_owned(),
+            interface: 0.5,
+            structure: 0.1,
+            semantic: 0.3,
+            compilation: 0.1,
+        };
+        let report = ScoreReport::aggregate(cats(), &named, 0.90);
+        assert_eq!(report.weights_profile, "aggressive");
     }
 }

@@ -814,6 +814,7 @@ fn render_score_text(
     use sordec_score::metrics;
 
     writeln!(out, "scorer version: {}", report.scorer_version)?;
+    writeln!(out, "weights profile: {}", report.weights_profile)?;
     let verdict = if report.passed { "PASS" } else { "FAIL" };
     writeln!(
         out,

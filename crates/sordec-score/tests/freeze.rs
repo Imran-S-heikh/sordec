@@ -1,8 +1,10 @@
 //! Version-freeze guard (K6/G6).
 //!
 //! The metric is frozen + versioned: once the Phase 4 emitter is scored
-//! against it, the algorithm and weights must not change silently. This
-//! test pins [`SCORER_VERSION`] and a golden calibration vector — a fixed
+//! against it, the algorithm and the *default* weights must not change
+//! silently (a custom `--weights` profile is recorded per-report, not
+//! frozen). This test pins [`SCORER_VERSION`] and a golden calibration
+//! vector (scored under the default profile) — a fixed
 //! reconstructed/original pair with deliberate, partial mismatches whose
 //! per-category and overall scores are recorded to four decimals.
 //!
@@ -112,6 +114,7 @@ fn golden_calibration_vector_is_stable() {
     let report = score_str(GOLDEN_RECONSTRUCTED, GOLDEN_ORIGINAL, &opts).expect("score");
 
     assert_eq!(report.scorer_version, "score-1.0.0");
+    assert_eq!(report.weights_profile, "rfp-default");
     // Frozen 2026-07-23 for score-1.0.0. Hand-checkable: interface drops
     // `admin` (recall 3/4 → F1 0.8571); structure is 2 matched of 3 names
     // (0.6667); semantic loses the swapped-tier storage ops + `admin`'s
