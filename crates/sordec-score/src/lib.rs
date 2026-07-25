@@ -74,7 +74,6 @@ pub fn score_files(
     opts: &ScoreOptions,
 ) -> ScoreReport {
     let compilation = CategoryScore::unchecked(
-        metrics::COMPILATION_WEIGHT,
         "compile check needs a source path (use score_paths or the CLI)",
     );
     assemble(reconstructed, original, compilation, opts.threshold)
@@ -98,7 +97,7 @@ pub fn score_paths(
     let compilation = if opts.check_compile {
         compile::check(reconstructed)
     } else {
-        CategoryScore::unchecked(metrics::COMPILATION_WEIGHT, "compile check not requested")
+        CategoryScore::unchecked("compile check not requested")
     };
     Ok(assemble(&recon, &orig, compilation, opts.threshold))
 }
@@ -117,7 +116,7 @@ fn assemble(
         semantic: semantic::evaluate(reconstructed, original),
         compilation,
     };
-    ScoreReport::aggregate(categories, threshold)
+    ScoreReport::aggregate(categories, &WeightProfile::rfp_default(), threshold)
 }
 
 /// Parse two Rust sources and score them.

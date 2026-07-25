@@ -35,7 +35,6 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::metrics;
 use crate::report::CategoryScore;
 
 /// The soroban-sdk version requirement the scratch crate depends on. A
@@ -48,20 +47,20 @@ const MAX_DIAGNOSTIC_LINES: usize = 12;
 
 /// Run the opt-in compilation check on the reconstructed source path.
 pub(crate) fn check(reconstructed: &Path) -> CategoryScore {
-    let weight = metrics::COMPILATION_WEIGHT;
     match run(reconstructed) {
         Ok(Outcome::Compiled) => {
-            CategoryScore::checked(1.0, weight).with_note("cargo check succeeded")
+            CategoryScore::checked(1.0).with_note("cargo check succeeded")
         }
         Ok(Outcome::Failed(diagnostics)) => {
-            let mut score =
-                CategoryScore::checked(0.0, weight).with_note("cargo check failed");
+            let mut score = CategoryScore::checked(0.0).with_note("cargo check failed");
             for line in diagnostics {
                 score = score.with_note(line);
             }
             score
         }
-        Err(reason) => CategoryScore::unchecked(weight, format!("compile check unavailable: {reason}")),
+        Err(reason) => {
+            CategoryScore::unchecked(format!("compile check unavailable: {reason}"))
+        }
     }
 }
 

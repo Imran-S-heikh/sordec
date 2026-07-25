@@ -27,7 +27,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use syn::visit::{self, Visit};
 use syn::{ImplItem, Item};
 
-use crate::metrics;
 use crate::report::CategoryScore;
 use crate::simil;
 
@@ -43,8 +42,7 @@ pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> Categ
 
     let names: BTreeSet<&String> = recon.keys().chain(orig.keys()).collect();
     if names.is_empty() {
-        return CategoryScore::checked(1.0, metrics::STRUCTURE_WEIGHT)
-            .with_note("no functions to compare");
+        return CategoryScore::checked(1.0).with_note("no functions to compare");
     }
 
     let mut total = 0.0;
@@ -62,7 +60,7 @@ pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> Categ
     }
     let score = total / names.len() as f64;
 
-    let mut category = CategoryScore::checked(score, metrics::STRUCTURE_WEIGHT).with_note(format!(
+    let mut category = CategoryScore::checked(score).with_note(format!(
         "{} functions ({} original, {} reconstructed)",
         names.len(),
         orig.len(),

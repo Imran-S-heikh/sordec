@@ -10,7 +10,6 @@
 
 use crate::extract;
 use crate::facts::SemanticFact;
-use crate::metrics;
 use crate::report::CategoryScore;
 use crate::simil::{self, Multiset};
 
@@ -23,8 +22,7 @@ pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> Categ
     let orig_total: usize = orig.values().sum();
 
     if recon_total == 0 && orig_total == 0 {
-        return CategoryScore::checked(1.0, metrics::SEMANTIC_WEIGHT)
-            .with_note("no semantic facts on either side");
+        return CategoryScore::checked(1.0).with_note("no semantic facts on either side");
     }
 
     let overlap: usize = orig
@@ -39,7 +37,7 @@ pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> Categ
         2.0 * precision * recall / (precision + recall)
     };
 
-    let mut score = CategoryScore::checked(f1, metrics::SEMANTIC_WEIGHT).with_note(format!(
+    let mut score = CategoryScore::checked(f1).with_note(format!(
         "precision={precision:.4} recall={recall:.4} ({orig_total} original facts, {recon_total} reconstructed)"
     ));
     if let Some(note) = missing_note(&orig, &recon) {

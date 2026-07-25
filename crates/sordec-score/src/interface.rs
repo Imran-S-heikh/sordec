@@ -36,7 +36,6 @@ use std::collections::BTreeMap;
 use syn::{FnArg, Fields, ImplItem, Item, ReturnType};
 
 use crate::canon;
-use crate::metrics;
 use crate::report::CategoryScore;
 
 /// Score the interface category.
@@ -45,7 +44,7 @@ pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> Categ
     let orig = extract(original);
     let outcome = f1(&recon, &orig);
 
-    let mut score = CategoryScore::checked(outcome.f1, metrics::INTERFACE_WEIGHT).with_note(
+    let mut score = CategoryScore::checked(outcome.f1).with_note(
         format!(
             "precision={:.4} recall={:.4} ({} original ABI items, {} reconstructed)",
             outcome.precision,

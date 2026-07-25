@@ -13,6 +13,7 @@
 
 use serde::Serialize;
 
+use crate::config::WeightProfile;
 use crate::metrics;
 
 /// Version of the scoring algorithm + weights. Bumped on any change that
@@ -29,7 +30,9 @@ pub const SCORER_VERSION: &str = "score-1.0.0";
 pub struct CategoryScore {
     /// Sub-score in `[0.0, 1.0]`.
     pub score: f64,
-    /// This category's weight in the overall mean (from [`metrics`]).
+    /// This category's weight in the overall mean. Populated by
+    /// [`ScoreReport::aggregate`] from the active [`WeightProfile`]; `0.0`
+    /// until then.
     pub weight: f64,
     /// Whether this category contributed to `overall`. Always `true` for
     /// interface / structure / semantic. `false` for compilation when the
@@ -43,24 +46,26 @@ pub struct CategoryScore {
 }
 
 impl CategoryScore {
-    /// A checked category with the given score and weight.
+    /// A checked category with the given score. Its weight is assigned at
+    /// aggregation from the active [`WeightProfile`].
     #[must_use]
-    pub fn checked(score: f64, weight: f64) -> Self {
+    pub fn checked(score: f64) -> Self {
         Self {
             score,
-            weight,
+            weight: 0.0,
             checked: true,
             notes: Vec::new(),
         }
     }
 
     /// An unchecked category (excluded from the overall mean), scored `0`
-    /// with a note explaining why it was skipped.
+    /// with a note explaining why it was skipped. Its weight is assigned at
+    /// aggregation from the active [`WeightProfile`].
     #[must_use]
-    pub fn unchecked(weight: f64, reason: impl Into<String>) -> Self {
+    pub fn unchecked(reason: impl Into<String>) -> Self {
         Self {
             score: 0.0,
-            weight,
+            weight: 0.0,
             checked: false,
             notes: vec![reason.into()],
         }
@@ -100,6 +105,19 @@ impl Categories {
             (metrics::COMPILATION, &self.compilation),
         ]
     }
+
+    /// The categories paired with their canonical names, mutably, in
+    /// [`metrics::WEIGHTS`] order — the seam through which
+    /// [`ScoreReport::aggregate`] injects profile weights. The four are
+    /// distinct fields, so the simultaneous `&mut` borrows are sound.
+    fn pairs_mut(&mut self) -> [(&'static str, &mut CategoryScore); 4] {
+        [
+            (metrics::INTERFACE, &mut self.interface),
+            (metrics::STRUCTURE, &mut self.structure),
+            (metrics::SEMANTIC, &mut self.semantic),
+            (metrics::COMPILATION, &mut self.compilation),
+        ]
+    }
 }
 
 /// A completed scoring run.
@@ -121,15 +139,24 @@ pub struct ScoreReport {
 }
 
 impl ScoreReport {
-    /// Aggregate the four categories into an overall score and pass/fail.
+    /// Aggregate the four categories into an overall score and pass/fail,
+    /// weighting them by `profile`.
     ///
-    /// `overall` is the weight-normalized mean over the *checked*
-    /// categories only: a category with `checked == false` (compilation,
-    /// when not run) drops out of both the numerator and the denominator,
-    /// so the number never silently credits an unrun check. When no
-    /// category is checked, `overall` is `0.0`.
+    /// Each category's weight is taken from `profile` — the single owner of
+    /// the weights, already validated at load. `overall` is then the
+    /// weight-normalized mean over the *checked* categories only: a category
+    /// with `checked == false` (compilation, when not run) drops out of both
+    /// the numerator and the denominator, so the number never silently
+    /// credits an unrun check. When no category is checked, `overall` is
+    /// `0.0`.
     #[must_use]
-    pub fn aggregate(categories: Categories, threshold: f64) -> Self {
+    pub fn aggregate(mut categories: Categories, profile: &WeightProfile, threshold: f64) -> Self {
+        // Inject each category's weight from the profile. A canonical category
+        // name is always present in a profile, so `weight_of` is `Some`;
+        // `unwrap_or(0.0)` keeps it panic-free regardless.
+        for (name, cat) in categories.pairs_mut() {
+            cat.weight = profile.weight_of(name).unwrap_or(0.0);
+        }
         let mut weighted_sum = 0.0;
         let mut weight_total = 0.0;
         for (_name, cat) in categories.pairs() {
@@ -165,19 +192,19 @@ impl ScoreReport {
 mod tests {
     use super::*;
 
-    fn cat(score: f64, weight: f64) -> CategoryScore {
-        CategoryScore::checked(score, weight)
+    fn cat(score: f64) -> CategoryScore {
+        CategoryScore::checked(score)
     }
 
     #[test]
     fn all_perfect_scores_one() {
         let categories = Categories {
-            interface: cat(1.0, metrics::INTERFACE_WEIGHT),
-            structure: cat(1.0, metrics::STRUCTURE_WEIGHT),
-            semantic: cat(1.0, metrics::SEMANTIC_WEIGHT),
-            compilation: cat(1.0, metrics::COMPILATION_WEIGHT),
+            interface: cat(1.0),
+            structure: cat(1.0),
+            semantic: cat(1.0),
+            compilation: cat(1.0),
         };
-        let report = ScoreReport::aggregate(categories, 0.90);
+        let report = ScoreReport::aggregate(categories, &WeightProfile::rfp_default(), 0.90);
         assert!((report.overall - 1.0).abs() < 1e-9);
         assert!(report.passed);
     }
@@ -187,15 +214,12 @@ mod tests {
         // Three perfect checked categories + an unchecked compilation must
         // still be 1.0 — the unrun check does not drag the number down.
         let categories = Categories {
-            interface: cat(1.0, metrics::INTERFACE_WEIGHT),
-            structure: cat(1.0, metrics::STRUCTURE_WEIGHT),
-            semantic: cat(1.0, metrics::SEMANTIC_WEIGHT),
-            compilation: CategoryScore::unchecked(
-                metrics::COMPILATION_WEIGHT,
-                "compile check not requested",
-            ),
+            interface: cat(1.0),
+            structure: cat(1.0),
+            semantic: cat(1.0),
+            compilation: CategoryScore::unchecked("compile check not requested"),
         };
-        let report = ScoreReport::aggregate(categories, 0.90);
+        let report = ScoreReport::aggregate(categories, &WeightProfile::rfp_default(), 0.90);
         assert!((report.overall - 1.0).abs() < 1e-9);
         assert!(report.passed);
     }
@@ -205,10 +229,10 @@ mod tests {
         // Drift guard: the report's serialized keys must equal the
         // canonical names in `metrics::WEIGHTS`, in order.
         let categories = Categories {
-            interface: cat(1.0, metrics::INTERFACE_WEIGHT),
-            structure: cat(1.0, metrics::STRUCTURE_WEIGHT),
-            semantic: cat(1.0, metrics::SEMANTIC_WEIGHT),
-            compilation: cat(1.0, metrics::COMPILATION_WEIGHT),
+            interface: cat(1.0),
+            structure: cat(1.0),
+            semantic: cat(1.0),
+            compilation: cat(1.0),
         };
         let names: Vec<&'static str> = categories.pairs().iter().map(|(n, _)| *n).collect();
         let weight_names: Vec<&'static str> =
@@ -227,15 +251,46 @@ mod tests {
     fn weighted_mean_is_normalized() {
         // A single 0.5 category among perfect ones lands between 0.5 and 1.
         let categories = Categories {
-            interface: cat(0.5, metrics::INTERFACE_WEIGHT),
-            structure: cat(1.0, metrics::STRUCTURE_WEIGHT),
-            semantic: cat(1.0, metrics::SEMANTIC_WEIGHT),
-            compilation: CategoryScore::unchecked(metrics::COMPILATION_WEIGHT, "skipped"),
+            interface: cat(0.5),
+            structure: cat(1.0),
+            semantic: cat(1.0),
+            compilation: CategoryScore::unchecked("skipped"),
         };
-        let report = ScoreReport::aggregate(categories, 0.90);
+        let report = ScoreReport::aggregate(categories, &WeightProfile::rfp_default(), 0.90);
         // checked weights: 0.30 + 0.25 + 0.30 = 0.85; sum = 0.5*0.30 + 0.55 = 0.70
         let expected = (0.5 * 0.30 + 1.0 * 0.25 + 1.0 * 0.30) / 0.85;
         assert!((report.overall - expected).abs() < 1e-9);
         assert!(!report.passed);
+    }
+
+    #[test]
+    fn profile_drives_the_weighting() {
+        // Same categories, two profiles: all weight on the perfect category
+        // vs all weight on the zero category. Proves the profile — not the
+        // category construction — decides the overall.
+        let cats = || Categories {
+            interface: cat(1.0),
+            structure: cat(0.0),
+            semantic: cat(0.0),
+            compilation: CategoryScore::unchecked("skipped"),
+        };
+        let heavy_interface = WeightProfile {
+            name: "heavy-interface".to_owned(),
+            interface: 1.0,
+            structure: 0.0,
+            semantic: 0.0,
+            compilation: 0.0,
+        };
+        let heavy_structure = WeightProfile {
+            name: "heavy-structure".to_owned(),
+            interface: 0.0,
+            structure: 1.0,
+            semantic: 0.0,
+            compilation: 0.0,
+        };
+        let a = ScoreReport::aggregate(cats(), &heavy_interface, 0.90);
+        let b = ScoreReport::aggregate(cats(), &heavy_structure, 0.90);
+        assert!((a.overall - 1.0).abs() < 1e-9, "all weight on the perfect category");
+        assert!((b.overall - 0.0).abs() < 1e-9, "all weight on the zero category");
     }
 }
