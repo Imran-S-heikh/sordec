@@ -24,6 +24,7 @@
 
 mod canon;
 mod compile;
+pub mod config;
 mod error;
 mod extract;
 mod facts;
@@ -37,6 +38,7 @@ mod structure;
 
 use std::path::Path;
 
+pub use config::WeightProfile;
 pub use error::ScoreError;
 pub use report::{Categories, CategoryScore, ScoreReport, SCORER_VERSION};
 

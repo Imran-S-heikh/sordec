@@ -26,4 +26,16 @@ pub enum ScoreError {
         /// The `syn` parse error.
         source: syn::Error,
     },
+
+    /// A weights profile could not be parsed or was invalid. `reason`
+    /// carries the flattened TOML-parse or validation message; the `toml`
+    /// error type is deliberately not exposed so the public API stays stable
+    /// if the config format ever changes.
+    #[error("invalid weights profile {path}: {reason}")]
+    Config {
+        /// The profile's origin — a file path, or a marker like `"<inline>"`.
+        path: String,
+        /// What was wrong (a TOML-parse error or a validation failure).
+        reason: String,
+    },
 }

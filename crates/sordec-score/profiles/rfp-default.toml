@@ -1,0 +1,17 @@
+# Default scorer weight profile — reproduces the frozen score-1.0.0 weights.
+#
+# Copy this file, edit the weights, and pass it with `--weights <file>` (T3)
+# to reweight categories without recompiling.
+#
+# Weights are RELATIVE: the aggregator normalizes over the checked categories,
+# so they need NOT sum to 1.0 — only their ratios matter. They must each be
+# finite and >= 0, with at least one > 0.
+#
+# The defaults below are pending Mo/ABS sign-off (SCORER_RULES_INVENTORY C5).
+
+name = "rfp-default"
+
+interface   = 0.30
+structure   = 0.25
+semantic    = 0.30
+compilation = 0.15   # gate / "behavior" stand-in today; -> behavior in M6
