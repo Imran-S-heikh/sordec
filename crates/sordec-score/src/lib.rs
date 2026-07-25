@@ -43,7 +43,7 @@ pub use error::ScoreError;
 pub use report::{Categories, CategoryScore, ScoreReport, SCORER_VERSION};
 
 /// Knobs for a scoring run.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ScoreOptions {
     /// Pass threshold for the overall score. Default `0.90` (the D4.1
     /// contractual bar).
@@ -52,6 +52,9 @@ pub struct ScoreOptions {
     /// against `soroban-sdk`). Off by default so the fast path — and the
     /// default test suite — stays toolchain-free.
     pub check_compile: bool,
+    /// Per-category weights for the overall mean. Defaults to
+    /// [`WeightProfile::rfp_default`] (the frozen score-1.0.0 weights).
+    pub weights: WeightProfile,
 }
 
 impl Default for ScoreOptions {
@@ -59,6 +62,7 @@ impl Default for ScoreOptions {
         Self {
             threshold: 0.90,
             check_compile: false,
+            weights: WeightProfile::rfp_default(),
         }
     }
 }
@@ -76,7 +80,7 @@ pub fn score_files(
     let compilation = CategoryScore::unchecked(
         "compile check needs a source path (use score_paths or the CLI)",
     );
-    assemble(reconstructed, original, compilation, opts.threshold)
+    assemble(reconstructed, original, compilation, &opts.weights, opts.threshold)
 }
 
 /// Score two scoring inputs given by path. Each path may be a single
@@ -99,7 +103,7 @@ pub fn score_paths(
     } else {
         CategoryScore::unchecked("compile check not requested")
     };
-    Ok(assemble(&recon, &orig, compilation, opts.threshold))
+    Ok(assemble(&recon, &orig, compilation, &opts.weights, opts.threshold))
 }
 
 /// Assemble the three AST categories plus a supplied compilation category
@@ -108,6 +112,7 @@ fn assemble(
     reconstructed: &syn::File,
     original: &syn::File,
     compilation: CategoryScore,
+    profile: &WeightProfile,
     threshold: f64,
 ) -> ScoreReport {
     let categories = Categories {
@@ -116,7 +121,7 @@ fn assemble(
         semantic: semantic::evaluate(reconstructed, original),
         compilation,
     };
-    ScoreReport::aggregate(categories, &WeightProfile::rfp_default(), threshold)
+    ScoreReport::aggregate(categories, profile, threshold)
 }
 
 /// Parse two Rust sources and score them.
@@ -170,5 +175,34 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn default_options_use_rfp_weights() {
+        let report = score_str(SRC, SRC, &ScoreOptions::default()).expect("parse");
+        assert_eq!(report.categories.interface.weight, 0.30);
+        assert_eq!(report.categories.structure.weight, 0.25);
+        assert_eq!(report.categories.semantic.weight, 0.30);
+        assert_eq!(report.categories.compilation.weight, 0.15);
+    }
+
+    #[test]
+    fn custom_options_weights_reach_the_report() {
+        // A custom profile on ScoreOptions must flow through
+        // assemble -> aggregate -> report.
+        let custom = WeightProfile {
+            name: "custom".to_owned(),
+            interface: 0.70,
+            structure: 0.10,
+            semantic: 0.10,
+            compilation: 0.10,
+        };
+        let opts = ScoreOptions {
+            weights: custom,
+            ..ScoreOptions::default()
+        };
+        let report = score_str(SRC, SRC, &opts).expect("parse");
+        assert_eq!(report.categories.interface.weight, 0.70);
+        assert_eq!(report.categories.structure.weight, 0.10);
     }
 }

@@ -107,6 +107,7 @@ fn golden_calibration_vector_is_stable() {
     let opts = ScoreOptions {
         threshold: 0.90,
         check_compile: false,
+        ..Default::default()
     };
     let report = score_str(GOLDEN_RECONSTRUCTED, GOLDEN_ORIGINAL, &opts).expect("score");
 

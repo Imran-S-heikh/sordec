@@ -195,6 +195,12 @@ struct ScoreArgs {
     /// Overall pass threshold. Defaults to the D4.1 contractual bar.
     #[arg(long, default_value_t = 0.90)]
     threshold: f64,
+
+    /// Path to a TOML weights profile (see
+    /// `crates/sordec-score/profiles/rfp-default.toml`). Absent → the
+    /// built-in default weights.
+    #[arg(long, value_name = "FILE")]
+    weights: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------
@@ -752,9 +758,20 @@ fn run_score(args: &ScoreArgs) -> u8 {
     // 1. Load + score. The loader reads both inputs (a `.rs` file or a
     //    source directory); an I/O failure gets the dedicated exit code so
     //    it doesn't conflate with a parse failure.
+    let weights = match &args.weights {
+        Some(path) => match sordec_score::WeightProfile::load(path) {
+            Ok(profile) => profile,
+            Err(e) => {
+                let _ = writeln!(std::io::stderr(), "sordec: {e}");
+                return EXIT_IO_ERR;
+            }
+        },
+        None => sordec_score::WeightProfile::rfp_default(),
+    };
     let opts = sordec_score::ScoreOptions {
         threshold: args.threshold,
         check_compile: args.check_compile,
+        weights,
     };
     let report = match sordec_score::score_paths(&args.reconstructed, &args.original, &opts) {
         Ok(report) => report,

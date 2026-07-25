@@ -149,3 +149,36 @@ fn score_unparseable_input_is_a_pipeline_error() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn score_accepts_a_weights_profile() {
+    // The shipped default profile reproduces the built-in weights, so an
+    // identity pair still passes when weights are supplied via --weights.
+    const PROFILE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../sordec-score/profiles/rfp-default.toml"
+    );
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["score", HELLO_ADD_SRC, HELLO_ADD_SRC, "--weights", PROFILE])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"))
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn score_rejects_a_bad_weights_file() {
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args([
+            "score",
+            HELLO_ADD_SRC,
+            HELLO_ADD_SRC,
+            "--weights",
+            "/no/such/weights.toml",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("could not read"));
+}

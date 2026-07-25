@@ -59,7 +59,7 @@ fn measure(name: &'static str) -> Result<Measured, String> {
     std::fs::create_dir_all(&src).map_err(|e| format!("scratch dir: {e}"))?;
     std::fs::write(src.join("lib.rs"), &output.rust).map_err(|e| format!("write recon: {e}"))?;
 
-    let opts = ScoreOptions { threshold: 0.9, check_compile: false };
+    let opts = ScoreOptions { threshold: 0.9, check_compile: false, ..Default::default() };
     let report = score_paths(&src, &base.join("source/src"), &opts).map_err(|e| format!("score: {e}"));
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(Measured { name, report: report? })

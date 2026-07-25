@@ -43,6 +43,7 @@ fn opts() -> ScoreOptions {
     ScoreOptions {
         threshold: 0.90,
         check_compile: false,
+        ..Default::default()
     }
 }
 
