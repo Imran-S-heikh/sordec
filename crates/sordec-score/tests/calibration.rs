@@ -37,6 +37,24 @@ fn fixture_src(name: &str) -> PathBuf {
         .join("source/src")
 }
 
+/// Fixtures whose semantic category is *unmeasurable* — zero facts on
+/// either side, so identity leaves it **unchecked** rather than claiming a
+/// perfect 1.0 (score-2.0.0 T8).
+///
+/// The list is exact, not a floor, and the two entries are here for very
+/// different reasons — both worth keeping visible:
+///
+/// - `hello-add` genuinely performs no Soroban operations (`a + b`), so
+///   there is nothing for any scorer to recover.
+/// - `attestation` *does* perform them, but the fact vocabulary does not yet
+///   cover crypto/prng/deploy (milestone M5, T17). That is a limitation of
+///   the instrument, not a property of the contract.
+///
+/// Expanding the vocabulary will flip `attestation` to checked and fail this
+/// test. That is the intent: a category becoming measurable is a deliberate
+/// change to the instrument and should be recorded here consciously.
+const SEMANTICALLY_UNMEASURABLE: [&str; 2] = ["attestation", "hello-add"];
+
 fn opts() -> ScoreOptions {
     // The compilation category is opt-in and needs a toolchain; the
     // calibration guards are about the three AST categories.
@@ -51,20 +69,57 @@ fn opts() -> ScoreOptions {
 // Identity: score(x, x) == 1.0
 // ---------------------------------------------------------------------
 
+/// Identity holds on every fixture: everything the scorer *measured* is
+/// exactly perfect, and the overall is 1.0.
+///
+/// Stated over the **checked** categories, because a category that extracted
+/// nothing is unchecked rather than falsely perfect (T8). On its own that
+/// phrasing could pass vacuously — if a bug made every category unchecked,
+/// "all checked categories are perfect" would be trivially true and this
+/// anti-Goodhart guard would quietly stop guarding. So the measurement floor
+/// below is load-bearing, not decoration: it pins exactly which categories
+/// must still be measurable on which fixtures.
 #[test]
 fn identity_is_perfect_on_every_fixture() {
     for name in FIXTURES {
         let dir = fixture_src(name);
         let report = score_paths(&dir, &dir, &opts()).expect("score fixture");
+
         assert!(
             (report.overall - 1.0).abs() < 1e-9,
             "{name}: overall {} != 1.0",
             report.overall
         );
-        assert_eq!(report.categories.interface.score, 1.0, "{name} interface");
-        assert_eq!(report.categories.structure.score, 1.0, "{name} structure");
-        assert_eq!(report.categories.semantic.score, 1.0, "{name} semantic");
         assert!(report.passed, "{name} must pass identity");
+
+        // Everything measured must be exactly perfect.
+        let categories = [
+            ("interface", &report.categories.interface),
+            ("structure", &report.categories.structure),
+            ("semantic", &report.categories.semantic),
+        ];
+        for (label, category) in categories {
+            if category.checked {
+                assert_eq!(category.score, 1.0, "{name} {label}");
+            }
+        }
+
+        // The measurement floor — guards against a vacuous pass.
+        assert!(
+            report.categories.interface.checked,
+            "{name}: interface must stay measurable"
+        );
+        assert!(
+            report.categories.structure.checked,
+            "{name}: structure must stay measurable"
+        );
+        let semantic_expected = !SEMANTICALLY_UNMEASURABLE.contains(&name);
+        assert_eq!(
+            report.categories.semantic.checked, semantic_expected,
+            "{name}: semantic checked={} but expected {semantic_expected} — \
+             update SEMANTICALLY_UNMEASURABLE if this change is intended",
+            report.categories.semantic.checked
+        );
     }
 }
 

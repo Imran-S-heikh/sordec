@@ -37,22 +37,24 @@ use syn::{FnArg, Fields, ImplItem, Item, ReturnType};
 
 use crate::canon;
 use crate::report::CategoryScore;
+use crate::simil;
 
 /// Score the interface category.
 pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> CategoryScore {
     let recon = extract(reconstructed);
     let orig = extract(original);
-    let outcome = f1(&recon, &orig);
 
-    let mut score = CategoryScore::checked(outcome.f1).with_note(
-        format!(
-            "precision={:.4} recall={:.4} ({} original ABI items, {} reconstructed)",
-            outcome.precision,
-            outcome.recall,
-            orig.len(),
-            recon.len()
-        ),
-    );
+    let Some(outcome) = f1(&recon, &orig) else {
+        return CategoryScore::unchecked("no ABI items on either side — nothing to measure");
+    };
+
+    let mut score = CategoryScore::checked(outcome.f1).with_note(format!(
+        "precision={} recall={} ({} original ABI items, {} reconstructed)",
+        simil::render_ratio(outcome.precision),
+        simil::render_ratio(outcome.recall),
+        orig.len(),
+        recon.len()
+    ));
     if let Some(note) = diff_note("missing", &orig, &recon) {
         score = score.with_note(note);
     }
@@ -171,49 +173,17 @@ fn field_list(fields: &Fields) -> String {
     parts.join(",")
 }
 
-/// The outcome of an exact-match F1 over two keyed sets.
-struct F1Outcome {
-    precision: f64,
-    recall: f64,
-    f1: f64,
-}
-
 /// Exact-match F1: an item is correct when both sides carry the same key
 /// with an equal value.
-fn f1(recon: &BTreeMap<String, String>, orig: &BTreeMap<String, String>) -> F1Outcome {
-    if recon.is_empty() && orig.is_empty() {
-        return F1Outcome {
-            precision: 1.0,
-            recall: 1.0,
-            f1: 1.0,
-        };
-    }
+///
+/// `None` when neither side declared any ABI item — an extraction that
+/// found nothing is unmeasurable, not perfect (see [`simil::prf`]).
+fn f1(recon: &BTreeMap<String, String>, orig: &BTreeMap<String, String>) -> Option<simil::Prf> {
     let correct = orig
         .iter()
         .filter(|(key, value)| recon.get(*key) == Some(*value))
         .count();
-    let precision = ratio(correct, recon.len());
-    let recall = ratio(correct, orig.len());
-    let f1 = if precision + recall == 0.0 {
-        0.0
-    } else {
-        2.0 * precision * recall / (precision + recall)
-    };
-    F1Outcome {
-        precision,
-        recall,
-        f1,
-    }
-}
-
-/// `numerator / denominator`, or `1.0` when the denominator is zero (an
-/// empty side has nothing to get wrong).
-fn ratio(numerator: usize, denominator: usize) -> f64 {
-    if denominator == 0 {
-        1.0
-    } else {
-        numerator as f64 / denominator as f64
-    }
+    simil::prf(correct, recon.len(), orig.len())
 }
 
 /// A note listing keys in `from` whose value is not exactly reproduced in
@@ -328,8 +298,30 @@ mod tests {
     }
 
     #[test]
-    fn empty_interfaces_score_one() {
+    fn empty_interfaces_are_unchecked_not_perfect() {
+        // No `#[contractimpl]`/`#[contracttype]` on either side: the
+        // extractor found nothing, so there is nothing to score. Reporting
+        // 1.0 here is the false perfect T8 removes — it is exactly what a
+        // macro-expanded input (which consumes those attributes) would hit.
         let f = file("pub fn helper() {}");
-        assert!((evaluate(&f, &f).score - 1.0).abs() < 1e-9);
+        let score = evaluate(&f, &f);
+        assert!(!score.checked, "a 0-item extraction must not be checked");
+        assert_ne!(score.score, 1.0);
+    }
+
+    #[test]
+    fn nothing_reconstructed_does_not_report_perfect_precision() {
+        // The live bug from docs/benchmarks/report.md: 18 original items,
+        // 0 reconstructed, reported as precision=1.0000.
+        let orig = file(CONTRACT);
+        let recon = file("pub fn unrelated() {}");
+        let score = evaluate(&recon, &orig);
+        assert!(score.checked, "the original has items — this is measurable");
+        assert_eq!(score.score, 0.0);
+        let note = score.notes.first().expect("a summary note");
+        assert!(
+            note.contains("precision=n/a"),
+            "precision must read as undefined, got: {note}"
+        );
     }
 }

@@ -21,24 +21,19 @@ pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> Categ
     let recon_total: usize = recon.values().sum();
     let orig_total: usize = orig.values().sum();
 
-    if recon_total == 0 && orig_total == 0 {
-        return CategoryScore::checked(1.0).with_note("no semantic facts on either side");
-    }
-
     let overlap: usize = orig
         .iter()
         .map(|(key, count)| *count.min(recon.get(key).unwrap_or(&0)))
         .sum();
-    let precision = ratio(overlap, recon_total);
-    let recall = ratio(overlap, orig_total);
-    let f1 = if precision + recall == 0.0 {
-        0.0
-    } else {
-        2.0 * precision * recall / (precision + recall)
+
+    let Some(outcome) = simil::prf(overlap, recon_total, orig_total) else {
+        return CategoryScore::unchecked("no semantic facts on either side — nothing to measure");
     };
 
-    let mut score = CategoryScore::checked(f1).with_note(format!(
-        "precision={precision:.4} recall={recall:.4} ({orig_total} original facts, {recon_total} reconstructed)"
+    let mut score = CategoryScore::checked(outcome.f1).with_note(format!(
+        "precision={} recall={} ({orig_total} original facts, {recon_total} reconstructed)",
+        simil::render_ratio(outcome.precision),
+        simil::render_ratio(outcome.recall),
     ));
     if let Some(note) = missing_note(&orig, &recon) {
         score = score.with_note(note);
@@ -50,15 +45,6 @@ pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> Categ
 fn bag(facts: &[SemanticFact]) -> Multiset {
     let keys: Vec<String> = facts.iter().map(SemanticFact::key).collect();
     simil::multiset(&keys)
-}
-
-/// `numerator / denominator`, or `1.0` when the denominator is zero.
-fn ratio(numerator: usize, denominator: usize) -> f64 {
-    if denominator == 0 {
-        1.0
-    } else {
-        numerator as f64 / denominator as f64
-    }
 }
 
 /// A note naming original facts under-reproduced in the reconstruction
@@ -156,8 +142,30 @@ mod tests {
     }
 
     #[test]
-    fn empty_semantics_score_one() {
+    fn empty_semantics_are_unchecked_not_perfect() {
+        // Pure arithmetic carries no Soroban-operation facts. Nothing was
+        // recovered because there was nothing to recover — unmeasurable,
+        // not perfect. This is the hello-add fixture's shape.
         let f = file("fn helper(a: u32) -> u32 { a + 1 }");
-        assert!((evaluate(&f, &f).score - 1.0).abs() < 1e-9);
+        let score = evaluate(&f, &f);
+        assert!(!score.checked, "a 0-fact comparison must not be checked");
+        assert_ne!(score.score, 1.0);
+    }
+
+    #[test]
+    fn facts_invented_against_a_factless_original_score_zero() {
+        // The original has no facts but the reconstruction claims some:
+        // recall is undefined, precision is a real 0.0, and the category
+        // stays checked — inventing facts is a measurable failure.
+        let orig = file("fn helper(a: u32) -> u32 { a + 1 }");
+        let recon = file(CONTRACT);
+        let score = evaluate(&recon, &orig);
+        assert!(score.checked, "invented facts are measurable");
+        assert_eq!(score.score, 0.0);
+        let note = score.notes.first().expect("a summary note");
+        assert!(
+            note.contains("recall=n/a"),
+            "recall must read as undefined, got: {note}"
+        );
     }
 }

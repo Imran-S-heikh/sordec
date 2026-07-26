@@ -42,7 +42,9 @@ pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> Categ
 
     let names: BTreeSet<&String> = recon.keys().chain(orig.keys()).collect();
     if names.is_empty() {
-        return CategoryScore::checked(1.0).with_note("no functions to compare");
+        // Neither side declared a function: nothing was compared, which is
+        // not the same as everything matching (score-2.0.0 T8).
+        return CategoryScore::unchecked("no functions to compare — nothing to measure");
     }
 
     let mut total = 0.0;
@@ -248,5 +250,35 @@ mod tests {
         let while_loop = file("fn g() { while true {} }");
         let for_loop = file("fn g() { for _ in 0..1 {} }");
         assert!(evaluate(&while_loop, &for_loop).score < 1.0);
+    }
+
+    #[test]
+    fn no_functions_is_unchecked_not_perfect() {
+        // Nothing to compare is not a perfect comparison (score-2.0.0 T8).
+        let f = file("pub struct S { x: u32 }");
+        let score = evaluate(&f, &f);
+        assert!(
+            !score.checked,
+            "a 0-function comparison must not be checked"
+        );
+        assert_ne!(score.score, 1.0);
+    }
+
+    #[test]
+    fn straight_line_functions_still_match_perfectly() {
+        // The T8 scope boundary, pinned. A function with no control flow has
+        // an empty skeleton, and two empty skeletons are a *genuine* perfect
+        // match — the reconstruction reproduced the (absent) control flow
+        // exactly. `simil`'s empty-vs-empty 1.0 is correct and must stay:
+        // "nothing to measure" is a category-level judgement, not a
+        // per-function one. This is the hello-add `add` case.
+        let f = file("fn add(a: u64, b: u64) -> u64 { a + b }");
+        let score = evaluate(&f, &f);
+        assert!(score.checked, "a real function is measurable");
+        assert!(
+            (score.score - 1.0).abs() < 1e-9,
+            "score was {}",
+            score.score
+        );
     }
 }
