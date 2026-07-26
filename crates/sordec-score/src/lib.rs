@@ -41,9 +41,9 @@ mod structure;
 
 use std::path::Path;
 
-pub use config::WeightProfile;
+pub use config::{Basis, BasisProfile, WeightProfile};
 pub use error::ScoreError;
-pub use report::{Categories, CategoryScore, ScoreReport, SCORER_VERSION};
+pub use report::{Categories, CategoryScore, SCORER_VERSION, ScoreReport};
 
 /// Knobs for a scoring run.
 #[derive(Debug, Clone)]
@@ -58,18 +58,18 @@ pub struct ScoreOptions {
     /// Per-category weights for the overall mean. Defaults to
     /// [`WeightProfile::rfp_default`] (the frozen score-1.0.0 weights).
     pub weights: WeightProfile,
-    /// Score the AST categories on **macro-expanded** sources rather than the
-    /// sources as written — the basis the RFP mandates.
+    /// Which source basis each AST category is scored against. Defaults to
+    /// [`BasisProfile::source_only`], which needs no toolchain and reproduces
+    /// `score-1.0.0` exactly.
     ///
-    /// Off by default while the harness lands (milestone M2, T6): enabling it
-    /// moves every score, so flipping the default belongs with the
-    /// per-category basis decision and its version bump (T9). Needs a
-    /// toolchain; when expansion is unavailable the run falls back to the
-    /// pre-expansion basis and says so in [`ScoreReport::notes`].
+    /// [`BasisProfile::rfp_default`] selects the RFP-aligned split. The
+    /// default flips to it once the interface category can read the expanded
+    /// basis (milestone M3, T10) — until then it would report `unchecked`,
+    /// blanking the strongest category.
     ///
-    /// Only [`score_paths`] can honor this — expansion needs source *paths*,
-    /// which a parsed AST does not carry.
-    pub expand: bool,
+    /// Only [`score_paths`] can honor an expanded basis: expansion needs
+    /// source *paths*, which a parsed AST does not carry.
+    pub basis: BasisProfile,
 }
 
 impl Default for ScoreOptions {
@@ -78,7 +78,7 @@ impl Default for ScoreOptions {
             threshold: 0.90,
             check_compile: false,
             weights: WeightProfile::rfp_default(),
-            expand: false,
+            basis: BasisProfile::source_only(),
         }
     }
 }
@@ -93,10 +93,11 @@ pub fn score_files(
     original: &syn::File,
     opts: &ScoreOptions,
 ) -> ScoreReport {
-    let compilation = CategoryScore::unchecked(
-        "compile check needs a source path (use score_paths or the CLI)",
-    );
-    assemble(reconstructed, original, compilation, &opts.weights, opts.threshold)
+    let compilation =
+        CategoryScore::unchecked("compile check needs a source path (use score_paths or the CLI)");
+    // No paths, so no expansion is possible: everything is source-basis.
+    let sources = Sources::source_only(reconstructed.clone(), original.clone());
+    assemble(&sources, compilation, opts)
 }
 
 /// Score two scoring inputs given by path. Each path may be a single
@@ -112,46 +113,72 @@ pub fn score_paths(
     original: &Path,
     opts: &ScoreOptions,
 ) -> Result<ScoreReport, ScoreError> {
-    let basis = load_basis(reconstructed, original, opts)?;
+    let sources = Sources::load(reconstructed, original, &opts.basis)?;
     let compilation = if opts.check_compile {
         compile::check(reconstructed)
     } else {
         CategoryScore::unchecked("compile check not requested")
     };
-    let report = assemble(
-        &basis.recon,
-        &basis.orig,
-        compilation,
-        &opts.weights,
-        opts.threshold,
-    );
-    Ok(match basis.note {
-        Some(note) => report.with_note(note),
-        None => report,
-    })
+    let mut report = assemble(&sources, compilation, opts);
+    for note in &sources.notes {
+        report = report.with_note(note.clone());
+    }
+    Ok(report)
 }
 
-/// The parsed sources the AST categories are scored against, plus a note
-/// recording which basis they came from when it is not the default.
-struct Basis {
-    recon: syn::File,
-    orig: syn::File,
-    note: Option<String>,
-}
-
-/// Load both sides, macro-expanding them when requested.
+/// Both renderings of the two inputs, so each category can be scored on the
+/// basis it belongs on.
 ///
-/// Expansion is best-effort by design: a missing toolchain or an unresolvable
-/// dependency degrades to the pre-expansion basis with the reason recorded,
-/// rather than failing the run or silently scoring zero. Both sides must
-/// expand or neither does — scoring an expanded reconstruction against an
-/// un-expanded original would compare two different kinds of thing.
-fn load_basis(
-    reconstructed: &Path,
-    original: &Path,
-    opts: &ScoreOptions,
-) -> Result<Basis, ScoreError> {
-    if opts.expand {
+/// Holding both is the point of T9: interface and structure want the
+/// macro-expanded form (the RFP's basis, and the only place the ABI is
+/// visible), while semantic wants the sources as written — see
+/// [`BasisProfile::rfp_default`] for why.
+struct Sources {
+    /// The sources as written. Always available.
+    source: (syn::File, syn::File),
+    /// The expanded, glue-stripped sources; `None` when no category asked for
+    /// them or expansion was unavailable.
+    expanded: Option<(syn::File, syn::File)>,
+    /// Run-level notes recording which basis was used, and why if it was not
+    /// the one requested.
+    notes: Vec<String>,
+}
+
+impl Sources {
+    /// Wrap an already-parsed pair; nothing can be expanded without paths.
+    fn source_only(recon: syn::File, orig: syn::File) -> Self {
+        Self {
+            source: (recon, orig),
+            expanded: None,
+            notes: Vec::new(),
+        }
+    }
+
+    /// Load both sides, macro-expanding as well when `profile` asks for it.
+    ///
+    /// Expansion is best-effort by design: a missing toolchain or an
+    /// unresolvable dependency degrades to the pre-expansion basis with the
+    /// reason recorded, rather than failing the run or silently scoring zero.
+    /// Both sides expand or neither does — scoring an expanded reconstruction
+    /// against an un-expanded original would compare two different kinds of
+    /// thing.
+    fn load(
+        reconstructed: &Path,
+        original: &Path,
+        profile: &BasisProfile,
+    ) -> Result<Self, ScoreError> {
+        let source = (
+            loader::load(reconstructed, "reconstructed")?,
+            loader::load(original, "original")?,
+        );
+        if !profile.needs_expansion() {
+            return Ok(Self {
+                source,
+                expanded: None,
+                notes: Vec::new(),
+            });
+        }
+
         match (expand::expand(reconstructed), expand::expand(original)) {
             (Ok(recon_text), Ok(orig_text)) => {
                 // Expanded source is mostly SDK-generated glue; scoring it raw
@@ -163,46 +190,53 @@ fn load_basis(
                 if let Some(summary) = orig.abi_summary() {
                     note.push_str(&format!(" — original {summary}"));
                 }
-                return Ok(Basis {
-                    recon: recon.file,
-                    orig: orig.file,
-                    note: Some(note),
-                });
+                Ok(Self {
+                    source,
+                    expanded: Some((recon.file, orig.file)),
+                    notes: vec![note],
+                })
             }
-            (Err(why), _) | (_, Err(why)) => {
-                return Ok(Basis {
-                    recon: loader::load(reconstructed, "reconstructed")?,
-                    orig: loader::load(original, "original")?,
-                    note: Some(format!(
-                        "basis: pre-expansion — macro expansion unavailable ({why})"
-                    )),
-                });
-            }
+            (Err(why), _) | (_, Err(why)) => Ok(Self {
+                source,
+                expanded: None,
+                notes: vec![format!(
+                    "basis: pre-expansion — macro expansion unavailable ({why})"
+                )],
+            }),
         }
     }
-    Ok(Basis {
-        recon: loader::load(reconstructed, "reconstructed")?,
-        orig: loader::load(original, "original")?,
-        note: None,
-    })
+
+    /// The pair a category should be scored against.
+    ///
+    /// A request for [`Basis::Expanded`] falls back to the source pair when
+    /// expansion was unavailable; `Sources::load` has already recorded why.
+    fn pair(&self, basis: Basis) -> (&syn::File, &syn::File) {
+        let (recon, orig) = match basis {
+            Basis::Expanded => self.expanded.as_ref().unwrap_or(&self.source),
+            Basis::Source => &self.source,
+        };
+        (recon, orig)
+    }
 }
 
-/// Assemble the three AST categories plus a supplied compilation category
-/// into a report.
-fn assemble(
-    reconstructed: &syn::File,
-    original: &syn::File,
-    compilation: CategoryScore,
-    profile: &WeightProfile,
-    threshold: f64,
-) -> ScoreReport {
+/// Assemble the three AST categories — each on its own basis — plus a
+/// supplied compilation category into a report.
+fn assemble(sources: &Sources, compilation: CategoryScore, opts: &ScoreOptions) -> ScoreReport {
+    let basis = &opts.basis;
+    let (recon, orig) = sources.pair(basis.interface);
+    let interface = interface::evaluate(recon, orig);
+    let (recon, orig) = sources.pair(basis.structure);
+    let structure = structure::evaluate(recon, orig);
+    let (recon, orig) = sources.pair(basis.semantic);
+    let semantic = semantic::evaluate(recon, orig);
+
     let categories = Categories {
-        interface: interface::evaluate(reconstructed, original),
-        structure: structure::evaluate(reconstructed, original),
-        semantic: semantic::evaluate(reconstructed, original),
+        interface,
+        structure,
+        semantic,
         compilation,
     };
-    ScoreReport::aggregate(categories, profile, threshold)
+    ScoreReport::aggregate(categories, &opts.weights, &opts.basis, opts.threshold)
 }
 
 /// Parse two Rust sources and score them.
@@ -265,6 +299,66 @@ mod tests {
         assert_eq!(report.categories.structure.weight, 0.25);
         assert_eq!(report.categories.semantic.weight, 0.30);
         assert_eq!(report.categories.compilation.weight, 0.15);
+    }
+
+    #[test]
+    fn the_default_basis_is_recorded_and_needs_no_toolchain() {
+        let report = score_str(SRC, SRC, &ScoreOptions::default()).expect("parse");
+        assert_eq!(report.basis_profile, "source-only");
+        assert!(!ScoreOptions::default().basis.needs_expansion());
+    }
+
+    #[test]
+    fn the_router_consults_the_profile_per_category() {
+        // Proves `assemble` actually routes rather than being incidentally
+        // correct: two `Sources` differing *only* in their expanded pair,
+        // scored under a profile that sends structure to `Expanded` and
+        // semantic to `Source`. Structure must see the expanded pair and
+        // semantic must not.
+        let source_side = syn::parse_file("fn f() { panic!(); }").expect("parse");
+        // The "expanded" stand-in has different control flow and no panic.
+        let expanded_side = syn::parse_file("fn f() { if true { g(); } }").expect("parse");
+
+        let sources = Sources {
+            source: (source_side.clone(), source_side.clone()),
+            expanded: Some((expanded_side.clone(), expanded_side)),
+            notes: Vec::new(),
+        };
+        let opts = ScoreOptions {
+            basis: BasisProfile {
+                name: "split".to_owned(),
+                interface: Basis::Source,
+                structure: Basis::Expanded,
+                semantic: Basis::Source,
+            },
+            ..ScoreOptions::default()
+        };
+        let report = assemble(&sources, CategoryScore::unchecked("n/a"), &opts);
+
+        // Semantic read the source pair, which has a panic on both sides.
+        assert!(report.categories.semantic.checked, "source pair has facts");
+        // Structure read the expanded pair: identical to itself, so 1.0.
+        assert!((report.categories.structure.score - 1.0).abs() < 1e-9);
+        assert_eq!(report.basis_profile, "split");
+    }
+
+    #[test]
+    fn an_expanded_request_falls_back_to_source_when_unavailable() {
+        // `Sources` with no expanded pair: a category asking for `Expanded`
+        // must still score, on the source pair, rather than erroring or
+        // silently reporting nothing.
+        let file = syn::parse_file(SRC).expect("parse");
+        let sources = Sources::source_only(file.clone(), file);
+        let opts = ScoreOptions {
+            basis: BasisProfile::rfp_default(),
+            ..ScoreOptions::default()
+        };
+        let report = assemble(&sources, CategoryScore::unchecked("n/a"), &opts);
+        assert!(
+            (report.overall - 1.0).abs() < 1e-9,
+            "identity still scores 1.0"
+        );
+        assert_eq!(report.basis_profile, "rfp-default");
     }
 
     #[test]

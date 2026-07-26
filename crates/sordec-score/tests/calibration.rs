@@ -17,7 +17,7 @@
 
 use std::path::PathBuf;
 
-use sordec_score::{score_paths, score_str, ScoreOptions};
+use sordec_score::{ScoreOptions, score_paths, score_str};
 
 /// Every fixture that ships Rust source under `source/src`.
 const FIXTURES: [&str; 7] = [
@@ -141,7 +141,7 @@ fn identity_is_perfect_on_the_expanded_basis() {
     // path: crate-root walk-up, expansion of both sides, `load_str`.
     let dir = fixture_src("hello-add");
     let opts = ScoreOptions {
-        expand: true,
+        basis: sordec_score::BasisProfile::rfp_default(),
         ..opts()
     };
     let report = score_paths(&dir, &dir, &opts).expect("score fixture");
@@ -168,6 +168,52 @@ fn identity_is_perfect_on_the_expanded_basis() {
             assert_eq!(category.score, 1.0, "expanded {label}");
         }
     }
+}
+
+/// The split basis is live: structure moves with expansion, semantic does not
+/// (score-2.0.0 T9).
+///
+/// Semantic staying on the pre-expansion sources is the whole point of the
+/// per-category basis — `extract` recognizes panics only as macros, so scoring
+/// it on expanded input would hide the reconstruction's over-production and
+/// inflate precision. This pins that the router actually keeps semantic where
+/// it belongs when the rest of the run is expanded.
+///
+/// `#[ignore]`d because it shells out to `cargo expand`.
+#[test]
+#[ignore = "shells out to cargo expand against soroban-sdk (slow)"]
+fn the_split_basis_moves_structure_but_not_semantic() {
+    let dir = fixture_src("token-v23");
+    let source_only = score_paths(&dir, &dir, &opts()).expect("source-basis score");
+    let split = score_paths(
+        &dir,
+        &dir,
+        &ScoreOptions {
+            basis: sordec_score::BasisProfile::rfp_default(),
+            ..opts()
+        },
+    )
+    .expect("split-basis score");
+
+    assert!(
+        split
+            .notes
+            .iter()
+            .any(|note| note.contains("basis: macro-expanded")),
+        "expansion did not run — notes: {:?}",
+        split.notes
+    );
+    assert_eq!(split.basis_profile, "rfp-default");
+
+    // Semantic read the same (pre-expansion) sources in both runs.
+    assert_eq!(
+        split.categories.semantic.score, source_only.categories.semantic.score,
+        "semantic must stay on the pre-expansion basis"
+    );
+    assert_eq!(
+        split.categories.semantic.notes, source_only.categories.semantic.notes,
+        "identical basis must yield identical fact counts"
+    );
 }
 
 // ---------------------------------------------------------------------

@@ -1,4 +1,5 @@
-//! Configurable per-category weights (`score-2.0.0`, milestone M1).
+//! Configurable per-category weights and source bases (`score-2.0.0`,
+//! milestones M1 and M2).
 //!
 //! `score-1.0.0` baked the four category weights into compile-time consts
 //! ([`metrics::INTERFACE_WEIGHT`] and friends) and wired them into each
@@ -26,6 +27,108 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::{error::ScoreError, metrics};
+
+/// Which rendering of the sources a category is scored against.
+///
+/// The RFP mandates a **macro-expanded** comparison
+/// (`OFFICIAL_TRANCHES.md:63-64`), but that is not the right basis for every
+/// category — see [`BasisProfile::rfp_default`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Basis {
+    /// The sources as written, before macro expansion.
+    Source,
+    /// The sources after `cargo expand`, with SDK glue stripped
+    /// (`crate::expand` + `crate::glue`).
+    Expanded,
+}
+
+/// A named assignment of a source [`Basis`] to each AST category.
+///
+/// Recorded in every report alongside the weights profile, so
+/// `(scorer_version, weights_profile, basis_profile)` reproduces a score.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BasisProfile {
+    /// Identifier recorded in the report, e.g. `"source-only"`.
+    pub name: String,
+    /// Basis for the interface category.
+    pub interface: Basis,
+    /// Basis for the structure category.
+    pub structure: Basis,
+    /// Basis for the semantic category.
+    pub semantic: Basis,
+}
+
+impl BasisProfile {
+    /// Every category on the pre-expansion sources — the built-in default.
+    ///
+    /// Keeps the fast path toolchain-free and reproduces `score-1.0.0`
+    /// exactly. The default flips to [`rfp_default`](Self::rfp_default) once
+    /// the interface category can read the expanded basis (milestone M3, T10).
+    #[must_use]
+    pub fn source_only() -> Self {
+        Self {
+            name: "source-only".to_owned(),
+            interface: Basis::Source,
+            structure: Basis::Source,
+            semantic: Basis::Source,
+        }
+    }
+
+    /// The RFP-aligned split: interface and structure on the expanded basis,
+    /// **semantic on the pre-expansion sources**.
+    ///
+    /// Semantic is the deliberate exception. `crate::extract` recognizes
+    /// panics only in their *macro* form (`visit_macro` on `panic` /
+    /// `panic_with_error`), and expansion rewrites those to
+    /// `::core::panicking::*` calls it cannot see. Scoring semantic on
+    /// expanded input therefore drops panic facts from **both** sides — but
+    /// far from equally: measured on token-v23 the reconstruction sheds 60
+    /// facts and the original 5, lifting precision 0.3049 → 0.9091 purely by
+    /// hiding our own over-production. That is measurement error flattering
+    /// the tool, so semantic stays where the facts are visible.
+    ///
+    /// Revisit when T16 teaches `extract` the post-expansion forms;
+    /// `extract`'s `panic_macro_is_recognized_but_expanded_call_is_not` test
+    /// fails when that happens, forcing this decision to be re-argued rather
+    /// than silently inherited.
+    #[must_use]
+    pub fn rfp_default() -> Self {
+        Self {
+            name: "rfp-default".to_owned(),
+            interface: Basis::Expanded,
+            structure: Basis::Expanded,
+            semantic: Basis::Source,
+        }
+    }
+
+    /// Whether any category asks for the expanded basis. When false the
+    /// scorer never shells out to `cargo expand`.
+    #[must_use]
+    pub fn needs_expansion(&self) -> bool {
+        [self.interface, self.structure, self.semantic].contains(&Basis::Expanded)
+    }
+
+    /// Parse and validate a profile from TOML text. `origin` names the source
+    /// for error messages.
+    ///
+    /// # Errors
+    ///
+    /// [`ScoreError::Config`] if `text` is not valid TOML for this schema.
+    pub fn from_toml_str(text: &str, origin: &str) -> Result<Self, ScoreError> {
+        toml::from_str(text).map_err(|source| ScoreError::Config {
+            path: origin.to_owned(),
+            reason: source.to_string(),
+        })
+    }
+}
+
+impl Default for BasisProfile {
+    fn default() -> Self {
+        Self::source_only()
+    }
+}
 
 /// A named set of per-category weights for the overall mean.
 ///
@@ -107,7 +210,9 @@ impl WeightProfile {
         };
         for (name, weight) in self.pairs() {
             if !weight.is_finite() {
-                return Err(fail(format!("weight '{name}' must be finite, got {weight}")));
+                return Err(fail(format!(
+                    "weight '{name}' must be finite, got {weight}"
+                )));
             }
             if weight < 0.0 {
                 return Err(fail(format!(
@@ -261,5 +366,48 @@ mod tests {
             Some(metrics::COMPILATION_WEIGHT)
         );
         assert_eq!(p.weight_of("behavior"), None);
+    }
+
+    // -----------------------------------------------------------------
+    // BasisProfile
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn the_default_basis_is_source_only() {
+        // Keeps the fast path toolchain-free and score-1.0.0-identical until
+        // interface can read the expanded basis (M3/T10).
+        let p = BasisProfile::default();
+        assert_eq!(p, BasisProfile::source_only());
+        assert_eq!(p.name, "source-only");
+        assert!(!p.needs_expansion(), "the default must never shell out");
+    }
+
+    #[test]
+    fn rfp_default_expands_interface_and_structure_but_not_semantic() {
+        // The semantic exception is the whole point of T9: `extract` sees
+        // panics only as macros, so expansion would hide our over-production.
+        let p = BasisProfile::rfp_default();
+        assert_eq!(p.interface, Basis::Expanded);
+        assert_eq!(p.structure, Basis::Expanded);
+        assert_eq!(p.semantic, Basis::Source);
+        assert!(p.needs_expansion());
+    }
+
+    #[test]
+    fn basis_profile_round_trips_through_toml() {
+        let original = BasisProfile::rfp_default();
+        let text = toml::to_string(&original).expect("serialize");
+        let parsed = BasisProfile::from_toml_str(&text, "<round-trip>").expect("parse");
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn basis_profile_rejects_an_unknown_basis() {
+        let err = BasisProfile::from_toml_str(
+            "name = \"t\"\ninterface = \"wasm\"\nstructure = \"source\"\nsemantic = \"source\"\n",
+            "<test>",
+        )
+        .expect_err("`wasm` is not a basis");
+        assert!(matches!(err, ScoreError::Config { .. }), "got {err:?}");
     }
 }

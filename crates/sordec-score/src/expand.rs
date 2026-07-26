@@ -30,6 +30,21 @@
 //! source all yield [`Unavailable`]. The caller falls back to the
 //! pre-expansion basis and records why — mirroring how `compile` reports an
 //! unrun check rather than a failed one.
+//!
+//! ## Offline precondition
+//!
+//! Expansion runs `--offline` so a scoring run stays hermetic (the same choice
+//! `compile` makes). Every dependency in the target crate's lockfile must
+//! therefore already be in the local cargo registry cache, or the run degrades
+//! with `offline registry is missing a required crate`. For the vendored
+//! corpus that is one-time setup:
+//!
+//! ```text
+//! for d in samples/contracts/*/source; do (cd "$d" && cargo fetch); done
+//! ```
+//!
+//! Measured: token-v22 pins `proc-macro2 v1.0.87`, which the workspace build
+//! never pulls in, so it fell back to the pre-expansion basis until fetched.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -192,10 +192,12 @@ struct ScoreArgs {
     #[arg(long)]
     check_compile: bool,
 
-    /// Score the AST categories on macro-expanded sources (`cargo expand`)
-    /// rather than the sources as written — the basis the RFP mandates.
-    /// Needs a toolchain; falls back to the pre-expansion basis, and says
-    /// so in the report, when expansion is unavailable.
+    /// Use the RFP-aligned source basis: interface and structure on
+    /// macro-expanded sources (`cargo expand`), semantic on the sources as
+    /// written. Semantic is the deliberate exception — expansion rewrites
+    /// `panic!` into calls the fact extractor cannot see, which would inflate
+    /// its precision. Needs a toolchain; falls back to the pre-expansion
+    /// basis, and says so in the report, when expansion is unavailable.
     #[arg(long)]
     expand: bool,
 
@@ -779,7 +781,11 @@ fn run_score(args: &ScoreArgs) -> u8 {
         threshold: args.threshold,
         check_compile: args.check_compile,
         weights,
-        expand: args.expand,
+        basis: if args.expand {
+            sordec_score::BasisProfile::rfp_default()
+        } else {
+            sordec_score::BasisProfile::source_only()
+        },
     };
     let report = match sordec_score::score_paths(&args.reconstructed, &args.original, &opts) {
         Ok(report) => report,
@@ -823,6 +829,7 @@ fn render_score_text(
 
     writeln!(out, "scorer version: {}", report.scorer_version)?;
     writeln!(out, "weights profile: {}", report.weights_profile)?;
+    writeln!(out, "basis profile:   {}", report.basis_profile)?;
     let verdict = if report.passed { "PASS" } else { "FAIL" };
     writeln!(
         out,

@@ -15,7 +15,7 @@
 
 use serde::Serialize;
 
-use crate::config::WeightProfile;
+use crate::config::{BasisProfile, WeightProfile};
 use crate::metrics;
 
 /// Version of the scoring algorithm + the default weights. Bumped on any
@@ -131,8 +131,10 @@ pub struct ScoreReport {
     /// The scoring algorithm version this report was produced by.
     pub scorer_version: &'static str,
     /// The weights profile this report was scored under. Together with
-    /// `scorer_version` it reproduces the score.
+    /// `scorer_version` and `basis_profile` it reproduces the score.
     pub weights_profile: String,
+    /// The source-basis profile each AST category was scored on.
+    pub basis_profile: String,
     /// Weighted mean of the *checked* category sub-scores.
     pub overall: f64,
     /// `overall >= threshold`.
@@ -158,7 +160,12 @@ impl ScoreReport {
     /// credits an unrun check. When no category is checked, `overall` is
     /// `0.0`.
     #[must_use]
-    pub fn aggregate(mut categories: Categories, profile: &WeightProfile, threshold: f64) -> Self {
+    pub fn aggregate(
+        mut categories: Categories,
+        profile: &WeightProfile,
+        basis: &BasisProfile,
+        threshold: f64,
+    ) -> Self {
         // Inject each category's weight from the profile. A canonical category
         // name is always present in a profile, so `weight_of` is `Some`;
         // `unwrap_or(0.0)` keeps it panic-free regardless.
@@ -181,6 +188,7 @@ impl ScoreReport {
         Self {
             scorer_version: SCORER_VERSION,
             weights_profile: profile.name.clone(),
+            basis_profile: basis.name.clone(),
             overall,
             passed: overall >= threshold,
             threshold,
@@ -213,7 +221,12 @@ mod tests {
             semantic: cat(1.0),
             compilation: cat(1.0),
         };
-        let report = ScoreReport::aggregate(categories, &WeightProfile::rfp_default(), 0.90);
+        let report = ScoreReport::aggregate(
+            categories,
+            &WeightProfile::rfp_default(),
+            &BasisProfile::source_only(),
+            0.90,
+        );
         assert!((report.overall - 1.0).abs() < 1e-9);
         assert!(report.passed);
     }
@@ -228,7 +241,12 @@ mod tests {
             semantic: cat(1.0),
             compilation: CategoryScore::unchecked("compile check not requested"),
         };
-        let report = ScoreReport::aggregate(categories, &WeightProfile::rfp_default(), 0.90);
+        let report = ScoreReport::aggregate(
+            categories,
+            &WeightProfile::rfp_default(),
+            &BasisProfile::source_only(),
+            0.90,
+        );
         assert!((report.overall - 1.0).abs() < 1e-9);
         assert!(report.passed);
     }
@@ -244,8 +262,7 @@ mod tests {
             compilation: cat(1.0),
         };
         let names: Vec<&'static str> = categories.pairs().iter().map(|(n, _)| *n).collect();
-        let weight_names: Vec<&'static str> =
-            metrics::WEIGHTS.iter().map(|(n, _)| *n).collect();
+        let weight_names: Vec<&'static str> = metrics::WEIGHTS.iter().map(|(n, _)| *n).collect();
         assert_eq!(names, weight_names);
 
         let value = serde_json::to_value(&categories).expect("serialize");
@@ -265,7 +282,12 @@ mod tests {
             semantic: cat(1.0),
             compilation: CategoryScore::unchecked("skipped"),
         };
-        let report = ScoreReport::aggregate(categories, &WeightProfile::rfp_default(), 0.90);
+        let report = ScoreReport::aggregate(
+            categories,
+            &WeightProfile::rfp_default(),
+            &BasisProfile::source_only(),
+            0.90,
+        );
         // checked weights: 0.30 + 0.25 + 0.30 = 0.85; sum = 0.5*0.30 + 0.55 = 0.70
         let expected = (0.5 * 0.30 + 1.0 * 0.25 + 1.0 * 0.30) / 0.85;
         assert!((report.overall - expected).abs() < 1e-9);
@@ -297,10 +319,18 @@ mod tests {
             semantic: 0.0,
             compilation: 0.0,
         };
-        let a = ScoreReport::aggregate(cats(), &heavy_interface, 0.90);
-        let b = ScoreReport::aggregate(cats(), &heavy_structure, 0.90);
-        assert!((a.overall - 1.0).abs() < 1e-9, "all weight on the perfect category");
-        assert!((b.overall - 0.0).abs() < 1e-9, "all weight on the zero category");
+        let a =
+            ScoreReport::aggregate(cats(), &heavy_interface, &BasisProfile::source_only(), 0.90);
+        let b =
+            ScoreReport::aggregate(cats(), &heavy_structure, &BasisProfile::source_only(), 0.90);
+        assert!(
+            (a.overall - 1.0).abs() < 1e-9,
+            "all weight on the perfect category"
+        );
+        assert!(
+            (b.overall - 0.0).abs() < 1e-9,
+            "all weight on the zero category"
+        );
     }
 
     #[test]
@@ -311,7 +341,12 @@ mod tests {
             semantic: cat(1.0),
             compilation: CategoryScore::unchecked("skipped"),
         };
-        let default = ScoreReport::aggregate(cats(), &WeightProfile::rfp_default(), 0.90);
+        let default = ScoreReport::aggregate(
+            cats(),
+            &WeightProfile::rfp_default(),
+            &BasisProfile::source_only(),
+            0.90,
+        );
         assert_eq!(default.weights_profile, "rfp-default");
 
         let named = WeightProfile {
@@ -321,7 +356,7 @@ mod tests {
             semantic: 0.3,
             compilation: 0.1,
         };
-        let report = ScoreReport::aggregate(cats(), &named, 0.90);
+        let report = ScoreReport::aggregate(cats(), &named, &BasisProfile::source_only(), 0.90);
         assert_eq!(report.weights_profile, "aggressive");
     }
 }

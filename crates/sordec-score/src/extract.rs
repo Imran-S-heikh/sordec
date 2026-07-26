@@ -132,7 +132,8 @@ impl<'a> Visit<'a> for BindingCollector<'a> {
         if let syn::Pat::Ident(pat_ident) = &node.pat
             && let Some(init) = &node.init
         {
-            self.bindings.insert(pat_ident.ident.to_string(), &init.expr);
+            self.bindings
+                .insert(pat_ident.ident.to_string(), &init.expr);
         }
         visit::visit_local(self, node);
     }
@@ -279,10 +280,7 @@ fn storage_op(method: &str) -> StorageOp {
 }
 
 fn is_cosmetic(method: &str) -> bool {
-    matches!(
-        method,
-        "clone" | "into" | "as_ref" | "to_owned" | "borrow"
-    )
+    matches!(method, "clone" | "into" | "as_ref" | "to_owned" | "borrow")
 }
 
 #[cfg(test)]
@@ -341,6 +339,35 @@ mod tests {
     }
 
     #[test]
+    fn panic_macro_is_recognized_but_its_expanded_call_is_not() {
+        // This asymmetry is *why* the semantic category stays on the
+        // pre-expansion basis (score-2.0.0 T9, `BasisProfile::rfp_default`).
+        //
+        // Panics are recognized only in macro form, via `visit_macro`.
+        // `cargo expand` rewrites `panic!()` into a `::core::panicking::*`
+        // call this extractor cannot see, so scoring semantic on expanded
+        // input silently drops the fact — and drops it far more often from
+        // our reconstruction (60 panics on token-v23) than from the original
+        // (5), inflating precision 0.3049 → 0.9091 purely by hiding our own
+        // over-production.
+        let macro_form = facts_of(r#"fn f() { panic!("boom"); }"#);
+        assert!(
+            macro_form.contains(&"panic:bare".to_string()),
+            "the macro form must be recognized: {macro_form:?}"
+        );
+
+        let expanded_form = facts_of(r#"fn f() { ::core::panicking::panic_explicit(); }"#);
+        assert!(
+            !expanded_form.iter().any(|key| key.starts_with("panic:")),
+            "expanded panics are invisible to this vocabulary: {expanded_form:?}"
+        );
+
+        // When T16 teaches `extract` the post-expansion forms, this assertion
+        // fails. That is deliberate: the semantic basis decision must be
+        // re-argued at that point, not silently inherited.
+    }
+
+    #[test]
     fn cross_contract_needs_a_client_receiver() {
         // `.transfer` on a token client is a cross-contract call…
         let client = facts_of(
@@ -376,7 +403,8 @@ mod tests {
 
     #[test]
     fn a_swapped_tier_changes_the_fact() {
-        let persistent = facts_of("fn f(e: Env, k: DataKey) { e.storage().persistent().set(&k, &1); }");
+        let persistent =
+            facts_of("fn f(e: Env, k: DataKey) { e.storage().persistent().set(&k, &1); }");
         let instance = facts_of("fn f(e: Env, k: DataKey) { e.storage().instance().set(&k, &1); }");
         assert_ne!(persistent, instance);
     }
