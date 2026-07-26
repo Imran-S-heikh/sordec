@@ -14,16 +14,18 @@
 //!   literal.
 //! - **`Inferred`** — derived by propagation (an arithmetic result, a phi
 //!   join, a value flowing to a typed return). Evidence, not proof.
-//! - **`Unknown`** — genuinely undetermined, or a phi whose arms disagree.
-//!   Never a default guess.
+//! - **`Unknown`** — genuinely undetermined, a phi whose arms disagree, or a
+//!   binding two inferences conflicted on. Never a default guess.
 //!
 //! The lattice is **monotonic** (`Unknown < Inferred < Known`): a binding's
-//! type only ever rises in certainty, and an equal-rank candidate never
-//! displaces the incumbent. That guarantees the fixpoint terminates and is
-//! order-deterministic. A binding the recognizers already proved (`Known`)
-//! is never overwritten.
+//! type only ever rises in certainty, and an equal-rank candidate of the
+//! *same* base never displaces the incumbent. The one exception is a genuine
+//! conflict — an equal-rank candidate of a *different* base — which reverts
+//! the binding to `Unknown` and freezes it there, so the fixpoint still
+//! terminates and stays order-deterministic. A binding the recognizers
+//! already proved (`Known`) is never overwritten.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sordec_common::{Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
@@ -77,19 +79,23 @@ impl Pass<HighIr> for TypeInferPass {
 fn infer_function(func: &mut HighFunction) -> bool {
     let mut types: HashMap<ValueId, IrType> =
         func.bindings.iter().map(|(id, b)| (id, b.ty.clone())).collect();
+    // Ids whose evidence conflicted: they revert to `Unknown` and stay there,
+    // so re-derivation can never resurrect one of the conflicting types (and
+    // the fixpoint still terminates).
+    let mut conflicted: HashSet<ValueId> = HashSet::new();
 
-    seed_abi(func, &mut types);
+    seed_abi(func, &mut types, &mut conflicted);
 
     for _ in 0..MAX_ROUNDS {
         let mut round_changed = false;
         // Forward: each binding's type from its own expression.
         for (id, binding) in func.bindings.iter() {
             if let Some(cand) = infer_expr(&binding.expr, &types) {
-                round_changed |= improve(&mut types, id, cand);
+                round_changed |= improve(&mut types, &mut conflicted, id, cand);
             }
         }
         // Backward: uses constrain their operands / returned values.
-        round_changed |= backward(func, &mut types);
+        round_changed |= backward(func, &mut types, &mut conflicted);
         if !round_changed {
             break;
         }
@@ -102,15 +108,27 @@ fn infer_function(func: &mut HighFunction) -> bool {
         let Some(cand) = types.get(&id).cloned() else {
             continue;
         };
-        if let Some(binding) = func.bindings.get_mut(id)
-            && rank(&cand) > rank(&binding.ty)
-        {
+        let Some(binding) = func.bindings.get_mut(id) else {
+            continue;
+        };
+        if rank(&cand) > rank(&binding.ty) {
             let note = format!("type-propagation: {}", describe(&cand));
             binding.ty = cand;
             binding.add_provenance(Provenance::new(
                 PASS_NAME,
                 ProvenanceSource::TypePropagation,
                 note,
+            ));
+            changed = true;
+        } else if conflicted.contains(&id) && rank(&binding.ty) > 0 {
+            // Conflicting evidence retracts an earlier commitment: never keep
+            // one side silently — leave the binding honestly `Unknown`.
+            binding.ty =
+                IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence);
+            binding.add_provenance(Provenance::new(
+                PASS_NAME,
+                ProvenanceSource::TypePropagation,
+                "conflicting type evidence — left Unknown".to_string(),
             ));
             changed = true;
         }
@@ -120,7 +138,11 @@ fn infer_function(func: &mut HighFunction) -> bool {
 
 /// Seed the entry parameters and returned values from the `contractspecv0`
 /// signature — the proven ABI boundary (`Known`).
-fn seed_abi(func: &HighFunction, types: &mut HashMap<ValueId, IrType>) {
+fn seed_abi(
+    func: &HighFunction,
+    types: &mut HashMap<ValueId, IrType>,
+    conflicted: &mut HashSet<ValueId>,
+) {
     let Some(sig) = &func.signature else {
         return;
     };
@@ -128,10 +150,10 @@ fn seed_abi(func: &HighFunction, types: &mut HashMap<ValueId, IrType>) {
     // logical arg in the Soroban ABI).
     for (param, input) in func.params.iter().zip(&sig.inputs) {
         if let Some(ty) = type_ref_to_ir(&input.ty, Certainty::Known) {
-            improve(types, *param, ty);
+            improve(types, conflicted, *param, ty);
         }
     }
-    seed_returns(func, sig, types);
+    seed_returns(func, sig, types, conflicted);
 }
 
 /// Back-type each returned value from the signature's return type. The
@@ -141,11 +163,12 @@ fn seed_returns(
     func: &HighFunction,
     sig: &FunctionSignature,
     types: &mut HashMap<ValueId, IrType>,
+    conflicted: &mut HashSet<ValueId>,
 ) {
     for site in &func.returns {
         for (value, out) in site.iter().zip(&sig.outputs) {
             if let Some(ty) = type_ref_to_ir(out, Certainty::Inferred) {
-                improve(types, *value, ty);
+                improve(types, conflicted, *value, ty);
             }
         }
     }
@@ -153,23 +176,31 @@ fn seed_returns(
 
 /// Backward rules: propagate from a use back to its operands. Returns
 /// whether anything improved this round.
-fn backward(func: &HighFunction, types: &mut HashMap<ValueId, IrType>) -> bool {
+fn backward(
+    func: &HighFunction,
+    types: &mut HashMap<ValueId, IrType>,
+    conflicted: &mut HashSet<ValueId>,
+) -> bool {
     let mut changed = false;
     for (_, binding) in func.bindings.iter() {
         match &binding.expr {
-            // Arithmetic: both operands share the result's integer type.
+            // Numeric arithmetic: both operands share the numeric type. A
+            // bitwise op that involves a logical type (`address & 255`) is a
+            // tag extraction, not shared-type arithmetic — so only a *numeric*
+            // base propagates; a logical base is never forced onto an operand.
             Expr::Binary { op, lhs, rhs } if is_arithmetic(*op) => {
-                if let Some(base) = base_of(types.get(lhs)).or_else(|| base_of(types.get(rhs))) {
-                    changed |= improve(types, *lhs, IrType::Inferred(base.clone()));
-                    changed |= improve(types, *rhs, IrType::Inferred(base));
+                if let Some(base) = numeric_base(types.get(lhs), types.get(rhs)) {
+                    changed |= improve(types, conflicted, *lhs, IrType::Inferred(base.clone()));
+                    changed |= improve(types, conflicted, *rhs, IrType::Inferred(base));
                 }
             }
             // Comparison: the two operands share one type (the result is
-            // `bool`, handled forward).
+            // `bool`, handled forward). Logical types compare (`addr == addr`),
+            // so this is not gated on `is_numeric`.
             Expr::Binary { op, lhs, rhs } if is_comparison(*op) => {
                 if let Some(base) = base_of(types.get(lhs)).or_else(|| base_of(types.get(rhs))) {
-                    changed |= improve(types, *lhs, IrType::Inferred(base.clone()));
-                    changed |= improve(types, *rhs, IrType::Inferred(base));
+                    changed |= improve(types, conflicted, *lhs, IrType::Inferred(base.clone()));
+                    changed |= improve(types, conflicted, *rhs, IrType::Inferred(base));
                 }
             }
             // Host-call arguments and conversions: back-type the operands
@@ -177,7 +208,7 @@ fn backward(func: &HighFunction, types: &mut HashMap<ValueId, IrType>) -> bool {
             // "conversions" categories).
             Expr::Semantic(SemanticOp::Known(op)) => {
                 for (arg, ty) in semantic_arg_types(op) {
-                    changed |= improve(types, arg, IrType::Inferred(ty));
+                    changed |= improve(types, conflicted, arg, IrType::Inferred(ty));
                 }
             }
             _ => {}
@@ -223,9 +254,13 @@ fn phi_join(
 
 fn unary_result(op: UnaryOp, operand: Option<&IrType>) -> Option<IrType> {
     match op {
-        // Sign/bit flips preserve the operand's numeric type.
+        // Sign/bit flips preserve the operand's numeric type — but only a
+        // numeric one. A bit-flip of a logical type is a raw-integer op, not
+        // the logical type.
         UnaryOp::Neg | UnaryOp::Not | UnaryOp::BitNot | UnaryOp::Abs => {
-            base_of(operand).map(IrType::Inferred)
+            base_of(operand)
+                .filter(KnownType::is_numeric)
+                .map(IrType::Inferred)
         }
         // Bit-count intrinsics yield u32.
         UnaryOp::Clz | UnaryOp::Ctz | UnaryOp::Popcnt => Some(IrType::Inferred(KnownType::U32)),
@@ -238,9 +273,11 @@ fn binary_result(op: BinaryOp, lhs: Option<&IrType>, rhs: Option<&IrType>) -> Op
     if is_comparison(op) {
         return Some(IrType::Inferred(KnownType::Bool));
     }
-    // Arithmetic / bitwise: the result is the shared integer type of the
-    // operands (whichever side is known).
-    base_of(lhs).or_else(|| base_of(rhs)).map(IrType::Inferred)
+    // Arithmetic / bitwise: the result is the *numeric* type of a numeric
+    // operand. A bitwise op on a logical type (`address & 255`) extracts a
+    // tag/integer, not the logical type, so a logical base never becomes the
+    // result — it is left `Unknown` (or takes the numeric operand's type).
+    numeric_base(lhs, rhs).map(IrType::Inferred)
 }
 
 /// ABI-pinned types of a recovered op's operands: the "host-call
@@ -351,19 +388,51 @@ fn base_of(t: Option<&IrType>) -> Option<KnownType> {
     }
 }
 
+/// The first *numeric* operand base of an arithmetic/bitwise op, or `None`.
+/// A logical base (`Address`, `Bytes`, `Val`, …) is skipped: masking or
+/// combining such a value yields an integer, not the logical type, so it must
+/// not propagate to (or from) the result.
+fn numeric_base(lhs: Option<&IrType>, rhs: Option<&IrType>) -> Option<KnownType> {
+    [base_of(lhs), base_of(rhs)]
+        .into_iter()
+        .flatten()
+        .find(KnownType::is_numeric)
+}
+
 /// Raise `types[id]` to `cand` iff `cand` is strictly higher certainty.
 /// Monotonic: equal rank never displaces the incumbent, so the fixpoint
 /// converges and is order-deterministic.
-fn improve(types: &mut HashMap<ValueId, IrType>, id: ValueId, cand: IrType) -> bool {
+fn improve(
+    types: &mut HashMap<ValueId, IrType>,
+    conflicted: &mut HashSet<ValueId>,
+    id: ValueId,
+    cand: IrType,
+) -> bool {
+    // A conflicted id is a terminal `Unknown`: never resurrect a type for it.
+    // This also keeps the fixpoint monotonic and terminating.
+    if conflicted.contains(&id) {
+        return false;
+    }
+    let cand_rank = rank(&cand);
     let slot = types.entry(id).or_insert(IrType::Unknown(
         sordec_common::UnknownReason::InsufficientEvidence,
     ));
-    if rank(&cand) > rank(slot) {
+    let slot_rank = rank(slot);
+    if cand_rank > slot_rank {
         *slot = cand;
-        true
-    } else {
-        false
+        return true;
     }
+    // Same certainty rank but a different base = conflicting evidence. Revert
+    // to `Unknown` rather than silently keeping the incumbent (keep-first).
+    if cand_rank == slot_rank
+        && cand_rank > 0
+        && base_of(Some(&*slot)) != base_of(Some(&cand))
+    {
+        *slot = IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence);
+        conflicted.insert(id);
+        return true;
+    }
+    false
 }
 
 /// A terse type description for the provenance note.
@@ -467,18 +536,57 @@ mod tests {
     #[test]
     fn lattice_only_upgrades() {
         let mut m = HashMap::new();
+        let mut conflicted = HashSet::new();
         let id = ValueId::from_index(0);
         m.insert(id, unknown());
         // Unknown → Inferred upgrades.
-        assert!(improve(&mut m, id, IrType::Inferred(KnownType::U64)));
-        // Inferred → Inferred of a different base does NOT displace (stable).
-        assert!(!improve(&mut m, id, IrType::Inferred(KnownType::I64)));
+        assert!(improve(&mut m, &mut conflicted, id, IrType::Inferred(KnownType::U64)));
+        // Inferred → Inferred of the SAME base does not displace (stable).
+        assert!(!improve(&mut m, &mut conflicted, id, IrType::Inferred(KnownType::U64)));
         assert_eq!(m[&id], IrType::Inferred(KnownType::U64));
         // Inferred → Known upgrades.
-        assert!(improve(&mut m, id, IrType::Known(KnownType::U64)));
-        // Known is never downgraded.
-        assert!(!improve(&mut m, id, IrType::Inferred(KnownType::Bool)));
+        assert!(improve(&mut m, &mut conflicted, id, IrType::Known(KnownType::U64)));
+        // Known is never downgraded by a lower-rank candidate.
+        assert!(!improve(&mut m, &mut conflicted, id, IrType::Inferred(KnownType::Bool)));
         assert_eq!(m[&id], IrType::Known(KnownType::U64));
+    }
+
+    #[test]
+    fn conflicting_inferences_revert_to_unknown_and_stick() {
+        // Two same-rank inferences of different bases must NOT keep-first —
+        // they revert the binding to Unknown, and that decision is sticky.
+        let mut m = HashMap::new();
+        let mut conflicted = HashSet::new();
+        let id = ValueId::from_index(0);
+        m.insert(id, unknown());
+        assert!(improve(&mut m, &mut conflicted, id, IrType::Inferred(KnownType::U64)));
+        // Conflict: reverts to Unknown (returns true — the slot changed).
+        assert!(improve(&mut m, &mut conflicted, id, IrType::Inferred(KnownType::Address)));
+        assert!(matches!(m[&id], IrType::Unknown(_)), "reverted to Unknown");
+        assert!(conflicted.contains(&id));
+        // Sticky: not even a later Known resurrects a type.
+        assert!(!improve(&mut m, &mut conflicted, id, IrType::Known(KnownType::U64)));
+        assert!(matches!(m[&id], IrType::Unknown(_)), "still Unknown");
+    }
+
+    #[test]
+    fn bitwise_on_logical_type_is_not_the_logical_type() {
+        let addr = IrType::Known(KnownType::Address);
+        let u32t = IrType::Known(KnownType::U32);
+        // `address & 255`: the masked result is the integer tag, never Address.
+        assert_eq!(
+            binary_result(BinaryOp::BitAnd, Some(&addr), Some(&u32t)),
+            Some(IrType::Inferred(KnownType::U32))
+        );
+        // No numeric operand at all → nothing honest to say (never Address).
+        assert_eq!(binary_result(BinaryOp::BitAnd, Some(&addr), Some(&addr)), None);
+        // A bit-flip of a logical type is likewise not that type.
+        assert_eq!(unary_result(UnaryOp::BitNot, Some(&addr)), None);
+        // Real integer arithmetic is unaffected.
+        assert_eq!(
+            binary_result(BinaryOp::Shr, Some(&IrType::Known(KnownType::U64)), None),
+            Some(IrType::Inferred(KnownType::U64))
+        );
     }
 
     // ---- expression rules ----
