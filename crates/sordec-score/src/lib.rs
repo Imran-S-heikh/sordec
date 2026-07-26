@@ -29,6 +29,7 @@ mod error;
 mod expand;
 mod extract;
 mod facts;
+mod glue;
 mod interface;
 mod loader;
 pub mod metrics;
@@ -153,10 +154,19 @@ fn load_basis(
     if opts.expand {
         match (expand::expand(reconstructed), expand::expand(original)) {
             (Ok(recon_text), Ok(orig_text)) => {
+                // Expanded source is mostly SDK-generated glue; scoring it raw
+                // would count macro output as failed reconstruction. The same
+                // pass harvests the ABI ground truth (consumed from T10).
+                let recon = glue::canonicalize(loader::load_str(&recon_text, "reconstructed")?);
+                let orig = glue::canonicalize(loader::load_str(&orig_text, "original")?);
+                let mut note = "basis: macro-expanded".to_owned();
+                if let Some(summary) = orig.abi_summary() {
+                    note.push_str(&format!(" — original {summary}"));
+                }
                 return Ok(Basis {
-                    recon: loader::load_str(&recon_text, "reconstructed")?,
-                    orig: loader::load_str(&orig_text, "original")?,
-                    note: Some("basis: macro-expanded".to_owned()),
+                    recon: recon.file,
+                    orig: orig.file,
+                    note: Some(note),
                 });
             }
             (Err(why), _) | (_, Err(why)) => {
