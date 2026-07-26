@@ -1,21 +1,28 @@
-//! Category weights and canonical category names — the one place these
+//! Category names and the default category weights — the one place these
 //! constants are defined.
 //!
 //! The overall score is a weighted mean of the four category sub-scores.
-//! Weights live here as named consts (not scattered literals) so a change
-//! is a single, reviewable, version-bumping edit. The category **names**
-//! live here too and are the exact JSON object keys the report emits.
+//! The **default** weights live here as named consts (not scattered
+//! literals); a change to one is a single, reviewable, version-bumping edit.
+//! Runtime overrides come from a [`WeightProfile`], which defaults to these
+//! values. The category **names** live here too and are the exact JSON
+//! object keys the report emits.
 //!
 //! ## Drift protection
 //!
 //! This mirrors the `sordec-passes` `metrics_catalog` idiom: one owner for
 //! the strings, guarded rather than trusted. [`WEIGHTS`] pairs every
-//! category name with its weight; a unit test asserts the weights sum to
-//! 1.0 and that the report's serialized keys equal these names. Renaming a
-//! category or nudging a weight without updating this table trips that
-//! test — and, by the freeze policy, must bump [`SCORER_VERSION`].
+//! category name with its default weight. A unit test here asserts the names
+//! are unique; `report`'s drift test asserts the report's serialized keys
+//! equal these names; and the "default weights sum to 1.0" guard lives with
+//! the default profile ([`WeightProfile::rfp_default`], now that weights are
+//! runtime-configurable). Renaming a category or nudging a default weight
+//! trips those tests — and, by the freeze policy, a default-weight change
+//! must bump [`SCORER_VERSION`].
 //!
 //! [`SCORER_VERSION`]: crate::report::SCORER_VERSION
+//! [`WeightProfile`]: crate::WeightProfile
+//! [`WeightProfile::rfp_default`]: crate::WeightProfile::rfp_default
 
 /// Interface category: public entrypoint signatures + `#[contracttype]`
 /// shapes. Highest-weighted alongside semantic — the contract's declared
@@ -51,30 +58,9 @@ pub const WEIGHTS: [(&str, f64); 4] = [
     (COMPILATION, COMPILATION_WEIGHT),
 ];
 
-/// Look up a category's weight by name. Panics on an unknown name — the
-/// names are compile-time consts from this module, so a miss is a bug, not
-/// a runtime condition.
-#[must_use]
-pub fn weight_of(category: &str) -> f64 {
-    WEIGHTS
-        .iter()
-        .find(|(name, _)| *name == category)
-        .map(|(_, w)| *w)
-        .unwrap_or_else(|| panic!("unknown scorer category: {category}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn weights_sum_to_one() {
-        let total: f64 = WEIGHTS.iter().map(|(_, w)| *w).sum();
-        assert!(
-            (total - 1.0).abs() < f64::EPSILON,
-            "category weights must sum to 1.0, got {total}"
-        );
-    }
 
     #[test]
     fn category_names_are_unique() {

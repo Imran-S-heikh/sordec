@@ -14,12 +14,12 @@
 //! categories (`report::ScoreReport::aggregate`), so a profile's weights need
 //! not sum to `1.0` — only their ratios matter.
 //!
-//! This module is intentionally standalone in T1: the type is defined,
-//! loaded, and validated here, but is not yet applied at aggregation (that is
-//! T2). It therefore moves no score and does not bump [`SCORER_VERSION`].
+//! The profile is applied at aggregation (`ScoreReport::aggregate`) and its
+//! name is recorded in every report. A run that supplies no profile uses
+//! [`WeightProfile::rfp_default`], so the default path scores identically to
+//! `score-1.0.0` and moves no score.
 //!
 //! [`metrics::INTERFACE_WEIGHT`]: crate::metrics::INTERFACE_WEIGHT
-//! [`SCORER_VERSION`]: crate::SCORER_VERSION
 
 use std::path::Path;
 
@@ -125,8 +125,8 @@ impl WeightProfile {
 
     /// The weight for a canonical category name (see [`metrics`]), or `None`
     /// if `category` is not one of the four categories. Returns `None` rather
-    /// than panicking (unlike [`metrics::weight_of`]) because the name may
-    /// come from runtime input.
+    /// than panicking on an unknown name, since the name may come from runtime
+    /// input.
     #[must_use]
     pub fn weight_of(&self, category: &str) -> Option<f64> {
         self.pairs()
