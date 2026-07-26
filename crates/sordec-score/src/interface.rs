@@ -38,11 +38,25 @@ use syn::{FnArg, Fields, ImplItem, Item, ReturnType};
 use crate::canon;
 use crate::report::CategoryScore;
 use crate::simil;
+use crate::spec;
 
 /// Score the interface category.
-pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> CategoryScore {
-    let recon = extract(reconstructed);
-    let orig = extract(original);
+///
+/// `spec` carries the two sides' harvested spec-XDR entries when scoring on
+/// the macro-expanded basis. It is the ABI ground truth and takes precedence:
+/// expansion consumes the `#[contractimpl]` / `#[contracttype]` attributes
+/// this module's own extractor keys on, so without it the expanded basis
+/// yields nothing to compare. `None` — the pre-expansion basis — falls back to
+/// the attribute extractor.
+pub(crate) fn evaluate(
+    reconstructed: &syn::File,
+    original: &syn::File,
+    spec: Option<(&spec::SpecMap, &spec::SpecMap)>,
+) -> CategoryScore {
+    let (recon, orig) = match spec {
+        Some((recon_spec, orig_spec)) => (spec::abi(recon_spec), spec::abi(orig_spec)),
+        None => (extract(reconstructed), extract(original)),
+    };
 
     let Some(outcome) = f1(&recon, &orig) else {
         return CategoryScore::unchecked("no ABI items on either side — nothing to measure");
@@ -234,7 +248,7 @@ mod tests {
     #[test]
     fn identical_interface_scores_one() {
         let f = file(CONTRACT);
-        let score = evaluate(&f, &f);
+        let score = evaluate(&f, &f, None);
         assert!((score.score - 1.0).abs() < 1e-9);
     }
 
@@ -257,7 +271,7 @@ mod tests {
             }
             "#,
         );
-        assert!((evaluate(&recon, &orig).score - 1.0).abs() < 1e-9);
+        assert!((evaluate(&recon, &orig, None).score - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -274,7 +288,7 @@ mod tests {
             "#,
         );
         // Dropped `balance` (1 of 3 ABI items) → score below 1.
-        let score = evaluate(&recon, &orig);
+        let score = evaluate(&recon, &orig, None);
         assert!(score.score < 1.0, "score was {}", score.score);
     }
 
@@ -294,7 +308,7 @@ mod tests {
         );
         // `mint`'s amount type changed i128 → u64: wrong sig hurts both
         // precision and recall.
-        assert!(evaluate(&recon, &orig).score < 1.0);
+        assert!(evaluate(&recon, &orig, None).score < 1.0);
     }
 
     #[test]
@@ -304,7 +318,7 @@ mod tests {
         // 1.0 here is the false perfect T8 removes — it is exactly what a
         // macro-expanded input (which consumes those attributes) would hit.
         let f = file("pub fn helper() {}");
-        let score = evaluate(&f, &f);
+        let score = evaluate(&f, &f, None);
         assert!(!score.checked, "a 0-item extraction must not be checked");
         assert_ne!(score.score, 1.0);
     }
@@ -315,7 +329,7 @@ mod tests {
         // 0 reconstructed, reported as precision=1.0000.
         let orig = file(CONTRACT);
         let recon = file("pub fn unrelated() {}");
-        let score = evaluate(&recon, &orig);
+        let score = evaluate(&recon, &orig, None);
         assert!(score.checked, "the original has items — this is measurable");
         assert_eq!(score.score, 0.0);
         let note = score.notes.first().expect("a summary note");

@@ -15,6 +15,12 @@ repository.workspace = true
 # skeleton walk; features are additive across the workspace.
 syn = { workspace = true, features = ["visit"] }
 quote.workspace = true
+# The contract's declared ABI is XDR in the wasm's `contractspecv0` section and,
+# post-expansion, in the SDK's generated `spec_xdr_*` consts. Decoding it is how
+# the interface category reads ground truth (T10). This is a third-party format
+# library, not one of the pipeline crates the scorer grades — the independence
+# rule above is about the latter.
+stellar-xdr.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 toml.workspace = true

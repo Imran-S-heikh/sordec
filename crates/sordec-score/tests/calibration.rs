@@ -216,6 +216,68 @@ fn the_split_basis_moves_structure_but_not_semantic() {
     );
 }
 
+/// The interface category survives macro expansion by reading the spec-XDR
+/// (score-2.0.0 T10).
+///
+/// Before T10 this reported `unchecked` on every fixture: expansion consumes
+/// the `#[contractimpl]` / `#[contracttype]` attributes the extractor keyed
+/// on, and T8 correctly refuses to score a zero-item extraction. That was the
+/// blocker holding back the default-basis flip.
+///
+/// `#[ignore]`d because it shells out to `cargo expand`.
+#[test]
+#[ignore = "shells out to cargo expand against soroban-sdk (slow)"]
+fn interface_is_measurable_on_the_expanded_basis() {
+    let dir = fixture_src("token-v23");
+    let report = score_paths(
+        &dir,
+        &dir,
+        &ScoreOptions {
+            basis: sordec_score::BasisProfile::rfp_default(),
+            ..opts()
+        },
+    )
+    .expect("score");
+
+    assert!(
+        report.categories.interface.checked,
+        "interface must read the ABI from the spec, not from consumed attributes: {:?}",
+        report.categories.interface.notes
+    );
+    // Identity: the fixture against itself is a perfect ABI match.
+    assert_eq!(report.categories.interface.score, 1.0);
+}
+
+/// Doc comments do not cost interface score, end to end (score-2.0.0 T10).
+///
+/// attestation is the only corpus fixture whose entrypoints carry doc
+/// comments, and they land in the spec-XDR. Comparing raw spec bytes scores it
+/// 0 of 7 purely for docs our reconstruction does not emit; docs are excluded
+/// at every nesting level, so a reconstruction with a correct ABI scores as
+/// correct. This is the fixture that proves it on real expanded output rather
+/// than on hand-built bytes.
+#[test]
+#[ignore = "shells out to cargo expand against soroban-sdk (slow)"]
+fn documented_entrypoints_do_not_cost_interface_score() {
+    let dir = fixture_src("attestation");
+    let report = score_paths(
+        &dir,
+        &dir,
+        &ScoreOptions {
+            basis: sordec_score::BasisProfile::rfp_default(),
+            ..opts()
+        },
+    )
+    .expect("score");
+
+    assert!(report.categories.interface.checked);
+    assert_eq!(
+        report.categories.interface.score, 1.0,
+        "documented entrypoints must still compare equal: {:?}",
+        report.categories.interface.notes
+    );
+}
+
 // ---------------------------------------------------------------------
 // A small, realistic contract the invariance + mutation tests transform.
 // ---------------------------------------------------------------------

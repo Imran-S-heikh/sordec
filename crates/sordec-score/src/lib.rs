@@ -37,6 +37,7 @@ mod report;
 mod scratch;
 mod semantic;
 mod simil;
+mod spec;
 mod structure;
 
 use std::path::Path;
@@ -139,6 +140,11 @@ struct Sources {
     /// The expanded, glue-stripped sources; `None` when no category asked for
     /// them or expansion was unavailable.
     expanded: Option<(syn::File, syn::File)>,
+    /// The spec-XDR entries harvested while stripping glue, in the same order
+    /// as `expanded`. The contract's declared ABI, and what the interface
+    /// category scores against on the expanded basis (T10) — the attributes it
+    /// would otherwise key on do not survive expansion.
+    spec: Option<(spec::SpecMap, spec::SpecMap)>,
     /// Run-level notes recording which basis was used, and why if it was not
     /// the one requested.
     notes: Vec<String>,
@@ -150,6 +156,7 @@ impl Sources {
         Self {
             source: (recon, orig),
             expanded: None,
+            spec: None,
             notes: Vec::new(),
         }
     }
@@ -175,6 +182,7 @@ impl Sources {
             return Ok(Self {
                 source,
                 expanded: None,
+                spec: None,
                 notes: Vec::new(),
             });
         }
@@ -193,12 +201,14 @@ impl Sources {
                 Ok(Self {
                     source,
                     expanded: Some((recon.file, orig.file)),
+                    spec: Some((recon.spec, orig.spec)),
                     notes: vec![note],
                 })
             }
             (Err(why), _) | (_, Err(why)) => Ok(Self {
                 source,
                 expanded: None,
+                spec: None,
                 notes: vec![format!(
                     "basis: pre-expansion — macro expansion unavailable ({why})"
                 )],
@@ -217,6 +227,19 @@ impl Sources {
         };
         (recon, orig)
     }
+
+    /// The harvested spec-XDR pair, when a category is scoring on the expanded
+    /// basis and expansion actually produced one.
+    ///
+    /// `None` on the source basis, or when expansion fell back — in both cases
+    /// the caller must use its own source-level extractor, since the spec is
+    /// only visible after expansion.
+    fn spec_for(&self, basis: Basis) -> Option<(&spec::SpecMap, &spec::SpecMap)> {
+        match basis {
+            Basis::Expanded => self.spec.as_ref().map(|(recon, orig)| (recon, orig)),
+            Basis::Source => None,
+        }
+    }
 }
 
 /// Assemble the three AST categories — each on its own basis — plus a
@@ -224,7 +247,7 @@ impl Sources {
 fn assemble(sources: &Sources, compilation: CategoryScore, opts: &ScoreOptions) -> ScoreReport {
     let basis = &opts.basis;
     let (recon, orig) = sources.pair(basis.interface);
-    let interface = interface::evaluate(recon, orig);
+    let interface = interface::evaluate(recon, orig, sources.spec_for(basis.interface));
     let (recon, orig) = sources.pair(basis.structure);
     let structure = structure::evaluate(recon, orig);
     let (recon, orig) = sources.pair(basis.semantic);
@@ -322,6 +345,7 @@ mod tests {
         let sources = Sources {
             source: (source_side.clone(), source_side.clone()),
             expanded: Some((expanded_side.clone(), expanded_side)),
+            spec: None,
             notes: Vec::new(),
         };
         let opts = ScoreOptions {
