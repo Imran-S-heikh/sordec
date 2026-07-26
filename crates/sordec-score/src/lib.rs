@@ -26,12 +26,14 @@ mod canon;
 mod compile;
 pub mod config;
 mod error;
+mod expand;
 mod extract;
 mod facts;
 mod interface;
 mod loader;
 pub mod metrics;
 mod report;
+mod scratch;
 mod semantic;
 mod simil;
 mod structure;
@@ -55,6 +57,18 @@ pub struct ScoreOptions {
     /// Per-category weights for the overall mean. Defaults to
     /// [`WeightProfile::rfp_default`] (the frozen score-1.0.0 weights).
     pub weights: WeightProfile,
+    /// Score the AST categories on **macro-expanded** sources rather than the
+    /// sources as written — the basis the RFP mandates.
+    ///
+    /// Off by default while the harness lands (milestone M2, T6): enabling it
+    /// moves every score, so flipping the default belongs with the
+    /// per-category basis decision and its version bump (T9). Needs a
+    /// toolchain; when expansion is unavailable the run falls back to the
+    /// pre-expansion basis and says so in [`ScoreReport::notes`].
+    ///
+    /// Only [`score_paths`] can honor this — expansion needs source *paths*,
+    /// which a parsed AST does not carry.
+    pub expand: bool,
 }
 
 impl Default for ScoreOptions {
@@ -63,6 +77,7 @@ impl Default for ScoreOptions {
             threshold: 0.90,
             check_compile: false,
             weights: WeightProfile::rfp_default(),
+            expand: false,
         }
     }
 }
@@ -96,14 +111,70 @@ pub fn score_paths(
     original: &Path,
     opts: &ScoreOptions,
 ) -> Result<ScoreReport, ScoreError> {
-    let recon = loader::load(reconstructed, "reconstructed")?;
-    let orig = loader::load(original, "original")?;
+    let basis = load_basis(reconstructed, original, opts)?;
     let compilation = if opts.check_compile {
         compile::check(reconstructed)
     } else {
         CategoryScore::unchecked("compile check not requested")
     };
-    Ok(assemble(&recon, &orig, compilation, &opts.weights, opts.threshold))
+    let report = assemble(
+        &basis.recon,
+        &basis.orig,
+        compilation,
+        &opts.weights,
+        opts.threshold,
+    );
+    Ok(match basis.note {
+        Some(note) => report.with_note(note),
+        None => report,
+    })
+}
+
+/// The parsed sources the AST categories are scored against, plus a note
+/// recording which basis they came from when it is not the default.
+struct Basis {
+    recon: syn::File,
+    orig: syn::File,
+    note: Option<String>,
+}
+
+/// Load both sides, macro-expanding them when requested.
+///
+/// Expansion is best-effort by design: a missing toolchain or an unresolvable
+/// dependency degrades to the pre-expansion basis with the reason recorded,
+/// rather than failing the run or silently scoring zero. Both sides must
+/// expand or neither does — scoring an expanded reconstruction against an
+/// un-expanded original would compare two different kinds of thing.
+fn load_basis(
+    reconstructed: &Path,
+    original: &Path,
+    opts: &ScoreOptions,
+) -> Result<Basis, ScoreError> {
+    if opts.expand {
+        match (expand::expand(reconstructed), expand::expand(original)) {
+            (Ok(recon_text), Ok(orig_text)) => {
+                return Ok(Basis {
+                    recon: loader::load_str(&recon_text, "reconstructed")?,
+                    orig: loader::load_str(&orig_text, "original")?,
+                    note: Some("basis: macro-expanded".to_owned()),
+                });
+            }
+            (Err(why), _) | (_, Err(why)) => {
+                return Ok(Basis {
+                    recon: loader::load(reconstructed, "reconstructed")?,
+                    orig: loader::load(original, "original")?,
+                    note: Some(format!(
+                        "basis: pre-expansion — macro expansion unavailable ({why})"
+                    )),
+                });
+            }
+        }
+    }
+    Ok(Basis {
+        recon: loader::load(reconstructed, "reconstructed")?,
+        orig: loader::load(original, "original")?,
+        note: None,
+    })
 }
 
 /// Assemble the three AST categories plus a supplied compilation category

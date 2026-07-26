@@ -192,6 +192,13 @@ struct ScoreArgs {
     #[arg(long)]
     check_compile: bool,
 
+    /// Score the AST categories on macro-expanded sources (`cargo expand`)
+    /// rather than the sources as written — the basis the RFP mandates.
+    /// Needs a toolchain; falls back to the pre-expansion basis, and says
+    /// so in the report, when expansion is unavailable.
+    #[arg(long)]
+    expand: bool,
+
     /// Overall pass threshold. Defaults to the D4.1 contractual bar.
     #[arg(long, default_value_t = 0.90)]
     threshold: f64,
@@ -772,6 +779,7 @@ fn run_score(args: &ScoreArgs) -> u8 {
         threshold: args.threshold,
         check_compile: args.check_compile,
         weights,
+        expand: args.expand,
     };
     let report = match sordec_score::score_paths(&args.reconstructed, &args.original, &opts) {
         Ok(report) => report,

@@ -123,6 +123,53 @@ fn identity_is_perfect_on_every_fixture() {
     }
 }
 
+/// Identity must survive the change of basis (score-2.0.0 T6).
+///
+/// The macro-expanded basis is a different comparison entirely — generated
+/// glue, desugared control flow, inlined ABI statics — so the anti-Goodhart
+/// guarantee has to be re-established on it, not assumed to carry over. A
+/// source scored against itself is still perfectly reconstructed no matter
+/// which basis it is read on.
+///
+/// `#[ignore]`d because it shells out to `cargo expand` (the `compile`
+/// convention). Run with:
+///   cargo test -p sordec-score -- --ignored
+#[test]
+#[ignore = "shells out to cargo expand against soroban-sdk (slow)"]
+fn identity_is_perfect_on_the_expanded_basis() {
+    // hello-add is the cheapest fixture to expand and exercises the whole
+    // path: crate-root walk-up, expansion of both sides, `load_str`.
+    let dir = fixture_src("hello-add");
+    let opts = ScoreOptions {
+        expand: true,
+        ..opts()
+    };
+    let report = score_paths(&dir, &dir, &opts).expect("score fixture");
+
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("basis: macro-expanded")),
+        "expansion did not actually run — notes: {:?}",
+        report.notes
+    );
+    assert!(
+        (report.overall - 1.0).abs() < 1e-9,
+        "expanded identity overall {} != 1.0",
+        report.overall
+    );
+    for (label, category) in [
+        ("interface", &report.categories.interface),
+        ("structure", &report.categories.structure),
+        ("semantic", &report.categories.semantic),
+    ] {
+        if category.checked {
+            assert_eq!(category.score, 1.0, "expanded {label}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // A small, realistic contract the invariance + mutation tests transform.
 // ---------------------------------------------------------------------

@@ -56,6 +56,21 @@ pub fn load(path: &Path, side: &'static str) -> Result<syn::File, ScoreError> {
     }
 }
 
+/// Load already-in-memory Rust source through the identical filtering path
+/// as [`load`].
+///
+/// The macro-expansion harness ([`crate::expand`]) produces text rather than
+/// a file, and it must be stripped exactly as file input is — otherwise the
+/// two bases would differ by more than expansion.
+///
+/// # Errors
+///
+/// [`ScoreError::Parse`] if `text` is not parseable Rust; `side` names which
+/// input it came from.
+pub fn load_str(text: &str, side: &'static str) -> Result<syn::File, ScoreError> {
+    Ok(strip_file(parse(text, side)?))
+}
+
 /// Collect + merge every non-test `.rs` file under `dir`.
 fn load_dir(dir: &Path, side: &'static str) -> Result<syn::File, ScoreError> {
     let mut files = Vec::new();
@@ -301,6 +316,46 @@ mod tests {
             second.to_token_stream().to_string()
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_str_strips_identically_to_load() {
+        // The expanded basis arrives as text, so it must go through exactly
+        // the same filtering as file input — otherwise the two bases would
+        // differ by more than macro expansion.
+        const SRC: &str = r#"
+            #![no_std]
+            use soroban_sdk::contract;
+            pub fn keep(a: u32) -> u32 { a }
+            #[cfg(test)]
+            mod test { fn helper() {} }
+            #[test]
+            fn dropped() {}
+        "#;
+        let dir = scratch("load_str");
+        let path = dir.join("lib.rs");
+        fs::write(&path, SRC).unwrap();
+
+        let from_file = load(&path, "original").expect("load file");
+        let from_text = load_str(SRC, "original").expect("load text");
+        assert_eq!(fn_names(&from_text), vec!["keep"]);
+        assert_eq!(
+            from_file.to_token_stream().to_string(),
+            from_text.to_token_stream().to_string()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_str_reports_the_side_on_a_parse_error() {
+        let result = load_str("fn (", "reconstructed");
+        assert!(matches!(
+            result,
+            Err(ScoreError::Parse {
+                side: "reconstructed",
+                ..
+            })
+        ));
     }
 
     #[test]
