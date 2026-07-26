@@ -203,12 +203,15 @@ fn backward(
                     changed |= improve(types, conflicted, *rhs, IrType::Inferred(base));
                 }
             }
-            // Host-call arguments and conversions: back-type the operands
-            // the recovered op's ABI pins (Mo's "host-call arguments" +
-            // "conversions" categories).
+            // Host-call arguments and conversions: the recovered op's ABI
+            // *pins* these operand types authoritatively — `val_encode<u32>`'s
+            // argument IS a `u32`, `require_auth`'s receiver IS an `Address`.
+            // They are `Known`, so they win over the weak arithmetic
+            // operand-share guess (a `u32` that is also bit-shifted to build a
+            // `Val` stays a `u32`, it does not become a conflict → `Unknown`).
             Expr::Semantic(SemanticOp::Known(op)) => {
                 for (arg, ty) in semantic_arg_types(op) {
-                    changed |= improve(types, conflicted, arg, IrType::Inferred(ty));
+                    changed |= improve(types, conflicted, arg, IrType::Known(ty));
                 }
             }
             _ => {}
