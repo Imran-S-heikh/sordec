@@ -18,9 +18,33 @@
 //! `match`-desugaring is the emitter's to align, so counting it would create
 //! spurious mismatches.
 //!
-//! Loops keep their kind (`loop:while` / `loop:for` / `loop:loop`) because
-//! recovering the loop *kind* is exactly what the Phase 3 structurer does,
-//! and the scorer should measure that fidelity.
+//! ## Loop unification (score-2.0.0 T13b)
+//!
+//! `while`, `for`, and `loop` all emit a single `loop` token. The governing
+//! rule for this vocabulary is **score what survives compilation, don't score
+//! what doesn't**: a token earns its place only if the information it carries
+//! is actually in the wasm.
+//!
+//! Loop *kind* is not. `for i in 0..n`, `while i < n`, and `loop { … break }`
+//! all lower to near-identical counted loops once LLVM is done; only the
+//! iterator protocol (`for x in collection`) leaves a partial fingerprint, and
+//! reading it back is a guess. Emitting three distinct tokens made guessing
+//! wrong a *full* miss on information the decompiler cannot recover — the
+//! scorer marking down an honest reconstruction for the compiler's choices.
+//!
+//! Loop *presence* and *position* do survive, and still count in full: a
+//! dropped loop, an invented one, or a loop and a branch in the wrong order
+//! all cost score. Branch *arity* survives too (a `match` is a `br_table`
+//! whose size is visible), so `branch:N` stays exact — this is a targeted
+//! collapse, not a general softening.
+//!
+//! **Known limitation:** the stream is flat preorder with no enter/exit
+//! markers, so it records the *sequence* of constructs but not their
+//! *containment* — a nested loop and two sequential loops both reduce to
+//! `[loop, loop]`. Containment does survive compilation and arguably should
+//! be scored; encoding it is a separate vocabulary change, tracked in
+//! `plan/M4_STRUCTURE_DESIGN.md` §7 and pinned by
+//! `containment_depth_is_not_encoded_known_limitation`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -147,19 +171,22 @@ impl<'ast> Visit<'ast> for SkeletonVisitor {
         visit::visit_expr_match(self, node);
     }
 
+    // The three loop forms unify as `loop`: the kind does not survive
+    // optimization, so scoring it would grade a guess (see the module doc).
+
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
         // covers `while` and `while let`.
-        self.tokens.push("loop:while".to_string());
+        self.tokens.push("loop".to_string());
         visit::visit_expr_while(self, node);
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        self.tokens.push("loop:for".to_string());
+        self.tokens.push("loop".to_string());
         visit::visit_expr_for_loop(self, node);
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        self.tokens.push("loop:loop".to_string());
+        self.tokens.push("loop".to_string());
         visit::visit_expr_loop(self, node);
     }
 
@@ -246,10 +273,60 @@ mod tests {
     }
 
     #[test]
-    fn loop_kind_is_distinguished() {
+    fn loop_kind_is_unified() {
+        // T13b: the kind does not survive optimization, so recovering `while`
+        // where the source wrote `for` must cost nothing. All three forms are
+        // one `loop` token.
         let while_loop = file("fn g() { while true {} }");
         let for_loop = file("fn g() { for _ in 0..1 {} }");
-        assert!(evaluate(&while_loop, &for_loop).score < 1.0);
+        let bare_loop = file("fn g() { loop { break; } }");
+        assert!((evaluate(&while_loop, &for_loop).score - 1.0).abs() < 1e-9);
+        // `loop { break; }` also carries a `break`, so compare it against a
+        // `while` body that breaks too — otherwise this measures the `break`,
+        // not the loop kind.
+        let while_break = file("fn g() { while true { break; } }");
+        assert!((evaluate(&bare_loop, &while_break).score - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn loop_presence_still_counts() {
+        // The collapse must not become "loops are free". A dropped loop is
+        // still a real structural miss.
+        let with_loop = file("fn g(n: u32) { for _ in 0..n { work(); } }");
+        let without = file("fn g(n: u32) { work(); }");
+        assert!(evaluate(&without, &with_loop).score < 1.0);
+    }
+
+    #[test]
+    fn loop_ordering_still_counts() {
+        // The collapse must not flatten *order*. A loop inside a branch and a
+        // branch inside a loop are different control flow, and the preorder
+        // stream sees it.
+        let loop_in_branch = file("fn g() { if x { for _ in 0..2 {} } }");
+        let branch_in_loop = file("fn g() { for _ in 0..2 { if x {} } }");
+        assert!(evaluate(&loop_in_branch, &branch_in_loop).score < 1.0);
+    }
+
+    #[test]
+    fn containment_depth_is_not_encoded_known_limitation() {
+        // KNOWN LIMITATION, pinned deliberately so it cannot be "fixed" by
+        // accident without a decision. The skeleton is a flat *preorder*
+        // stream with no enter/exit markers, so it records the sequence of
+        // constructs but not which contains which: a nested loop and two
+        // sequential loops both reduce to `[loop, loop, branch:1]`.
+        //
+        // Containment does survive compilation, so by this module's governing
+        // rule it *should* be scored — encoding it is a separate vocabulary
+        // change with its own score impact, tracked in
+        // `plan/M4_STRUCTURE_DESIGN.md` §7. Predates T13b: the old
+        // `loop:for` tokens had exactly the same blind spot.
+        let nested = file("fn g() { for _ in 0..2 { for _ in 0..2 { if x {} } } }");
+        let sequential = file("fn g() { for _ in 0..2 {} for _ in 0..2 {} if x {} }");
+        assert!(
+            (evaluate(&nested, &sequential).score - 1.0).abs() < 1e-9,
+            "if this now differs, containment became encoded — update the \
+             module doc and §7 rather than deleting this test"
+        );
     }
 
     #[test]
