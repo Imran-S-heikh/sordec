@@ -858,6 +858,12 @@ fn render_score_text(
 
 /// Render one category line: score + weight, or an em dash + reason when
 /// the category was not checked.
+///
+/// The first note rides on the score line; any further notes are indented
+/// beneath it. Interface reports a summary per ABI kind (entrypoints, types)
+/// plus their diffs, and showing only the first would hide half of what the
+/// category measured — which is precisely what the per-kind split exists to
+/// surface.
 fn render_category_line(
     out: &mut impl Write,
     label: &str,
@@ -870,6 +876,9 @@ fn render_category_line(
     }
     if let Some(note) = cat.notes.first() {
         write!(out, "  {note}")?;
+    }
+    for note in cat.notes.iter().skip(1) {
+        write!(out, "\n{:<17}{note}", "")?;
     }
     writeln!(out)
 }

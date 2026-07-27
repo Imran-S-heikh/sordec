@@ -99,7 +99,7 @@ fn assert_close(actual: f64, expected: f64, label: &str) {
 #[test]
 fn scorer_version_is_frozen() {
     assert_eq!(
-        SCORER_VERSION, "score-1.0.0",
+        SCORER_VERSION, "score-2.0.0",
         "SCORER_VERSION changed — update the golden vector below to match"
     );
 }
@@ -113,15 +113,19 @@ fn golden_calibration_vector_is_stable() {
     };
     let report = score_str(GOLDEN_RECONSTRUCTED, GOLDEN_ORIGINAL, &opts).expect("score");
 
-    assert_eq!(report.scorer_version, "score-1.0.0");
+    assert_eq!(report.scorer_version, "score-2.0.0");
     assert_eq!(report.weights_profile, "rfp-default");
-    // Frozen 2026-07-23 for score-1.0.0. Hand-checkable: interface drops
-    // `admin` (recall 3/4 → F1 0.8571); structure is 2 matched of 3 names
-    // (0.6667); semantic loses the swapped-tier storage ops + `admin`'s
+    // Re-frozen 2026-07-27 for score-2.0.0, when T11 split the ABI F1 into
+    // entrypoints and types. Hand-checkable: interface drops `admin`, so
+    // entrypoints are 2 matched of 3 (F1 0.8) while the one `#[contracttype]`
+    // is reproduced exactly (1.0) — the category is their mean, 0.9000, up
+    // from the pooled 0.8571 because the correct type no longer shares a
+    // denominator with the missing entrypoint. Structure is 2 matched of 3
+    // names (0.6667); semantic loses the swapped-tier storage ops + `admin`'s
     // facts (0.6250); overall is the weight-normalized mean over the three
-    // checked categories (0.7192).
-    assert_close(report.categories.interface.score, 0.857143, "interface");
+    // checked categories (0.7343).
+    assert_close(report.categories.interface.score, 0.900000, "interface");
     assert_close(report.categories.structure.score, 0.666667, "structure");
     assert_close(report.categories.semantic.score, 0.625000, "semantic");
-    assert_close(report.overall, 0.719188, "overall");
+    assert_close(report.overall, 0.734314, "overall");
 }

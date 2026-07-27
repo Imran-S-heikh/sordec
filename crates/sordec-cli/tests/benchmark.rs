@@ -80,12 +80,19 @@ fn measure_all() -> Vec<Measured> {
 fn overall_band(name: &str) -> (f64, f64) {
     // Bands are the measured baseline ±~0.02. Scoring is deterministic, so a
     // breach means an intended change — update these and regenerate the report.
+    //
+    // Re-derived 2026-07-27 for score-2.0.0, when T11 split the interface F1
+    // into entrypoints and types. The split moves scores in *both* directions:
+    // down where the emitter over-declares types (token-v22, token-v23), up
+    // where a small type set carries one wrong item beside correct entrypoints
+    // (timelock). token-v23 previously cleared its floor by 0.0007, which is
+    // not a band — hence the re-derivation rather than a spot fix.
     match name {
-        "hello-add" => (0.00, 0.05),
-        "token-v22" => (0.43, 0.47),
-        "token-v23" => (0.40, 0.44),
+        "hello-add" => (0.00, 0.02),
+        "token-v22" => (0.42, 0.46),
+        "token-v23" => (0.38, 0.42),
         "token-v23-stripped" => (0.09, 0.13),
-        "timelock" => (0.42, 0.47),
+        "timelock" => (0.44, 0.48),
         "dex-liquidity-pool" => (0.44, 0.48),
         "attestation" => (0.36, 0.40),
         _ => (0.00, 1.00),

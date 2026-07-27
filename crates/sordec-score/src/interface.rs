@@ -21,6 +21,15 @@
 //! from the signature value: types are the reliable interface identity, and
 //! a `e`-vs-`env` receiver name should not cost score.
 //!
+//! ## The two halves are scored separately
+//!
+//! Entrypoints and type/event declarations get their own F1, and the category
+//! is their mean (T11). Pooling them made the score depend on how many types a
+//! contract happens to declare rather than on reconstruction quality:
+//! token-v23's 13 byte-perfect entrypoints were diluting 12 over-declared type
+//! entries into a single `0.762`, which reported neither fact. A kind neither
+//! side declares drops out of the mean rather than scoring `0`.
+//!
 //! ## Deferred to Phase 4
 //!
 //! This category compares two Rust sources symmetrically. When a `.wasm` is
@@ -58,24 +67,123 @@ pub(crate) fn evaluate(
         None => (extract(reconstructed), extract(original)),
     };
 
-    let Some(outcome) = f1(&recon, &orig) else {
+    let kinds: Vec<Kind> = KINDS
+        .iter()
+        .filter_map(|kind| kind.measure(&recon, &orig))
+        .collect();
+    if kinds.is_empty() {
         return CategoryScore::unchecked("no ABI items on either side — nothing to measure");
-    };
-
-    let mut score = CategoryScore::checked(outcome.f1).with_note(format!(
-        "precision={} recall={} ({} original ABI items, {} reconstructed)",
-        simil::render_ratio(outcome.precision),
-        simil::render_ratio(outcome.recall),
-        orig.len(),
-        recon.len()
-    ));
-    if let Some(note) = diff_note("missing", &orig, &recon) {
-        score = score.with_note(note);
     }
-    if let Some(note) = diff_note("extra", &recon, &orig) {
-        score = score.with_note(note);
+
+    // Mean over the kinds that were measurable. An absent kind drops out
+    // rather than scoring 0 — the same discipline `simil::prf` applies one
+    // level up, so a contract that declares no types is not penalized for it.
+    let mean = kinds.iter().map(|kind| kind.outcome.f1).sum::<f64>() / kinds.len() as f64;
+
+    let mut score = CategoryScore::checked(mean);
+    for kind in &kinds {
+        score = score.with_note(kind.summary());
+        if let Some(note) = kind.diff_note("missing", &orig, &recon) {
+            score = score.with_note(note);
+        }
+        if let Some(note) = kind.diff_note("extra", &recon, &orig) {
+            score = score.with_note(note);
+        }
     }
     score
+}
+
+/// The two halves of a contract's declared surface, scored separately.
+///
+/// Pooling them into one F1 makes the score depend on how many types a contract
+/// happens to declare rather than on reconstruction quality: token-v23's 13
+/// byte-perfect entrypoints were diluting 12 over-declared type entries into a
+/// single 0.762, hiding both facts. A contract with fifty types would drown its
+/// entrypoints entirely.
+///
+/// The two are weighted equally. Weighting the callable surface higher is
+/// arguable — it is what consumers bind against — but it would raise the score,
+/// so it is not a thumb to put on the scale unilaterally.
+const KINDS: [KindSpec; 2] = [
+    KindSpec {
+        label: "entrypoints",
+        prefix: "fn ",
+    },
+    KindSpec {
+        label: "types",
+        prefix: "type ",
+    },
+];
+
+/// One half's identity: how its keys are namespaced, and what to call it.
+struct KindSpec {
+    label: &'static str,
+    prefix: &'static str,
+}
+
+/// One half's measured outcome.
+struct Kind {
+    spec: &'static KindSpec,
+    outcome: simil::Prf,
+    orig_len: usize,
+    recon_len: usize,
+}
+
+impl KindSpec {
+    /// Score this half, or `None` when neither side declared anything of this
+    /// kind — unmeasurable, not perfect.
+    fn measure(
+        &'static self,
+        recon: &BTreeMap<String, String>,
+        orig: &BTreeMap<String, String>,
+    ) -> Option<Kind> {
+        let mine = |map: &BTreeMap<String, String>| -> usize {
+            map.keys()
+                .filter(|key| key.starts_with(self.prefix))
+                .count()
+        };
+        let correct = orig
+            .iter()
+            .filter(|(key, value)| key.starts_with(self.prefix) && recon.get(*key) == Some(*value))
+            .count();
+        let (orig_len, recon_len) = (mine(orig), mine(recon));
+        simil::prf(correct, recon_len, orig_len).map(|outcome| Kind {
+            spec: self,
+            outcome,
+            orig_len,
+            recon_len,
+        })
+    }
+}
+
+impl Kind {
+    fn summary(&self) -> String {
+        format!(
+            "{} {:.4}  precision={} recall={} ({} original, {} reconstructed)",
+            self.spec.label,
+            self.outcome.f1,
+            simil::render_ratio(self.outcome.precision),
+            simil::render_ratio(self.outcome.recall),
+            self.orig_len,
+            self.recon_len
+        )
+    }
+
+    /// This kind's share of a `missing`/`extra` diff, so the two halves' notes
+    /// stay separable.
+    fn diff_note(
+        &self,
+        label: &str,
+        from: &BTreeMap<String, String>,
+        other: &BTreeMap<String, String>,
+    ) -> Option<String> {
+        let mine: BTreeMap<String, String> = from
+            .iter()
+            .filter(|(key, _)| key.starts_with(self.spec.prefix))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        diff_note(&format!("{} {label}", self.spec.label), &mine, other)
+    }
 }
 
 /// The ABI surface of one source: a keyed map from a namespaced item key
@@ -185,19 +293,6 @@ fn field_list(fields: &Fields) -> String {
         })
         .collect();
     parts.join(",")
-}
-
-/// Exact-match F1: an item is correct when both sides carry the same key
-/// with an equal value.
-///
-/// `None` when neither side declared any ABI item — an extraction that
-/// found nothing is unmeasurable, not perfect (see [`simil::prf`]).
-fn f1(recon: &BTreeMap<String, String>, orig: &BTreeMap<String, String>) -> Option<simil::Prf> {
-    let correct = orig
-        .iter()
-        .filter(|(key, value)| recon.get(*key) == Some(*value))
-        .count();
-    simil::prf(correct, recon.len(), orig.len())
 }
 
 /// A note listing keys in `from` whose value is not exactly reproduced in
@@ -321,6 +416,133 @@ mod tests {
         let score = evaluate(&f, &f, None);
         assert!(!score.checked, "a 0-item extraction must not be checked");
         assert_ne!(score.score, 1.0);
+    }
+
+    #[test]
+    fn over_declared_types_cannot_hide_behind_perfect_entrypoints() {
+        // THE T11 case, in miniature: this is token-v23's shape — every
+        // entrypoint byte-perfect, the type set badly over-declared. Pooling
+        // the two into one F1 lets the good half dilute the bad one and
+        // reports neither. Scoring them separately reports both, and lands
+        // *below* the pooled number.
+        let orig = file(
+            r#"
+            #[contractimpl]
+            impl Token {
+                pub fn a(e: Env) {}
+                pub fn b(e: Env) {}
+                pub fn c(e: Env) {}
+                pub fn d(e: Env) {}
+            }
+            #[contracttype]
+            pub struct Kept { x: u32 }
+            "#,
+        );
+        let recon = file(
+            r#"
+            #[contractimpl]
+            impl Token {
+                pub fn a(e: Env) {}
+                pub fn b(e: Env) {}
+                pub fn c(e: Env) {}
+                pub fn d(e: Env) {}
+            }
+            #[contracttype]
+            pub struct Kept { x: u32 }
+            #[contracttype]
+            pub struct Invented1 { x: u32 }
+            #[contracttype]
+            pub struct Invented2 { x: u32 }
+            #[contracttype]
+            pub struct Invented3 { x: u32 }
+            "#,
+        );
+        let score = evaluate(&recon, &orig, None);
+
+        // entrypoints 4/4/4 -> 1.0; types 1 correct of 4 emitted, 1 original
+        // -> precision 0.25, recall 1.0, F1 0.4. Mean = 0.7.
+        assert!(
+            (score.score - 0.7).abs() < 1e-9,
+            "expected the mean of the two halves, got {}",
+            score.score
+        );
+        // Pooling would have been 5 correct / 8 emitted / 5 original -> 0.769.
+        assert!(
+            score.score < 0.769,
+            "the split must not be more forgiving than pooling"
+        );
+
+        let notes = score.notes.join("\n");
+        assert!(notes.contains("entrypoints 1.0000"), "{notes}");
+        assert!(notes.contains("types 0.4000"), "{notes}");
+        assert!(
+            notes.contains("types extra: type Invented1"),
+            "extras must be attributed to their half: {notes}"
+        );
+    }
+
+    #[test]
+    fn a_kind_neither_side_declares_drops_out_of_the_mean() {
+        // hello-add's shape: entrypoints only, no `#[contracttype]` at all.
+        // The absent half is unmeasurable, not zero, so the category is the
+        // entrypoint score alone rather than half of it.
+        let f = file(
+            r#"
+            #[contractimpl]
+            impl Token { pub fn add(a: u32) -> u32 { a } }
+            "#,
+        );
+        let score = evaluate(&f, &f, None);
+        assert!(
+            (score.score - 1.0).abs() < 1e-9,
+            "score was {}",
+            score.score
+        );
+        let notes = score.notes.join("\n");
+        assert!(notes.contains("entrypoints 1.0000"), "{notes}");
+        assert!(
+            !notes.contains("types"),
+            "absent kind must not be reported: {notes}"
+        );
+    }
+
+    #[test]
+    fn a_wrong_entrypoint_is_not_masked_by_correct_types() {
+        // The mirror of the headline case, and the reason equal weighting is
+        // the neutral choice: a broken callable surface must show even when
+        // every declared type is right.
+        let orig = file(
+            r#"
+            #[contractimpl]
+            impl Token { pub fn transfer(e: Env, amount: i128) {} }
+            #[contracttype]
+            pub struct A { x: u32 }
+            #[contracttype]
+            pub struct B { x: u32 }
+            #[contracttype]
+            pub struct C { x: u32 }
+            "#,
+        );
+        let recon = file(
+            r#"
+            #[contractimpl]
+            impl Token { pub fn transfer(e: Env, amount: u64) {} }
+            #[contracttype]
+            pub struct A { x: u32 }
+            #[contracttype]
+            pub struct B { x: u32 }
+            #[contracttype]
+            pub struct C { x: u32 }
+            "#,
+        );
+        // entrypoints 0.0, types 1.0 -> 0.5, regardless of there being three
+        // times as many types as entrypoints.
+        let score = evaluate(&recon, &orig, None);
+        assert!(
+            (score.score - 0.5).abs() < 1e-9,
+            "score was {}",
+            score.score
+        );
     }
 
     #[test]
