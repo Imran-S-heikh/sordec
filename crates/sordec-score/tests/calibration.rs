@@ -55,6 +55,18 @@ fn fixture_src(name: &str) -> PathBuf {
 /// change to the instrument and should be recorded here consciously.
 const SEMANTICALLY_UNMEASURABLE: [&str; 2] = ["attestation", "hello-add"];
 
+/// Fixtures whose *structure* category is unmeasurable on identity — no
+/// entrypoint carries control flow on either side, so there is nothing to
+/// compare and the category is **unchecked** rather than a false 1.0
+/// (score-2.0.0 T13d).
+///
+/// Exact, not a floor, for the same reason as the list above. `hello-add`'s
+/// only entrypoint is `a + b`: no branch, no loop, nothing for a
+/// control-flow metric to say. Note this applies to *identity* — scoring the
+/// real reconstruction, our side emits marshalling branches the source does
+/// not have, so the pair is measurable and correctly scores 0.
+const STRUCTURALLY_UNMEASURABLE: [&str; 1] = ["hello-add"];
+
 fn opts() -> ScoreOptions {
     // The compilation category is opt-in and needs a toolchain; the
     // calibration guards are about the three AST categories.
@@ -109,9 +121,12 @@ fn identity_is_perfect_on_every_fixture() {
             report.categories.interface.checked,
             "{name}: interface must stay measurable"
         );
-        assert!(
-            report.categories.structure.checked,
-            "{name}: structure must stay measurable"
+        let structure_expected = !STRUCTURALLY_UNMEASURABLE.contains(&name);
+        assert_eq!(
+            report.categories.structure.checked, structure_expected,
+            "{name}: structure checked={} but expected {structure_expected} — \
+             update STRUCTURALLY_UNMEASURABLE if this change is intended",
+            report.categories.structure.checked
         );
         let semantic_expected = !SEMANTICALLY_UNMEASURABLE.contains(&name);
         assert_eq!(
@@ -280,6 +295,13 @@ fn documented_entrypoints_do_not_cost_interface_score() {
 
 // ---------------------------------------------------------------------
 // A small, realistic contract the invariance + mutation tests transform.
+//
+// `transfer`'s guard is load-bearing, not decoration: since T13d a category
+// with no control flow anywhere reports `unchecked`, so without a branch here
+// every structure assertion below would pass vacuously against an unmeasured
+// category. The guard is a bare `return` rather than a `panic!` so it adds
+// control flow without adding a semantic fact, keeping the two categories
+// independent.
 // ---------------------------------------------------------------------
 
 const BASE: &str = r#"
@@ -298,6 +320,7 @@ pub struct Token;
 #[contractimpl]
 impl Token {
     pub fn transfer(e: Env, from: Address, to: Address, amount: i128) {
+        if amount < 0 { return; }
         from.require_auth();
         let key = DataKey::Balance(from);
         let b = e.storage().persistent().get::<DataKey, i128>(&key).unwrap();

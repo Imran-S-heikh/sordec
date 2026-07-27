@@ -120,12 +120,27 @@ fn golden_calibration_vector_is_stable() {
     // entrypoints are 2 matched of 3 (F1 0.8) while the one `#[contracttype]`
     // is reproduced exactly (1.0) — the category is their mean, 0.9000, up
     // from the pooled 0.8571 because the correct type no longer shares a
-    // denominator with the missing entrypoint. Structure is 2 matched of 3
-    // names (0.6667); semantic loses the swapped-tier storage ops + `admin`'s
-    // facts (0.6250); overall is the weight-normalized mean over the three
-    // checked categories (0.7343).
+    // denominator with the missing entrypoint. Semantic loses the
+    // swapped-tier storage ops + `admin`'s facts (0.6250).
+    //
+    // Structure re-frozen again at T13d, 0.6667 -> 0.5000. Also
+    // hand-checkable, and the drop is the intended effect:
+    //
+    //   transfer  both sides carry `if b < amount`  -> 1.0, measured
+    //   balance   straight-line on both sides       -> drops out entirely
+    //   admin     missing from the reconstruction   -> 0.0, measured
+    //
+    // Before T13d, `balance` contributed a free 1.0 for having no control
+    // flow, which diluted the missing `admin` and reported 2/3. Of the
+    // entrypoints structure could actually measure, one was reproduced and
+    // one was not: 1/2. A category is neither penalized nor credited for
+    // control flow the contract does not have.
+    //
+    // No SCORER_VERSION bump: `score-2.0.0` is the in-progress rebuild
+    // version and the convention through T9/T10/T11 is to re-freeze this
+    // vector as the definition lands, not to bump per task.
     assert_close(report.categories.interface.score, 0.900000, "interface");
-    assert_close(report.categories.structure.score, 0.666667, "structure");
+    assert_close(report.categories.structure.score, 0.500000, "structure");
     assert_close(report.categories.semantic.score, 0.625000, "semantic");
-    assert_close(report.overall, 0.734314, "overall");
+    assert_close(report.overall, 0.685294, "overall");
 }

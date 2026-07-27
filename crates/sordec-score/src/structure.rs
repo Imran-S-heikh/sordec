@@ -137,27 +137,58 @@ fn score_entrypoints(
     let orig = CallGraph::build(original);
 
     let mut total = 0.0;
+    let mut measured = 0usize;
     let mut missing = 0usize;
+    let mut flowless = 0usize;
     let mut low = Vec::new();
     for name in entrypoints {
         // Unresolvable covers both "we never emitted it" and "we emitted
         // several things by that name": in either case we cannot identify the
         // entrypoint, and guessing which body is meant would be worse than
         // scoring the miss.
-        let sim = if recon.resolve(name).is_some() {
-            function_similarity(&stream(&recon, name), &stream(&orig, name))
-        } else {
+        //
+        // Note this stays a 0 even when the original entrypoint carries no
+        // control flow. "We did not emit it" is never "nothing to measure" —
+        // the absence is itself the finding.
+        let Some(_) = recon.resolve(name) else {
             missing += 1;
-            0.0
+            measured += 1;
+            low.push(format!("{name}(0.00)"));
+            continue;
         };
+
+        let (ours, theirs) = (stream(&recon, name), stream(&orig, name));
+        if ours.is_empty() && theirs.is_empty() {
+            // Neither side has control flow here, so this entrypoint tells us
+            // nothing about reconstruction quality. Drop it from *both* the
+            // numerator and the denominator, the same way an absent ABI kind
+            // drops out of `interface` — a contract is neither penalized nor
+            // credited for what it does not have.
+            flowless += 1;
+            continue;
+        }
+
+        let sim = function_similarity(&ours, &theirs);
         total += sim;
+        measured += 1;
         if sim < 0.75 {
             low.push(format!("{name}({sim:.2})"));
         }
     }
 
-    let mut category = CategoryScore::checked(total / entrypoints.len() as f64).with_note(format!(
-        "{} entrypoints ({missing} unreconstructed)",
+    if measured == 0 {
+        // Every entrypoint was straight-line on both sides: the category
+        // compared nothing at all, which is not the same as comparing
+        // everything successfully (score-2.0.0 T8). Reporting 1.0 here would
+        // be a false perfect that appears exactly when the emitter improves —
+        // once marshalling elision lands and we stop inventing branches.
+        return CategoryScore::unchecked(
+            "no entrypoint carries control flow on either side — nothing to measure",
+        );
+    }
+
+    let mut category = CategoryScore::checked(total / measured as f64).with_note(format!(
+        "{} entrypoints ({missing} unreconstructed, {flowless} without control flow)",
         entrypoints.len()
     ));
     // An ambiguous bare name makes `closure` drop that call edge, so the
@@ -498,12 +529,57 @@ mod tests {
     }
 
     #[test]
-    fn straight_line_entrypoint_matches_perfectly() {
-        // A contract with no control flow reproduced exactly is a genuine
-        // per-entrypoint match. Whether a whole *category* of these should
-        // read `unchecked` instead is the category-level question, handled
-        // separately (T13d). This is the hello-add `add` case.
-        assert_perfect("fn add(a: u64, b: u64) -> u64 { a + b }", "fn add(a: u64, b: u64) -> u64 { a + b }", &["add"]);
+    fn an_all_straight_line_contract_is_unchecked() {
+        // T13d. Per *entrypoint*, empty-vs-empty is a genuine match — the
+        // reconstruction reproduced the absent control flow exactly. Per
+        // *category*, a contract with no control flow anywhere gave structure
+        // nothing to compare, and reporting 1.0 would be a false perfect
+        // (score-2.0.0 T8). This is the hello-add `add` case, and the false
+        // perfect would appear precisely when the emitter improves enough to
+        // stop inventing branches.
+        let src = "fn add(a: u64, b: u64) -> u64 { a + b }";
+        let s = score(src, src, &["add"]);
+        assert!(!s.checked, "nothing was compared, so nothing is perfect");
+        assert_ne!(s.score, 1.0);
+    }
+
+    #[test]
+    fn a_straight_line_entrypoint_drops_out_of_the_mean() {
+        // Dropped from the numerator *and* the denominator, so it neither
+        // penalizes nor inflates. `flow` alone decides the score; if `plain`
+        // contributed a free 1.0 the mean would be pulled up to ~0.75.
+        let s = score(
+            "fn plain(a: u64) -> u64 { a } fn flow(x: i128) { if x < 0 {} if x > 9 {} }",
+            "fn plain(a: u64) -> u64 { a } fn flow(x: i128) { if x < 0 {} }",
+            &["plain", "flow"],
+        );
+        let flow_only = score(
+            "fn flow(x: i128) { if x < 0 {} if x > 9 {} }",
+            "fn flow(x: i128) { if x < 0 {} }",
+            &["flow"],
+        );
+        assert!(s.checked);
+        assert!(
+            (s.score - flow_only.score).abs() < 1e-9,
+            "{} != {}",
+            s.score,
+            flow_only.score
+        );
+        assert!(
+            s.notes.iter().any(|n| n.contains("1 without control flow")),
+            "notes: {:?}",
+            s.notes
+        );
+    }
+
+    #[test]
+    fn a_missing_entrypoint_scores_zero_even_with_no_control_flow() {
+        // The drop-out is for entrypoints we *emitted* that turned out to have
+        // nothing to compare. Failing to emit one is never "nothing to
+        // measure" — the absence is itself the finding.
+        let s = score("fn other() {}", "fn plain(a: u64) -> u64 { a }", &["plain"]);
+        assert!(s.checked, "a missing entrypoint is a measurement, not a gap");
+        assert!(s.score.abs() < 1e-9, "score was {}", s.score);
     }
 
     // ----------------------------------------------------------------
