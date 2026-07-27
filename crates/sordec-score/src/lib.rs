@@ -23,6 +23,11 @@
 //! output. The metric is frozen + versioned: see [`SCORER_VERSION`].
 
 mod canon;
+// Built ahead of its consumer: `structure` starts scoring per-entrypoint over
+// call closures at T13c, which is what first constructs a `CallGraph`. The
+// allow goes with that wiring.
+#[allow(dead_code)]
+mod closure;
 mod compile;
 pub mod config;
 mod error;
