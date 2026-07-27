@@ -107,9 +107,29 @@ pub(crate) enum AuthKind {
 }
 
 /// Panic / trap kind.
+///
+/// An **argument-less** `panic!()` produces *no fact at all* (score-2.0.0
+/// T18). It is an arg-decode trap the compiler inlined out of the SDK's
+/// `try_from_val`, not a Soroban operation the contract performs — the same
+/// marshalling-vs-semantics line `sordec-ir`'s `KnownOp` already draws, and
+/// the one T17 followed when it kept `ValTagCheck` / `VecOp` / `MapOp` out of
+/// this vocabulary.
+///
+/// The rule is **symmetric**: a *source* that writes a bare `panic!()` also
+/// yields nothing. It is not a filter on our own output.
+///
+/// Before this, both spellings keyed as `panic:bare`, so token-v23's 60
+/// emitted traps were credited as recovering the source's 5 authored
+/// `panic!("insufficient balance")`-style panics — overlap the reconstruction
+/// had not earned. Removing it *lowers recall* (0.5814 → 0.4651 on token-v23):
+/// we genuinely do not recover authored panics, and now say so.
+///
+/// The traps are not thereby hidden. They are control flow, so the
+/// **structure** category still counts every one of them, and its token census
+/// reports the resulting bloat. Each category measures what it is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PanicKind {
-    /// `panic!(...)`.
+    /// `panic!(…)` **with** arguments — an authored panic.
     Bare,
     /// `panic_with_error!(...)`.
     WithError,

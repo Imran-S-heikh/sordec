@@ -159,7 +159,14 @@ impl<'a> Visit<'a> for SemanticVisitor<'a> {
     fn visit_macro(&mut self, node: &'a syn::Macro) {
         if let Some(segment) = node.path.segments.last() {
             match segment.ident.to_string().as_str() {
-                "panic" => self.facts.push(SemanticFact::Panic(PanicKind::Bare)),
+                // An *argument-less* `panic!()` is an arg-decode trap, not a
+                // Soroban operation, and carries no fact — see `PanicKind` for
+                // why, and why the rule is symmetric.
+                "panic" if !node.tokens.is_empty() => {
+                    self.facts.push(SemanticFact::Panic(PanicKind::Bare));
+                }
+                "panic" => {}
+                // Always authored: it carries an error operand by construction.
                 "panic_with_error" => self.facts.push(SemanticFact::Panic(PanicKind::WithError)),
                 _ => {}
             }
@@ -505,10 +512,17 @@ mod tests {
         // Panics are recognized only in macro form, via `visit_macro`.
         // `cargo expand` rewrites `panic!()` into a `::core::panicking::*`
         // call this extractor cannot see, so scoring semantic on expanded
-        // input silently drops the fact — and drops it far more often from
-        // our reconstruction (60 panics on token-v23) than from the original
-        // (5), inflating precision 0.3049 → 0.9091 purely by hiding our own
-        // over-production.
+        // input silently drops the fact — and drops it from *both* sides
+        // indiscriminately, hiding our 60 token-v23 traps and the original's 5
+        // authored panics alike.
+        //
+        // T18 lands on the same precision (0.9091) by a different and much
+        // narrower route, so the distinction is worth being precise about: it
+        // drops only *argument-less* `panic!()`, and the original's authored
+        // panics stay in the denominator as recall misses. The expanded basis
+        // would have scored recall 0.526 by deleting the things we failed to
+        // recover; T18 scores 0.465 by keeping them and marking them missed.
+        // Stricter, not more forgiving.
         let macro_form = facts_of(r#"fn f() { panic!("boom"); }"#);
         assert!(
             macro_form.contains(&"panic:bare".to_string()),
@@ -521,9 +535,61 @@ mod tests {
             "expanded panics are invisible to this vocabulary: {expanded_form:?}"
         );
 
-        // When T16 teaches `extract` the post-expansion forms, this assertion
+        // When `extract` learns the post-expansion forms, this assertion
         // fails. That is deliberate: the semantic basis decision must be
-        // re-argued at that point, not silently inherited.
+        // re-argued at that point, not silently inherited. (T16 investigated
+        // and left it alone — the pre-expansion basis already keeps the macros
+        // visible, so there was nothing to teach.)
+    }
+
+    #[test]
+    fn an_authored_panic_is_a_fact_but_a_bare_trap_is_not() {
+        // T18. A bare `panic!()` is an arg-decode trap the compiler inlined
+        // out of the SDK's `try_from_val` — marshalling, not a Soroban
+        // operation. token-v23 emits 60 of them against the source's 5
+        // authored panics, and both used to key as `panic:bare`, so our traps
+        // were credited as recovering their panics.
+        assert!(facts_of(r#"fn f() { panic!("insufficient balance"); }"#)
+            .contains(&"panic:bare".to_string()));
+        assert!(facts_of(r#"fn f(x: i128) { panic!("negative: {}", x); }"#)
+            .contains(&"panic:bare".to_string()));
+
+        assert!(
+            facts_of(r#"fn f() { panic!(); }"#).is_empty(),
+            "a bare trap must not be fact-bearing"
+        );
+    }
+
+    #[test]
+    fn the_bare_panic_rule_is_symmetric() {
+        // Not a filter on our own output: it is a property of the macro, so
+        // an *original* writing a bare `panic!()` gets no fact either. Pinned
+        // because a rule that raises our score is exactly the one a later
+        // reader should be able to check is even-handed.
+        let mixed = r#"
+            fn f(e: Env, a: Address) {
+                a.require_auth();
+                panic!();
+                panic!("real");
+            }
+        "#;
+        let keys = facts_of(mixed);
+        assert_eq!(
+            keys.iter().filter(|k| *k == "panic:bare").count(),
+            1,
+            "only the authored panic counts: {keys:?}"
+        );
+        assert!(keys.contains(&"auth:require_auth".to_string()));
+    }
+
+    #[test]
+    fn panic_with_error_is_always_authored() {
+        // Untouched by T18: it carries an error operand by construction, so
+        // there is no argument-less form to confuse with a trap.
+        assert!(
+            facts_of(r#"fn f(e: Env) { panic_with_error!(&e, Error::Overflow); }"#)
+                .contains(&"panic:with_error".to_string())
+        );
     }
 
     #[test]

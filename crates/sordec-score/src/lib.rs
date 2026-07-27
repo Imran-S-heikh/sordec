@@ -392,9 +392,12 @@ mod tests {
         // semantic must not.
         // Both stand-ins declare an ABI, so structure has entrypoints to
         // anchor on (T13c) and this test cannot pass vacuously.
+        // The panic carries a message: since T18 a bare `panic!()` is an
+        // arg-decode trap and yields no fact, which would leave semantic
+        // unchecked and make this routing assertion vacuous.
         let source_side = syn::parse_file(
             "#[contract] pub struct C;
-             #[contractimpl] impl C { pub fn f() { panic!(); } }",
+             #[contractimpl] impl C { pub fn f() { panic!(\"boom\"); } }",
         )
         .expect("parse");
         // The "expanded" stand-in has different control flow and no panic.

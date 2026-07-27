@@ -105,17 +105,32 @@ fn overall_band(name: &str) -> (f64, f64) {
     // multi-SDK-version corpus, since a token-v23-only check would have missed
     // this entirely.
     //
+    // Re-derived across the board 2026-07-27 at T18, when an argument-less
+    // `panic!()` stopped being a semantic fact. Aggregate 0.3880 -> 0.4589.
+    //
+    // Read the direction, not just the size. Our reconstructions emit bare
+    // arg-decode traps in bulk (60 on token-v23 against the source's 5
+    // authored, message-carrying panics) and both used to key as `panic:bare`,
+    // so our traps were credited as *recovering* their panics. Removing that
+    // false match moves the two halves opposite ways: token-v23 precision
+    // 0.3049 -> 0.9091, recall 0.5814 -> 0.4651, and `panic:bare` now appears
+    // in the under-recovered list. We report worse recovery and stop counting
+    // marshalling as behaviour.
+    //
+    // hello-add moves most (0.3529 -> 0.5455) because its only semantic facts
+    // were five such traps: with them gone, neither side has any operation and
+    // the category renormalizes out as unmeasurable rather than scoring 0.
     // These bands are also the guard against a *silent* fallback: a machine
     // that cannot run `cargo expand` degrades every category to the source
-    // basis, which drops hello-add from 0.353 to 0.000 and breaches its band
-    // loudly rather than quietly reporting a different metric.
+    // basis, which moves hello-add off 0.5455 and breaches its band loudly
+    // rather than quietly reporting a different metric.
     match name {
-        "hello-add" => (0.33, 0.37),
-        "token-v22" => (0.46, 0.50),
-        "token-v23" => (0.38, 0.42),
-        "token-v23-stripped" => (0.10, 0.14),
-        "timelock" => (0.49, 0.53),
-        "dex-liquidity-pool" => (0.45, 0.49),
+        "hello-add" => (0.53, 0.57),
+        "token-v22" => (0.54, 0.58),
+        "token-v23" => (0.45, 0.49),
+        "token-v23-stripped" => (0.15, 0.19),
+        "timelock" => (0.56, 0.60),
+        "dex-liquidity-pool" => (0.49, 0.53),
         "attestation" => (0.37, 0.41),
         _ => (0.00, 1.00),
     }
