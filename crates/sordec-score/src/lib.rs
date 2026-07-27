@@ -23,10 +23,6 @@
 //! output. The metric is frozen + versioned: see [`SCORER_VERSION`].
 
 mod canon;
-// Built ahead of its consumer: `structure` starts scoring per-entrypoint over
-// call closures at T13c, which is what first constructs a `CallGraph`. The
-// allow goes with that wiring.
-#[allow(dead_code)]
 mod closure;
 mod compile;
 pub mod config;
@@ -258,7 +254,7 @@ fn assemble(sources: &Sources, compilation: CategoryScore, opts: &ScoreOptions) 
     let (recon, orig) = sources.pair(basis.interface);
     let interface = interface::evaluate(recon, orig, sources.spec_for(basis.interface));
     let (recon, orig) = sources.pair(basis.structure);
-    let structure = structure::evaluate(recon, orig);
+    let structure = structure::evaluate(recon, orig, sources.spec_for(basis.structure));
     let (recon, orig) = sources.pair(basis.semantic);
     let semantic = semantic::evaluate(recon, orig);
 
@@ -297,10 +293,23 @@ pub fn score_str(
 mod tests {
     use super::*;
 
+    /// A minimal but *real* contract. It has to declare an ABI: since T13c
+    /// the structure category is anchored on entrypoints, so a bare `pub fn`
+    /// with no `#[contractimpl]` correctly reports "nothing to measure"
+    /// rather than scoring — which would make these routing tests pass
+    /// vacuously.
     const SRC: &str = r#"
         #![no_std]
-        pub fn add(a: u32, b: u32) -> u32 {
-            if a > b { a - b } else { b - a }
+        use soroban_sdk::{contract, contractimpl, Env};
+
+        #[contract]
+        pub struct C;
+
+        #[contractimpl]
+        impl C {
+            pub fn add(e: Env, a: u32, b: u32) -> u32 {
+                if a > b { a - b } else { b - a }
+            }
         }
     "#;
 
@@ -381,9 +390,19 @@ mod tests {
         // scored under a profile that sends structure to `Expanded` and
         // semantic to `Source`. Structure must see the expanded pair and
         // semantic must not.
-        let source_side = syn::parse_file("fn f() { panic!(); }").expect("parse");
+        // Both stand-ins declare an ABI, so structure has entrypoints to
+        // anchor on (T13c) and this test cannot pass vacuously.
+        let source_side = syn::parse_file(
+            "#[contract] pub struct C;
+             #[contractimpl] impl C { pub fn f() { panic!(); } }",
+        )
+        .expect("parse");
         // The "expanded" stand-in has different control flow and no panic.
-        let expanded_side = syn::parse_file("fn f() { if true { g(); } }").expect("parse");
+        let expanded_side = syn::parse_file(
+            "#[contract] pub struct C;
+             #[contractimpl] impl C { pub fn f() { if true { g(); } } }",
+        )
+        .expect("parse");
 
         let sources = Sources {
             source: (source_side.clone(), source_side.clone()),

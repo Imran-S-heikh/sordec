@@ -85,18 +85,29 @@ fn overall_band(name: &str) -> (f64, f64) {
     // `rfp-default` (interface + structure macro-expanded, semantic
     // pre-expansion). Aggregate 0.3205 -> 0.3896.
     //
+    // Re-derived again 2026-07-27 at T13c, when structure stopped averaging
+    // over the union of function *names* and started scoring per ABI
+    // entrypoint over call closures. Aggregate 0.3896 -> 0.3850. The small
+    // drop is the metric becoming honest: the old number was inflated by
+    // name-matching artifacts. The load-bearing evidence is token-v23 and
+    // token-v23-stripped, two builds of the same contract differing only in
+    // the name section — structure scored 0.0522 vs 0.0045 (11.6x) before,
+    // and 0.0480 vs 0.0480 after. That pair is now the regression test for
+    // name-independence: if their bands ever diverge again, structure has
+    // started measuring debug info.
+    //
     // These bands are also the guard against a *silent* fallback: a machine
     // that cannot run `cargo expand` degrades every category to the source
     // basis, which drops hello-add from 0.353 to 0.000 and breaches its band
     // loudly rather than quietly reporting a different metric.
     match name {
         "hello-add" => (0.33, 0.37),
-        "token-v22" => (0.43, 0.47),
+        "token-v22" => (0.44, 0.48),
         "token-v23" => (0.38, 0.42),
-        "token-v23-stripped" => (0.09, 0.13),
-        "timelock" => (0.50, 0.54),
+        "token-v23-stripped" => (0.10, 0.14),
+        "timelock" => (0.49, 0.53),
         "dex-liquidity-pool" => (0.45, 0.49),
-        "attestation" => (0.41, 0.45),
+        "attestation" => (0.37, 0.41),
         _ => (0.00, 1.00),
     }
 }
@@ -115,6 +126,34 @@ fn accuracy_regression() {
             m.name
         );
     }
+}
+
+/// Structure must not depend on the binary's name section (score-2.0.0 T13c).
+///
+/// `token-v23` and `token-v23-stripped` are the same contract; the stripped
+/// build differs only in that its function names are gone. Their control flow
+/// is identical, so a structure metric that measures the *reconstruction*
+/// must score them the same. The old name-keyed algorithm scored 0.0522 and
+/// 0.0045 — an 11.6x swing on nothing but debug info, which is what motivated
+/// per-entrypoint closure scoring.
+///
+/// Interface legitimately still differs (the stripped build recovers no ABI),
+/// so this pins structure alone.
+#[test]
+fn structure_is_independent_of_the_name_section() {
+    let named = measure("token-v23").expect("token-v23");
+    let stripped = measure("token-v23-stripped").expect("token-v23-stripped");
+
+    let (a, b) = (
+        named.report.categories.structure.score,
+        stripped.report.categories.structure.score,
+    );
+    assert!(
+        (a - b).abs() < 1e-9,
+        "structure {a:.4} (named) != {b:.4} (stripped) — the two builds have \
+         identical control flow, so a difference means structure is measuring \
+         the name section again"
+    );
 }
 
 /// Regenerate `docs/benchmarks/report.{md,json}`. `#[ignore]`d so the fast

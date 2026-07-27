@@ -1,11 +1,39 @@
-//! Structure category: per-function control-flow-skeleton similarity.
+//! Structure category: per-entrypoint control-flow-skeleton similarity.
 //!
-//! Each function is reduced to a preorder token stream of its control-flow
-//! constructs — branches and loops, plus the `return` / `break` / `continue`
-//! leaves — with straight-line code dropped. Two functions are compared by
-//! blending an ordered (LCS) similarity with a multiset similarity of those
-//! tokens; the category score is the average over the union of function
-//! names, so a missing or extra function contributes `0`.
+//! One skeleton is built per **ABI entrypoint**, covering the closure of code
+//! that entrypoint can reach, and the category score is the mean over the
+//! *original's* entrypoints. Each function in the closure contributes a
+//! preorder token stream of its control-flow constructs — branches and loops,
+//! plus the `return` / `break` / `continue` leaves — with straight-line code
+//! dropped; the streams are concatenated in call-graph BFS order and compared
+//! by blending an ordered (LCS) similarity with a multiset similarity.
+//!
+//! ## Why the entrypoint, and not the function (score-2.0.0 T13c)
+//!
+//! Until T13c this category averaged over the **union of function names** on
+//! both sides, scoring `0` for any name present on only one side. That
+//! measures the binary's debug info rather than the reconstruction: internal
+//! helper names and boundaries are not in the wasm at all — rustc inlines a
+//! small helper out of existence, and the decompiler can only invent `funcN`
+//! for whatever bodies remain.
+//!
+//! The cost was measured. `token-v23` scored **0.0522** and *the same binary
+//! with its name section stripped* scored **0.0045** — an 11.6x swing on
+//! identical control flow. Scoring per entrypoint over closures, both read
+//! **0.0578**, because nothing in the comparison depends on a name the
+//! compiler did not preserve.
+//!
+//! Entrypoints are the one anchor that does survive: they are exported and
+//! recorded in the contract's spec-XDR. So they are the unit, they are the
+//! denominator (an entrypoint we failed to emit scores `0` — recovering one of
+//! thirteen perfectly must not read as perfect), and everything below them is
+//! flattened. [`crate::closure`] supplies the reachability; this module
+//! supplies the tokens and the comparison.
+//!
+//! What this deliberately does **not** reward is decomposition: merging five
+//! helpers into one entrypoint body, or splitting one into five, compares
+//! equal. That is the point — the wasm does not record which the author wrote.
+//! Emitting control flow the source does not have still costs full score.
 //!
 //! ## Branch unification (the `?`/`match`/`if let` equivalence)
 //!
@@ -46,13 +74,15 @@
 //! `plan/M4_STRUCTURE_DESIGN.md` §7 and pinned by
 //! `containment_depth_is_not_encoded_known_limitation`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use syn::visit::{self, Visit};
-use syn::{ImplItem, Item};
 
+use crate::closure::CallGraph;
+use crate::interface;
 use crate::report::CategoryScore;
 use crate::simil;
+use crate::spec;
 
 /// How much the ordered (LCS) similarity counts vs the multiset similarity
 /// when comparing two function skeletons.
@@ -60,38 +90,86 @@ const SEQUENCE_WEIGHT: f64 = 0.6;
 const MULTISET_WEIGHT: f64 = 0.4;
 
 /// Score the structure category.
-pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> CategoryScore {
-    let recon = skeletons(reconstructed);
-    let orig = skeletons(original);
+///
+/// `spec` is the harvested spec-XDR pair when the category is running on the
+/// macro-expanded basis, mirroring [`crate::interface::evaluate`]. It is the
+/// ABI ground truth and takes precedence; `None` — the pre-expansion basis —
+/// falls back to the attribute extractor. Only the *original's* half is read:
+/// the entrypoint set is the thing being reproduced, so it comes from the
+/// source of truth, not from what we happened to emit.
+pub(crate) fn evaluate(
+    reconstructed: &syn::File,
+    original: &syn::File,
+    spec: Option<(&spec::SpecMap, &spec::SpecMap)>,
+) -> CategoryScore {
+    let abi = match spec {
+        Some((_, orig_spec)) => spec::abi(orig_spec),
+        None => interface::extract(original),
+    };
+    // Both extractors namespace entrypoints `"fn name"` (see `spec::render`).
+    let entrypoints: BTreeSet<String> = abi
+        .keys()
+        .filter_map(|key| key.strip_prefix("fn "))
+        .map(str::to_owned)
+        .collect();
 
-    let names: BTreeSet<&String> = recon.keys().chain(orig.keys()).collect();
-    if names.is_empty() {
-        // Neither side declared a function: nothing was compared, which is
-        // not the same as everything matching (score-2.0.0 T8).
-        return CategoryScore::unchecked("no functions to compare — nothing to measure");
+    score_entrypoints(reconstructed, original, &entrypoints)
+}
+
+/// The category score over an explicit entrypoint set.
+///
+/// Split out from [`evaluate`] so the algorithm can be tested without
+/// synthesizing spec-XDR bytes or `#[contractimpl]` boilerplate around every
+/// fixture — the entrypoint set is an input, not something to reverse-engineer
+/// from the test source.
+fn score_entrypoints(
+    reconstructed: &syn::File,
+    original: &syn::File,
+    entrypoints: &BTreeSet<String>,
+) -> CategoryScore {
+    if entrypoints.is_empty() {
+        // No declared ABI: nothing was compared, which is not the same as
+        // everything matching (score-2.0.0 T8).
+        return CategoryScore::unchecked("no ABI entrypoints — nothing to measure");
     }
 
+    let recon = CallGraph::build(reconstructed);
+    let orig = CallGraph::build(original);
+
     let mut total = 0.0;
+    let mut missing = 0usize;
     let mut low = Vec::new();
-    for name in &names {
-        let sim = match (recon.get(*name), orig.get(*name)) {
-            (Some(a), Some(b)) => function_similarity(a, b),
-            // Present on only one side — a missing or invented function.
-            _ => 0.0,
+    for name in entrypoints {
+        // Unresolvable covers both "we never emitted it" and "we emitted
+        // several things by that name": in either case we cannot identify the
+        // entrypoint, and guessing which body is meant would be worse than
+        // scoring the miss.
+        let sim = if recon.resolve(name).is_some() {
+            function_similarity(&stream(&recon, name), &stream(&orig, name))
+        } else {
+            missing += 1;
+            0.0
         };
         total += sim;
         if sim < 0.75 {
             low.push(format!("{name}({sim:.2})"));
         }
     }
-    let score = total / names.len() as f64;
 
-    let mut category = CategoryScore::checked(score).with_note(format!(
-        "{} functions ({} original, {} reconstructed)",
-        names.len(),
-        orig.len(),
-        recon.len()
+    let mut category = CategoryScore::checked(total / entrypoints.len() as f64).with_note(format!(
+        "{} entrypoints ({missing} unreconstructed)",
+        entrypoints.len()
     ));
+    // An ambiguous bare name makes `closure` drop that call edge, so the
+    // reachable set — and the score with it — is a lower bound. Say so rather
+    // than let the number read as complete.
+    let (recon_ambiguous, orig_ambiguous) = (recon.ambiguous_names(), orig.ambiguous_names());
+    if recon_ambiguous > 0 || orig_ambiguous > 0 {
+        category = category.with_note(format!(
+            "ambiguous names ({orig_ambiguous} original, {recon_ambiguous} reconstructed) — \
+             their call edges are dropped, so this is a lower bound"
+        ));
+    }
     if !low.is_empty() {
         low.sort_unstable();
         let shown = low.len().min(8);
@@ -104,44 +182,26 @@ pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> Categ
     category
 }
 
+/// The flattened control-flow skeleton of everything `entrypoint` reaches:
+/// each reachable function's tokens, concatenated in call-graph BFS order.
+///
+/// Function boundaries vanish here on purpose. rustc decides which helpers
+/// survive as separate bodies, so scoring the split would grade the compiler's
+/// choices rather than the reconstruction's fidelity.
+fn stream(graph: &CallGraph<'_>, entrypoint: &str) -> Vec<String> {
+    graph
+        .closure(entrypoint)
+        .into_iter()
+        .filter_map(|key| graph.body(key))
+        .flat_map(skeleton_of)
+        .collect()
+}
+
 /// Blend the ordered and multiset similarities of two skeleton streams.
 fn function_similarity(a: &[String], b: &[String]) -> f64 {
     let seq = simil::sequence_similarity(a, b);
     let bag = simil::multiset_similarity(&simil::multiset(a), &simil::multiset(b));
     SEQUENCE_WEIGHT * seq + MULTISET_WEIGHT * bag
-}
-
-/// Map every function (free functions + all impl methods, recursing into
-/// inline modules) to its control-flow-skeleton token stream, keyed by name.
-fn skeletons(file: &syn::File) -> BTreeMap<String, Vec<String>> {
-    let mut map = BTreeMap::new();
-    for item in &file.items {
-        collect_item(item, &mut map);
-    }
-    map
-}
-
-fn collect_item(item: &Item, map: &mut BTreeMap<String, Vec<String>>) {
-    match item {
-        Item::Fn(item_fn) => {
-            map.insert(item_fn.sig.ident.to_string(), skeleton_of(&item_fn.block));
-        }
-        Item::Impl(item_impl) => {
-            for impl_item in &item_impl.items {
-                if let ImplItem::Fn(method) = impl_item {
-                    map.insert(method.sig.ident.to_string(), skeleton_of(&method.block));
-                }
-            }
-        }
-        Item::Mod(item_mod) => {
-            if let Some((_, items)) = &item_mod.content {
-                for nested in items {
-                    collect_item(nested, map);
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 /// The preorder control-flow-skeleton token stream of one function body.
@@ -206,6 +266,7 @@ impl<'ast> Visit<'ast> for SkeletonVisitor {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,97 +275,95 @@ mod tests {
         syn::parse_str(src).expect("source parses")
     }
 
+    fn eps(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| (*n).to_owned()).collect()
+    }
+
+    /// Score with an explicit entrypoint set, bypassing ABI extraction.
+    fn score(recon: &str, orig: &str, entrypoints: &[&str]) -> CategoryScore {
+        score_entrypoints(&file(recon), &file(orig), &eps(entrypoints))
+    }
+
+    fn assert_perfect(recon: &str, orig: &str, entrypoints: &[&str]) {
+        let s = score(recon, orig, entrypoints);
+        assert!(s.checked, "must be measurable");
+        assert!((s.score - 1.0).abs() < 1e-9, "score was {}", s.score);
+    }
+
+    // ----------------------------------------------------------------
+    // Vocabulary: what costs score and what does not
+    // ----------------------------------------------------------------
+
     #[test]
     fn identical_structure_scores_one() {
-        let f = file(
-            r#"
-            fn g(x: i128) -> i128 {
-                if x < 0 { return 0; }
-                let mut total = 0;
-                for i in 0..x { total += i; }
-                total
-            }
-            "#,
-        );
-        assert!((evaluate(&f, &f).score - 1.0).abs() < 1e-9);
+        let src = "fn g(x: i128) -> i128 {
+            if x < 0 { return 0; }
+            let mut total = 0;
+            for i in 0..x { total += i; }
+            total
+        }";
+        assert_perfect(src, src, &["g"]);
     }
 
     #[test]
     fn if_let_else_matches_two_arm_match() {
         // The core equivalence: `if let Some … else` == two-arm `match`.
-        let if_let = file(
-            r#"
-            fn g(o: Option<i128>) -> i128 {
-                if let Some(v) = o { v } else { 0 }
-            }
-            "#,
+        assert_perfect(
+            "fn g(o: Option<i128>) -> i128 { if let Some(v) = o { v } else { 0 } }",
+            "fn g(o: Option<i128>) -> i128 { match o { Some(v) => v, None => 0 } }",
+            &["g"],
         );
-        let matched = file(
-            r#"
-            fn g(o: Option<i128>) -> i128 {
-                match o { Some(v) => v, None => 0 }
-            }
-            "#,
-        );
-        assert!((evaluate(&if_let, &matched).score - 1.0).abs() < 1e-9);
     }
 
     #[test]
     fn a_dropped_guard_lowers_the_score() {
-        let with_guard = file(
-            r#"
-            fn g(x: i128) -> i128 {
-                if x < 0 { return 0; }
-                x
-            }
-            "#,
+        let s = score(
+            "fn g(x: i128) -> i128 { x }",
+            "fn g(x: i128) -> i128 { if x < 0 { return 0; } x }",
+            &["g"],
         );
-        let without = file("fn g(x: i128) -> i128 { x }");
-        assert!(evaluate(&without, &with_guard).score < 1.0);
-    }
-
-    #[test]
-    fn a_missing_function_contributes_zero() {
-        let two = file("fn a() { if true {} } fn b() { for _ in 0..1 {} }");
-        let one = file("fn a() { if true {} }");
-        let score = evaluate(&one, &two).score;
-        // `a` matches (1.0), `b` missing (0.0) → average 0.5.
-        assert!((score - 0.5).abs() < 1e-9, "score was {score}");
+        assert!(s.score < 1.0);
     }
 
     #[test]
     fn loop_kind_is_unified() {
         // T13b: the kind does not survive optimization, so recovering `while`
-        // where the source wrote `for` must cost nothing. All three forms are
-        // one `loop` token.
-        let while_loop = file("fn g() { while true {} }");
-        let for_loop = file("fn g() { for _ in 0..1 {} }");
-        let bare_loop = file("fn g() { loop { break; } }");
-        assert!((evaluate(&while_loop, &for_loop).score - 1.0).abs() < 1e-9);
-        // `loop { break; }` also carries a `break`, so compare it against a
-        // `while` body that breaks too — otherwise this measures the `break`,
-        // not the loop kind.
-        let while_break = file("fn g() { while true { break; } }");
-        assert!((evaluate(&bare_loop, &while_break).score - 1.0).abs() < 1e-9);
+        // where the source wrote `for` must cost nothing.
+        assert_perfect(
+            "fn g() { while true {} }",
+            "fn g() { for _ in 0..1 {} }",
+            &["g"],
+        );
+        // `loop { break; }` carries a `break`, so compare against a `while`
+        // that breaks too — otherwise this measures the `break`, not the kind.
+        assert_perfect(
+            "fn g() { loop { break; } }",
+            "fn g() { while true { break; } }",
+            &["g"],
+        );
     }
 
     #[test]
     fn loop_presence_still_counts() {
-        // The collapse must not become "loops are free". A dropped loop is
-        // still a real structural miss.
-        let with_loop = file("fn g(n: u32) { for _ in 0..n { work(); } }");
-        let without = file("fn g(n: u32) { work(); }");
-        assert!(evaluate(&without, &with_loop).score < 1.0);
+        // The collapse must not become "loops are free".
+        let s = score(
+            "fn g(n: u32) { work(); }",
+            "fn g(n: u32) { for _ in 0..n { work(); } }",
+            &["g"],
+        );
+        assert!(s.score < 1.0);
     }
 
     #[test]
     fn loop_ordering_still_counts() {
-        // The collapse must not flatten *order*. A loop inside a branch and a
-        // branch inside a loop are different control flow, and the preorder
-        // stream sees it.
-        let loop_in_branch = file("fn g() { if x { for _ in 0..2 {} } }");
-        let branch_in_loop = file("fn g() { for _ in 0..2 { if x {} } }");
-        assert!(evaluate(&loop_in_branch, &branch_in_loop).score < 1.0);
+        // A loop inside a branch and a branch inside a loop are different
+        // control flow, and the preorder stream sees it.
+        let s = score(
+            "fn g() { if x { for _ in 0..2 {} } }",
+            "fn g() { for _ in 0..2 { if x {} } }",
+            &["g"],
+        );
+        assert!(s.score < 1.0);
     }
 
     #[test]
@@ -312,50 +371,165 @@ mod tests {
         // KNOWN LIMITATION, pinned deliberately so it cannot be "fixed" by
         // accident without a decision. The skeleton is a flat *preorder*
         // stream with no enter/exit markers, so it records the sequence of
-        // constructs but not which contains which: a nested loop and two
-        // sequential loops both reduce to `[loop, loop, branch:1]`.
+        // constructs but not which contains which.
         //
         // Containment does survive compilation, so by this module's governing
-        // rule it *should* be scored — encoding it is a separate vocabulary
-        // change with its own score impact, tracked in
-        // `plan/M4_STRUCTURE_DESIGN.md` §7. Predates T13b: the old
-        // `loop:for` tokens had exactly the same blind spot.
-        let nested = file("fn g() { for _ in 0..2 { for _ in 0..2 { if x {} } } }");
-        let sequential = file("fn g() { for _ in 0..2 {} for _ in 0..2 {} if x {} }");
-        assert!(
-            (evaluate(&nested, &sequential).score - 1.0).abs() < 1e-9,
-            "if this now differs, containment became encoded — update the \
-             module doc and §7 rather than deleting this test"
+        // rule it *should* be scored; encoding it is a separate vocabulary
+        // change tracked in `plan/M4_STRUCTURE_DESIGN.md` §7. Predates M4 —
+        // the old `loop:for` tokens had the same blind spot.
+        assert_perfect(
+            "fn g() { for _ in 0..2 { for _ in 0..2 { if x {} } } }",
+            "fn g() { for _ in 0..2 {} for _ in 0..2 {} if x {} }",
+            &["g"],
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // T13c: the unit is the entrypoint closure, not the named function
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn helper_names_do_not_affect_the_score() {
+        // The headline property. Internal names are not in the wasm, so the
+        // decompiler's invented `func7` must cost exactly nothing against the
+        // source's `check_amount`. Under the old name-keyed algorithm this
+        // pair scored 0; it is why token-v23 and token-v23-stripped differed
+        // 11.6x on identical control flow.
+        assert_perfect(
+            "fn g(x: i128) { func7(x); } fn func7(x: i128) { if x < 0 {} }",
+            "fn g(x: i128) { check_amount(x); } fn check_amount(x: i128) { if x < 0 {} }",
+            &["g"],
         );
     }
 
     #[test]
-    fn no_functions_is_unchecked_not_perfect() {
+    fn inlining_a_helper_scores_the_same_as_calling_it() {
+        // rustc decides which helpers survive as separate bodies. Recovering
+        // an inlined branch in the entrypoint must equal the source's call out
+        // to a helper holding the same branch.
+        assert_perfect(
+            "fn g(x: i128) { if x < 0 {} }",
+            "fn g(x: i128) { check(x); } fn check(x: i128) { if x < 0 {} }",
+            &["g"],
+        );
+    }
+
+    #[test]
+    fn a_helper_called_twice_is_counted_once() {
+        // Splicing at every call site was measured and rejected: it multiplies
+        // a shared helper by its call count. The closure visits each function
+        // once, so two calls and one inlined copy agree.
+        assert_perfect(
+            "fn g() { if x {} }",
+            "fn g() { h(); h(); } fn h() { if x {} }",
+            &["g"],
+        );
+    }
+
+    #[test]
+    fn a_function_outside_the_abi_is_not_scored() {
+        // Helpers no longer auto-zero: an unreachable function that only one
+        // side declares is not part of any entrypoint's closure, so it cannot
+        // drag the score down.
+        assert_perfect(
+            "fn g() { if x {} }",
+            "fn g() { if x {} } fn unrelated() { for _ in 0..9 { if y {} } }",
+            &["g"],
+        );
+    }
+
+    #[test]
+    fn spurious_control_flow_still_costs() {
+        // Boundary-agnostic is not lenient. Emitting branches the source does
+        // not have — un-elided Val-marshalling, in practice — is a real miss.
+        let s = score(
+            "fn g(x: i128) { if !is_i128(a) {} if !ok(b) {} if x < 0 {} }",
+            "fn g(x: i128) { if x < 0 {} }",
+            &["g"],
+        );
+        assert!(s.score < 1.0, "score was {}", s.score);
+    }
+
+    #[test]
+    fn a_missing_entrypoint_scores_zero() {
+        let s = score("fn other() {}", "fn g() { if x {} }", &["g"]);
+        assert!(s.checked);
+        assert!(s.score.abs() < 1e-9, "score was {}", s.score);
+    }
+
+    #[test]
+    fn an_ambiguous_entrypoint_scores_zero() {
+        // Two bodies named `g`: we cannot tell which is the entrypoint, and
+        // guessing would be worse than scoring the miss.
+        let s = score(
+            "struct A; struct B; impl A { fn g() { if x {} } } impl B { fn g() {} }",
+            "fn g() { if x {} }",
+            &["g"],
+        );
+        assert!(s.score.abs() < 1e-9, "score was {}", s.score);
+        assert!(
+            s.notes.iter().any(|n| n.contains("ambiguous names")),
+            "an ambiguity must be reported, notes: {:?}",
+            s.notes
+        );
+    }
+
+    #[test]
+    fn a_missing_entrypoint_is_reported_in_the_notes() {
+        let s = score("fn other() {}", "fn g() {}", &["g"]);
+        assert!(
+            s.notes.iter().any(|n| n.contains("1 unreconstructed")),
+            "notes: {:?}",
+            s.notes
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Degenerate inputs
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn no_entrypoints_is_unchecked_not_perfect() {
         // Nothing to compare is not a perfect comparison (score-2.0.0 T8).
         let f = file("pub struct S { x: u32 }");
-        let score = evaluate(&f, &f);
-        assert!(
-            !score.checked,
-            "a 0-function comparison must not be checked"
-        );
-        assert_ne!(score.score, 1.0);
+        let s = evaluate(&f, &f, None);
+        assert!(!s.checked, "a 0-entrypoint comparison must not be checked");
+        assert_ne!(s.score, 1.0);
     }
 
     #[test]
-    fn straight_line_functions_still_match_perfectly() {
-        // The T8 scope boundary, pinned. A function with no control flow has
-        // an empty skeleton, and two empty skeletons are a *genuine* perfect
-        // match — the reconstruction reproduced the (absent) control flow
-        // exactly. `simil`'s empty-vs-empty 1.0 is correct and must stay:
-        // "nothing to measure" is a category-level judgement, not a
-        // per-function one. This is the hello-add `add` case.
-        let f = file("fn add(a: u64, b: u64) -> u64 { a + b }");
-        let score = evaluate(&f, &f);
-        assert!(score.checked, "a real function is measurable");
-        assert!(
-            (score.score - 1.0).abs() < 1e-9,
-            "score was {}",
-            score.score
+    fn straight_line_entrypoint_matches_perfectly() {
+        // A contract with no control flow reproduced exactly is a genuine
+        // per-entrypoint match. Whether a whole *category* of these should
+        // read `unchecked` instead is the category-level question, handled
+        // separately (T13d). This is the hello-add `add` case.
+        assert_perfect("fn add(a: u64, b: u64) -> u64 { a + b }", "fn add(a: u64, b: u64) -> u64 { a + b }", &["add"]);
+    }
+
+    // ----------------------------------------------------------------
+    // Entrypoint resolution
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn entrypoints_come_from_contractimpl_on_the_source_basis() {
+        // The `spec == None` arm: pre-expansion, the ABI is the attributes.
+        // The spec-XDR arm needs real XDR bytes and is covered end-to-end by
+        // the expanded-basis calibration test and the corpus benchmark.
+        let f = file(
+            "#[contract] pub struct T;
+             #[contractimpl] impl T { pub fn go(x: i128) { if x < 0 {} } }",
         );
+        let s = evaluate(&f, &f, None);
+        assert!(s.checked, "contractimpl entrypoints must be found");
+        assert!((s.score - 1.0).abs() < 1e-9);
+        assert!(s.notes.iter().any(|n| n.contains("1 entrypoints")), "notes: {:?}", s.notes);
+    }
+
+    #[test]
+    fn a_plain_function_is_not_an_entrypoint() {
+        // Without `#[contractimpl]` there is no ABI, so there is nothing to
+        // measure — not a perfect score.
+        let f = file("fn helper() { if x {} }");
+        assert!(!evaluate(&f, &f, None).checked);
     }
 }

@@ -188,7 +188,13 @@ impl Kind {
 
 /// The ABI surface of one source: a keyed map from a namespaced item key
 /// (`"fn transfer"`, `"type DataKey"`) to its normalized value.
-fn extract(file: &syn::File) -> BTreeMap<String, String> {
+///
+/// Shared with [`crate::structure`], which reads the `"fn "` keys for its
+/// entrypoint set on the pre-expansion basis (T13c). Both categories are
+/// anchored on the same notion of "what this contract declares", so one
+/// extractor is correct — a second one could drift and make the two
+/// categories disagree about which functions are entrypoints.
+pub(crate) fn extract(file: &syn::File) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for item in &file.items {
         collect_item(item, &mut map);
