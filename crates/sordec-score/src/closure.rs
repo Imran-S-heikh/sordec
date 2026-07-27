@@ -319,6 +319,29 @@ mod tests {
     }
 
     #[test]
+    fn a_caller_is_not_in_its_callees_closure() {
+        // The structural reason the structure category needs no glue
+        // denylist (T14'). Macro-generated invoke shims *call* the
+        // entrypoint, so walking downward from the entrypoint never reaches
+        // them — the exclusion is a property of the direction of travel, not
+        // of a name list that would have to be maintained against every SDK
+        // release.
+        let file = graph(
+            "pub mod __mint { pub fn invoke_raw() { mint(); } }
+             fn mint() { helper(); }
+             fn helper() {}",
+        );
+        let g = CallGraph::build(&file);
+        assert_eq!(
+            g.closure("mint"),
+            vec![&"mint".to_owned(), &"helper".to_owned()],
+            "the shim must not appear in the entrypoint's closure"
+        );
+        // The edge exists — it just points the other way.
+        assert!(g.closure("invoke_raw").contains(&&"mint".to_owned()));
+    }
+
+    #[test]
     fn unresolvable_root_yields_empty_closure() {
         let file = graph("fn a() {}");
         let g = CallGraph::build(&file);

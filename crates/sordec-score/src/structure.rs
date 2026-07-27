@@ -35,6 +35,23 @@
 //! equal. That is the point — the wasm does not record which the author wrote.
 //! Emitting control flow the source does not have still costs full score.
 //!
+//! ## Why there is no glue denylist (score-2.0.0 T14′)
+//!
+//! Macro-generated code is excluded **by the direction of travel**, not by a
+//! name list. Generated glue sits *upstream* of the ABI — the `__mint` invoke
+//! shim calls the user's `mint`, never the reverse — so a closure walked
+//! downward from an entrypoint cannot reach it. That holds without knowing any
+//! of the SDK's generated names, which is why it does not need maintaining
+//! against SDK releases the way a denylist would.
+//!
+//! Verified rather than assumed:
+//! `no_macro_glue_is_reachable_from_any_entrypoint` expands every corpus
+//! fixture and checks each entrypoint's closure against the name patterns
+//! `crate::glue` recognizes. It matters because `glue::canonicalize` cannot
+//! strip everything — `#[contracttype]`'s `TryFromVal`/`IntoVal` impls are
+//! written on *user-declared* types, so they survive into the graph and would
+//! be scored as reconstruction if anything reached them. Nothing does.
+//!
 //! ## Branch unification (the `?`/`match`/`if let` equivalence)
 //!
 //! `if`, `if let`, and `match` are all emitted as a single `branch:N` token
@@ -717,6 +734,100 @@ mod tests {
         assert!(s.checked, "contractimpl entrypoints must be found");
         assert!((s.score - 1.0).abs() < 1e-9);
         assert!(s.notes.iter().any(|n| n.contains("1 entrypoints")), "notes: {:?}", s.notes);
+    }
+
+    // ----------------------------------------------------------------
+    // T14': macro glue is unreachable from an entrypoint closure
+    // ----------------------------------------------------------------
+
+    /// Whether an owner-qualified key names macro-generated code, judged by
+    /// the constants `glue` already owns so the two cannot drift apart.
+    ///
+    /// `entrypoints` is checked first and wins: the harvested ABI is the
+    /// ground truth for what is user surface. The SDK's `__constructor` is a
+    /// real entrypoint that happens to start with the generated-name prefix,
+    /// so a purely lexical rule would misread it as glue.
+    fn is_generated(key: &str, entrypoints: &[String]) -> bool {
+        let (owner, method) = key
+            .split_once("::")
+            .map_or((None, key), |(o, m)| (Some(o), m));
+        if entrypoints.iter().any(|e| e == method) {
+            return false;
+        }
+        let generated_owner = owner.is_some_and(|o| {
+            o.starts_with(crate::glue::GENERATED_MOD_PREFIX)
+                || crate::glue::GENERATED_TYPE_SUFFIXES
+                    .iter()
+                    .any(|suffix| o.ends_with(suffix))
+        });
+        generated_owner
+            || method.starts_with(crate::glue::SPEC_FN)
+            || method.starts_with(crate::glue::GENERATED_MOD_PREFIX)
+            // `#[contracttype]` conversions survive canonicalization: their
+            // self-type is user-declared, so `glue` cannot tell them apart
+            // from the user's own impls. If one were reachable, it would be
+            // scored as if we had reconstructed it.
+            || matches!(method, "try_from_val" | "into_val" | "invoke_raw")
+    }
+
+    /// The claim T14 was going to enforce with a denylist, tested instead.
+    ///
+    /// Structure walks *downward* from each ABI entrypoint, and generated glue
+    /// sits *upstream* — the `__mint` invoke shim calls the user's `mint`, not
+    /// the reverse — so a downward closure should never reach it. That makes a
+    /// denylist unnecessary, but "should" is an argument, not evidence: this
+    /// runs the real expanded corpus and checks.
+    ///
+    /// If it ever fails it names the fixture, entrypoint and offending key,
+    /// which is precisely the input a narrowly-scoped denylist would need.
+    #[test]
+    #[ignore = "shells out to cargo expand against soroban-sdk (slow)"]
+    fn no_macro_glue_is_reachable_from_any_entrypoint() {
+        // Every corpus fixture with distinct source. `token-v23-stripped`
+        // vendors the same source as `token-v23` — only its wasm differs — so
+        // expanding it again would test nothing new.
+        const FIXTURES: [&str; 6] = [
+            "hello-add",
+            "token-v22",
+            "token-v23",
+            "timelock",
+            "dex-liquidity-pool",
+            "attestation",
+        ];
+
+        for fixture in FIXTURES {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../samples/contracts")
+                .join(fixture)
+                .join("source/src");
+            let expanded = crate::expand::expand(&dir)
+                .unwrap_or_else(|e| panic!("{fixture} must expand: {e}"));
+            let out = crate::glue::canonicalize(
+                syn::parse_file(&expanded).expect("expanded output parses"),
+            );
+            let graph = CallGraph::build(&out.file);
+
+            let entrypoints: Vec<String> = spec::abi(&out.spec)
+                .keys()
+                .filter_map(|key| key.strip_prefix("fn "))
+                .map(str::to_owned)
+                .collect();
+            assert!(
+                !entrypoints.is_empty(),
+                "{fixture}: no entrypoints harvested — the check would pass vacuously"
+            );
+
+            for entrypoint in &entrypoints {
+                for key in graph.closure(entrypoint) {
+                    assert!(
+                        !is_generated(key, &entrypoints),
+                        "{fixture}: entrypoint `{entrypoint}` reaches generated code `{key}` — \
+                         glue is being scored as reconstruction, and T14's denylist is needed \
+                         after all (see plan/M4_STRUCTURE_DESIGN.md §5.2)"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

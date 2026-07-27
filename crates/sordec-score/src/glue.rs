@@ -44,19 +44,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use syn::{ImplItem, Item, Type};
 
 /// Prefix marking every generated ABI static, in either SDK layout.
-const SPEC_STATIC_PREFIX: &str = "__SPEC_XDR_";
+pub(crate) const SPEC_STATIC_PREFIX: &str = "__SPEC_XDR_";
 
 /// Prefix marking the generated invoke shims and spec wrapper modules
 /// (`__mint`, `__Contract__mint__spec`).
-const GENERATED_MOD_PREFIX: &str = "__";
+pub(crate) const GENERATED_MOD_PREFIX: &str = "__";
 
 /// The generated const-fn family carrying the ABI bytes: `spec_xdr` on a
 /// type or event, `spec_xdr_<entrypoint>` on the contract.
-const SPEC_FN: &str = "spec_xdr";
+pub(crate) const SPEC_FN: &str = "spec_xdr";
 
 /// Suffixes of the helper types the contract macros generate beside a
 /// contract struct: `TokenClient`, `TokenArgs`.
-const GENERATED_TYPE_SUFFIXES: [&str; 2] = ["Client", "Args"];
+pub(crate) const GENERATED_TYPE_SUFFIXES: [&str; 2] = ["Client", "Args"];
 
 /// An expanded source with the macro glue removed and its ABI recovered.
 pub(crate) struct Canonicalized {
