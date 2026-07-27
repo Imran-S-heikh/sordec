@@ -170,6 +170,18 @@ impl<'a> Visit<'a> for SemanticVisitor<'a> {
 
 impl<'a> SemanticVisitor<'a> {
     fn method_fact(&self, node: &'a syn::ExprMethodCall) -> Option<SemanticFact> {
+        // Anything invoked on `….events()` is an event emission, whatever the
+        // SDK spells the emitting method. Checked before the method-name match
+        // for two reasons: it cannot double-fire with the `"publish"` arm
+        // below (`e.events().publish(…)` yields one fact, not two), and it
+        // sidesteps an ordering hazard — the storage arm runs
+        // `storage_tier(&node.receiver)?`, whose `?` returns from this whole
+        // function, so an event named `get` or `set` would otherwise produce
+        // *nothing* rather than falling through to a later arm.
+        if receiver_is_events(&node.receiver) {
+            return Some(SemanticFact::Event);
+        }
+
         let method = node.method.to_string();
         match method.as_str() {
             "require_auth" => Some(SemanticFact::Auth(AuthKind::RequireAuth)),
@@ -246,6 +258,20 @@ fn storage_tier(receiver: &Expr) -> Option<Tier> {
 /// Whether a receiver is a `…ledger()` chain.
 fn receiver_is_ledger(receiver: &Expr) -> bool {
     matches!(receiver, Expr::MethodCall(call) if call.method == "ledger")
+}
+
+/// Whether an expression is a `….events()` call — the receiver every event
+/// emission shares, whichever way the SDK spells the emitting method.
+///
+/// Keying on the method name alone missed a whole API. SDK v23's
+/// `#[contractevent]` emits `SetAdmin { … }.publish(&e)`, but v22's
+/// `TokenUtils` has **one named method per event** —
+/// `TokenUtils::new(&e).events().mint(admin, to, amount)`. token-v22's seven
+/// emissions produced *zero* facts, so the five our reconstruction correctly
+/// recovered scored as fabrications against an original credited with none.
+/// The receiver is the part both spellings agree on.
+fn receiver_is_events(receiver: &Expr) -> bool {
+    matches!(receiver, Expr::MethodCall(call) if call.method == "events")
 }
 
 /// Whether an expression is a `*Client::new(...)` constructor call.
@@ -336,6 +362,62 @@ mod tests {
         assert!(keys.contains(&"auth:require_auth".to_string()));
         assert!(keys.contains(&"event".to_string()));
         assert!(keys.contains(&"panic:bare".to_string()));
+    }
+
+    /// Count of `"event"` facts — the tests below assert on counts rather than
+    /// membership, because a double-count is invisible to `contains`.
+    fn event_count(src: &str) -> usize {
+        facts_of(src).iter().filter(|key| *key == "event").count()
+    }
+
+    #[test]
+    fn v22_token_utils_events_are_recognized() {
+        // SDK v22 has one *named method per event*, so keying on the method
+        // name alone saw none of these. token-v22's seven emissions produced
+        // zero facts, which scored our five correctly-recovered events as
+        // fabrications against an original credited with none.
+        assert_eq!(
+            event_count(
+                r#"
+                fn f(e: Env, admin: Address, to: Address, amount: i128) {
+                    TokenUtils::new(&e).events().mint(admin, to, amount);
+                    TokenUtils::new(&e).events().transfer(admin, to, amount);
+                }
+                "#
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn v23_contractevent_publish_is_still_recognized() {
+        // The other spelling: a `#[contractevent]` struct literal receiver,
+        // which is *not* an `.events()` call, so it needs the `"publish"` arm.
+        assert_eq!(
+            event_count(r#"fn f(e: Env, admin: Address) { SetAdmin { admin }.publish(&e); }"#),
+            1
+        );
+    }
+
+    #[test]
+    fn an_events_publish_chain_yields_exactly_one_fact() {
+        // T16's original concern, pinned rather than reasoned about: this form
+        // matches *both* rules — receiver is `.events()` and the method is
+        // `publish` — so it is the one shape that could double-count.
+        assert_eq!(
+            event_count(r#"fn f(e: Env, t: Symbol, d: i128) { e.events().publish((t,), d); }"#),
+            1
+        );
+    }
+
+    #[test]
+    fn a_method_on_a_non_events_receiver_is_not_an_event() {
+        // The rule keys on the receiver being `.events()`, not on any method
+        // called `mint` anywhere.
+        assert_eq!(
+            event_count(r#"fn f(e: Env, c: Address) { some_helper(&e).mint(c, 1); }"#),
+            0
+        );
     }
 
     #[test]

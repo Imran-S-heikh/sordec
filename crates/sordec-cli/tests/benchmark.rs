@@ -96,13 +96,22 @@ fn overall_band(name: &str) -> (f64, f64) {
     // name-independence: if their bands ever diverge again, structure has
     // started measuring debug info.
     //
+    // token-v22 re-derived 2026-07-27 at T16, when the semantic extractor
+    // learned SDK v22's `TokenUtils::new(&e).events().<name>(…)` event API.
+    // Its seven emissions had been producing zero facts, so the five events
+    // our reconstruction correctly recovered scored as fabrications against an
+    // original credited with none: semantic 0.3361 -> 0.3968. No other fixture
+    // uses that API, and none moved — which is the argument for keeping a
+    // multi-SDK-version corpus, since a token-v23-only check would have missed
+    // this entirely.
+    //
     // These bands are also the guard against a *silent* fallback: a machine
     // that cannot run `cargo expand` degrades every category to the source
     // basis, which drops hello-add from 0.353 to 0.000 and breaches its band
     // loudly rather than quietly reporting a different metric.
     match name {
         "hello-add" => (0.33, 0.37),
-        "token-v22" => (0.44, 0.48),
+        "token-v22" => (0.46, 0.50),
         "token-v23" => (0.38, 0.42),
         "token-v23-stripped" => (0.10, 0.14),
         "timelock" => (0.49, 0.53),

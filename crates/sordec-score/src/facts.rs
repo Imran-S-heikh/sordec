@@ -25,8 +25,17 @@ pub(crate) enum SemanticFact {
     },
     /// An authorization requirement.
     Auth(AuthKind),
-    /// An event publication (`events().publish` or a `#[contractevent]`
-    /// struct's `.publish`).
+    /// An event publication: anything invoked on `….events()` (covering SDK
+    /// v22's `TokenUtils::new(&e).events().mint(…)` as well as
+    /// `e.events().publish(…)`), or a `#[contractevent]` struct's `.publish`.
+    ///
+    /// Deliberately **unnamed** — every event compares equal to every other.
+    /// Carrying the name would discriminate better, and the v22 API hands one
+    /// over for free, but our emitter recovers `publish((v28,), v29)`: an
+    /// opaque topic value with no recoverable name. Naming events would turn
+    /// today's correct matches into mismatches, penalising the scorer for what
+    /// the *emitter* cannot yet recover. Revisit if topic symbols become
+    /// recoverable.
     Event,
     /// A cross-contract call whose receiver is a generated `*Client`. The
     /// method is the callee entrypoint name (a SEP-41 method, or another
