@@ -1398,7 +1398,7 @@ mod tests {
         for op in [
             KnownOp::ValEncodeSmall { ty: KnownType::U64, value: v(0) },
             KnownOp::ValDecodeSmall { value: v(0) },
-            KnownOp::ValTagCheck { value: v(0), tag: 6 },
+            KnownOp::ValTagCheck { value: v(0), tag: 6, negated: false },
         ] {
             assert!(known_op_effects(&op).is_pure_total(), "{op:?} must be pure");
         }

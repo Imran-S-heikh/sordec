@@ -157,7 +157,10 @@ pub(crate) fn label_known_op(op: &KnownOp) -> String {
         KnownOp::DeployOp { kind, .. } => format!("deploy::{kind:?}"),
         KnownOp::ValEncodeSmall { ty, value } => format!("val_encode<{ty:?}>({value})"),
         KnownOp::ValDecodeSmall { value } => format!("val_decode({value})"),
-        KnownOp::ValTagCheck { value, tag } => format!("val_tag_check({value}, tag={tag:#04x})"),
+        KnownOp::ValTagCheck { value, tag, negated } => format!(
+            "val_tag_check({value}, tag={tag:#04x}{})",
+            if *negated { ", negated" } else { "" }
+        ),
         KnownOp::ValObject { kind, .. } => format!("val_obj::{kind:?}"),
         KnownOp::SymbolNew { resolved, .. } => format!("symbol_new({})", opt_str(resolved)),
         KnownOp::StringNew { resolved, .. } => format!("string_new({})", opt_str(resolved)),

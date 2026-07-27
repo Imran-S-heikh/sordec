@@ -12,7 +12,7 @@
 //! |---|---|---|
 //! | small encode | `(value << 8) \| tag`, tag ∈ 6..=13 | `ValEncodeSmall` |
 //! | u32/i32 encode | `(value << 32) \| tag`, tag ∈ {4,5} | `ValEncodeSmall` |
-//! | tag check | `(value & 0xFF) == tag` | `ValTagCheck` |
+//! | tag check | `(value & 0xFF) ==/!= tag` | `ValTagCheck` |
 //! | small decode | `value >> {8,32}` (gated) | `ValDecodeSmall` |
 //! | object conv. | `i`-module host call | `ValObject` |
 //!
@@ -163,17 +163,24 @@ fn try_object(_func: &HighFunction, id: ValueId, expr: &Expr) -> Option<Rewrite>
     })
 }
 
-/// P3 — tag check: `(value & 0xFF) == tag`.
+/// P3 — tag check: `(value & 0xFF) == tag`, or `!=` for the negated form.
+///
+/// Both polarities are the same SDK guard. Matching only `Eq` left most of
+/// them raw: on token-v23 this recognized **5** sites while
+/// [`crate::refine::panic_recover`] — which has always matched both — classified
+/// **23** trap leaves as tag-guarded. `refine::polarity` does not close the gap
+/// either; it only flips guards whose exit sits in the `else` arm, and fires
+/// zero times on that contract.
 fn try_tag_check(func: &HighFunction, id: ValueId, expr: &Expr) -> Option<Rewrite> {
-    let Expr::Binary {
-        op: BinaryOp::Eq,
-        lhs,
-        rhs,
-    } = expr
-    else {
+    let Expr::Binary { op, lhs, rhs } = expr else {
         return None;
     };
-    // Either operand may be the tag literal (commutative `==`).
+    let negated = match op {
+        BinaryOp::Eq => false,
+        BinaryOp::Ne => true,
+        _ => return None,
+    };
+    // Either operand may be the tag literal (both comparators commute).
     for (masked_side, tag_side) in [(*lhs, *rhs), (*rhs, *lhs)] {
         let Some(tag) = lit_tag(func, tag_side) else {
             continue;
@@ -212,10 +219,21 @@ fn try_tag_check(func: &HighFunction, id: ValueId, expr: &Expr) -> Option<Rewrit
         };
         return Some(Rewrite {
             id,
-            expr: Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, tag })),
+            expr: Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                value,
+                tag,
+                negated,
+            })),
             ty: Some(IrType::Inferred(KnownType::Bool)),
             source: ProvenanceSource::SdkPattern,
-            note: format!("val-tag-check {}", val_abi::tag_name(tag).unwrap_or("?")),
+            // Record the polarity: a `!=` guard is recognized *and* its
+            // meaning inverted relative to the `==` form, and the audit trail
+            // has to show that rather than imply a plain match.
+            note: format!(
+                "val-tag-check {}{}",
+                val_abi::tag_name(tag).unwrap_or("?"),
+                if negated { " (negated)" } else { "" }
+            ),
             metric: M_TAG_CHECK,
         });
     }
@@ -514,13 +532,84 @@ mod tests {
         assert!(changed);
         assert_eq!(metrics.get(M_TAG_CHECK), Some(1));
         match expr_at(&func, v(4)) {
-            Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, tag })) => {
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, tag, negated })) => {
                 assert_eq!(*value, v(0));
                 assert_eq!(*tag, 64);
+                assert!(!negated, "an `==` guard is not negated");
             }
             other => panic!("expected ValTagCheck, got {other:?}"),
         }
         assert_eq!(func.bindings.get(v(4)).unwrap().ty, IrType::Inferred(KnownType::Bool));
+    }
+
+    #[test]
+    fn negated_tag_check_recognized() {
+        // The majority form in the corpus: `(value & 0xFF) != tag`. Matching
+        // `Eq` alone left these raw — 5 recognized against the 23 tag-guarded
+        // traps `refine::panic_recover` sees on token-v23.
+        let mut func = func_with(vec![
+            i64c(0),
+            i32c(255),
+            bin(BinaryOp::BitAnd, v(0), v(1)),
+            i32c(77),
+            bin(BinaryOp::Ne, v(2), v(3)),
+        ]);
+        let (changed, metrics) = run(&mut func);
+        assert!(changed);
+        assert_eq!(metrics.get(M_TAG_CHECK), Some(1));
+        match expr_at(&func, v(4)) {
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, tag, negated })) => {
+                assert_eq!(*value, v(0));
+                assert_eq!(*tag, 77);
+                assert!(negated, "a `!=` guard must record its polarity");
+            }
+            other => panic!("expected ValTagCheck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negated_tag_check_is_commutative() {
+        // `tag != (value & 0xFF)` — the literal on the left.
+        let mut func = func_with(vec![
+            i64c(0),
+            i32c(255),
+            bin(BinaryOp::BitAnd, v(0), v(1)),
+            i32c(77),
+            bin(BinaryOp::Ne, v(3), v(2)),
+        ]);
+        let (changed, _) = run(&mut func);
+        assert!(changed);
+        match expr_at(&func, v(4)) {
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, negated, .. })) => {
+                assert_eq!(*value, v(0));
+                assert!(negated);
+            }
+            other => panic!("expected ValTagCheck, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_negated_compare_still_needs_a_valid_tag_and_the_0xff_mask() {
+        // Widening the comparator must not widen what counts as a tag check.
+        // Bogus tag byte:
+        let mut bogus_tag = func_with(vec![
+            i64c(0),
+            i32c(255),
+            bin(BinaryOp::BitAnd, v(0), v(1)),
+            i32c(200),
+            bin(BinaryOp::Ne, v(2), v(3)),
+        ]);
+        assert!(!run(&mut bogus_tag).0, "invalid tag byte must not match");
+
+        // Wrong mask:
+        let mut wrong_mask = func_with(vec![
+            i64c(0),
+            i32c(254),
+            bin(BinaryOp::BitAnd, v(0), v(1)),
+            i32c(77),
+            bin(BinaryOp::Ne, v(2), v(3)),
+        ]);
+        assert!(!run(&mut wrong_mask).0, "a non-0xFF mask must not match");
     }
 
     #[test]
@@ -543,7 +632,7 @@ mod tests {
         let (changed, _) = run(&mut func);
         assert!(changed);
         match expr_at(&func, v(5)) {
-            Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, tag })) => {
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, tag, .. })) => {
                 assert_eq!(*value, v(0), "should see through the wrap conversion");
                 assert_eq!(*tag, 77);
             }

@@ -866,28 +866,32 @@ fn dump_hir_with_garbage_input_exits_one() {
 
 #[test]
 fn dump_hir_folds_single_use_pure_chains() {
-    // The muxed-address tag guard in `transfer` — four raw bindings
-    // (two consts, an `and`, an `ne`) — renders as one nested line on
-    // the default path. Only mechanically-lowered bindings fold;
-    // recognizer-touched ones keep their line + provenance note.
+    // A single-use pure arithmetic chain renders as one nested line on the
+    // default path.
+    //
+    // This used to assert on the muxed-address tag guard, but that chain is
+    // now *recognized* (`!has_tag(v1, AddressObject)`) and recognizer-touched
+    // bindings deliberately keep their own line + provenance note rather than
+    // folding. Address arithmetic is the remaining mechanically-lowered case,
+    // which is what this test is actually about.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", TOKEN_V23])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ne (and v1, 255i64), 77i64"));
+        .stdout(predicate::str::contains("add (add v8, v2), v16"));
 }
 
 #[test]
 fn dump_hir_raw_flag_shows_unfolded_chains() {
-    // `--raw` skips both pipelines and the fold plan: the same guard
+    // `--raw` skips both pipelines and the fold plan: the same chain
     // stays flat ANF with one binding per line.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", "--raw", TOKEN_V23])
         .assert()
         .success()
-        .stdout(predicate::str::contains("ne (and v1, 255i64), 77i64").not())
+        .stdout(predicate::str::contains("add (add v8, v2), v16").not())
         .stdout(predicate::str::contains("and v1, v8"));
 }
 
@@ -928,7 +932,9 @@ fn dump_hir_structures_token_transfer_into_labeled_scopes() {
         .stdout(predicate::str::contains("'bb4: {"))
         .stdout(predicate::str::contains("break 'bb4"))
         .stdout(predicate::str::contains(";; bb0"))
-        .stdout(predicate::str::contains("if (ne (and v1, 255i64), 77i64) {"));
+        // The entry guard, now recognized rather than raw arithmetic. Pinned by
+        // tag name, not by SSA number: the number is incidental to this test.
+        .stdout(predicate::str::contains("!has_tag(v1, AddressObject)"));
 }
 
 #[test]
@@ -942,8 +948,16 @@ fn dump_hir_recovers_guard_clauses_with_inline_traps() {
         .args(["dump-hir", TOKEN_V23])
         .assert()
         .success()
+        // The guard condition is now a recognized `ValTagCheck`, and
+        // recognizer-touched bindings keep their own line, so the guard reads
+        // over two lines instead of one folded condition. Both halves are
+        // asserted: the named check, and the else-less `if` whose body is the
+        // trap D8 typed.
         .stdout(predicate::str::contains(
-            "if (ne (and v1, 255i64), 77i64) {\n    panic!()  ;; unwrap: tag-checked trap\n  }",
+            "= !has_tag(v1, AddressObject)  ;; SdkPattern: val-tag-check AddressObject (negated)",
+        ))
+        .stdout(predicate::str::contains(
+            "panic!()  ;; unwrap: tag-checked trap",
         ));
 }
 
@@ -960,7 +974,10 @@ fn dump_hir_flattens_timelock_claim_guard_cascade() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "if (ne (and v18, 255i64), 76i64) {\n    panic!()  ;; unwrap: tag-checked trap",
+            "= !has_tag(v2, AddressObject)  ;; SdkPattern: val-tag-check AddressObject (negated)",
+        ))
+        .stdout(predicate::str::contains(
+            "panic!()  ;; unwrap: tag-checked trap",
         ))
         .stdout(predicate::str::contains(
             "if (eq v51, 1i32) {\n    panic!()  ;; no error code",

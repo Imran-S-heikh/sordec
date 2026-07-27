@@ -813,9 +813,16 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io:
         KnownOp::ValDecodeSmall { value } => {
             write!(out, "val_decode({})", ctx.operand(*value))
         }
-        KnownOp::ValTagCheck { value, tag } => {
+        KnownOp::ValTagCheck {
+            value,
+            tag,
+            negated,
+        } => {
             let name = val_abi::tag_name(*tag).unwrap_or("?");
-            write!(out, "has_tag({}, {name})", ctx.operand(*value))
+            // Render the polarity, so a dump of a `!=` guard cannot be
+            // misread as a plain match.
+            let bang = if *negated { "!" } else { "" };
+            write!(out, "{bang}has_tag({}, {name})", ctx.operand(*value))
         }
         KnownOp::ValObject { kind, args } => {
             write!(out, "{}", val_abi::obj_kind_name(*kind))?;
@@ -1680,9 +1687,21 @@ mod tests {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
             value: v(1),
             tag: 64,
+            negated: false,
         }));
         let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "has_tag(v1, U64Object)");
+    }
+
+    #[test]
+    fn a_negated_val_tag_check_renders_with_a_bang() {
+        let expr = Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+            value: v(1),
+            tag: 64,
+            negated: true,
+        }));
+        let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
+        assert_eq!(s, "!has_tag(v1, U64Object)");
     }
 
     #[test]

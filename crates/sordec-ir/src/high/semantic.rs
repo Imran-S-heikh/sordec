@@ -604,7 +604,7 @@ pub enum KnownOp {
         value: ValueId,
     },
 
-    /// Val tag test: `(value & 0xFF) == tag`.
+    /// Val tag test: `(value & 0xFF) == tag`, or its negation.
     ///
     /// The SDK's small-vs-object dispatch guard. `tag` is the raw tag
     /// byte; resolve its name via the `val_abi` table in
@@ -615,6 +615,21 @@ pub enum KnownOp {
         value: ValueId,
         /// Expected tag byte (see `soroban-env-common`'s `Tag` enum).
         tag: u8,
+        /// `true` when the source comparison was `!=` — the guard fires
+        /// on a tag *mismatch*.
+        ///
+        /// The polarity has to live on the op rather than in a wrapping
+        /// `Unary(Not)`: a recognizer rewrite replaces one binding in
+        /// place and its replacement must stay a `Semantic(Known(_))`,
+        /// which is also what the shared idempotency guard keys on. A
+        /// `Not`-wrapped binding would fail that check and be
+        /// re-recognized on every run.
+        ///
+        /// Both polarities are the same SDK guard and classify a trap
+        /// identically (see `refine::panic_recover`); this field exists
+        /// so an elision pass can delete the guard without inverting its
+        /// meaning, and so dumps read as written.
+        negated: bool,
     },
 
     /// Host-side object-form Val conversion — one of the `i`-module
@@ -962,7 +977,7 @@ impl KnownOp {
             KnownOp::PanicWithError { error } => f(*error),
             KnownOp::ValEncodeSmall { ty: _, value }
             | KnownOp::ValDecodeSmall { value }
-            | KnownOp::ValTagCheck { value, tag: _ } => f(*value),
+            | KnownOp::ValTagCheck { value, .. } => f(*value),
             KnownOp::SymbolNew {
                 lm_pos,
                 len,
