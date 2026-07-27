@@ -254,7 +254,20 @@ fn signature(sig: &syn::Signature) -> String {
     format!("({}) -> {ret}", params.join(","))
 }
 
-/// Normalized struct shape in declaration order (field order is ABI-significant).
+/// Normalized struct shape, in declaration order.
+///
+/// **Declaration order is not actually ABI-significant** for a
+/// `#[contracttype]` struct: the SDK sorts fields when it writes the spec, so
+/// timelock's source order `token, amount, claimants, time_bound` and our
+/// alphabetical emission produce the identical spec entry. Comparing
+/// declaration order therefore charges a reconstruction for a difference that
+/// does not exist on the wire — measured, it cost timelock 0.125 of its
+/// interface score.
+///
+/// Left as-is deliberately: this is the *source-basis* extractor, a fallback
+/// used only when expansion is unavailable, and sorting here would diverge it
+/// further from what it is approximating. The spec-basis path
+/// ([`crate::spec`]) is authoritative and unaffected.
 fn struct_shape(fields: &Fields) -> String {
     format!("struct{{{}}}", field_list(fields))
 }

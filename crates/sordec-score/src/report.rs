@@ -7,11 +7,24 @@
 //! Every report carries [`SCORER_VERSION`]. The metric is *frozen +
 //! versioned* (K6): once the Phase 4 emitter is scored against it, the
 //! algorithm and the *default* weights do not change without bumping this
-//! string. A non-default weights profile is recorded per-report in
-//! [`ScoreReport::weights_profile`] and takes the score outside the frozen
-//! default contract. A golden-snapshot test (added with the calibration
-//! battery) pins the version to a recorded calibration vector so an
-//! accidental change trips at test time.
+//! string. A golden-snapshot test pins the version to a recorded calibration
+//! vector so an accidental change trips at test time.
+//!
+//! ## Version vs the recorded dimensions
+//!
+//! The version pins the **algorithm and the default weights**. The two
+//! *profiles* are recorded per-report instead — [`ScoreReport::weights_profile`]
+//! and [`ScoreReport::basis_profile`] — because they are inputs to a run rather
+//! than properties of the metric. The triple
+//! `(scorer_version, weights_profile, basis_profile)` is what reproduces a
+//! score.
+//!
+//! So changing which basis is the *default* does not bump the version: the
+//! basis was already recorded in every report, and the frozen calibration
+//! vector is unaffected because it runs through `score_str`, which carries no
+//! paths and is therefore always source-basis. Changing the *algorithm* — a
+//! new category, a different extractor, a re-weighting of the built-in default
+//! — does bump it.
 
 use serde::Serialize;
 

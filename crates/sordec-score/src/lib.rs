@@ -60,16 +60,20 @@ pub struct ScoreOptions {
     /// [`WeightProfile::rfp_default`] (the frozen score-1.0.0 weights).
     pub weights: WeightProfile,
     /// Which source basis each AST category is scored against. Defaults to
-    /// [`BasisProfile::source_only`], which needs no toolchain and reproduces
-    /// `score-1.0.0` exactly.
+    /// [`BasisProfile::rfp_default`] — the basis the RFP mandates: interface
+    /// and structure on macro-expanded sources, semantic on the sources as
+    /// written.
     ///
-    /// [`BasisProfile::rfp_default`] selects the RFP-aligned split. The
-    /// default flips to it once the interface category can read the expanded
-    /// basis (milestone M3, T10) — until then it would report `unchecked`,
-    /// blanking the strongest category.
+    /// This needs a toolchain. When expansion is unavailable every category
+    /// falls back to [`BasisProfile::source_only`] with the reason recorded in
+    /// [`ScoreReport::notes`]; the scores that produces are materially
+    /// different, so a run that silently fell back is meant to be caught by the
+    /// corpus accuracy bands rather than accepted.
     ///
     /// Only [`score_paths`] can honor an expanded basis: expansion needs
-    /// source *paths*, which a parsed AST does not carry.
+    /// source *paths*, which a parsed AST does not carry. [`score_files`] and
+    /// [`score_str`] are therefore always source-basis — which is why the
+    /// frozen calibration vector is unaffected by this default.
     pub basis: BasisProfile,
 }
 
@@ -79,7 +83,7 @@ impl Default for ScoreOptions {
             threshold: 0.90,
             check_compile: false,
             weights: WeightProfile::rfp_default(),
-            basis: BasisProfile::source_only(),
+            basis: BasisProfile::rfp_default(),
         }
     }
 }
@@ -325,10 +329,44 @@ mod tests {
     }
 
     #[test]
-    fn the_default_basis_is_recorded_and_needs_no_toolchain() {
+    fn the_default_basis_is_the_rfp_basis() {
+        // M3 close-out: the default is the basis the RFP mandates, so a plain
+        // `sordec score` reports the contractual number rather than an
+        // approximation of it.
+        assert_eq!(
+            ScoreOptions::default().basis,
+            BasisProfile::rfp_default(),
+            "the default must be the RFP basis"
+        );
+        assert!(
+            ScoreOptions::default().basis.needs_expansion(),
+            "which means the default path needs a toolchain"
+        );
+    }
+
+    #[test]
+    fn source_only_stays_toolchain_free() {
+        // Still worth pinning even though it is no longer the default: this is
+        // the profile every category falls back to when expansion is
+        // unavailable, so it must never itself want a toolchain.
+        assert!(!BasisProfile::source_only().needs_expansion());
+    }
+
+    #[test]
+    fn ast_entry_points_are_always_source_basis() {
+        // `score_str` carries no paths, so nothing can be expanded regardless
+        // of the profile. This is *why* the frozen calibration vector does not
+        // move when the default basis changes — the evidence for not bumping
+        // SCORER_VERSION at M3 close-out.
         let report = score_str(SRC, SRC, &ScoreOptions::default()).expect("parse");
-        assert_eq!(report.basis_profile, "source-only");
-        assert!(!ScoreOptions::default().basis.needs_expansion());
+        assert_eq!(
+            report.basis_profile, "rfp-default",
+            "the profile is recorded"
+        );
+        assert!(
+            (report.overall - 1.0).abs() < 1e-9,
+            "and identity still scores 1.0 on the source pair it actually used"
+        );
     }
 
     #[test]

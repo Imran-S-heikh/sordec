@@ -192,14 +192,21 @@ struct ScoreArgs {
     #[arg(long)]
     check_compile: bool,
 
-    /// Use the RFP-aligned source basis: interface and structure on
-    /// macro-expanded sources (`cargo expand`), semantic on the sources as
-    /// written. Semantic is the deliberate exception — expansion rewrites
-    /// `panic!` into calls the fact extractor cannot see, which would inflate
-    /// its precision. Needs a toolchain; falls back to the pre-expansion
-    /// basis, and says so in the report, when expansion is unavailable.
-    #[arg(long)]
-    expand: bool,
+    /// Which source basis to score on.
+    ///
+    /// `rfp-default` (the default) is the basis the RFP mandates: interface
+    /// and structure on macro-expanded sources (`cargo expand`), semantic on
+    /// the sources as written. Semantic is the deliberate exception —
+    /// expansion rewrites `panic!` into calls the fact extractor cannot see,
+    /// which would inflate its precision. It needs a toolchain, and falls
+    /// back to `source-only` — saying so in the report — when expansion is
+    /// unavailable.
+    ///
+    /// `source-only` scores everything on the sources as written. Needs no
+    /// toolchain, and is what the fallback lands on; ask for it explicitly
+    /// when you want that guarantee rather than a degraded RFP run.
+    #[arg(long, value_name = "PROFILE", default_value = "rfp-default")]
+    basis: BasisArg,
 
     /// Overall pass threshold. Defaults to the D4.1 contractual bar.
     #[arg(long, default_value_t = 0.90)]
@@ -210,6 +217,24 @@ struct ScoreArgs {
     /// built-in default weights.
     #[arg(long, value_name = "FILE")]
     weights: Option<PathBuf>,
+}
+
+/// The two built-in basis profiles, as a CLI value.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum BasisArg {
+    /// Interface + structure macro-expanded, semantic pre-expansion.
+    RfpDefault,
+    /// Everything on the sources as written; no toolchain needed.
+    SourceOnly,
+}
+
+impl From<BasisArg> for sordec_score::BasisProfile {
+    fn from(arg: BasisArg) -> Self {
+        match arg {
+            BasisArg::RfpDefault => Self::rfp_default(),
+            BasisArg::SourceOnly => Self::source_only(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -781,11 +806,7 @@ fn run_score(args: &ScoreArgs) -> u8 {
         threshold: args.threshold,
         check_compile: args.check_compile,
         weights,
-        basis: if args.expand {
-            sordec_score::BasisProfile::rfp_default()
-        } else {
-            sordec_score::BasisProfile::source_only()
-        },
+        basis: args.basis.into(),
     };
     let report = match sordec_score::score_paths(&args.reconstructed, &args.original, &opts) {
         Ok(report) => report,
