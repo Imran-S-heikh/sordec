@@ -141,6 +141,7 @@ fn score_entrypoints(
     let mut missing = 0usize;
     let mut flowless = 0usize;
     let mut low = Vec::new();
+    let mut census = TokenCensus::default();
     for name in entrypoints {
         // Unresolvable covers both "we never emitted it" and "we emitted
         // several things by that name": in either case we cannot identify the
@@ -153,6 +154,9 @@ fn score_entrypoints(
         let Some(_) = recon.resolve(name) else {
             missing += 1;
             measured += 1;
+            // Its control flow is wholly unrecovered — a recall miss, and the
+            // census must see it as one rather than as an absent comparison.
+            census.observe(&[], &stream(&orig, name));
             low.push(format!("{name}(0.00)"));
             continue;
         };
@@ -168,6 +172,7 @@ fn score_entrypoints(
             continue;
         }
 
+        census.observe(&ours, &theirs);
         let sim = function_similarity(&ours, &theirs);
         total += sim;
         measured += 1;
@@ -201,6 +206,9 @@ fn score_entrypoints(
              their call edges are dropped, so this is a lower bound"
         ));
     }
+    if let Some(note) = census.note() {
+        category = category.with_note(note);
+    }
     if !low.is_empty() {
         low.sort_unstable();
         let shown = low.len().min(8);
@@ -211,6 +219,58 @@ fn score_entrypoints(
         category = category.with_note(format!("low-similarity: {list}"));
     }
     category
+}
+
+/// Control-flow token totals across the measured entrypoints.
+///
+/// The score alone says `0.0480` and nothing about what to do with it. This
+/// decomposes it into the two facts that actually differ: how much of the
+/// original's control flow we recovered (recall), and how much of what we
+/// emitted is real (precision). On the corpus those read ~0.87 and ~0.04 —
+/// we recover essentially all the real structure and bury it in 20x more
+/// marshalling, which is an emitter problem, not a scoring one.
+#[derive(Default)]
+struct TokenCensus {
+    orig: usize,
+    recon: usize,
+    overlap: usize,
+}
+
+impl TokenCensus {
+    fn observe(&mut self, ours: &[String], theirs: &[String]) {
+        self.orig += theirs.len();
+        self.recon += ours.len();
+        self.overlap += simil::multiset_overlap(&simil::multiset(theirs), &simil::multiset(ours));
+    }
+
+    /// The census as a report note, or `None` when no tokens were seen at all
+    /// — reachable when every measured entrypoint was straight-line in the
+    /// original and missing from the reconstruction.
+    fn note(&self) -> Option<String> {
+        let prf = simil::prf(self.overlap, self.recon, self.orig)?;
+        let mut note = format!(
+            "control flow: precision={} recall={} ({} original tokens, {} reconstructed)",
+            simil::render_ratio(prf.precision),
+            simil::render_ratio(prf.recall),
+            self.orig,
+            self.recon
+        );
+        if self.orig > 0 {
+            // `2·o/(o+r)` is the best Sorensen-Dice attainable at this token
+            // ratio even with perfect recall. The category score is a mean of
+            // per-entrypoint blends rather than one global Dice, so this is an
+            // indicator of headroom and not a strict bound — hence `~`. Its
+            // point survives the imprecision: while bloat is this high, no
+            // change to the scoring algorithm gets past roughly here.
+            let (o, r) = (self.orig as f64, self.recon as f64);
+            note.push_str(&format!(
+                " — bloat {:.1}x, dice ceiling ~{:.4}",
+                r / o,
+                2.0 * o / (o + r)
+            ));
+        }
+        Some(note)
+    }
 }
 
 /// The flattened control-flow skeleton of everything `entrypoint` reaches:
@@ -580,6 +640,64 @@ mod tests {
         let s = score("fn other() {}", "fn plain(a: u64) -> u64 { a }", &["plain"]);
         assert!(s.checked, "a missing entrypoint is a measurement, not a gap");
         assert!(s.score.abs() < 1e-9, "score was {}", s.score);
+    }
+
+    // ----------------------------------------------------------------
+    // T13e: the control-flow token census
+    // ----------------------------------------------------------------
+
+    fn census_note(s: &CategoryScore) -> Option<&String> {
+        s.notes.iter().find(|n| n.starts_with("control flow:"))
+    }
+
+    #[test]
+    fn the_census_reports_precision_recall_and_bloat() {
+        // Original has one branch; we recover it and invent three more. So
+        // recall is perfect and precision is 1/4, with 4x bloat.
+        let s = score(
+            "fn g(x: i128) { if a {} if b {} if c {} if x < 0 {} }",
+            "fn g(x: i128) { if x < 0 {} }",
+            &["g"],
+        );
+        let note = census_note(&s).expect("census note");
+        assert!(note.contains("1 original tokens"), "{note}");
+        assert!(note.contains("4 reconstructed"), "{note}");
+        assert!(note.contains("recall=1.0000"), "{note}");
+        assert!(note.contains("precision=0.2500"), "{note}");
+        assert!(note.contains("bloat 4.0x"), "{note}");
+        // 2*1/(1+4) = 0.4
+        assert!(note.contains("ceiling ~0.4000"), "{note}");
+    }
+
+    #[test]
+    fn a_missing_entrypoint_counts_against_recall() {
+        // Its control flow is wholly unrecovered, which is a recall miss —
+        // not an absent comparison to be quietly skipped.
+        let s = score("fn other() {}", "fn g(x: i128) { if x < 0 {} }", &["g"]);
+        let note = census_note(&s).expect("census note");
+        assert!(note.contains("1 original tokens"), "{note}");
+        assert!(note.contains("0 reconstructed"), "{note}");
+        assert!(note.contains("recall=0.0000"), "{note}");
+    }
+
+    #[test]
+    fn an_undefined_ratio_renders_not_applicable() {
+        // Nothing reconstructed means precision has no denominator. It is
+        // undefined, not 0.0000 — the distinction `simil::render_ratio` exists
+        // to preserve.
+        let s = score("fn other() {}", "fn g(x: i128) { if x < 0 {} }", &["g"]);
+        let note = census_note(&s).expect("census note");
+        assert!(note.contains("precision=n/a"), "{note}");
+    }
+
+    #[test]
+    fn the_census_is_omitted_when_no_tokens_were_seen() {
+        // `plain` is straight-line in the original and missing from the
+        // reconstruction: measured (it scores 0) but contributing no tokens
+        // either way, so there is nothing for a census to report.
+        let s = score("fn other() {}", "fn plain(a: u64) -> u64 { a }", &["plain"]);
+        assert!(s.checked);
+        assert!(census_note(&s).is_none(), "notes: {:?}", s.notes);
     }
 
     // ----------------------------------------------------------------

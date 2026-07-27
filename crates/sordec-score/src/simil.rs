@@ -37,11 +37,19 @@ pub(crate) fn multiset_similarity(a: &Multiset, b: &Multiset) -> f64 {
         (0, _) | (_, 0) => return 0.0,
         _ => {}
     }
-    let overlap: usize = a
-        .iter()
+    2.0 * multiset_overlap(a, b) as f64 / (total_a + total_b) as f64
+}
+
+/// How many token occurrences the two bags share: the per-key minimum count,
+/// summed.
+///
+/// Shared with the structure category's token census (T13e), which reports
+/// this as control-flow precision/recall alongside the score — the same
+/// overlap the similarity above divides by.
+pub(crate) fn multiset_overlap(a: &Multiset, b: &Multiset) -> usize {
+    a.iter()
         .map(|(key, count)| *count.min(b.get(key).unwrap_or(&0)))
-        .sum();
-    2.0 * overlap as f64 / (total_a + total_b) as f64
+        .sum()
 }
 
 /// A bag of tokens with per-token counts.
@@ -221,5 +229,27 @@ mod tests {
     fn render_ratio_marks_undefined() {
         assert_eq!(render_ratio(Some(0.5)), "0.5000");
         assert_eq!(render_ratio(None), "n/a");
+    }
+
+    #[test]
+    fn multiset_overlap_sums_per_key_minimums() {
+        let bag = |tokens: &[&str]| multiset(&tokens.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>());
+
+        // Disjoint bags share nothing.
+        assert_eq!(multiset_overlap(&bag(&["a"]), &bag(&["b"])), 0);
+        // Repeats count, capped at the smaller side: two `a` vs three is two.
+        assert_eq!(multiset_overlap(&bag(&["a", "a"]), &bag(&["a", "a", "a"])), 2);
+        // Partial overlap sums per key: min(2,1) for `a` plus min(1,1) for `b`.
+        assert_eq!(
+            multiset_overlap(&bag(&["a", "a", "b"]), &bag(&["a", "b", "c"])),
+            2
+        );
+        // Symmetric.
+        assert_eq!(
+            multiset_overlap(&bag(&["a", "b", "c"]), &bag(&["a", "a", "b"])),
+            2
+        );
+        // An empty side shares nothing.
+        assert_eq!(multiset_overlap(&bag(&[]), &bag(&["a"])), 0);
     }
 }
