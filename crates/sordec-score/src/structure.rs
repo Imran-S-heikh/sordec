@@ -83,13 +83,30 @@
 //! whose size is visible), so `branch:N` stays exact — this is a targeted
 //! collapse, not a general softening.
 //!
-//! **Known limitation:** the stream is flat preorder with no enter/exit
-//! markers, so it records the *sequence* of constructs but not their
-//! *containment* — a nested loop and two sequential loops both reduce to
-//! `[loop, loop]`. Containment does survive compilation and arguably should
-//! be scored; encoding it is a separate vocabulary change, tracked in
-//! `plan/M4_STRUCTURE_DESIGN.md` §7 and pinned by
-//! `containment_depth_is_not_encoded_known_limitation`.
+//! ## Containment (score-2.0.0 T13f)
+//!
+//! Leaving a construct's body emits an `end` token, so the otherwise-flat
+//! preorder stream encodes which construct contains which:
+//!
+//! ```text
+//! for { for { if } }   ->  [loop, loop, branch:1, end:branch:1, end:loop, end:loop]
+//! for {} for {} if {}  ->  [loop, end:loop, loop, end:loop, branch:1, end:branch:1]
+//! ```
+//!
+//! Containment survives compilation — a nested loop really is different
+//! control flow from two sequential ones — so by the rule above it counts.
+//! Until T13f the two forms compared *equal*.
+//!
+//! **Close markers rather than depth tags** (`branch:1@2`), because absolute
+//! depth is brittle against the one thing our emitter does everywhere: wrapping
+//! real code in an extra marshalling guard. That turns the source's
+//! `branch:1@0` into our `branch:1@1` and mismatches *every descendant* even
+//! when the inner structure is perfect. As a close-marked stream the same
+//! wrapper is a **local insertion** of two tokens, which the LCS half absorbs
+//! while still charging for it.
+//!
+//! Only the ordered half of the blend sees the markers; the multiset half and
+//! the token census read content tokens only (see [`content`]).
 
 use std::collections::BTreeSet;
 
@@ -105,6 +122,17 @@ use crate::spec;
 /// when comparing two function skeletons.
 const SEQUENCE_WEIGHT: f64 = 0.6;
 const MULTISET_WEIGHT: f64 = 0.4;
+
+/// Prefix of the token marking the end of a construct's body, making the
+/// otherwise-flat preorder stream encode *containment* (score-2.0.0 T13f).
+///
+/// The marker mirrors the token it closes — `end:loop`, `end:branch:2` — rather
+/// than being a bare `end`. A generic marker would be matchable between *any*
+/// two constructs, so `branch:2` against `branch:1` would score 0 on the open
+/// token but still match on the close, handing an arity mismatch partial credit
+/// it does not deserve. Mirroring keeps a mismatch a mismatch while still
+/// encoding the nesting.
+const CLOSE: &str = "end:";
 
 /// Score the structure category.
 ///
@@ -255,9 +283,11 @@ struct TokenCensus {
 
 impl TokenCensus {
     fn observe(&mut self, ours: &[String], theirs: &[String]) {
+        // Content tokens only — see `content`.
+        let (ours, theirs) = (content(ours), content(theirs));
         self.orig += theirs.len();
         self.recon += ours.len();
-        self.overlap += simil::multiset_overlap(&simil::multiset(theirs), &simil::multiset(ours));
+        self.overlap += simil::multiset_overlap(&simil::multiset(&theirs), &simil::multiset(&ours));
     }
 
     /// The census as a report note, or `None` when no tokens were seen at all
@@ -306,10 +336,31 @@ fn stream(graph: &CallGraph<'_>, entrypoint: &str) -> Vec<String> {
 }
 
 /// Blend the ordered and multiset similarities of two skeleton streams.
+///
+/// The two halves deliberately read *different* views of the stream, because
+/// they answer different questions:
+///
+/// - the **ordered** half sees the [`CLOSE`] markers, so it is sensitive to
+///   which construct contains which — "is this the same control-flow *shape*";
+/// - the **multiset** half sees content tokens only — "are the same constructs
+///   present, and how many". Feeding markers into the bag would make [`CLOSE`]
+///   the most common token by far and dilute that comparison into noise.
 fn function_similarity(a: &[String], b: &[String]) -> f64 {
     let seq = simil::sequence_similarity(a, b);
-    let bag = simil::multiset_similarity(&simil::multiset(a), &simil::multiset(b));
+    let (ca, cb) = (content(a), content(b));
+    let bag = simil::multiset_similarity(&simil::multiset(&ca), &simil::multiset(&cb));
     SEQUENCE_WEIGHT * seq + MULTISET_WEIGHT * bag
+}
+
+/// A skeleton stream with the [`CLOSE`] markers removed.
+///
+/// Shared by the multiset half of [`function_similarity`] and by
+/// [`TokenCensus`], so the two cannot drift on what counts as a token. The
+/// census in particular *must* stay on content tokens: markers roughly double
+/// every stream, which would silently restate the published bloat ratio and the
+/// emitter target derived from it.
+fn content(tokens: &[String]) -> Vec<String> {
+    tokens.iter().filter(|t| !t.starts_with(CLOSE)).cloned().collect()
 }
 
 /// The preorder control-flow-skeleton token stream of one function body.
@@ -326,17 +377,27 @@ struct SkeletonVisitor {
     tokens: Vec<String>,
 }
 
+impl SkeletonVisitor {
+    /// Push `token`, descend into its body, then push the mirrored close
+    /// marker — the bracketing that encodes containment.
+    fn open(&mut self, token: String, descend: impl FnOnce(&mut Self)) {
+        self.tokens.push(token.clone());
+        descend(self);
+        self.tokens.push(format!("{CLOSE}{token}"));
+    }
+}
+
 impl<'ast> Visit<'ast> for SkeletonVisitor {
     fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
         // `if` and `if let` unify with `match` as `branch:N`.
         let arity = if node.else_branch.is_some() { 2 } else { 1 };
-        self.tokens.push(format!("branch:{arity}"));
-        visit::visit_expr_if(self, node);
+        self.open(format!("branch:{arity}"), |v| visit::visit_expr_if(v, node));
     }
 
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
-        self.tokens.push(format!("branch:{}", node.arms.len()));
-        visit::visit_expr_match(self, node);
+        self.open(format!("branch:{}", node.arms.len()), |v| {
+            visit::visit_expr_match(v, node)
+        });
     }
 
     // The three loop forms unify as `loop`: the kind does not survive
@@ -344,18 +405,15 @@ impl<'ast> Visit<'ast> for SkeletonVisitor {
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
         // covers `while` and `while let`.
-        self.tokens.push("loop".to_string());
-        visit::visit_expr_while(self, node);
+        self.open("loop".to_owned(), |v| visit::visit_expr_while(v, node));
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        self.tokens.push("loop".to_string());
-        visit::visit_expr_for_loop(self, node);
+        self.open("loop".to_owned(), |v| visit::visit_expr_for_loop(v, node));
     }
 
     fn visit_expr_loop(&mut self, node: &'ast syn::ExprLoop) {
-        self.tokens.push("loop".to_string());
-        visit::visit_expr_loop(self, node);
+        self.open("loop".to_owned(), |v| visit::visit_expr_loop(v, node));
     }
 
     fn visit_expr_return(&mut self, node: &'ast syn::ExprReturn) {
@@ -475,21 +533,84 @@ mod tests {
     }
 
     #[test]
-    fn containment_depth_is_not_encoded_known_limitation() {
-        // KNOWN LIMITATION, pinned deliberately so it cannot be "fixed" by
-        // accident without a decision. The skeleton is a flat *preorder*
-        // stream with no enter/exit markers, so it records the sequence of
-        // constructs but not which contains which.
-        //
-        // Containment does survive compilation, so by this module's governing
-        // rule it *should* be scored; encoding it is a separate vocabulary
-        // change tracked in `plan/M4_STRUCTURE_DESIGN.md` §7. Predates M4 —
-        // the old `loop:for` tokens had the same blind spot.
-        assert_perfect(
+    fn containment_is_encoded() {
+        // T13f. This test previously pinned the *opposite* — nested and
+        // sequential compared equal, because the stream had no close markers.
+        // Containment survives compilation, so by this module's governing rule
+        // it counts, and the two must now differ.
+        let s = score(
             "fn g() { for _ in 0..2 { for _ in 0..2 { if x {} } } }",
             "fn g() { for _ in 0..2 {} for _ in 0..2 {} if x {} }",
             &["g"],
         );
+        assert!(
+            s.score < 1.0,
+            "nested and sequential must not compare equal, got {}",
+            s.score
+        );
+    }
+
+    #[test]
+    fn a_branch_arity_mismatch_still_costs_everything() {
+        // The reason close markers mirror their open token. With a generic
+        // `end`, `branch:2` against `branch:1` would score 0 on the open token
+        // but still match on the close, handing an arity mismatch partial
+        // credit. Mirrored, both halves miss and it stays a full mismatch.
+        let s = score(
+            "fn g(x: i128) { if x < 0 {} else {} }",
+            "fn g(x: i128) { if x < 0 {} }",
+            &["g"],
+        );
+        assert!(
+            s.score.abs() < 1e-9,
+            "an arity mismatch must not earn marker credit, got {}",
+            s.score
+        );
+    }
+
+    #[test]
+    fn containment_leaves_the_multiset_half_alone() {
+        // The bag asks "which constructs, how many" — a question nesting does
+        // not change. Both sides here have loop x2 + branch:1, so only the
+        // ordered half may differ, which bounds the penalty: the score must
+        // stay at or above the multiset weight.
+        let s = score(
+            "fn g() { for _ in 0..2 { for _ in 0..2 { if x {} } } }",
+            "fn g() { for _ in 0..2 {} for _ in 0..2 {} if x {} }",
+            &["g"],
+        );
+        assert!(
+            s.score >= MULTISET_WEIGHT,
+            "identical construct bags must still earn the multiset half, got {}",
+            s.score
+        );
+    }
+
+    #[test]
+    fn an_extra_enclosing_guard_does_not_wreck_inner_structure() {
+        // The property that chose close markers over depth tags. Our emitter
+        // wraps real code in marshalling guards constantly; under depth
+        // tagging every descendant's token would shift and mismatch. As a
+        // local two-token insertion the inner structure still scores.
+        let s = score(
+            "fn g(x: i128) { if tag_ok { if x < 0 {} if x > 9 {} } }",
+            "fn g(x: i128) { if x < 0 {} if x > 9 {} }",
+            &["g"],
+        );
+        assert!(
+            s.score > 0.5,
+            "a single wrapper must not destroy correct inner structure, got {}",
+            s.score
+        );
+    }
+
+    #[test]
+    fn identity_is_still_exactly_one_with_markers() {
+        // Markers are additive and symmetric, so identity must be untouched.
+        let src = "fn g(n: u32) {
+            for _ in 0..n { if a { for _ in 0..2 { if b {} } } else { return; } }
+        }";
+        assert_perfect(src, src, &["g"]);
     }
 
     // ----------------------------------------------------------------
