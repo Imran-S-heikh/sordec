@@ -48,6 +48,25 @@ pub(crate) enum SemanticFact {
     Panic(PanicKind),
     /// A ledger-context query.
     Ledger(LedgerKind),
+    /// A cryptographic host operation — anything invoked on `env.crypto()`
+    /// (`sha256`, `keccak256`, `ed25519_verify`, …).
+    ///
+    /// Unlike [`SemanticFact::Event`], the operation **is** named: `sha256`
+    /// and `keccak256` are different security properties and must not compare
+    /// equal, and the name is genuinely recoverable — the pipeline already
+    /// identifies these as `crypto::ComputeHashSha256` and friends. `String`
+    /// rather than an enum because the SDK's op set is open-ended.
+    Crypto {
+        /// The called host operation, e.g. `sha256`.
+        op: String,
+    },
+    /// A PRNG host operation — anything invoked on `env.prng()`
+    /// (`gen_range`, `shuffle`, …). Named for the same reason as
+    /// [`SemanticFact::Crypto`].
+    Prng {
+        /// The called host operation, e.g. `gen_range`.
+        op: String,
+    },
 }
 
 /// Storage operation kind.
@@ -125,6 +144,8 @@ impl SemanticFact {
             SemanticFact::CrossContract { method } => format!("xcall:{method}"),
             SemanticFact::Panic(kind) => format!("panic:{}", kind.token()),
             SemanticFact::Ledger(kind) => format!("ledger:{}", kind.token()),
+            SemanticFact::Crypto { op } => format!("crypto:{op}"),
+            SemanticFact::Prng { op } => format!("prng:{op}"),
         }
     }
 }

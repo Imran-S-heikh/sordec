@@ -170,16 +170,8 @@ impl<'a> Visit<'a> for SemanticVisitor<'a> {
 
 impl<'a> SemanticVisitor<'a> {
     fn method_fact(&self, node: &'a syn::ExprMethodCall) -> Option<SemanticFact> {
-        // Anything invoked on `….events()` is an event emission, whatever the
-        // SDK spells the emitting method. Checked before the method-name match
-        // for two reasons: it cannot double-fire with the `"publish"` arm
-        // below (`e.events().publish(…)` yields one fact, not two), and it
-        // sidesteps an ordering hazard — the storage arm runs
-        // `storage_tier(&node.receiver)?`, whose `?` returns from this whole
-        // function, so an event named `get` or `set` would otherwise produce
-        // *nothing* rather than falling through to a later arm.
-        if receiver_is_events(&node.receiver) {
-            return Some(SemanticFact::Event);
+        if let Some(fact) = receiver_keyed_fact(node) {
+            return Some(fact);
         }
 
         let method = node.method.to_string();
@@ -260,18 +252,35 @@ fn receiver_is_ledger(receiver: &Expr) -> bool {
     matches!(receiver, Expr::MethodCall(call) if call.method == "ledger")
 }
 
-/// Whether an expression is a `….events()` call — the receiver every event
-/// emission shares, whichever way the SDK spells the emitting method.
+/// Facts identified by the **host module their receiver names** rather than by
+/// the called method: `….events().<anything>`, `env.crypto().<op>`,
+/// `env.prng().<op>`.
 ///
-/// Keying on the method name alone missed a whole API. SDK v23's
+/// Keying on the method name alone missed whole APIs. SDK v23's
 /// `#[contractevent]` emits `SetAdmin { … }.publish(&e)`, but v22's
 /// `TokenUtils` has **one named method per event** —
 /// `TokenUtils::new(&e).events().mint(admin, to, amount)`. token-v22's seven
 /// emissions produced *zero* facts, so the five our reconstruction correctly
 /// recovered scored as fabrications against an original credited with none.
-/// The receiver is the part both spellings agree on.
-fn receiver_is_events(receiver: &Expr) -> bool {
-    matches!(receiver, Expr::MethodCall(call) if call.method == "events")
+/// Crypto and PRNG have the same shape: an open-ended set of operation names
+/// hanging off one stable receiver.
+///
+/// Consulted **before** the method-name match in [`SemanticVisitor::method_fact`],
+/// which prevents double-firing with the `"publish"` arm and sidesteps an
+/// ordering hazard: the storage arm runs `storage_tier(&node.receiver)?`, whose
+/// `?` returns from `method_fact` entirely, so a host op named `get` or `set`
+/// would otherwise yield *nothing* rather than falling through.
+fn receiver_keyed_fact(node: &syn::ExprMethodCall) -> Option<SemanticFact> {
+    let Expr::MethodCall(receiver) = node.receiver.as_ref() else {
+        return None;
+    };
+    let op = || node.method.to_string();
+    match receiver.method.to_string().as_str() {
+        "events" => Some(SemanticFact::Event),
+        "crypto" => Some(SemanticFact::Crypto { op: op() }),
+        "prng" => Some(SemanticFact::Prng { op: op() }),
+        _ => None,
+    }
 }
 
 /// Whether an expression is a `*Client::new(...)` constructor call.
@@ -408,6 +417,74 @@ mod tests {
             event_count(r#"fn f(e: Env, t: Symbol, d: i128) { e.events().publish((t,), d); }"#),
             1
         );
+    }
+
+    #[test]
+    fn crypto_ops_are_recognized_and_named() {
+        // Named, unlike `Event`: sha256 and keccak256 are different security
+        // properties and must not compare equal. The name is recoverable —
+        // the pipeline already identifies these as `crypto::ComputeHashSha256`
+        // and friends.
+        let keys = facts_of(
+            r#"
+            fn f(env: Env, m: Bytes, signer: BytesN<32>, sig: BytesN<64>) {
+                env.crypto().sha256(&m);
+                env.crypto().keccak256(&m);
+                env.crypto().ed25519_verify(&signer, &m, &sig);
+            }
+            "#,
+        );
+        assert!(keys.contains(&"crypto:sha256".to_string()), "{keys:?}");
+        assert!(keys.contains(&"crypto:keccak256".to_string()), "{keys:?}");
+        assert!(
+            keys.contains(&"crypto:ed25519_verify".to_string()),
+            "{keys:?}"
+        );
+    }
+
+    #[test]
+    fn different_crypto_ops_do_not_compare_equal() {
+        let sha = facts_of(r#"fn f(e: Env, m: Bytes) { e.crypto().sha256(&m); }"#);
+        let keccak = facts_of(r#"fn f(e: Env, m: Bytes) { e.crypto().keccak256(&m); }"#);
+        assert_ne!(sha, keccak);
+    }
+
+    #[test]
+    fn prng_ops_are_recognized() {
+        let keys = facts_of(r#"fn f(e: Env, lo: u64, hi: u64) { e.prng().gen_range(lo..=hi); }"#);
+        assert_eq!(keys, vec!["prng:gen_range".to_string()]);
+    }
+
+    #[test]
+    fn an_unrecovered_hole_is_not_a_recovered_fact() {
+        // Our emitter has no lowering for crypto host calls yet, so it emits
+        // `todo!("crypto::ComputeHashSha256")` — an honest admission of
+        // non-recovery. Counting that as a recovered fact would credit us for
+        // work not done, the same self-scoring that inflated structure ~10x
+        // before T7. The hole names the op, so this is cheap to get wrong.
+        let keys = facts_of(r#"fn f() { let _v = todo!("crypto::ComputeHashSha256"); }"#);
+        assert!(
+            keys.is_empty(),
+            "a `todo!` hole must never score as recovery, got {keys:?}"
+        );
+    }
+
+    #[test]
+    fn an_attestation_shaped_contract_yields_five_facts() {
+        // The driving fixture, in miniature: 4 crypto + 1 prng. Before T17
+        // this contract extracted *zero* facts and read as doing nothing.
+        let keys = facts_of(
+            r#"
+            fn digest(env: Env, m: Bytes) -> BytesN<32> { env.crypto().sha256(&m).into() }
+            fn digest_keccak(env: Env, m: Bytes) -> BytesN<32> { env.crypto().keccak256(&m).into() }
+            fn attest(env: Env, s: BytesN<32>, m: Bytes, g: BytesN<64>) {
+                env.crypto().ed25519_verify(&s, &m, &g);
+            }
+            fn check(env: Env, m: Bytes) -> BytesN<32> { env.crypto().sha256(&m).into() }
+            fn challenge(env: Env, lo: u64, hi: u64) -> u64 { env.prng().gen_range(lo..=hi) }
+            "#,
+        );
+        assert_eq!(keys.len(), 5, "{keys:?}");
     }
 
     #[test]

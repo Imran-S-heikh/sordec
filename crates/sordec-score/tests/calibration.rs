@@ -41,19 +41,25 @@ fn fixture_src(name: &str) -> PathBuf {
 /// either side, so identity leaves it **unchecked** rather than claiming a
 /// perfect 1.0 (score-2.0.0 T8).
 ///
-/// The list is exact, not a floor, and the two entries are here for very
-/// different reasons — both worth keeping visible:
+/// The list is exact, not a floor. `hello-add` genuinely performs no Soroban
+/// operations (`a + b`), so there is nothing for any scorer to recover — a
+/// property of the contract, not a gap in the instrument.
 ///
-/// - `hello-add` genuinely performs no Soroban operations (`a + b`), so
-///   there is nothing for any scorer to recover.
-/// - `attestation` *does* perform them, but the fact vocabulary does not yet
-///   cover crypto/prng/deploy (milestone M5, T17). That is a limitation of
-///   the instrument, not a property of the contract.
+/// **`attestation` was removed at T17.** It had been here for the opposite
+/// reason: it *does* perform host operations, but the fact vocabulary could
+/// not see crypto or PRNG, so a contract built specifically to exercise those
+/// surfaces measured as if it were empty. Teaching the extractor
+/// `env.crypto().<op>` and `env.prng().<op>` made it measurable — five facts
+/// on the identity run — which is the whole point of this list being exact:
+/// a category becoming measurable is a deliberate change to the instrument
+/// and has to be recorded here consciously, by a failing test.
 ///
-/// Expanding the vocabulary will flip `attestation` to checked and fail this
-/// test. That is the intent: a category becoming measurable is a deliberate
-/// change to the instrument and should be recorded here consciously.
-const SEMANTICALLY_UNMEASURABLE: [&str; 2] = ["attestation", "hello-add"];
+/// Note this is about *measurability*, not recovery. Scoring the real
+/// reconstruction, attestation still reads 0 — our emitter has no lowering
+/// for crypto host calls and emits `todo!("crypto::ComputeHashSha256")`
+/// holes. The difference is that the gap is now a measured 0-of-5 rather
+/// than invisible.
+const SEMANTICALLY_UNMEASURABLE: [&str; 1] = ["hello-add"];
 
 /// Fixtures whose *structure* category is unmeasurable on identity — no
 /// entrypoint carries control flow on either side, so there is nothing to
