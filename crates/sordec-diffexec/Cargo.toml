@@ -1,0 +1,32 @@
+[package]
+name = "sordec-diffexec"
+description = "Differential execution harness: original wasm vs recompiled reconstruction"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Nothing. The harness deliberately takes primitives (an `rssdkver` string, a
+# protocol string) rather than `sordec_ir::SorobanFacts`, so it stays decoupled
+# from the pipeline whose output it executes — the same independence rule
+# `sordec-score` follows. Callers do the extraction.
+
+[dev-dependencies]
+# Host-side execution of contract wasm, for the probe tests only.
+#
+# A dev-dependency on purpose: `tools/gate.sh` step 2 runs
+# `RUSTFLAGS="-D warnings" cargo build --release --workspace`, and RUSTFLAGS
+# applies to dependencies too. The `testutils` feature pulls `soroban-env-host`,
+# which vendors a 2023-vintage `soroban-wasmi`; compiling that under
+# warnings-as-errors on a current rustc is not something we want gating our
+# build. Step 2 does not build dev-dependencies, so this placement keeps the
+# gate honest. Moving it to `[dependencies]` will break `gate.sh`.
+# NB: this pulls `soroban-env-host`, which only compiles because `Cargo.lock`
+# holds `ed25519-dalek` at 2.x. See the workspace manifest for the full
+# explanation and the restore command; `tests/lockfile.rs` guards it.
+soroban-sdk.workspace = true
+
+[lints]
+workspace = true

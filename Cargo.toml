@@ -8,6 +8,7 @@ members = [
     "crates/sordec-backend",
     "crates/sordec-driver",
     "crates/sordec-score",
+    "crates/sordec-diffexec",
     "crates/sordec-cli",
 ]
 # Vendored fixture sources under `samples/contracts/<name>/source/` are
@@ -35,6 +36,7 @@ sordec-passes   = { path = "crates/sordec-passes" }
 sordec-backend  = { path = "crates/sordec-backend" }
 sordec-driver   = { path = "crates/sordec-driver" }
 sordec-score    = { path = "crates/sordec-score" }
+sordec-diffexec = { path = "crates/sordec-diffexec" }
 
 # External crates — pinned to exact versions we've validated
 wasmparser    = "0.240"
@@ -59,6 +61,30 @@ clap          = { version = "4.5", features = ["derive"] }
 # pin lives in one place.
 assert_cmd    = "2.0"
 predicates    = "3.1"
+
+# In-process contract execution — used only as a dev-dependency from
+# `crates/sordec-diffexec/`. `testutils` is what provides `Env`, contract
+# registration from raw wasm bytes, and the auth/event/ledger introspection the
+# behavior harness compares.
+#
+# CAUTION — this dependency carries a lockfile constraint that a plain
+# `cargo update` will break. `soroban-env-host` declares
+# `ed25519-dalek = ">=2.0.0"` (its Cargo.toml:133-134), unbounded across majors,
+# so the resolver picks 3.0.0, whose reworked `CryptoRng` bound then fails to
+# compile inside the host's own `builtin_contracts/testutils.rs`.
+#
+# A manifest bound here cannot fix it: `>=2.0.0` spans majors, so cargo is
+# entitled to keep a 3.0.0 node for the host alongside whatever we ask for.
+# The only mechanism that constrains the host's own node is the committed
+# `Cargo.lock`. If the build ever fails with
+# `ChaCha20Rng: ed25519_dalek::rand_core::CryptoRng is not satisfied`, restore it:
+#
+#     cargo update -p ed25519-dalek@3.0.0 --precise 2.2.0
+#
+# `curve25519-dalek` needs no separate pin — `ed25519-dalek 2.2` bounds it to 4.x.
+# `sordec-diffexec`'s `lockfile` test asserts this so a stray update fails loudly
+# rather than surfacing as a mystery compile error in the host graph.
+soroban-sdk       = { version = "23.5.3", features = ["testutils"] }
 
 [profile.release]
 lto = true

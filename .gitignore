@@ -18,6 +18,13 @@ Cargo.lock.bak
 # CLI output defaults
 /out/
 
+# soroban-sdk's test host writes a JSON snapshot of every test's ledger, auth
+# and event state next to the crate under test. Useful for eyeballing a probe
+# run, but it is regenerated on every invocation and is not a golden file —
+# committing it would produce churn on every `--ignored` run. When the harness
+# grows real golden files (plan B7) they get an explicit, committed home.
+**/test_snapshots/
+
 # Editor / IDE
 .vscode/
 .idea/
