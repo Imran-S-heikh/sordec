@@ -730,3 +730,101 @@ mod tests {
         assert!(second.is_empty(), "idempotent: the loads and calls are gone");
     }
 }
+
+/// Coverage accounting over the real corpus — what the elision *could*
+/// reach, and why it declined the rest.
+///
+/// Not a lock. It exists because a pass that silently declines is
+/// indistinguishable from a pass that has nothing to do, and the
+/// difference is the entire remaining work list. Run it to size that
+/// list:
+///
+///   cargo test -p sordec-passes --lib -- --ignored --nocapture sret_candidate_census
+#[cfg(test)]
+mod census {
+    use super::*;
+    use crate::marshalling::sret;
+    use sordec_common::IrId as _;
+
+    const FIXTURES: &[(&str, &[u8])] = &[
+        ("hello-add", include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/hello-add/hello-add.wasm"
+        ))),
+        ("token-v23", include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/token-v23/token-v23.wasm"
+        ))),
+        ("timelock", include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/timelock/timelock.wasm"
+        ))),
+        ("dex-liquidity-pool", include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/dex-liquidity-pool/dex-liquidity-pool.wasm"
+        ))),
+        ("attestation", include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/attestation/attestation.wasm"
+        ))),
+    ];
+
+    fn build(wasm: &[u8]) -> sordec_ir::HighIr {
+        use crate::lowering::LoweringStep as _;
+        let parsed = sordec_frontend::parse(wasm).expect("parses");
+        let mut lifted =
+            crate::lift_with_waffle(wasm, &parsed.wasm_facts, parsed.soroban_facts.as_ref())
+                .expect("lifts")
+                .lifted;
+        crate::default_lifted_pipeline().run(&mut lifted);
+        let mut high = crate::LiftToHigh.lower(lifted).expect("lowers");
+        crate::default_high_pipeline().run(&mut high);
+        high
+    }
+
+    #[test]
+    #[ignore = "diagnostic census over the corpus; run explicitly"]
+    #[allow(clippy::print_stdout)]
+    fn sret_candidate_census() {
+        for (name, wasm) in FIXTURES {
+            let high = build(wasm);
+            let (mut helpers, mut wide, mut declined, mut not_sret) = (0, 0, 0, 0);
+            let mut reasons: Vec<String> = Vec::new();
+
+            for func in &high.functions {
+                let Some(shape) = sret::analyze(func) else {
+                    not_sret += 1;
+                    continue;
+                };
+                if classify(func).is_some() {
+                    helpers += 1;
+                    continue;
+                }
+                // An sret shape we did not classify as marshalling. The
+                // interesting bucket: these are the wide returns the
+                // generalization has to reconstruct.
+                let host = !touches_no_host_state(func, &shape);
+                if host {
+                    wide += 1;
+                } else {
+                    declined += 1;
+                }
+                reasons.push(format!(
+                    "    func{:<3} slots={:?} params={} {}",
+                    func.id.index(),
+                    shape.slots.keys().collect::<Vec<_>>(),
+                    func.params.len(),
+                    if host { "touches host state -> WIDE RETURN" } else { "pure but unclassified" },
+                ));
+            }
+            println!(
+                "{name}: {} fns | {helpers} decode helper(s) | {wide} wide-return | \
+                 {declined} pure-unclassified | {not_sret} not an sret shape",
+                high.functions.len()
+            );
+            for reason in &reasons {
+                println!("{reason}");
+            }
+        }
+    }
+}
