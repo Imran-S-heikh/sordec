@@ -35,6 +35,18 @@ repository.workspace = true
 # explanation and the restore command; `tests/lockfile.rs` guards it.
 soroban-sdk.workspace = true
 
+# Reading which artifact cargo produced. `cargo build --message-format=json`
+# reports the wasm path on stdout, and that is the only authoritative answer:
+# scanning the target directory instead breaks the moment two crates share one
+# (which the vector corpus does deliberately, so soroban-sdk is built once rather
+# than eighteen times), and deriving the filename from the package name means
+# hand-parsing a manifest.
+#
+# A third-party format library, not one of the pipeline crates this harness
+# executes — the independence rule below is about the latter. `sordec-score` draws
+# the same line for `stellar-xdr`.
+serde_json.workspace = true
+
 # Nothing else, on purpose. The harness takes primitives (an `rssdkver` string, a
 # protocol string) rather than `sordec_ir::SorobanFacts`, so it stays decoupled
 # from the pipeline whose output it executes — the same independence rule

@@ -150,7 +150,17 @@ pub fn build(crate_dir: &Path, target_dir: &Path) -> Result<Vec<u8>, BuildFailur
 
     let mut command = Command::new("cargo");
     command
-        .args(["build", "--release", "--offline", "--target", RECONSTRUCTION_TARGET])
+        .args([
+            "build",
+            "--release",
+            "--offline",
+            "--target",
+            RECONSTRUCTION_TARGET,
+            // Artifacts as JSON on stdout, diagnostics still rendered for humans on
+            // stderr. Asking cargo which file it wrote is the only reliable way to
+            // know: see `wasm_from_artifacts`.
+            "--message-format=json-render-diagnostics",
+        ])
         .arg("--manifest-path")
         .arg(&manifest)
         .env("RUSTUP_TOOLCHAIN", RECONSTRUCTION_CHANNEL)
@@ -185,46 +195,49 @@ pub fn build(crate_dir: &Path, target_dir: &Path) -> Result<Vec<u8>, BuildFailur
         });
     }
 
-    read_sole_wasm(&target_dir.join(RECONSTRUCTION_TARGET).join("release"))
-}
-
-/// The one wasm in `dir`.
-///
-/// Found by scanning rather than by deriving it from the package name, so no TOML
-/// parsing — and therefore no second dependency — is needed. A crate emits exactly
-/// one `cdylib`, so more than one wasm means the directory is being shared and the
-/// bytes we picked would be arbitrary. That is worth an error rather than a coin
-/// flip.
-fn read_sole_wasm(dir: &Path) -> Result<Vec<u8>, BuildFailure> {
-    let entries = std::fs::read_dir(dir).map_err(|e| {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let wasm = wasm_from_artifacts(&stdout).ok_or_else(|| {
         BuildFailure::Unavailable(Unavailable {
-            reason: format!("build reported success but {} is unreadable: {e}", dir.display()),
+            reason: format!(
+                "build succeeded but reported no wasm artifact for {}",
+                manifest.display()
+            ),
         })
     })?;
 
-    let mut wasms: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("wasm"))
-        .collect();
-    wasms.sort();
-
-    let [wasm] = wasms.as_slice() else {
-        return Err(BuildFailure::Unavailable(Unavailable {
-            reason: format!(
-                "expected exactly one wasm in {}, found {}: {:?}",
-                dir.display(),
-                wasms.len(),
-                wasms
-            ),
-        }));
-    };
-
-    std::fs::read(wasm).map_err(|e| {
+    std::fs::read(&wasm).map_err(|e| {
         BuildFailure::Unavailable(Unavailable {
             reason: format!("cannot read {}: {e}", wasm.display()),
         })
     })
+}
+
+/// The wasm cargo says it produced, from its `--message-format=json` stream.
+///
+/// Asking cargo is the only reliable answer. Scanning the release directory breaks
+/// as soon as two crates share a target directory — which the vector corpus does on
+/// purpose, so soroban-sdk is built once instead of once per vector — and deriving
+/// the filename from the package name means hand-parsing a manifest and
+/// reimplementing cargo's dash-to-underscore rule.
+///
+/// Only the root crate produces a wasm `cdylib`; dependencies compile to rlibs. So
+/// the last wasm filename in the stream is this crate's. The *last* rather than the
+/// first because a rebuild can replay earlier artifacts, and the final one is always
+/// the crate just built.
+fn wasm_from_artifacts(stdout: &str) -> Option<PathBuf> {
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|message| message.get("reason").and_then(|r| r.as_str()) == Some("compiler-artifact"))
+        .filter_map(|message| {
+            let filenames = message.get("filenames")?.as_array()?.clone();
+            filenames
+                .iter()
+                .filter_map(|name| name.as_str())
+                .find(|name| name.ends_with(".wasm"))
+                .map(PathBuf::from)
+        })
+        .next_back()
 }
 
 /// Whether a cargo failure is the environment's fault rather than the crate's.
@@ -322,6 +335,40 @@ mod tests {
             Some(std::env::temp_dir().as_path()),
             "a key containing separators must not nest directories"
         );
+    }
+
+    #[test]
+    fn the_wasm_artifact_is_read_from_cargos_own_report() {
+        // Two crates in one target directory — the vector corpus's normal state —
+        // plus an rlib dependency and a non-artifact message.
+        let stream = concat!(
+            r#"{"reason":"compiler-artifact","target":{"name":"soroban-sdk"},"filenames":["/t/libsoroban_sdk.rlib"]}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","target":{"name":"vector-a"},"filenames":["/t/release/vector_a.wasm"]}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","target":{"name":"vector-b"},"filenames":["/t/release/vector_b.wasm"]}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+            "\n",
+        );
+        assert_eq!(
+            wasm_from_artifacts(stream),
+            Some(PathBuf::from("/t/release/vector_b.wasm")),
+            "the crate just built is the last wasm in the stream"
+        );
+    }
+
+    #[test]
+    fn a_stream_with_no_wasm_yields_nothing_rather_than_a_guess() {
+        let stream = concat!(
+            r#"{"reason":"compiler-artifact","target":{"name":"dep"},"filenames":["/t/libdep.rlib"]}"#,
+            "\n",
+            r#"{"reason":"build-finished","success":true}"#,
+        );
+        assert_eq!(wasm_from_artifacts(stream), None);
+        // Non-JSON noise must not derail the scan either.
+        assert_eq!(wasm_from_artifacts("not json at all\n"), None);
+        assert_eq!(wasm_from_artifacts(""), None);
     }
 
     #[test]
