@@ -18,7 +18,9 @@
 //! - **structure** — per-function control-flow-skeleton similarity
 //! - **semantic** — precision/recall over recovered Soroban-operation facts
 //! - **behavior** — differential execution of the original wasm against the
-//!   recompiled reconstruction. `unchecked` until the harness is wired in (T20).
+//!   recompiled reconstruction. Produced by `sordec-diffexec` and injected; see
+//!   [`behavior`] for why, and for the rule that keeps a calibration run out of the
+//!   mean.
 //!
 //! Alongside those sits the [`CompilationGate`]: does the reconstruction build
 //! at all? A pass/fail **precondition**, not a fifth category. It earns no share
@@ -30,6 +32,7 @@
 //! See [`score_files`] for the entry point and [`ScoreReport`] for the
 //! output. The metric is frozen + versioned: see [`SCORER_VERSION`].
 
+pub mod behavior;
 mod canon;
 mod closure;
 mod compile;
@@ -51,6 +54,7 @@ mod structure;
 
 use std::path::Path;
 
+pub use behavior::{BSide, Behavior, BehaviorInput, TupleScore};
 pub use config::{Basis, BasisProfile, WeightProfile};
 pub use error::ScoreError;
 pub use report::{Categories, CategoryScore, CompilationGate, SCORER_VERSION, ScoreReport};
@@ -87,6 +91,16 @@ pub struct ScoreOptions {
     /// [`score_str`] are therefore always source-basis — which is why the
     /// frozen calibration vector is unaffected by this default.
     pub basis: BasisProfile,
+    /// The differential-execution result for the `behavior` category.
+    ///
+    /// Injected rather than computed: behavior needs to run two wasm modules in a
+    /// Soroban host, and this crate deliberately never touches wasm — the instrument
+    /// stays independent of the pipeline it grades. `sordec-diffexec` produces the
+    /// result and the CLI hands it over.
+    ///
+    /// Defaults to [`BehaviorInput::NotRequested`], which reports the category
+    /// `unchecked` so it renormalises out of the mean rather than scoring zero.
+    pub behavior: BehaviorInput,
 }
 
 impl Default for ScoreOptions {
@@ -96,6 +110,7 @@ impl Default for ScoreOptions {
             check_compile: false,
             weights: WeightProfile::rfp_default(),
             basis: BasisProfile::rfp_default(),
+            behavior: BehaviorInput::NotRequested,
         }
     }
 }
@@ -266,8 +281,10 @@ impl Sources {
 ///
 /// The gate is passed in rather than computed here for the same reason
 /// compilation always was: only [`score_paths`] can reach a toolchain. Behavior
-/// is constructed *unchecked* until T20 wires `sordec-diffexec` in — an honest
-/// hole, not a zero, so it stays out of the weighted mean entirely.
+/// comes from [`ScoreOptions::behavior`] for a stronger reason — it needs a Soroban
+/// host, and this crate does not touch wasm. When it could not be measured, or was
+/// measured against something other than our own reconstruction, the category is an
+/// honest hole rather than a zero and stays out of the weighted mean entirely.
 fn assemble(sources: &Sources, gate: CompilationGate, opts: &ScoreOptions) -> ScoreReport {
     let basis = &opts.basis;
     let (recon, orig) = sources.pair(basis.interface);
@@ -277,9 +294,10 @@ fn assemble(sources: &Sources, gate: CompilationGate, opts: &ScoreOptions) -> Sc
     let (recon, orig) = sources.pair(basis.semantic);
     let semantic = semantic::evaluate(recon, orig);
 
-    let behavior = CategoryScore::unchecked(
-        "behavior needs differential execution of both wasms (sordec-diffexec); not yet wired",
-    );
+    // Injected, not computed: behavior needs a Soroban host, and this crate does not
+    // touch wasm. `category()` is also where the self-scoring guard lives — a
+    // calibration result is reported in full and excluded from the mean.
+    let behavior = opts.behavior.category();
 
     let categories = Categories {
         interface,
@@ -287,7 +305,14 @@ fn assemble(sources: &Sources, gate: CompilationGate, opts: &ScoreOptions) -> Sc
         semantic,
         behavior,
     };
-    ScoreReport::aggregate(categories, gate, &opts.weights, &opts.basis, opts.threshold)
+    ScoreReport::aggregate(
+        categories,
+        gate,
+        opts.behavior.measured().cloned(),
+        &opts.weights,
+        &opts.basis,
+        opts.threshold,
+    )
 }
 
 /// Parse two Rust sources and score them.
@@ -363,6 +388,110 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// A calibration result cannot raise the overall score, end to end.
+    ///
+    /// The behavior harness can compare a contract against itself, against its own
+    /// recompiled source, or against a deliberately mutated copy. All are useful and
+    /// none is a measurement of our decompiler, so none may reach `overall` — letting
+    /// one through would be self-scoring, the line T17 and T18 both held.
+    ///
+    /// Asserted as *equality with the not-requested run*, which is stronger than
+    /// checking a flag: a perfect 1.0 from the wrong B-side must move the number by
+    /// exactly nothing.
+    #[test]
+    fn a_calibration_b_side_cannot_move_the_overall_score() {
+        let baseline = score_str(SRC, SRC, &ScoreOptions::default()).expect("parse");
+
+        for b_side in [
+            BSide::ShippedWasm,
+            BSide::OriginalSourceRecompiled,
+            BSide::Calibration {
+                class: "overflow".to_owned(),
+            },
+        ] {
+            let opts = ScoreOptions {
+                behavior: BehaviorInput::Measured(Behavior::new(1.0, b_side.clone(), 9, 9)),
+                ..ScoreOptions::default()
+            };
+            let report = score_str(SRC, SRC, &opts).expect("parse");
+
+            assert!(
+                !report.categories.behavior.checked,
+                "{} must not be a checked category",
+                b_side.label()
+            );
+            assert!(
+                (report.overall - baseline.overall).abs() < 1e-12,
+                "{} moved overall {} -> {}",
+                b_side.label(),
+                baseline.overall,
+                report.overall
+            );
+            // Excluded, but not hidden: the number is still in the report.
+            let reported = report.behavior.as_ref().expect("the result is still reported");
+            assert!((reported.score - 1.0).abs() < f64::EPSILON);
+            assert_eq!(reported.b_side, b_side);
+        }
+    }
+
+    /// Our own reconstruction *does* score, so the guard above is not vacuous.
+    #[test]
+    fn our_reconstruction_b_side_does_move_the_overall_score() {
+        let baseline = score_str(SRC, SRC, &ScoreOptions::default()).expect("parse");
+        let opts = ScoreOptions {
+            behavior: BehaviorInput::Measured(Behavior::new(0.5, BSide::Reconstruction, 4, 9)),
+            ..ScoreOptions::default()
+        };
+        let report = score_str(SRC, SRC, &opts).expect("parse");
+
+        assert!(report.categories.behavior.checked);
+        assert!(
+            report.overall < baseline.overall,
+            "a 0.5 behavior score against a perfect baseline must lower the mean: \
+             {} -> {}",
+            baseline.overall,
+            report.overall
+        );
+        // And the rate never renders without its denominator.
+        assert!(
+            report
+                .categories
+                .behavior
+                .notes
+                .iter()
+                .any(|n| n.contains("4 of 9 entrypoints")),
+            "{:?}",
+            report.categories.behavior.notes
+        );
+    }
+
+    /// An unavailable harness renormalises out rather than scoring zero (T21).
+    #[test]
+    fn an_unavailable_behavior_leaves_the_score_untouched() {
+        let baseline = score_str(SRC, SRC, &ScoreOptions::default()).expect("parse");
+        let opts = ScoreOptions {
+            behavior: BehaviorInput::Unavailable {
+                reason: "rustc 1.89 is not installed".to_owned(),
+            },
+            ..ScoreOptions::default()
+        };
+        let report = score_str(SRC, SRC, &opts).expect("parse");
+
+        assert!(!report.categories.behavior.checked);
+        assert!((report.overall - baseline.overall).abs() < 1e-12);
+        assert!(report.behavior.is_none(), "nothing was measured");
+        assert!(
+            report
+                .categories
+                .behavior
+                .notes
+                .iter()
+                .any(|n| n.contains("rustc 1.89 is not installed")),
+            "the reason must reach the report: {:?}",
+            report.categories.behavior.notes
+        );
     }
 
     #[test]

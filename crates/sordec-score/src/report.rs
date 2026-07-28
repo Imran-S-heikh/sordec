@@ -28,6 +28,7 @@
 
 use serde::Serialize;
 
+use crate::behavior::Behavior;
 use crate::config::{BasisProfile, WeightProfile};
 use crate::metrics;
 
@@ -163,7 +164,9 @@ pub struct Categories {
     /// Recovered-fact precision/recall.
     pub semantic: CategoryScore,
     /// Differential execution of the original wasm against the recompiled
-    /// reconstruction. `unchecked` until the harness is wired in (T20).
+    /// reconstruction. Derived from [`crate::BehaviorInput`]: `unchecked` when the
+    /// harness could not run, and also when it ran against something other than our
+    /// own reconstruction — see [`crate::behavior`].
     pub behavior: CategoryScore,
 }
 
@@ -218,6 +221,16 @@ pub struct ScoreReport {
     /// Whether the reconstruction compiles. A precondition on `passed`, not a
     /// scored category — see [`CompilationGate`].
     pub compilation_gate: CompilationGate,
+    /// The differential-execution result behind `categories.behavior`, in full.
+    ///
+    /// Held alongside the category rather than inside it for two reasons. A
+    /// [`CategoryScore`] carries a bare number, and a behavior rate may never render
+    /// without its coverage fraction. And a *calibration* run — the harness compared
+    /// against something other than our reconstruction — must be reported completely
+    /// while being excluded from the mean, which a `CategoryScore` alone cannot
+    /// express. See [`crate::behavior`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behavior: Option<Behavior>,
     /// The four category sub-scores.
     pub categories: Categories,
     /// Run-level notes not tied to a single category.
@@ -232,7 +245,8 @@ impl ScoreReport {
     /// Each category's weight is taken from `profile` — the single owner of
     /// the weights, already validated at load. `overall` is then the
     /// weight-normalized mean over the *checked* categories only: a category
-    /// with `checked == false` (behavior, until T20 wires the harness in) drops
+    /// with `checked == false` — behavior, whenever the harness could not run or ran
+    /// against a calibration B-side — drops
     /// out of both the numerator and the denominator, so the number never
     /// silently credits an unrun check. When no category is checked, `overall`
     /// is `0.0`.
@@ -244,6 +258,7 @@ impl ScoreReport {
     pub fn aggregate(
         mut categories: Categories,
         gate: CompilationGate,
+        behavior: Option<Behavior>,
         profile: &WeightProfile,
         basis: &BasisProfile,
         threshold: f64,
@@ -275,6 +290,7 @@ impl ScoreReport {
             passed: overall >= threshold && !gate.is_failed(),
             threshold,
             compilation_gate: gate,
+            behavior,
             categories,
             notes: Vec::new(),
         }
@@ -315,6 +331,7 @@ mod tests {
         let report = ScoreReport::aggregate(
             categories,
             unchecked_gate(),
+            None,
             &WeightProfile::rfp_default(),
             &BasisProfile::source_only(),
             0.90,
@@ -336,6 +353,7 @@ mod tests {
         let report = ScoreReport::aggregate(
             categories,
             unchecked_gate(),
+            None,
             &WeightProfile::rfp_default(),
             &BasisProfile::source_only(),
             0.90,
@@ -378,6 +396,7 @@ mod tests {
         let report = ScoreReport::aggregate(
             categories,
             unchecked_gate(),
+            None,
             &WeightProfile::rfp_default(),
             &BasisProfile::source_only(),
             0.90,
@@ -416,6 +435,7 @@ mod tests {
         let a = ScoreReport::aggregate(
             cats(),
             unchecked_gate(),
+            None,
             &heavy_interface,
             &BasisProfile::source_only(),
             0.90,
@@ -423,6 +443,7 @@ mod tests {
         let b = ScoreReport::aggregate(
             cats(),
             unchecked_gate(),
+            None,
             &heavy_structure,
             &BasisProfile::source_only(),
             0.90,
@@ -448,6 +469,7 @@ mod tests {
         let default = ScoreReport::aggregate(
             cats(),
             unchecked_gate(),
+            None,
             &WeightProfile::rfp_default(),
             &BasisProfile::source_only(),
             0.90,
@@ -464,6 +486,7 @@ mod tests {
         let report = ScoreReport::aggregate(
             cats(),
             unchecked_gate(),
+            None,
             &named,
             &BasisProfile::source_only(),
             0.90,

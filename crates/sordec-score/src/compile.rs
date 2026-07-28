@@ -37,7 +37,8 @@
 //!
 //! - **Differential execution** is the real behavioral check: run the original
 //!   wasm and the recompiled reconstruction against the same inputs and compare.
-//!   Being built in `sordec-diffexec`; T20 wires it into the `behavior` slot.
+//!   Built in `sordec-diffexec` and injected via `ScoreOptions::behavior` (T20);
+//!   see [`crate::behavior`] for why it is injected rather than computed here.
 //!   Recompilation only ever proved the reconstruction was well-formed Soroban
 //!   code, never that it did the same thing.
 //! - **Baseline-to-beat.** The prior-generation decompiler's Rust output is

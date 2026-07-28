@@ -812,6 +812,11 @@ fn run_score(args: &ScoreArgs) -> u8 {
         check_compile: args.check_compile,
         weights,
         basis: args.basis.into(),
+        // Not requested yet: differential execution needs both wasm modules, and the
+        // one for our reconstruction does not exist until the emitter produces a crate
+        // that compiles. The `--behavior` flag and the `sordec-diffexec` mapping land
+        // in T22 with the coverage-paired renderer.
+        behavior: sordec_score::BehaviorInput::NotRequested,
     };
     let report = match sordec_score::score_paths(&args.reconstructed, &args.original, &opts) {
         Ok(report) => report,
