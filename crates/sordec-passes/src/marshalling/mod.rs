@@ -57,11 +57,13 @@ pub mod encode;
 pub mod frame;
 pub mod guard;
 pub(crate) mod sret;
+pub mod wide_return;
 
 pub use decode::ValDecodeCollapsePass;
 pub use encode::ValEncodeCollapsePass;
 pub use frame::FrameElisionPass;
 pub use guard::ArgGuardElisionPass;
+pub use wide_return::WideReturnPass;
 
 use sordec_common::{Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{Expr, HighFunction, IrType};
@@ -123,6 +125,8 @@ pub(crate) mod metrics {
         MARSHALLING_ENCODE_COLLAPSED as ENCODE_COLLAPSED,
         MARSHALLING_FRAMES_ELIDED as FRAMES_ELIDED,
         MARSHALLING_GUARDS_ELIDED as GUARDS_ELIDED,
+        MARSHALLING_WIDE_LOADS_REBOUND as WIDE_LOADS_REBOUND,
+        MARSHALLING_WIDE_RETURNS_RECOVERED as WIDE_RETURNS_RECOVERED,
     };
 }
 

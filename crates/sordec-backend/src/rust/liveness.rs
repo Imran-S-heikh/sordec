@@ -86,12 +86,15 @@ pub(crate) fn is_effectful(expr: &Expr) -> bool {
         | Expr::Unknown { .. } => true,
         // Division/remainder can trap (divide-by-zero); keep the trap.
         Expr::Binary { op: BinaryOp::Div | BinaryOp::Rem, .. } => true,
-        // Pure value production — safe to elide when unused.
+        // Pure value production — safe to elide when unused. A projection
+        // only names a component of an already-produced value; dropping an
+        // unread one cannot drop the producer, which is bound separately.
         Expr::Literal(_)
         | Expr::Use(_)
         | Expr::Unary { .. }
         | Expr::Binary { .. }
-        | Expr::Phi { .. } => false,
+        | Expr::Phi { .. }
+        | Expr::Project { .. } => false,
     }
 }
 

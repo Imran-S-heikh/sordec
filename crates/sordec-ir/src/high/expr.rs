@@ -60,6 +60,27 @@ pub enum Expr {
         args: Vec<ValueId>,
     },
 
+    /// One component of a multi-value producer, rendered `value.index`.
+    ///
+    /// WASM has no multi-value return in the shape rustc needs, so a
+    /// function returning anything wider than a machine word takes a
+    /// pointer to caller-allocated space and writes through it. Recovering
+    /// that as what the source wrote — a function *returning* a wide value
+    /// — means the call yields several values at once, and each consumer
+    /// needs to name the one it wants.
+    ///
+    /// Deliberately a projection rather than a destructuring `let`: the
+    /// body walk emits exactly one `let` per binding, and a pattern-binding
+    /// statement would be a second shape for the emitter to carry. `let t =
+    /// f(x); let a = t.0; let b = t.1;` fits the existing model, and the
+    /// dead-`let` pass removes whichever components go unread.
+    Project {
+        /// The multi-value producer.
+        value: ValueId,
+        /// Zero-based component index.
+        index: u32,
+    },
+
     /// Indirect call via WASM table.
     IndirectCall {
         /// Function table index.
@@ -172,6 +193,7 @@ impl Expr {
                     f(value);
                 }
             }
+            Expr::Project { value, index: _ } => f(*value),
             Expr::IndirectCall {
                 table: _,
                 sig: _,

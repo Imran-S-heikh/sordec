@@ -539,7 +539,7 @@ fn tag_list(tags: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::marshalling::test_support::{func_with, load, store, v};
     use sordec_common::IrId;
@@ -566,7 +566,7 @@ mod tests {
 
     /// The hello-add `u64: TryFromVal<Env, Val>` helper: two tag-checked
     /// Ok arms and one Err arm, written into a two-slot out-parameter.
-    fn u64_decode_helper() -> HighFunction {
+    pub(crate) fn u64_decode_helper() -> HighFunction {
         use sordec_common::BlockId;
         let bb = |i: u32| BlockId::from_index(i);
         func_with(

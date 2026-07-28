@@ -65,6 +65,7 @@ pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use marshalling::{
     ArgGuardElisionPass, FrameElisionPass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
@@ -204,6 +205,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // frame pointer is what lets the bracket go.
             Box::new(ValDecodeCollapsePass),
             Box::new(ValEncodeCollapsePass),
+            // `WideReturnPass` belongs here, strictly after the decode
+            // collapse. It is not registered yet: it needs a dominance
+            // gate first, and switching it on without one measured +14
+            // `cargo check` errors across the corpus. See its module docs.
             Box::new(ArgGuardElisionPass),
             Box::new(FrameElisionPass),
             Box::new(UnrecognizedScanPass),

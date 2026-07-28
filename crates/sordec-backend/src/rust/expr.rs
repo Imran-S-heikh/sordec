@@ -41,6 +41,14 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
         Expr::Semantic(op @ SemanticOp::Unknown { .. }) => {
             ctx.policy.unknown_expr(&semantic_label(op))
         }
+        // A component of a multi-value return, rendered `v.N`. The
+        // producer is a call whose emitted signature is a tuple, so the
+        // index is a real Rust field access.
+        Expr::Project { value, index } => {
+            let base = ctx.value_ref(*value);
+            let field = syn::Index::from(*index as usize);
+            parse_quote!(#base.#field)
+        }
         Expr::Load { .. } => ctx.policy.unknown_expr("memory load"),
         Expr::Store { .. } => ctx.policy.unknown_expr("memory store"),
         Expr::GlobalGet { index } => ctx.policy.unknown_expr(&format!("global.get {index}")),

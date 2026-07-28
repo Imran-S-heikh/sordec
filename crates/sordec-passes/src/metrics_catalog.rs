@@ -312,6 +312,11 @@ pub const MARSHALLING_DISPATCH_FOLDED: &str = "marshalling_dispatch_folded";
 pub const MARSHALLING_GUARDS_ELIDED: &str = "marshalling_guards_elided";
 /// Balanced shadow-stack prologue/epilogue brackets removed.
 pub const MARSHALLING_FRAMES_ELIDED: &str = "marshalling_frames_elided";
+/// Functions whose out-parameter was reconstructed as a real return
+/// value — the wide-return recovery.
+pub const MARSHALLING_WIDE_RETURNS_RECOVERED: &str = "marshalling_wide_returns_recovered";
+/// Slot loads rebound to a component of the call that produced them.
+pub const MARSHALLING_WIDE_LOADS_REBOUND: &str = "marshalling_wide_loads_rebound";
 
 // ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)
@@ -447,6 +452,8 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_DISPATCH_FOLDED,
         MARSHALLING_GUARDS_ELIDED,
         MARSHALLING_FRAMES_ELIDED,
+        MARSHALLING_WIDE_RETURNS_RECOVERED,
+        MARSHALLING_WIDE_LOADS_REBOUND,
     ]
 }
 

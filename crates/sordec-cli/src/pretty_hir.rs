@@ -722,6 +722,9 @@ fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Resu
         }
         Expr::Literal(lit) => render_literal(out, lit),
         Expr::Use(value) => write!(out, "{}", ctx.operand(*value)),
+        Expr::Project { value, index } => {
+            write!(out, "{}.{index}", ctx.operand(*value))
+        }
         Expr::Unary { op, value } => {
             write!(out, "{}({})", unary_str(*op), ctx.operand(*value))
         }
