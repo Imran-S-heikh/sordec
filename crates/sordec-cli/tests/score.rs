@@ -13,6 +13,24 @@ const HELLO_ADD_SRC: &str = concat!(
     "/../../samples/contracts/hello-add/source/src/lib.rs"
 );
 
+const HELLO_ADD_WASM: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../samples/contracts/hello-add/hello-add.wasm"
+);
+
+/// A contract with one entrypoint, for renderer assertions that need a report but not
+/// a particular score.
+const MINIMAL_CONTRACT: &str = r"
+#![no_std]
+use soroban_sdk::{contract, contractimpl, Env};
+#[contract]
+pub struct C;
+#[contractimpl]
+impl C {
+    pub fn go(e: Env, n: u32) -> u32 { if n > 0 { n } else { 0 } }
+}
+";
+
 const TOKEN_V23_SRC_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../samples/contracts/token-v23/source/src"
@@ -247,4 +265,122 @@ fn score_rejects_a_bad_weights_file() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains("could not read"));
+}
+
+/// `--behavior` reports *why* it could not measure, and the reason names the stage.
+///
+/// Behaviour needs a crate to recompile, so pointing it at a lone `.rs` file has to
+/// fail — and fail informatively. A bare "unavailable" would leave the user guessing
+/// between a missing toolchain, a broken reconstruction and a wrong argument.
+///
+/// Fast: it never reaches a build, because the crate check comes first.
+#[test]
+fn behavior_reports_the_stage_it_could_not_get_past() {
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args([
+            "score",
+            HELLO_ADD_SRC,
+            HELLO_ADD_SRC,
+            "--behavior",
+            HELLO_ADD_WASM,
+            "--basis",
+            "source-only",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("not a crate directory"))
+        // Unavailable must not veto the verdict, exactly as for the compile gate.
+        .stdout(predicate::str::contains("PASS"));
+}
+
+/// An unreadable oracle is reported as unavailable, not as a behavioural failure.
+///
+/// The distinction is the whole of T21: a score of 0.0 says the reconstruction does
+/// the wrong thing, and a missing file says nothing of the kind.
+#[test]
+fn a_missing_oracle_wasm_is_unavailable_not_a_zero() {
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args([
+            "score",
+            HELLO_ADD_SRC,
+            HELLO_ADD_SRC,
+            "--behavior",
+            "/no/such/contract.wasm",
+            "--json",
+            "--basis",
+            "source-only",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cannot read"))
+        // Unchecked, so it renormalises out of the mean rather than scoring zero.
+        .stdout(predicate::str::contains("\"checked\": false"))
+        .stdout(predicate::str::contains("\"passed\": true"));
+}
+
+/// A behaviour rate never renders without its coverage fraction.
+///
+/// The rule T22 absorbed from the retired B24, and the one thing separating an honest
+/// number from the "99.2%" we criticised in a competitor's harness. Asserted on a
+/// synthetic report rather than a real run, because the point is the *renderer*: it
+/// must be impossible to print a rate alone, whatever produced it.
+///
+/// Note the scorer makes this hard to get wrong by construction — `Behavior::new`
+/// takes the denominator as a required argument — so this guards the last mile, where
+/// a renderer could still choose to drop it.
+#[test]
+fn a_behavior_rate_never_renders_without_its_coverage() {
+    let report = sordec_score::score_str(
+        MINIMAL_CONTRACT,
+        MINIMAL_CONTRACT,
+        &sordec_score::ScoreOptions {
+            behavior: sordec_score::BehaviorInput::Measured(
+                sordec_score::Behavior::new(0.9925, sordec_score::BSide::Reconstruction, 3, 30)
+                    .with_tuples(vec![
+                        sordec_score::TupleScore {
+                            name: "return".to_owned(),
+                            matched: 3,
+                            exercised: 3,
+                        },
+                        sordec_score::TupleScore {
+                            name: "storage".to_owned(),
+                            matched: 0,
+                            exercised: 0,
+                        },
+                    ])
+                    .with_trivial_agreements(4),
+            ),
+            ..Default::default()
+        },
+    )
+    .expect("scores");
+
+    let json = serde_json::to_string(&report).expect("serialises");
+    // The denominator is in the machine-readable form...
+    assert!(json.contains("\"entrypoints_total\":30"), "{json}");
+    assert!(json.contains("\"entrypoints_driven\":3"), "{json}");
+    // ...and the per-tuple breakdown, so "events 94%, storage 87%" is expressible
+    // rather than blended into one number.
+    assert!(json.contains("\"tuples\""), "{json}");
+    assert!(json.contains("\"trivial_agreements\":4"), "{json}");
+
+    // And the text form pairs them on the category line.
+    let coverage = report
+        .behavior
+        .as_ref()
+        .expect("measured")
+        .coverage();
+    assert_eq!(coverage, "3 of 30 entrypoints");
+    assert!(
+        report
+            .categories
+            .behavior
+            .notes
+            .iter()
+            .any(|n| n.contains("3 of 30 entrypoints")),
+        "a 0.9925 rate over 3 of 30 entrypoints must never appear alone: {:?}",
+        report.categories.behavior.notes
+    );
 }

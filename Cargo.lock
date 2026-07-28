@@ -1876,6 +1876,7 @@ dependencies = [
  "serde_json",
  "sordec-backend",
  "sordec-common",
+ "sordec-diffexec",
  "sordec-driver",
  "sordec-frontend",
  "sordec-ir",

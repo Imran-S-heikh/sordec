@@ -197,6 +197,24 @@ struct ScoreArgs {
     #[arg(long)]
     check_compile: bool,
 
+    /// Evaluate the `behavior` category by differential execution against the
+    /// original contract's wasm.
+    ///
+    /// Takes the path to the **original** wasm, which is the oracle: behaviour is
+    /// compared against what the deployed contract actually does, not against its
+    /// source. The reconstruction argument must then be a crate *directory*, since it
+    /// has to be recompiled to wasm before it can be run.
+    ///
+    /// Off by default — it needs a toolchain and two builds.
+    ///
+    /// Honest about its current reach: driving an entrypoint requires constructing
+    /// arguments for it, which is not built yet, so today this reports *why* behaviour
+    /// could not be measured rather than a number. Those reasons are the useful part —
+    /// "reconstruction does not build (4 diagnostics): error[E0369]…" is the sharpest
+    /// emitter-progress signal we have.
+    #[arg(long, value_name = "ORIGINAL_WASM")]
+    behavior: Option<PathBuf>,
+
     /// Which source basis to score on.
     ///
     /// `rfp-default` (the default) is the basis the RFP mandates: interface
@@ -812,11 +830,10 @@ fn run_score(args: &ScoreArgs) -> u8 {
         check_compile: args.check_compile,
         weights,
         basis: args.basis.into(),
-        // Not requested yet: differential execution needs both wasm modules, and the
-        // one for our reconstruction does not exist until the emitter produces a crate
-        // that compiles. The `--behavior` flag and the `sordec-diffexec` mapping land
-        // in T22 with the coverage-paired renderer.
-        behavior: sordec_score::BehaviorInput::NotRequested,
+        behavior: match &args.behavior {
+            None => sordec_score::BehaviorInput::NotRequested,
+            Some(original_wasm) => measure_behavior(&args.reconstructed, original_wasm),
+        },
     };
     let report = match sordec_score::score_paths(&args.reconstructed, &args.original, &opts) {
         Ok(report) => report,
@@ -851,6 +868,90 @@ fn run_score(args: &ScoreArgs) -> u8 {
     EXIT_OK
 }
 
+/// Measure the `behavior` category by differential execution.
+///
+/// This is the seam between the two crates that must not know about each other:
+/// `sordec-diffexec` runs wasm and knows nothing about scoring, `sordec-score` scores
+/// and never touches wasm. The mapping lives here because the CLI is the only place
+/// entitled to depend on both.
+///
+/// Every failure path returns `Unavailable` carrying the reason rather than a zero. A
+/// behaviour score of 0.0 says "the reconstruction does the wrong thing"; a missing
+/// toolchain says nothing of the kind, and conflating them would let an environment
+/// problem read as a decompiler failure.
+///
+/// The last stage is the honest wall: even when both modules build and load, driving
+/// an entrypoint needs arguments constructed for its signature, and that is not built
+/// yet. So this reports how far it got. The stages are worth distinguishing because
+/// each names a different piece of work.
+fn measure_behavior(
+    reconstructed: &std::path::Path,
+    original_wasm: &std::path::Path,
+) -> sordec_score::BehaviorInput {
+    use sordec_diffexec::{exec, preflight, recompile, wasm};
+    use sordec_score::BehaviorInput;
+
+    let unavailable =
+        |reason: String| BehaviorInput::Unavailable { reason };
+
+    // 1. A toolchain to recompile with. The reason names the command that fixes it.
+    if let Err(missing) = preflight::detect() {
+        return unavailable(missing.reason);
+    }
+
+    // 2. The oracle: the original contract's own wasm.
+    let original = match std::fs::read(original_wasm) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return unavailable(format!("cannot read {}: {e}", original_wasm.display()));
+        }
+    };
+    if !wasm::is_loadable(&original) {
+        return unavailable(format!(
+            "{} has no `{}` section, so the host cannot load it and it cannot serve as \
+             a behaviour oracle",
+            original_wasm.display(),
+            wasm::ENV_META_SECTION
+        ));
+    }
+
+    // 3. Our side, recompiled. `--behavior` needs a crate directory, not a bare file,
+    //    because a lone `lib.rs` cannot be built.
+    if !reconstructed.join("Cargo.toml").is_file() {
+        return unavailable(format!(
+            "{} is not a crate directory (no Cargo.toml); behaviour needs a crate to \
+             recompile, not a single source file",
+            reconstructed.display()
+        ));
+    }
+    let cache = recompile::persistent_target_dir("cli-behavior");
+    let rebuilt = match recompile::build(reconstructed, &cache) {
+        Ok(bytes) => bytes,
+        Err(failure) => return unavailable(failure.reason()),
+    };
+
+    // 4. Both sides have to load before anything can be compared.
+    if let Err(refused) = exec::Session::register(&original) {
+        return unavailable(format!("original wasm: {refused}"));
+    }
+    if let Err(refused) = exec::Session::register(&rebuilt) {
+        return unavailable(format!("recompiled reconstruction: {refused}"));
+    }
+
+    // 5. And now the wall. Both modules run, and we have nothing to call them with.
+    //    Reported as the coverage fraction it is — zero of however many entrypoints
+    //    the contract declares — rather than as a score of any kind.
+    let entrypoints = wasm::exported_functions(&original)
+        .iter()
+        .filter(|name| *name != wasm::CONSTRUCTOR_EXPORT)
+        .count();
+    unavailable(format!(
+        "both modules build and load, but 0 of {entrypoints} entrypoints could be \
+         driven: invoking one requires constructing arguments for its signature, which \
+         is not implemented yet"
+    ))
+}
+
 /// Render a [`sordec_score::ScoreReport`] as a human-readable report.
 fn render_score_text(
     out: &mut impl Write,
@@ -879,11 +980,72 @@ fn render_score_text(
         render_category_line(out, label, cat)?;
     }
 
+    render_behavior_detail(out, report.behavior.as_ref())?;
+
     if !report.notes.is_empty() {
         writeln!(out, "notes:")?;
         for note in &report.notes {
             writeln!(out, "  - {note}")?;
         }
+    }
+    Ok(())
+}
+
+/// Render the differential-execution detail behind the `behavior` category.
+///
+/// Two rules this function exists to keep, both of them the difference between an
+/// honest number and a marketing one:
+///
+/// **The rate never appears without its denominator.** "99.2% behavioural match" is
+/// not a 99.2% result if it was measured over three of thirty entrypoints, and that
+/// is precisely the shape of claim we criticised in a competitor's harness. So the
+/// coverage fraction is printed on the same line, not below it and not optionally.
+///
+/// **The four observations are reported separately.** "events 94%, storage 87%" says
+/// where to work; a blended "93%" says nothing and hides which facility regressed. A
+/// tuple the contract never exercised prints `—`, not a free 100%.
+fn render_behavior_detail(
+    out: &mut impl Write,
+    behavior: Option<&sordec_score::Behavior>,
+) -> io::Result<()> {
+    let Some(behavior) = behavior else {
+        return Ok(());
+    };
+
+    writeln!(
+        out,
+        "behavior:       {:.4} over {}  [{}]",
+        behavior.score,
+        behavior.coverage(),
+        behavior.b_side.label()
+    )?;
+
+    // Stated on its own line rather than folded into the rate, because a run whose
+    // agreement is mostly mutual failure has demonstrated very little.
+    if behavior.trivial_agreements > 0 {
+        writeln!(
+            out,
+            "  {} call(s) excluded as trivial agreement (both sides failed identically)",
+            behavior.trivial_agreements
+        )?;
+    }
+
+    for tuple in &behavior.tuples {
+        if tuple.exercised == 0 {
+            writeln!(out, "  {:<9} —       (never exercised)", tuple.name)?;
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            let rate = tuple.matched as f64 / tuple.exercised as f64;
+            writeln!(
+                out,
+                "  {:<9} {rate:.4}  ({} of {} checks)",
+                tuple.name, tuple.matched, tuple.exercised
+            )?;
+        }
+    }
+
+    for note in &behavior.notes {
+        writeln!(out, "  - {note}")?;
     }
     Ok(())
 }

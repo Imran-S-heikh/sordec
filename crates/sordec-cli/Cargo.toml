@@ -14,6 +14,10 @@ path = "src/main.rs"
 [dependencies]
 sordec-common.workspace = true
 sordec-backend.workspace = true
+# Differential execution for the `score --behavior` path. Pulls a full Soroban host
+# into the binary, which is what a behaviour-checking CLI needs; the alternative is a
+# flag that cannot answer the question it names.
+sordec-diffexec.workspace = true
 sordec-driver.workspace = true
 sordec-score.workspace = true
 sordec-frontend = { workspace = true, features = ["serde"] }
