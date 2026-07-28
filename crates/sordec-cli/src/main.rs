@@ -22,7 +22,8 @@
 //!   metadata health) as text or `--json`.
 //! - `sordec score <reconstructed.rs> <original.rs>` — score a
 //!   reconstructed Rust source against the original across four
-//!   categories (interface / structure / semantic / compilation) as text
+//!   categories (interface / structure / semantic / behavior) plus the
+//!   compilation gate, as text
 //!   or `--json`. The accuracy measuring instrument (D4.1).
 //!
 //! Output convention (Unix-standard):
@@ -95,7 +96,8 @@ enum Command {
     /// recogniser-miss diagnostics by code.
     Coverage(CoverageArgs),
     /// Score a reconstructed Rust source against the original across four
-    /// categories (interface / structure / semantic / compilation).
+    /// categories (interface / structure / semantic / behavior), plus a
+    /// pass/fail compilation gate.
     Score(ScoreArgs),
 }
 
@@ -186,9 +188,12 @@ struct ScoreArgs {
     #[arg(long)]
     json: bool,
 
-    /// Run the opt-in compilation category (`cargo check` against
-    /// `soroban-sdk`). Off by default so the fast path stays
-    /// toolchain-free.
+    /// Evaluate the compilation gate (`cargo check` against `soroban-sdk`).
+    /// Off by default so the fast path stays toolchain-free.
+    ///
+    /// The gate is a precondition, not a score: passing this flag cannot raise
+    /// the overall number, but a reconstruction that fails to build reports
+    /// FAIL regardless of how well it scores.
     #[arg(long)]
     check_compile: bool,
 
@@ -851,6 +856,7 @@ fn render_score_text(
     writeln!(out, "scorer version: {}", report.scorer_version)?;
     writeln!(out, "weights profile: {}", report.weights_profile)?;
     writeln!(out, "basis profile:   {}", report.basis_profile)?;
+    render_compilation_gate(out, &report.compilation_gate)?;
     let verdict = if report.passed { "PASS" } else { "FAIL" };
     writeln!(
         out,
@@ -863,7 +869,7 @@ fn render_score_text(
         (metrics::INTERFACE, &cats.interface),
         (metrics::STRUCTURE, &cats.structure),
         (metrics::SEMANTIC, &cats.semantic),
-        (metrics::COMPILATION, &cats.compilation),
+        (metrics::BEHAVIOR, &cats.behavior),
     ] {
         render_category_line(out, label, cat)?;
     }
@@ -875,6 +881,36 @@ fn render_score_text(
         }
     }
     Ok(())
+}
+
+/// Render the compilation gate.
+///
+/// Placed above `overall` because it is a *precondition* on the verdict, not a
+/// contributor to the score: a failed gate means FAIL whatever the categories
+/// say. Diagnostics are summarized by count on the gate line and listed
+/// beneath — they are the sharpest emitter-progress signal available, so they
+/// stay visible even though they no longer earn a score.
+fn render_compilation_gate(
+    out: &mut impl Write,
+    gate: &sordec_score::CompilationGate,
+) -> io::Result<()> {
+    use sordec_score::CompilationGate;
+
+    match gate {
+        CompilationGate::Passed => writeln!(out, "compile gate:   PASS"),
+        CompilationGate::Failed { diagnostics } => {
+            let n = diagnostics.len();
+            let plural = if n == 1 { "" } else { "s" };
+            writeln!(out, "compile gate:   FAIL  ({n} diagnostic{plural})")?;
+            for line in diagnostics {
+                writeln!(out, "  {line}")?;
+            }
+            Ok(())
+        }
+        CompilationGate::Unchecked { reason } => {
+            writeln!(out, "compile gate:   not checked  ({reason})")
+        }
+    }
 }
 
 /// Render one category line: score + weight, or an em dash + reason when

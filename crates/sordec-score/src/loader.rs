@@ -27,7 +27,7 @@
 //!   it too).
 //!
 //! Inner attributes (`#![no_std]` …) are dropped from the AST because they
-//! do not affect any category; the compilation category works from the raw
+//! do not affect any category; the compilation gate works from the raw
 //! source files, not this flattened AST, so it is unaffected.
 
 use std::fs;

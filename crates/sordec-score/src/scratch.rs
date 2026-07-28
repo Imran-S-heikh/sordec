@@ -1,7 +1,7 @@
 //! Throwaway cargo crates for the subprocess-backed categories.
 //!
 //! Two scorer stages need to hand a Rust source to `cargo`: the compilation
-//! category (`cargo check`, [`crate::compile`]) and the macro-expansion
+//! gate (`cargo check`, [`crate::compile`]) and the macro-expansion
 //! harness (`cargo expand`, [`crate::expand`]). Both face the same problem —
 //! the emitter produces a bare `lib.rs`, not a crate — so both need a
 //! scratch package with a `soroban-sdk` dependency wrapped around it.

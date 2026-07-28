@@ -74,7 +74,7 @@ const SEMANTICALLY_UNMEASURABLE: [&str; 1] = ["hello-add"];
 const STRUCTURALLY_UNMEASURABLE: [&str; 1] = ["hello-add"];
 
 fn opts() -> ScoreOptions {
-    // The compilation category is opt-in and needs a toolchain; the
+    // The compilation gate is opt-in and needs a toolchain; the
     // calibration guards are about the three AST categories.
     ScoreOptions {
         threshold: 0.90,

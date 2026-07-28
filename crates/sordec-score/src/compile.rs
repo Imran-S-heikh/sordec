@@ -1,5 +1,13 @@
-//! Compilation category: does the reconstructed source `cargo check`
-//! against `soroban-sdk`? The honest stand-in for "behavior" (K6).
+//! Compilation **gate**: does the reconstructed source `cargo check`
+//! against `soroban-sdk`?
+//!
+//! A gate, not a scored category (T19). Compilation is the precondition every
+//! other measurement rests on — if the source does not build, behavior cannot
+//! be observed at all. Grading it would be meaningless (one type error and three
+//! hundred both fail) and would double-count, and since `todo!()` compiles, a
+//! *scored* compilation category paid weight for recovering nothing. So this
+//! module answers pass/fail and hands the diagnostics along; the score it used
+//! to hold now belongs to `behavior`.
 //!
 //! Opt-in (`--check-compile`) and worked from the **raw source**, not the
 //! flattened/normalized AST — re-emitting the AST would drop `#![no_std]`,
@@ -10,11 +18,14 @@
 //!
 //! Three outcomes, mapped so an unrun or unrunnable check never poses as a
 //! failure:
-//! - **compiled** → checked, score `1.0`.
-//! - **failed** (cargo ran, the source did not type-check) → checked,
-//!   score `0.0`, with the first diagnostics attached.
+//! - **compiled** → [`CompilationGate::Passed`].
+//! - **failed** (cargo ran, the source did not type-check) →
+//!   [`CompilationGate::Failed`], carrying the first diagnostics. Those are the
+//!   sharpest emitter-progress signal we have, so they are reported even though
+//!   they are no longer scored.
 //! - **unavailable** (no cargo, or the offline registry lacks the SDK / a
-//!   contract-specific dependency) → *unchecked*, excluded from the mean.
+//!   contract-specific dependency) → [`CompilationGate::Unchecked`], which does
+//!   *not* veto the verdict.
 //!
 //! The scratch crate itself is built by [`crate::scratch`], shared with the
 //! macro-expansion harness. Its soroban-sdk-only manifest is deliberately
@@ -22,12 +33,13 @@
 //! reports *unavailable*, not *failed* — the harness cannot vouch for a
 //! compile it could not attempt.
 //!
-//! ## Deferred to Phase 4
+//! ## The behavior category this gate used to stand in for
 //!
-//! - **Differential execution.** Recompilation proves the reconstruction is
-//!   well-formed Soroban code, not that it *behaves* like the original.
-//!   Executing both against the same inputs and comparing results is the
-//!   true behavioral check — a Phase-4 extension once the Rust emitter exists.
+//! - **Differential execution** is the real behavioral check: run the original
+//!   wasm and the recompiled reconstruction against the same inputs and compare.
+//!   Being built in `sordec-diffexec`; T20 wires it into the `behavior` slot.
+//!   Recompilation only ever proved the reconstruction was well-formed Soroban
+//!   code, never that it did the same thing.
 //! - **Baseline-to-beat.** The prior-generation decompiler's Rust output is
 //!   the intended baseline; regenerating it needs that older codebase's
 //!   toolchain restored (a transitive dependency no longer compiles under the
@@ -36,28 +48,20 @@
 use std::path::Path;
 use std::process::Command;
 
-use crate::report::CategoryScore;
+use crate::report::CompilationGate;
 use crate::scratch::{self, ScratchCrate};
 
 /// Number of leading cargo diagnostic lines to attach to a failure.
 const MAX_DIAGNOSTIC_LINES: usize = 12;
 
 /// Run the opt-in compilation check on the reconstructed source path.
-pub(crate) fn check(reconstructed: &Path) -> CategoryScore {
+pub(crate) fn check(reconstructed: &Path) -> CompilationGate {
     match run(reconstructed) {
-        Ok(Outcome::Compiled) => {
-            CategoryScore::checked(1.0).with_note("cargo check succeeded")
-        }
-        Ok(Outcome::Failed(diagnostics)) => {
-            let mut score = CategoryScore::checked(0.0).with_note("cargo check failed");
-            for line in diagnostics {
-                score = score.with_note(line);
-            }
-            score
-        }
-        Err(reason) => {
-            CategoryScore::unchecked(format!("compile check unavailable: {reason}"))
-        }
+        Ok(Outcome::Compiled) => CompilationGate::Passed,
+        Ok(Outcome::Failed(diagnostics)) => CompilationGate::Failed { diagnostics },
+        Err(reason) => CompilationGate::Unchecked {
+            reason: format!("compile check unavailable: {reason}"),
+        },
     }
 }
 
@@ -148,27 +152,33 @@ warning: unused import";
 
     #[test]
     #[ignore = "shells out to cargo check against soroban-sdk (slow)"]
-    fn a_valid_contract_compiles() {
+    fn a_valid_contract_passes_the_gate() {
         let src = temp_source("ok", MINIMAL_CONTRACT);
-        let score = check(&src);
-        assert!(score.checked, "expected a checked result: {:?}", score.notes);
+        let gate = check(&src);
         assert!(
-            (score.score - 1.0).abs() < 1e-9,
-            "score={} notes={:#?}",
-            score.score,
-            score.notes
+            matches!(gate, CompilationGate::Passed),
+            "expected Passed, got {gate:#?}"
         );
+        assert!(!gate.is_failed(), "a passing gate must not veto");
         let _ = std::fs::remove_dir_all(src.parent().unwrap());
     }
 
     #[test]
     #[ignore = "shells out to cargo check against soroban-sdk (slow)"]
-    fn a_broken_contract_fails() {
+    fn a_broken_contract_fails_the_gate_and_keeps_its_diagnostics() {
         let broken = format!("{MINIMAL_CONTRACT}\nfn bad() -> u32 {{ \"not a u32\" }}\n");
         let src = temp_source("bad", &broken);
-        let score = check(&src);
-        assert!(score.checked, "expected a checked result: {:?}", score.notes);
-        assert_eq!(score.score, 0.0);
+        let gate = check(&src);
+        let CompilationGate::Failed { diagnostics } = &gate else {
+            panic!("expected Failed, got {gate:#?}");
+        };
+        // Diagnostics are the whole reason a failed gate carries a payload:
+        // the error count is our emitter-progress signal.
+        assert!(
+            diagnostics.iter().any(|d| d.contains("error")),
+            "a failed gate must report why: {diagnostics:#?}"
+        );
+        assert!(gate.is_failed(), "a failed gate must veto the verdict");
         let _ = std::fs::remove_dir_all(src.parent().unwrap());
     }
 }

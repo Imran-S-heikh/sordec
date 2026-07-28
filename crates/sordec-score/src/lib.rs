@@ -17,7 +17,15 @@
 //! - **interface** — public entrypoint signatures + `#[contracttype]` shapes
 //! - **structure** — per-function control-flow-skeleton similarity
 //! - **semantic** — precision/recall over recovered Soroban-operation facts
-//! - **compilation** — does the reconstruction `cargo check` (opt-in)
+//! - **behavior** — differential execution of the original wasm against the
+//!   recompiled reconstruction. `unchecked` until the harness is wired in (T20).
+//!
+//! Alongside those sits the [`CompilationGate`]: does the reconstruction build
+//! at all? A pass/fail **precondition**, not a fifth category. It earns no share
+//! of the mean but it can veto the verdict — you do not get a grade for an exam
+//! you did not sit. It is not scored because a binary flag has no spectrum to
+//! score, because behavior already presupposes it, and because `todo!()`
+//! compiles: a scored compilation category paid weight for recovering nothing.
 //!
 //! See [`score_files`] for the entry point and [`ScoreReport`] for the
 //! output. The metric is frozen + versioned: see [`SCORER_VERSION`].
@@ -45,7 +53,7 @@ use std::path::Path;
 
 pub use config::{Basis, BasisProfile, WeightProfile};
 pub use error::ScoreError;
-pub use report::{Categories, CategoryScore, SCORER_VERSION, ScoreReport};
+pub use report::{Categories, CategoryScore, CompilationGate, SCORER_VERSION, ScoreReport};
 
 /// Knobs for a scoring run.
 #[derive(Debug, Clone)]
@@ -53,9 +61,12 @@ pub struct ScoreOptions {
     /// Pass threshold for the overall score. Default `0.90` (the D4.1
     /// contractual bar).
     pub threshold: f64,
-    /// Whether to run the opt-in compilation category (`cargo check`
+    /// Whether to evaluate the opt-in compilation *gate* (`cargo check`
     /// against `soroban-sdk`). Off by default so the fast path — and the
     /// default test suite — stays toolchain-free.
+    ///
+    /// When off the gate is `Unchecked` and cannot veto the verdict. When on, a
+    /// failed compile makes the run fail whatever the score.
     pub check_compile: bool,
     /// Per-category weights for the overall mean. Defaults to
     /// [`WeightProfile::rfp_default`] (the frozen score-1.0.0 weights).
@@ -90,25 +101,26 @@ impl Default for ScoreOptions {
 }
 
 /// Score a reconstructed source file against the original, both already
-/// parsed. The compilation category is reported *unchecked* here: it needs
-/// the reconstructed source *path* (see [`score_paths`]), which a parsed
-/// AST does not carry.
+/// parsed. The compilation gate is reported *unchecked* here: it needs the
+/// reconstructed source *path* (see [`score_paths`]), which a parsed AST does
+/// not carry.
 #[must_use]
 pub fn score_files(
     reconstructed: &syn::File,
     original: &syn::File,
     opts: &ScoreOptions,
 ) -> ScoreReport {
-    let compilation =
-        CategoryScore::unchecked("compile check needs a source path (use score_paths or the CLI)");
+    let gate = CompilationGate::Unchecked {
+        reason: "compile check needs a source path (use score_paths or the CLI)".to_owned(),
+    };
     // No paths, so no expansion is possible: everything is source-basis.
     let sources = Sources::source_only(reconstructed.clone(), original.clone());
-    assemble(&sources, compilation, opts)
+    assemble(&sources, gate, opts)
 }
 
 /// Score two scoring inputs given by path. Each path may be a single
 /// `.rs` file or a source directory (flattened by the loader). The CLI
-/// entry point; the only path that can run the compilation category.
+/// entry point; the only path that can evaluate the compilation gate.
 ///
 /// # Errors
 ///
@@ -120,12 +132,14 @@ pub fn score_paths(
     opts: &ScoreOptions,
 ) -> Result<ScoreReport, ScoreError> {
     let sources = Sources::load(reconstructed, original, &opts.basis)?;
-    let compilation = if opts.check_compile {
+    let gate = if opts.check_compile {
         compile::check(reconstructed)
     } else {
-        CategoryScore::unchecked("compile check not requested")
+        CompilationGate::Unchecked {
+            reason: "compile check not requested".to_owned(),
+        }
     };
-    let mut report = assemble(&sources, compilation, opts);
+    let mut report = assemble(&sources, gate, opts);
     for note in &sources.notes {
         report = report.with_note(note.clone());
     }
@@ -247,9 +261,14 @@ impl Sources {
     }
 }
 
-/// Assemble the three AST categories — each on its own basis — plus a
-/// supplied compilation category into a report.
-fn assemble(sources: &Sources, compilation: CategoryScore, opts: &ScoreOptions) -> ScoreReport {
+/// Assemble the three AST categories — each on its own basis — plus the
+/// supplied compilation gate into a report.
+///
+/// The gate is passed in rather than computed here for the same reason
+/// compilation always was: only [`score_paths`] can reach a toolchain. Behavior
+/// is constructed *unchecked* until T20 wires `sordec-diffexec` in — an honest
+/// hole, not a zero, so it stays out of the weighted mean entirely.
+fn assemble(sources: &Sources, gate: CompilationGate, opts: &ScoreOptions) -> ScoreReport {
     let basis = &opts.basis;
     let (recon, orig) = sources.pair(basis.interface);
     let interface = interface::evaluate(recon, orig, sources.spec_for(basis.interface));
@@ -258,13 +277,17 @@ fn assemble(sources: &Sources, compilation: CategoryScore, opts: &ScoreOptions) 
     let (recon, orig) = sources.pair(basis.semantic);
     let semantic = semantic::evaluate(recon, orig);
 
+    let behavior = CategoryScore::unchecked(
+        "behavior needs differential execution of both wasms (sordec-diffexec); not yet wired",
+    );
+
     let categories = Categories {
         interface,
         structure,
         semantic,
-        compilation,
+        behavior,
     };
-    ScoreReport::aggregate(categories, &opts.weights, &opts.basis, opts.threshold)
+    ScoreReport::aggregate(categories, gate, &opts.weights, &opts.basis, opts.threshold)
 }
 
 /// Parse two Rust sources and score them.
@@ -292,6 +315,15 @@ pub fn score_str(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unevaluated compilation gate, for tests routing on basis rather than
+    /// on the gate. `Unchecked` never vetoes, so the verdict stays a pure
+    /// function of the score.
+    fn unchecked_gate() -> CompilationGate {
+        CompilationGate::Unchecked {
+            reason: "not evaluated in this test".to_owned(),
+        }
+    }
 
     /// A minimal but *real* contract. It has to declare an ABI: since T13c
     /// the structure category is anchored on entrypoints, so a bare `pub fn`
@@ -339,7 +371,7 @@ mod tests {
         assert_eq!(report.categories.interface.weight, 0.30);
         assert_eq!(report.categories.structure.weight, 0.25);
         assert_eq!(report.categories.semantic.weight, 0.30);
-        assert_eq!(report.categories.compilation.weight, 0.15);
+        assert_eq!(report.categories.behavior.weight, 0.15);
     }
 
     #[test]
@@ -422,7 +454,7 @@ mod tests {
             },
             ..ScoreOptions::default()
         };
-        let report = assemble(&sources, CategoryScore::unchecked("n/a"), &opts);
+        let report = assemble(&sources, unchecked_gate(), &opts);
 
         // Semantic read the source pair, which has a panic on both sides.
         assert!(report.categories.semantic.checked, "source pair has facts");
@@ -442,7 +474,7 @@ mod tests {
             basis: BasisProfile::rfp_default(),
             ..ScoreOptions::default()
         };
-        let report = assemble(&sources, CategoryScore::unchecked("n/a"), &opts);
+        let report = assemble(&sources, unchecked_gate(), &opts);
         assert!(
             (report.overall - 1.0).abs() < 1e-9,
             "identity still scores 1.0"
@@ -459,7 +491,7 @@ mod tests {
             interface: 0.70,
             structure: 0.10,
             semantic: 0.10,
-            compilation: 0.10,
+            behavior: 0.10,
         };
         let opts = ScoreOptions {
             weights: custom,

@@ -42,8 +42,11 @@ pub const SCORER_VERSION: &str = "score-2.0.0";
 /// One category's contribution to the overall score.
 ///
 /// The JSON schema is **append-only** (the `sordec coverage` convention):
-/// later stages add fields (interface/semantic `precision`/`recall`,
-/// compilation `diagnostics`) but never remove or rename one already here.
+/// later stages add fields (interface/semantic `precision`/`recall`) but never
+/// remove or rename one already here. The one exception was T19, which renamed
+/// `compilation` to `behavior` and moved the compile result out to
+/// [`CompilationGate`] — a metric *definition* change, made while score-2.0.0
+/// is under construction, not a schema drift.
 #[derive(Debug, Clone, Serialize)]
 pub struct CategoryScore {
     /// Sub-score in `[0.0, 1.0]`.
@@ -53,9 +56,10 @@ pub struct CategoryScore {
     /// until then.
     pub weight: f64,
     /// Whether this category contributed to `overall`. Always `true` for
-    /// interface / structure / semantic. `false` for compilation when the
-    /// check was not requested or the toolchain was unavailable — such a
-    /// category is excluded from the weighted mean rather than scored `0`.
+    /// interface / structure / semantic. `false` for behavior until the
+    /// differential-execution harness is wired in, and for any category that
+    /// had nothing to measure — such a category is excluded from the weighted
+    /// mean rather than scored `0`.
     pub checked: bool,
     /// Human-readable notes explaining the sub-score (missing functions,
     /// tier mismatches, compile diagnostics, …).
@@ -97,8 +101,59 @@ impl CategoryScore {
     }
 }
 
+/// Whether the reconstruction compiles at all — the acceptance **gate**, not a
+/// scored category.
+///
+/// Compilation is a precondition: if the source does not build, nothing
+/// downstream can be measured. It is not graded because there is no spectrum to
+/// grade — one type error and three hundred both fail — and because grading it
+/// double-counts, behavior being unmeasurable without it. Decisively, `todo!()`
+/// compiles, so a *scored* compilation category paid weight for recovering
+/// nothing.
+///
+/// Three outcomes, matching what the check itself can distinguish. Only
+/// [`Failed`](Self::Failed) vetoes the verdict — a gate that could not run must
+/// never read as one that failed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum CompilationGate {
+    /// `cargo check` succeeded: the reconstruction builds.
+    Passed,
+    /// Cargo ran and the source did not type-check.
+    ///
+    /// Diagnostics are retained deliberately. The error count is the best
+    /// available signal of emitter progress — hello-add at 4 versus
+    /// dex-liquidity-pool at 314 says exactly where marshalling elision is
+    /// working — so it is *reported*, just not scored.
+    Failed {
+        /// Leading cargo diagnostics, capped by the check that produced them.
+        diagnostics: Vec<String>,
+    },
+    /// The check was not requested, or the toolchain / offline registry could
+    /// not run it.
+    Unchecked {
+        /// Why the gate could not be evaluated.
+        reason: String,
+    },
+}
+
+impl CompilationGate {
+    /// Whether this gate vetoes the run's verdict.
+    ///
+    /// Only a genuine compile failure does. [`Unchecked`](Self::Unchecked) must
+    /// not, or the default path — where the compile check is opt-in and off —
+    /// would fail every run.
+    #[must_use]
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed { .. })
+    }
+}
+
 /// The four category sub-scores. Field names are the canonical category
 /// names in [`metrics`]; serde emits them as the JSON object keys.
+///
+/// Compilation is absent by design — see [`CompilationGate`]. `behavior` took
+/// its slot in T19.
 #[derive(Debug, Clone, Serialize)]
 pub struct Categories {
     /// Public entrypoint + type-shape match.
@@ -107,8 +162,9 @@ pub struct Categories {
     pub structure: CategoryScore,
     /// Recovered-fact precision/recall.
     pub semantic: CategoryScore,
-    /// `cargo check` against `soroban-sdk`.
-    pub compilation: CategoryScore,
+    /// Differential execution of the original wasm against the recompiled
+    /// reconstruction. `unchecked` until the harness is wired in (T20).
+    pub behavior: CategoryScore,
 }
 
 impl Categories {
@@ -120,7 +176,7 @@ impl Categories {
             (metrics::INTERFACE, &self.interface),
             (metrics::STRUCTURE, &self.structure),
             (metrics::SEMANTIC, &self.semantic),
-            (metrics::COMPILATION, &self.compilation),
+            (metrics::BEHAVIOR, &self.behavior),
         ]
     }
 
@@ -133,7 +189,7 @@ impl Categories {
             (metrics::INTERFACE, &mut self.interface),
             (metrics::STRUCTURE, &mut self.structure),
             (metrics::SEMANTIC, &mut self.semantic),
-            (metrics::COMPILATION, &mut self.compilation),
+            (metrics::BEHAVIOR, &mut self.behavior),
         ]
     }
 }
@@ -150,10 +206,18 @@ pub struct ScoreReport {
     pub basis_profile: String,
     /// Weighted mean of the *checked* category sub-scores.
     pub overall: f64,
-    /// `overall >= threshold`.
+    /// The run's verdict: `overall >= threshold` **and** the compilation gate
+    /// did not fail.
+    ///
+    /// Both conditions, because a gate that cannot veto is not a gate. A
+    /// reconstruction that does not build fails regardless of how well it
+    /// scores — you do not get a grade for an exam you did not sit.
     pub passed: bool,
     /// The pass threshold this run used.
     pub threshold: f64,
+    /// Whether the reconstruction compiles. A precondition on `passed`, not a
+    /// scored category — see [`CompilationGate`].
+    pub compilation_gate: CompilationGate,
     /// The four category sub-scores.
     pub categories: Categories,
     /// Run-level notes not tied to a single category.
@@ -162,19 +226,24 @@ pub struct ScoreReport {
 }
 
 impl ScoreReport {
-    /// Aggregate the four categories into an overall score and pass/fail,
+    /// Aggregate the four categories into an overall score and a verdict,
     /// weighting them by `profile`.
     ///
     /// Each category's weight is taken from `profile` — the single owner of
     /// the weights, already validated at load. `overall` is then the
     /// weight-normalized mean over the *checked* categories only: a category
-    /// with `checked == false` (compilation, when not run) drops out of both
-    /// the numerator and the denominator, so the number never silently
-    /// credits an unrun check. When no category is checked, `overall` is
-    /// `0.0`.
+    /// with `checked == false` (behavior, until T20 wires the harness in) drops
+    /// out of both the numerator and the denominator, so the number never
+    /// silently credits an unrun check. When no category is checked, `overall`
+    /// is `0.0`.
+    ///
+    /// `gate` does not enter the mean at all. It gates
+    /// [`passed`](Self::passed): a failed compile makes the verdict `false`
+    /// whatever the score.
     #[must_use]
     pub fn aggregate(
         mut categories: Categories,
+        gate: CompilationGate,
         profile: &WeightProfile,
         basis: &BasisProfile,
         threshold: f64,
@@ -203,8 +272,9 @@ impl ScoreReport {
             weights_profile: profile.name.clone(),
             basis_profile: basis.name.clone(),
             overall,
-            passed: overall >= threshold,
+            passed: overall >= threshold && !gate.is_failed(),
             threshold,
+            compilation_gate: gate,
             categories,
             notes: Vec::new(),
         }
@@ -226,16 +296,25 @@ mod tests {
         CategoryScore::checked(score)
     }
 
+    /// A gate that was never evaluated. Never vetoes, so tests about weighting
+    /// stay pure functions of the scores.
+    fn unchecked_gate() -> CompilationGate {
+        CompilationGate::Unchecked {
+            reason: "not evaluated in this test".to_owned(),
+        }
+    }
+
     #[test]
     fn all_perfect_scores_one() {
         let categories = Categories {
             interface: cat(1.0),
             structure: cat(1.0),
             semantic: cat(1.0),
-            compilation: cat(1.0),
+            behavior: cat(1.0),
         };
         let report = ScoreReport::aggregate(
             categories,
+            unchecked_gate(),
             &WeightProfile::rfp_default(),
             &BasisProfile::source_only(),
             0.90,
@@ -245,17 +324,18 @@ mod tests {
     }
 
     #[test]
-    fn unchecked_compilation_is_excluded_from_the_mean() {
-        // Three perfect checked categories + an unchecked compilation must
+    fn an_unchecked_category_is_excluded_from_the_mean() {
+        // Three perfect checked categories + an unchecked behavior must
         // still be 1.0 — the unrun check does not drag the number down.
         let categories = Categories {
             interface: cat(1.0),
             structure: cat(1.0),
             semantic: cat(1.0),
-            compilation: CategoryScore::unchecked("compile check not requested"),
+            behavior: CategoryScore::unchecked("behavior harness not wired"),
         };
         let report = ScoreReport::aggregate(
             categories,
+            unchecked_gate(),
             &WeightProfile::rfp_default(),
             &BasisProfile::source_only(),
             0.90,
@@ -272,7 +352,7 @@ mod tests {
             interface: cat(1.0),
             structure: cat(1.0),
             semantic: cat(1.0),
-            compilation: cat(1.0),
+            behavior: cat(1.0),
         };
         let names: Vec<&'static str> = categories.pairs().iter().map(|(n, _)| *n).collect();
         let weight_names: Vec<&'static str> = metrics::WEIGHTS.iter().map(|(n, _)| *n).collect();
@@ -293,10 +373,11 @@ mod tests {
             interface: cat(0.5),
             structure: cat(1.0),
             semantic: cat(1.0),
-            compilation: CategoryScore::unchecked("skipped"),
+            behavior: CategoryScore::unchecked("skipped"),
         };
         let report = ScoreReport::aggregate(
             categories,
+            unchecked_gate(),
             &WeightProfile::rfp_default(),
             &BasisProfile::source_only(),
             0.90,
@@ -316,26 +397,36 @@ mod tests {
             interface: cat(1.0),
             structure: cat(0.0),
             semantic: cat(0.0),
-            compilation: CategoryScore::unchecked("skipped"),
+            behavior: CategoryScore::unchecked("skipped"),
         };
         let heavy_interface = WeightProfile {
             name: "heavy-interface".to_owned(),
             interface: 1.0,
             structure: 0.0,
             semantic: 0.0,
-            compilation: 0.0,
+            behavior: 0.0,
         };
         let heavy_structure = WeightProfile {
             name: "heavy-structure".to_owned(),
             interface: 0.0,
             structure: 1.0,
             semantic: 0.0,
-            compilation: 0.0,
+            behavior: 0.0,
         };
-        let a =
-            ScoreReport::aggregate(cats(), &heavy_interface, &BasisProfile::source_only(), 0.90);
-        let b =
-            ScoreReport::aggregate(cats(), &heavy_structure, &BasisProfile::source_only(), 0.90);
+        let a = ScoreReport::aggregate(
+            cats(),
+            unchecked_gate(),
+            &heavy_interface,
+            &BasisProfile::source_only(),
+            0.90,
+        );
+        let b = ScoreReport::aggregate(
+            cats(),
+            unchecked_gate(),
+            &heavy_structure,
+            &BasisProfile::source_only(),
+            0.90,
+        );
         assert!(
             (a.overall - 1.0).abs() < 1e-9,
             "all weight on the perfect category"
@@ -352,10 +443,11 @@ mod tests {
             interface: cat(1.0),
             structure: cat(1.0),
             semantic: cat(1.0),
-            compilation: CategoryScore::unchecked("skipped"),
+            behavior: CategoryScore::unchecked("skipped"),
         };
         let default = ScoreReport::aggregate(
             cats(),
+            unchecked_gate(),
             &WeightProfile::rfp_default(),
             &BasisProfile::source_only(),
             0.90,
@@ -367,9 +459,15 @@ mod tests {
             interface: 0.5,
             structure: 0.1,
             semantic: 0.3,
-            compilation: 0.1,
+            behavior: 0.1,
         };
-        let report = ScoreReport::aggregate(cats(), &named, &BasisProfile::source_only(), 0.90);
+        let report = ScoreReport::aggregate(
+            cats(),
+            unchecked_gate(),
+            &named,
+            &BasisProfile::source_only(),
+            0.90,
+        );
         assert_eq!(report.weights_profile, "aggressive");
     }
 }

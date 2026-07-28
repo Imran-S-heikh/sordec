@@ -7,11 +7,15 @@
 # so they need NOT sum to 1.0 — only their ratios matter. They must each be
 # finite and >= 0, with at least one > 0.
 #
+# Note there is no `compilation` weight. Compilation is a pass/fail GATE, not a
+# scored category (T19): it can veto the run's verdict, but it earns no share of
+# the mean. A profile still carrying a `compilation` key is rejected outright.
+#
 # The defaults below are pending Mo/ABS sign-off (SCORER_RULES_INVENTORY C5).
 
 name = "rfp-default"
 
-interface   = 0.30
-structure   = 0.25
-semantic    = 0.30
-compilation = 0.15   # gate / "behavior" stand-in today; -> behavior in M6
+interface = 0.30
+structure = 0.25
+semantic  = 0.30
+behavior  = 0.15   # inherited from the compilation category it replaced in T19

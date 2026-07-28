@@ -139,6 +139,15 @@ fn golden_calibration_vector_is_stable() {
     // No SCORER_VERSION bump: `score-2.0.0` is the in-progress rebuild
     // version and the convention through T9/T10/T11 is to re-freeze this
     // vector as the definition lands, not to bump per task.
+    //
+    // T19 (compilation -> gate, behavior takes the category slot) deliberately
+    // moved NOTHING here, and that is the point: `check_compile` is false in
+    // this vector, so compilation was already `unchecked` and excluded from the
+    // mean. Swapping one unchecked category for another at the same weight
+    // (0.15, inherited) cannot change a weight-normalized mean over the checked
+    // three. The four numbers below holding unchanged is what verifies T19 was a
+    // pure restructuring. Re-weighting the other three *would* move them, which
+    // is precisely why it was split into its own change.
     assert_close(report.categories.interface.score, 0.900000, "interface");
     assert_close(report.categories.structure.score, 0.500000, "structure");
     assert_close(report.categories.semantic.score, 0.625000, "semantic");

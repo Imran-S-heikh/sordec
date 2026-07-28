@@ -146,9 +146,14 @@ pub struct WeightProfile {
     pub structure: f64,
     /// Weight of the semantic category.
     pub semantic: f64,
-    /// Weight of the compilation category (the honest "behavior" stand-in;
-    /// renamed to `behavior` in milestone M6).
-    pub compilation: f64,
+    /// Weight of the behavior category.
+    ///
+    /// Was `compilation` until T19, when compilation became a pass/fail gate
+    /// rather than a scored category. Because the struct is
+    /// `deny_unknown_fields`, a profile file still using the old `compilation`
+    /// key is rejected with a config error rather than silently ignored — the
+    /// honest failure mode for a renamed schema.
+    pub behavior: f64,
 }
 
 impl WeightProfile {
@@ -161,7 +166,7 @@ impl WeightProfile {
             interface: metrics::INTERFACE_WEIGHT,
             structure: metrics::STRUCTURE_WEIGHT,
             semantic: metrics::SEMANTIC_WEIGHT,
-            compilation: metrics::COMPILATION_WEIGHT,
+            behavior: metrics::BEHAVIOR_WEIGHT,
         }
     }
 
@@ -248,7 +253,7 @@ impl WeightProfile {
             (metrics::INTERFACE, self.interface),
             (metrics::STRUCTURE, self.structure),
             (metrics::SEMANTIC, self.semantic),
-            (metrics::COMPILATION, self.compilation),
+            (metrics::BEHAVIOR, self.behavior),
         ]
     }
 }
@@ -259,10 +264,10 @@ mod tests {
 
     /// Build a valid profile with each weight substituted verbatim, so the
     /// rejection tests exercise `validate` (not the TOML parser).
-    fn profile_toml(interface: &str, structure: &str, semantic: &str, compilation: &str) -> String {
+    fn profile_toml(interface: &str, structure: &str, semantic: &str, behavior: &str) -> String {
         format!(
             "name = \"t\"\ninterface = {interface}\nstructure = {structure}\n\
-             semantic = {semantic}\ncompilation = {compilation}\n"
+             semantic = {semantic}\nbehavior = {behavior}\n"
         )
     }
 
@@ -281,13 +286,13 @@ mod tests {
         assert_eq!(p.interface, metrics::INTERFACE_WEIGHT);
         assert_eq!(p.structure, metrics::STRUCTURE_WEIGHT);
         assert_eq!(p.semantic, metrics::SEMANTIC_WEIGHT);
-        assert_eq!(p.compilation, metrics::COMPILATION_WEIGHT);
+        assert_eq!(p.behavior, metrics::BEHAVIOR_WEIGHT);
     }
 
     #[test]
     fn rfp_default_sums_to_one_and_validates() {
         let p = WeightProfile::rfp_default();
-        let sum = p.interface + p.structure + p.semantic + p.compilation;
+        let sum = p.interface + p.structure + p.semantic + p.behavior;
         assert!(
             (sum - 1.0).abs() < f64::EPSILON,
             "default should sum to 1.0, got {sum}"
@@ -340,7 +345,7 @@ mod tests {
         // `deny_unknown_fields` catches the misspelling before validation.
         assert_config_err(
             "name = \"t\"\ninterface = 0.30\nstructure = 0.25\nsemantic = 0.30\n\
-             compilation = 0.15\nsematic = 0.10\n",
+             behavior = 0.15\nsematic = 0.10\n",
         );
     }
 
@@ -362,10 +367,23 @@ mod tests {
             Some(metrics::INTERFACE_WEIGHT)
         );
         assert_eq!(
-            p.weight_of(metrics::COMPILATION),
-            Some(metrics::COMPILATION_WEIGHT)
+            p.weight_of(metrics::BEHAVIOR),
+            Some(metrics::BEHAVIOR_WEIGHT)
         );
-        assert_eq!(p.weight_of("behavior"), None);
+        // `compilation` is no longer a category — it is a gate (T19), so it has
+        // no weight to look up. This assertion is the inverse of what it was.
+        assert_eq!(p.weight_of("compilation"), None);
+    }
+
+    #[test]
+    fn a_profile_using_the_pre_t19_compilation_key_is_rejected() {
+        // The rename is breaking on purpose. `deny_unknown_fields` turns a stale
+        // profile file into a config error naming the unknown key, rather than
+        // silently dropping the weight and scoring against a partial profile.
+        assert_config_err(
+            "name = \"t\"\ninterface = 0.30\nstructure = 0.25\nsemantic = 0.30\n\
+             compilation = 0.15\n",
+        );
     }
 
     // -----------------------------------------------------------------
