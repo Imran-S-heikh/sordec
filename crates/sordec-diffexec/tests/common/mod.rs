@@ -10,6 +10,13 @@
 //! load-bearing rather than decorative, and two copies would drift. Full
 //! reasoning on [`CORPUS_RELEASE_PROFILE`].
 
+// A `tests/common/` module is compiled into every test binary that declares it, and
+// each one uses a different subset — `identity.rs` needs only `unique_dir`, while
+// `vectors.rs` needs the crate assembly. Every item here is live in at least one
+// binary, but the compiler cannot see that, and `tools/gate.sh` runs clippy with
+// `-D warnings`.
+#![allow(dead_code)]
+
 use std::path::{Path, PathBuf};
 
 /// The `[profile.release]` block every contract in the corpus was built with.

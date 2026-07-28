@@ -212,13 +212,24 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// [`Unavailable`] when the host would refuse the module — checked from the
-    /// bytes first, because `Env::register` reports that by panicking. This
-    /// catches the one case the corpus actually contains (`token-v23-stripped`,
-    /// which has no custom sections at all). A module malformed in some *other*
-    /// way will still panic inside the SDK; that has not been observed, and
-    /// pre-validating the whole module format to rule it out would mean
-    /// reimplementing the host's verifier.
+    /// [`Unavailable`] when the module cannot be registered — checked from the bytes
+    /// first, because `Env::register` reports both of these by *panicking*, and a
+    /// harness whose discipline is to degrade with a reason cannot have the SDK abort
+    /// a corpus run halfway through.
+    ///
+    /// Two cases, both found on real fixtures:
+    ///
+    /// - **No `contractenvmetav0`.** The host checks this on every module load
+    ///   (`parsed_module.rs:301`) and refuses without it. `token-v23-stripped` has no
+    ///   custom sections at all.
+    /// - **A constructor.** Registration runs `__constructor`, and it takes
+    ///   arguments on every corpus contract that has one, so registering with none
+    ///   fails inside the VM with `MismatchingParameterLen`. Supplying them needs
+    ///   input generation.
+    ///
+    /// A module malformed in some *other* way will still panic inside the SDK. That
+    /// has not been observed, and pre-validating the whole module format to rule it
+    /// out would mean reimplementing the host's verifier.
     pub fn register(wasm: &[u8]) -> Result<Self, Unavailable> {
         if !wasm::is_loadable(wasm) {
             return Err(Unavailable {
@@ -226,6 +237,16 @@ impl Session {
                     "wasm has no `{}` section, which the host requires on every \
                      module load, so this contract can never be executed",
                     wasm::ENV_META_SECTION
+                ),
+            });
+        }
+        if wasm::has_constructor(wasm) {
+            return Err(Unavailable {
+                reason: format!(
+                    "contract exports `{}`, which registration invokes; every corpus \
+                     contract with one takes arguments, so registering without them \
+                     fails in the VM. Supplying them needs input generation.",
+                    wasm::CONSTRUCTOR_EXPORT
                 ),
             });
         }

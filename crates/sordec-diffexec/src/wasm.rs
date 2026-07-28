@@ -30,6 +30,39 @@ pub const ENV_META_SECTION: &str = "contractenvmetav0";
 /// The custom section carrying the contract's declared ABI.
 pub const SPEC_SECTION: &str = "contractspecv0";
 
+/// The wasm section id holding a module's exports.
+const EXPORT_SECTION_ID: u8 = 7;
+
+/// The export-kind byte marking a function export. Memories, tables and globals use
+/// other values and are not entrypoints.
+const EXPORT_KIND_FUNC: u8 = 0x00;
+
+/// The export a contract's constructor is compiled to.
+///
+/// Present only when the contract declares one. Registering such a contract requires
+/// its constructor arguments, which is why [`has_constructor`] exists.
+pub const CONSTRUCTOR_EXPORT: &str = "__constructor";
+
+/// Whether this contract has a constructor that must be supplied arguments at
+/// registration.
+///
+/// Measured across the corpus: token-v22, token-v23 and dex-liquidity-pool all export
+/// one, and **all three take arguments** — `(Address, u32, String, String)` for the
+/// tokens, `(Address, Address)` for the pool. None is zero-arity.
+///
+/// So this deliberately does not try to recover the *arity*: doing so means walking
+/// the export, function and type sections to reach a parameter count, and on this
+/// corpus the answer is always "more than zero". A zero-argument constructor would be
+/// skipped unnecessarily, which is the conservative direction, and the code to handle
+/// it would ship unexercised. Arity-aware handling belongs with the input generation
+/// that would supply the arguments anyway.
+#[must_use]
+pub fn has_constructor(wasm: &[u8]) -> bool {
+    exported_functions(wasm)
+        .iter()
+        .any(|name| name == CONSTRUCTOR_EXPORT)
+}
+
 /// Whether the host will accept this module at all.
 ///
 /// Cheap and total: a truncated or malformed module simply reports `false`
@@ -42,7 +75,97 @@ pub fn is_loadable(wasm: &[u8]) -> bool {
 /// Custom-section names in a wasm module, in module order.
 #[must_use]
 pub fn section_names(wasm: &[u8]) -> Vec<String> {
+    custom_sections(wasm).into_iter().map(|(name, _)| name).collect()
+}
+
+/// The contents of a named custom section.
+///
+/// `None` when the module has no such section. The first match wins; a module with
+/// two sections of the same name is malformed and the host would reject it.
+///
+/// Used to compare a recompiled contract's declared ABI against the original's
+/// without needing to invoke anything — `contractspecv0` is XDR, so byte equality
+/// *is* ABI equality. That makes it the one equivalence check available for a
+/// contract the harness cannot yet drive.
+#[must_use]
+pub fn custom_section<'wasm>(wasm: &'wasm [u8], name: &str) -> Option<&'wasm [u8]> {
+    custom_sections(wasm)
+        .into_iter()
+        .find(|(section, _)| section == name)
+        .map(|(_, contents)| contents)
+}
+
+/// Every custom section as `(name, contents)`, in module order.
+fn custom_sections(wasm: &[u8]) -> Vec<(String, &[u8])> {
+    sections(wasm)
+        .into_iter()
+        .filter(|(id, _)| *id == CUSTOM_SECTION_ID)
+        .filter_map(|(_, payload)| split_custom_section(payload))
+        .collect()
+}
+
+/// Names of the functions this module exports.
+///
+/// These are the contract's entrypoints: the host dispatches an invocation by
+/// looking up an exported function by name, so this is the set of things that can be
+/// called at all.
+///
+/// Returns an empty vector for a module with no export section or one that is
+/// malformed — the host would reject such a module anyway, so there is nothing to
+/// distinguish.
+#[must_use]
+pub fn exported_functions(wasm: &[u8]) -> Vec<String> {
+    let Some((_, payload)) = sections(wasm).into_iter().find(|(id, _)| *id == EXPORT_SECTION_ID)
+    else {
+        return Vec::new();
+    };
+
     let mut names = Vec::new();
+    let mut cursor = 0usize;
+    let Some((count, count_bytes)) = leb128(&payload[cursor..]) else {
+        return names;
+    };
+    cursor += count_bytes;
+
+    for _ in 0..count {
+        // Each entry is a LEB128-prefixed name, a one-byte kind, then a LEB128 index.
+        let Some((name_len, name_len_bytes)) = leb128(payload.get(cursor..).unwrap_or(&[])) else {
+            break;
+        };
+        cursor += name_len_bytes;
+
+        let Some(name_end) = cursor
+            .checked_add(name_len as usize)
+            .filter(|end| *end <= payload.len())
+        else {
+            break;
+        };
+        let name = String::from_utf8_lossy(&payload[cursor..name_end]).into_owned();
+        cursor = name_end;
+
+        let Some(&kind) = payload.get(cursor) else {
+            break;
+        };
+        cursor += 1;
+
+        let Some((_, index_bytes)) = leb128(payload.get(cursor..).unwrap_or(&[])) else {
+            break;
+        };
+        cursor += index_bytes;
+
+        if kind == EXPORT_KIND_FUNC {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Every section as `(id, payload)`, in module order.
+///
+/// A truncated or malformed module stops the walk rather than erroring: such a module
+/// is one the host would refuse, so there is no useful distinction to draw.
+fn sections(wasm: &[u8]) -> Vec<(u8, &[u8])> {
+    let mut found = Vec::new();
     let mut cursor = WASM_HEADER_LEN;
 
     while cursor < wasm.len() {
@@ -61,24 +184,22 @@ pub fn section_names(wasm: &[u8]) -> Vec<String> {
             break;
         };
 
-        if section_id == CUSTOM_SECTION_ID
-            && let Some(name) = custom_section_name(&wasm[cursor..payload_end])
-        {
-            names.push(name);
-        }
+        found.push((section_id, &wasm[cursor..payload_end]));
         cursor = payload_end;
     }
-    names
+    found
 }
 
-/// The name of a custom section, given its complete payload.
+/// Split a custom section's complete payload into its name and its contents.
 ///
-/// A custom section's payload begins with its own LEB128-prefixed name; the rest
-/// is opaque content we have no interest in here.
-fn custom_section_name(payload: &[u8]) -> Option<String> {
+/// A custom section's payload begins with its own LEB128-prefixed name; everything
+/// after that is the section's opaque content.
+fn split_custom_section(payload: &[u8]) -> Option<(String, &[u8])> {
     let (name_len, name_len_bytes) = leb128(payload)?;
-    let name = payload.get(name_len_bytes..name_len_bytes + name_len as usize)?;
-    Some(String::from_utf8_lossy(name).into_owned())
+    let name_end = name_len_bytes.checked_add(name_len as usize)?;
+    let name = payload.get(name_len_bytes..name_end)?;
+    let contents = payload.get(name_end..)?;
+    Some((String::from_utf8_lossy(name).into_owned(), contents))
 }
 
 /// Read a LEB128 `u32`, returning the value and the bytes consumed.
@@ -136,6 +257,51 @@ mod tests {
     fn a_truncated_module_terminates_rather_than_looping() {
         let wasm = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x00, 0xff];
         let _ = section_names(&wasm);
+    }
+
+    #[test]
+    fn a_named_custom_section_yields_its_contents() {
+        let wasm = module_with_custom_section("meta");
+        // `module_with_custom_section` appends exactly one content byte, 0x2a.
+        assert_eq!(custom_section(&wasm, "meta"), Some(&[0x2a][..]));
+        assert_eq!(custom_section(&wasm, "absent"), None);
+        // Total on malformed input, like the rest of this module.
+        assert_eq!(custom_section(&[], SPEC_SECTION), None);
+    }
+
+    #[test]
+    fn function_exports_are_read_and_non_functions_skipped() {
+        // magic + version, then an export section (id 7) with three entries: a
+        // function, a memory (kind 2), and another function.
+        let mut wasm = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        let mut payload = vec![0x03]; // three exports
+        for (name, kind) in [("add", 0x00u8), ("memory", 0x02), ("__constructor", 0x00)] {
+            payload.push(u8::try_from(name.len()).unwrap());
+            payload.extend_from_slice(name.as_bytes());
+            payload.push(kind);
+            payload.push(0x00); // index
+        }
+        wasm.push(EXPORT_SECTION_ID);
+        wasm.push(u8::try_from(payload.len()).unwrap());
+        wasm.extend_from_slice(&payload);
+
+        assert_eq!(
+            exported_functions(&wasm),
+            vec!["add".to_owned(), "__constructor".to_owned()],
+            "the memory export is not an entrypoint"
+        );
+        assert!(has_constructor(&wasm));
+    }
+
+    #[test]
+    fn a_module_with_no_exports_has_no_constructor() {
+        assert!(!has_constructor(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]));
+        assert!(exported_functions(&[]).is_empty());
+        // A truncated export section must terminate rather than loop or panic.
+        let truncated = vec![
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, EXPORT_SECTION_ID, 0x02, 0x05, 0xff,
+        ];
+        let _ = exported_functions(&truncated);
     }
 
     #[test]
