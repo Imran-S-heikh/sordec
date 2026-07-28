@@ -1859,6 +1859,7 @@ dependencies = [
  "sordec-passes",
  "syn 2.0.117",
  "thiserror 2.0.18",
+ "toml",
  "wasmparser 0.240.0",
  "wasmprinter",
  "wat",
@@ -1895,6 +1896,7 @@ dependencies = [
 name = "sordec-diffexec"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "soroban-sdk",
 ]
 
