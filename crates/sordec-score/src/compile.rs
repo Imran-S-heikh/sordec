@@ -44,7 +44,7 @@
 //! - **Baseline-to-beat.** The prior-generation decompiler's Rust output is
 //!   the intended baseline; regenerating it needs that older codebase's
 //!   toolchain restored (a transitive dependency no longer compiles under the
-//!   current Rust release). Recorded in `docs/scoring_metric.md` §7.
+//!   current Rust release). Recorded in `docs/scoring_metric.md` §8 (Baseline).
 
 use std::path::Path;
 use std::process::Command;

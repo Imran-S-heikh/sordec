@@ -124,6 +124,30 @@ fn overall_band(name: &str) -> (f64, f64) {
     // that cannot run `cargo expand` degrades every category to the source
     // basis, which moves hello-add off 0.5455 and breaches its band loudly
     // rather than quietly reporting a different metric.
+    //
+    // Re-measured 2026-07-28 at T23, and **not re-derived**: every fixture sits
+    // inside the band it already had. Aggregate 0.4611.
+    //
+    // Two things had been true of the committed artifacts and are worth recording,
+    // because the second is easy to misread as a regression:
+    //
+    // 1. `docs/benchmarks/report.{md,json}` were stale from *before* T13f — they
+    //    still carried a `compilation` category key, which T19 removed. Regenerated
+    //    here. They are generated measurement records, so hand-editing them would
+    //    have fabricated data.
+    // 2. The aggregate they recorded was 0.4589, and the current measurement is
+    //    0.4611. That delta is **not** new: T13f's own commit message records
+    //    "structure 0.0480 -> 0.0589 (aggregate 0.4589 -> 0.4611)". The artifacts
+    //    simply predated it. Regenerating reproduces T13f's figure exactly, which is
+    //    the check that nothing since has moved a score — E1 (`246abdc`) recorded
+    //    "no score moved" and this confirms it, as does the whole T20-T22 behavior
+    //    wiring: behavior is an *unchecked* category corpus-wide, so it renormalizes
+    //    out of the mean exactly as the unchecked compilation category did before it.
+    //
+    // Behavior will stay unchecked here until the emitter produces a crate that
+    // compiles. That is not a gap in the harness — it is validated against nine
+    // known-answer divergence vectors and against each fixture's own recompiled
+    // source — it is the emitter's turn.
     match name {
         "hello-add" => (0.53, 0.57),
         "token-v22" => (0.54, 0.58),
@@ -221,7 +245,9 @@ fn render_markdown(measured: &[Measured], mean: f64) -> String {
     s.push_str(&format!(
         "Scorer `{}`, threshold 0.90. Reconstruction (`sordec decompile`) scored \
          directory-vs-directory against each fixture's vendored source. \
-         Compilation category off (AST-diff only). Regenerate with \
+         Compilation is a gate and is not evaluated here; behavior is unchecked \
+         until the emitter produces a crate that compiles, so these are AST-diff \
+         numbers over three categories. Regenerate with \
          `SORDEC_BENCH_WRITE=1 cargo test -p sordec-cli --test benchmark -- --ignored`.\n\n",
         sordec_score::SCORER_VERSION
     ));
