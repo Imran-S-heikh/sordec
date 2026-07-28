@@ -142,12 +142,21 @@ fn coverage_json_reports_recognizer_miss_diagnostics_on_token_v23() {
 }
 
 #[test]
-fn coverage_on_hello_add_reports_only_the_panic_lint() {
+fn coverage_on_hello_add_reports_no_recovery_miss() {
     // A fully-recovered contract: no recogniser misses, no surviving
-    // unknown host calls. The only code present is the informational
-    // bare-panic lint the D8 pass wires (hello-add's decode guards,
-    // overflow check, and panic-glue wrappers = 5 sites) — any other
-    // code appearing here is a recovery regression.
+    // unknown host calls. Any *miss* code appearing here is a recovery
+    // regression.
+    //
+    // Two informational codes do fire, and neither is a miss. The D8 pass
+    // lints hello-add's bare panics, and the marshalling pass reports each
+    // argument guard it deleted — deliberately, because deleting a trap is
+    // a behavioural claim and a reviewer should not have to diff two
+    // outputs to find where it was made.
+    const INFORMATIONAL: [&str; 2] = [
+        "lift::panic_without_error_code",
+        "lift::marshalling_guard_elided",
+    ];
+
     let out = Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["coverage", "--json", HELLO_ADD])
@@ -158,12 +167,27 @@ fn coverage_on_hello_add_reports_only_the_panic_lint() {
         .clone();
     let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
     let by_code = v["diagnostics"]["by_code"].as_array().unwrap();
-    assert_eq!(by_code.len(), 1, "only the panic lint fires: {by_code:?}");
-    assert_eq!(
-        by_code[0]["code"].as_str(),
-        Some("lift::panic_without_error_code")
-    );
-    assert_eq!(v["diagnostics"]["total"].as_u64(), Some(5));
+    for entry in by_code {
+        let code = entry["code"].as_str().unwrap_or_default();
+        assert!(
+            INFORMATIONAL.contains(&code),
+            "unexpected diagnostic {code} — a recovery regression: {by_code:?}"
+        );
+    }
+    let count = |code: &str| {
+        by_code
+            .iter()
+            .find(|e| e["code"].as_str() == Some(code))
+            .and_then(|e| e["count"].as_u64())
+    };
+    // The panic lint is a *recovery* census taken where traps are typed,
+    // which is before elision runs — so it counts all five sites, two of
+    // which the marshalling pass then deletes. Three survive into the
+    // emitted crate (the overflow trap and its two glue wrappers). The
+    // two numbers describe different moments on purpose; read together
+    // they say "five traps recovered, two of them ABI marshalling".
+    assert_eq!(count("lift::panic_without_error_code"), Some(5));
+    assert_eq!(count("lift::marshalling_guard_elided"), Some(2));
 }
 
 #[test]

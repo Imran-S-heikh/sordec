@@ -68,18 +68,29 @@ fn dump_hir_raw_renders_unrecognized_host_calls() {
 #[test]
 fn dump_hir_on_hello_add_recognizes_val_ops() {
     // The default path runs the C1 Val-encoding recognizer. hello-add's
-    // dispatcher + `add` exercise all four pattern families: small
-    // encode, decode, tag check, and object conversion.
+    // dispatcher + `add` exercise all four pattern families: small encode,
+    // decode, tag check, and object conversion.
+    //
+    // The *encode* families no longer survive to the dump as ops: the
+    // marshalling pass collapses a return-value encode back to the value
+    // at the ABI boundary. That is not a recognition regression — nothing
+    // can be collapsed that was not first recognized — so the encode side
+    // is asserted through the provenance note the collapse leaves behind,
+    // and the decode side, which the pass does not consume, still shows as
+    // ops. `--raw` (below) remains the assertion that recognition is what
+    // produces these in the first place.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", HELLO_ADD])
         .assert()
         .success()
-        .stdout(predicate::str::contains("val_encode<u64>"))
         .stdout(predicate::str::contains("has_tag("))
-        .stdout(predicate::str::contains("obj_from_u64"))
+        .stdout(predicate::str::contains("obj_to_u64"))
+        .stdout(predicate::str::contains("val_decode("))
         // Provenance for a recognized bit-pattern is SdkPattern.
-        .stdout(predicate::str::contains(";; SdkPattern: val-encode"))
+        .stdout(predicate::str::contains(";; SdkPattern: val-tag-check"))
+        // The recognized encode, named by the elision that consumed it.
+        .stdout(predicate::str::contains("return-value encode collapsed"))
         .stderr(predicate::str::contains("[error]").not());
 }
 

@@ -36,10 +36,14 @@ fn emission_is_deterministic() {
 }
 
 /// hello-add reconstructs its `#[contract]` scaffold and its one spec
-/// method — now with a **real body** (W2), not a `todo!()` stub. Asserted
-/// by robust markers (SSA-destructed phi, a helper call threading a
-/// parameter name, structured control flow, an explicit return) rather
-/// than a brittle full-file snapshot.
+/// method, with the ABI marshalling elided. Asserted by robust markers
+/// rather than a brittle full-file snapshot.
+///
+/// This test previously pinned the *un-elided* shape — a `func0(e, v5, a)`
+/// spill call and `todo!("memory load")` holes. Those were the SDK's
+/// `TryFromVal` glue reconstructed literally, and deleting them is the
+/// whole point of `sordec_passes::marshalling`, so the markers moved with
+/// the behaviour they describe.
 #[test]
 fn hello_add_emits_a_real_add_body() {
     let (_, wasm) = common::fixtures()[0];
@@ -56,13 +60,40 @@ fn hello_add_emits_a_real_add_body() {
     // SSA destruction: a hoisted `let mut` phi, assigned and returned.
     assert!(src.contains("let mut v"), "phi hoisted as let mut:\n{src}");
     assert!(src.contains("return v"), "explicit return of a value:\n{src}");
-    // A helper call threading the env and a recovered parameter name.
-    assert!(src.contains("func0(e, v5, a)"), "call threads env + param `a`:\n{src}");
-    // Structured control flow survived the walk.
-    assert!(src.contains("if v"), "if present:\n{src}");
-    assert!(src.contains("break 'bb"), "labeled break present:\n{src}");
-    // Host-call sites are honest holes carrying their recovered label.
-    assert!(src.contains("todo!(\"memory load\")"), "host/memory hole labeled:\n{src}");
+
+    // The arguments read as themselves: each decode collapsed to the
+    // parameter it decodes, so no frame pointer is threaded anywhere.
+    assert!(src.contains("= a;"), "`a` bound directly, not decoded:\n{src}");
+    assert!(src.contains("= b;"), "`b` bound directly, not decoded:\n{src}");
+    assert!(!src.contains("func0("), "the decode helper has no callers:\n{src}");
+    assert!(!src.contains("fn func0"), "and is not emitted at all:\n{src}");
+
+    // The contract's own logic survives: `a + b` and the overflow trap
+    // rustc emits for it under `overflow-checks = true`.
+    assert!(src.contains(" + "), "the addition survives:\n{src}");
+    assert!(src.contains("panic!()"), "the overflow trap survives:\n{src}");
+
+    // Nothing in the entrypoint is a hole any more.
+    assert!(!src.contains("todo!"), "no unrecovered holes remain:\n{src}");
+}
+
+/// The headline gate for the marshalling work: hello-add's reconstruction
+/// **compiles**, with zero errors rather than a reported rate.
+///
+/// `#[ignore]`d like its siblings — it shells out to `cargo` against the
+/// cached SDK. Run with:
+///
+///   cargo test -p sordec-backend -- --ignored --nocapture hello_add_cargo_check
+#[test]
+#[ignore = "shells out to cargo; run explicitly"]
+fn hello_add_cargo_check() {
+    let (_, wasm) = common::fixtures()[0];
+    let report = common::cargo_check_emitted(wasm);
+    assert_eq!(
+        report.error_lines, 0,
+        "hello-add must compile clean; cargo said:\n{}",
+        report.output
+    );
 }
 
 /// The idiom table (P5): token-v23's storage/auth/event ops render as the

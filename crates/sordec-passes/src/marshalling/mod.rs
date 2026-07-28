@@ -44,18 +44,22 @@
 //!
 //! ## Order
 //!
-//! [`decode`] → [`guard`] → [`frame`], as a fixpoint group: collapsing a
-//! decode makes its failure guard constant, removing the guard makes the
+//! [`decode`] → [`encode`] → [`guard`] → [`frame`], as a fixpoint group,
+//! because each one unblocks the next: collapsing a decode makes its
+//! failure guard constant, collapsing a return encode makes the width
+//! dispatch around it decide nothing, removing those guards makes the
 //! frame pointer dead, and a dead frame pointer is what lets the prologue
 //! and epilogue go. Running them in one direction to a fixpoint converges
 //! because each strictly reduces the number of live marshalling bindings.
 
 pub mod decode;
+pub mod encode;
 pub mod frame;
 pub mod guard;
 pub(crate) mod sret;
 
 pub use decode::ValDecodeCollapsePass;
+pub use encode::ValEncodeCollapsePass;
 pub use frame::FrameElisionPass;
 pub use guard::ArgGuardElisionPass;
 
@@ -115,6 +119,8 @@ pub(crate) mod metrics {
     pub(crate) use crate::metrics_catalog::{
         MARSHALLING_DECODE_CALLS_ELIDED as DECODE_CALLS_ELIDED,
         MARSHALLING_DECODE_COLLAPSED as DECODE_COLLAPSED,
+        MARSHALLING_DISPATCH_FOLDED as DISPATCH_FOLDED,
+        MARSHALLING_ENCODE_COLLAPSED as ENCODE_COLLAPSED,
         MARSHALLING_FRAMES_ELIDED as FRAMES_ELIDED,
         MARSHALLING_GUARDS_ELIDED as GUARDS_ELIDED,
     };

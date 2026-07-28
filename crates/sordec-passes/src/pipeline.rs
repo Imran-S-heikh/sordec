@@ -92,6 +92,26 @@ impl<Ir> Pipeline<Ir> {
         self.passes.is_empty()
     }
 
+    /// Pass names in manifest order.
+    ///
+    /// Exists so a manifest can assert *by name* what a fixpoint group
+    /// covers. The groups are raw index ranges, so inserting a pass above
+    /// one silently slides its window onto different passes — a bug with
+    /// no symptom except a pass quietly running once instead of to
+    /// convergence, or vice versa.
+    #[must_use]
+    pub fn pass_names(&self) -> Vec<&'static str> {
+        self.passes.iter().map(|p| p.name()).collect()
+    }
+
+    /// The configured fixpoint groups, as index ranges into
+    /// [`pass_names`](Self::pass_names).
+    #[inline]
+    #[must_use]
+    pub fn fixpoint_groups(&self) -> &[Range<usize>] {
+        &self.fixpoint_groups
+    }
+
     /// Execute the pipeline on `ir`, looping fixpoint groups to convergence.
     ///
     /// Within a fixpoint group, all passes in the group's index range

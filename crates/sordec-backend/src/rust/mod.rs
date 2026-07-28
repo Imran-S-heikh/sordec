@@ -23,7 +23,10 @@ mod scaffold;
 mod sig;
 mod ty;
 
-use sordec_ir::{HighIr, TypeRegistry};
+use std::collections::HashSet;
+
+use sordec_common::FuncId;
+use sordec_ir::{Expr, HighIr, Region, TypeRegistry};
 
 use crate::error::BackendResult;
 use crate::rust::func::Emitted;
@@ -55,6 +58,59 @@ pub fn emit_cargo_toml(high: &HighIr) -> String {
     scaffold::emit_cargo_toml(high)
 }
 
+/// The functions the emitted module needs: every root, plus everything
+/// reachable from one by a call the body actually emits.
+///
+/// Roots are the `contractspecv0` entrypoints (which become
+/// `#[contractimpl]` methods) and any function carrying a recovered export
+/// name — dropping a module export would change the reconstruction's
+/// surface, which is not this filter's business.
+///
+/// Unreachable helpers are skipped at **emission**, never removed from the
+/// IR: preserving everything recovered is the IR's job, and a view of it
+/// is the right place to decide what a compilable crate needs. Marshalling
+/// elision is what makes this load-bearing rather than cosmetic — once an
+/// argument decode collapses to its parameter, the SDK's `TryFromVal`
+/// helper has no callers at all, and emitting a dead helper full of
+/// un-lowered `Val` holes fails `cargo check` for code nothing runs.
+///
+/// Reachability follows *emitted* calls, matching how [`liveness`] defines
+/// use: a call sitting in an unscheduled binding is not in the output, so
+/// it cannot keep a callee alive.
+fn reachable_functions(high: &HighIr) -> HashSet<FuncId> {
+    let mut reachable: HashSet<FuncId> = HashSet::new();
+    let mut queue: Vec<FuncId> = high
+        .functions
+        .iter()
+        .filter(|f| f.signature.is_some() || f.name.is_some())
+        .map(|f| f.id)
+        .collect();
+
+    while let Some(id) = queue.pop() {
+        if !reachable.insert(id) {
+            continue;
+        }
+        let Some(func) = high.function(id) else {
+            continue;
+        };
+        func.region.for_each_node(|node| {
+            if let Region::Basic(b) = node
+                && let Some(block) = func.blocks.get(*b)
+            {
+                for vid in &block.bindings {
+                    if let Some(binding) = func.bindings.get(*vid)
+                        && let Expr::Call { target, .. } = &binding.expr
+                        && !reachable.contains(target)
+                    {
+                        queue.push(*target);
+                    }
+                }
+            }
+        });
+    }
+    reachable
+}
+
 /// Assemble the whole module as a `syn::File`.
 fn build_file(high: &HighIr, policy: &dyn HolePolicy) -> syn::File {
     let types = high.soroban_facts.as_ref().map(|f| &f.types);
@@ -69,7 +125,11 @@ fn build_file(high: &HighIr, policy: &dyn HolePolicy) -> syn::File {
     let reg = types.unwrap_or(&fallback_reg);
     let mut methods: Vec<syn::ImplItemFn> = Vec::new();
     let mut free_fns: Vec<syn::Item> = Vec::new();
+    let reachable = reachable_functions(high);
     for func in &high.functions {
+        if !reachable.contains(&func.id) {
+            continue;
+        }
         match func::emit_function(high, func, reg, policy) {
             Emitted::Method(m) => methods.push(*m),
             Emitted::Free(f) => free_fns.push(*f),

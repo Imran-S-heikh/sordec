@@ -9,7 +9,7 @@
 //! replaces these with method chains).
 
 use sordec_common::{FuncId, IrId};
-use sordec_ir::{BinaryOp, Binding, Expr, HighIr, Literal, SemanticOp, UnaryOp};
+use sordec_ir::{BinaryOp, Binding, Expr, HighIr, IrType, KnownType, Literal, SemanticOp, UnaryOp};
 use syn::parse_quote;
 
 use crate::rust::body::FnCtx;
@@ -19,7 +19,7 @@ use crate::wat::annotate;
 /// The right-hand side expression for one binding.
 pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
     match &binding.expr {
-        Expr::Literal(lit) => literal_expr(ctx, lit),
+        Expr::Literal(lit) => literal_expr(ctx, lit, &binding.ty),
         Expr::Use(v) => ctx.value_ref(*v),
         Expr::Unary { op, value } => unary_expr(*op, ctx.value_ref(*value)),
         Expr::Binary { op, lhs, rhs } => {
@@ -89,23 +89,66 @@ fn semantic_label(op: &SemanticOp) -> String {
     }
 }
 
-fn literal_expr(ctx: &FnCtx, lit: &Literal) -> syn::Expr {
+/// An integer literal's Rust suffix, taken from the type the pipeline
+/// *recovered* for the binding rather than from the WASM opcode that
+/// produced it.
+///
+/// WASM has no signed/unsigned distinction in its value types — `i64`
+/// there means "64 bits", and the signedness lives in the *operators*.
+/// So the `Literal` variant records how the constant was encoded, not
+/// what the source called it, and emitting its suffix verbatim makes
+/// every constant compared against a recovered `u64` a type error
+/// (`v21 > 72057594037927935i64` where `v21: u64`).
+///
+/// The recovered type is the better answer whenever there is one, and
+/// reinterpreting is lossless: the cast preserves the bit pattern, which
+/// is exactly what the original WASM compared.
+fn int_literal(n: i128, ty: &IrType) -> Option<syn::Expr> {
+    let known = match ty {
+        IrType::Known(k) | IrType::Inferred(k) => k,
+        IrType::Unknown(_) => return None,
+    };
+    Some(match known {
+        KnownType::U32 => {
+            let v = n as u32;
+            parse_quote!(#v)
+        }
+        KnownType::I32 => {
+            let v = n as i32;
+            parse_quote!(#v)
+        }
+        KnownType::U64 => {
+            let v = n as u64;
+            parse_quote!(#v)
+        }
+        KnownType::I64 => {
+            let v = n as i64;
+            parse_quote!(#v)
+        }
+        // Everything else is either not an integer or not something a raw
+        // WASM constant can stand in for (`i128` arrives as two limbs,
+        // `Address` as a handle). Fall back to the encoded form.
+        _ => return None,
+    })
+}
+
+fn literal_expr(ctx: &FnCtx, lit: &Literal, ty: &IrType) -> syn::Expr {
     match lit {
         Literal::I32(n) => {
             let n = *n;
-            parse_quote!(#n)
+            int_literal(i128::from(n), ty).unwrap_or_else(|| parse_quote!(#n))
         }
         Literal::I64(n) => {
             let n = *n;
-            parse_quote!(#n)
+            int_literal(i128::from(n), ty).unwrap_or_else(|| parse_quote!(#n))
         }
         Literal::U32(n) => {
             let n = *n;
-            parse_quote!(#n)
+            int_literal(i128::from(n), ty).unwrap_or_else(|| parse_quote!(#n))
         }
         Literal::U64(n) => {
             let n = *n;
-            parse_quote!(#n)
+            int_literal(i128::from(n), ty).unwrap_or_else(|| parse_quote!(#n))
         }
         Literal::Bool(b) => {
             if *b {

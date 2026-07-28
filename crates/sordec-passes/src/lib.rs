@@ -63,7 +63,9 @@ pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
-pub use marshalling::{ArgGuardElisionPass, FrameElisionPass, ValDecodeCollapsePass};
+pub use marshalling::{
+    ArgGuardElisionPass, FrameElisionPass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
@@ -201,6 +203,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // removing that guard makes the frame pointer dead, and a dead
             // frame pointer is what lets the bracket go.
             Box::new(ValDecodeCollapsePass),
+            Box::new(ValEncodeCollapsePass),
             Box::new(ArgGuardElisionPass),
             Box::new(FrameElisionPass),
             Box::new(UnrecognizedScanPass),
@@ -218,7 +221,37 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // Two fixpoint groups: wave-1 region refinement, and marshalling
         // elision. Both converge because every member strictly reduces a
         // measure — nesting depth for the first, live marshalling bindings
-        // for the second.
-        vec![1..6, 24..27],
+        // for the second. `marshalling_group_covers_exactly_the_elision_passes`
+        // pins the second range by pass name, so inserting a pass above it
+        // fails a test instead of silently shifting the window.
+        vec![1..6, 24..28],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fixpoint group is a pair of raw indices into the manifest, so
+    /// adding a pass anywhere above one silently moves the window over the
+    /// wrong passes. This pins the marshalling group by name.
+    #[test]
+    fn marshalling_group_covers_exactly_the_elision_passes() {
+        let pipeline = default_high_pipeline();
+        let names: Vec<&str> = pipeline.pass_names();
+        let group = pipeline
+            .fixpoint_groups()
+            .iter()
+            .find(|r| names[r.start] == marshalling::decode::PASS_NAME)
+            .expect("the marshalling group starts at the decode pass");
+        assert_eq!(
+            &names[group.clone()],
+            &[
+                marshalling::decode::PASS_NAME,
+                marshalling::encode::PASS_NAME,
+                marshalling::guard::PASS_NAME,
+                marshalling::frame::PASS_NAME,
+            ],
+        );
+    }
 }

@@ -9,6 +9,54 @@
 use sordec_ir::HighIr;
 use sordec_passes::LoweringStep;
 
+/// What `cargo check` said about an emitted crate.
+pub struct CheckReport {
+    /// Number of `error…` lines cargo printed. Zero means it compiled.
+    pub error_lines: usize,
+    /// Cargo's stderr, for a failing assertion to quote.
+    pub output: String,
+}
+
+/// Emit `wasm` as a standalone crate and `cargo check` it offline.
+///
+/// The manifest is written **verbatim** as the emitter produced it — never
+/// patched — so a passing check is a claim about the crate we actually
+/// ship, not about a repaired copy of it.
+#[must_use]
+pub fn cargo_check_emitted(wasm: &[u8]) -> CheckReport {
+    let high = build_high(wasm);
+    let rust = sordec_backend::emit_rust(&high).expect("emits");
+    let cargo_toml = sordec_backend::emit_cargo_toml(&high);
+
+    let dir = std::env::temp_dir().join(format!(
+        "sordec-check-{}-{}",
+        std::process::id(),
+        wasm.len()
+    ));
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).expect("scratch dir");
+    std::fs::write(dir.join("Cargo.toml"), &cargo_toml).expect("manifest");
+    std::fs::write(src.join("lib.rs"), &rust).expect("source");
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let output = std::process::Command::new(cargo)
+        .args(["check", "--offline", "--quiet", "--manifest-path"])
+        .arg(dir.join("Cargo.toml"))
+        .output()
+        .expect("cargo runs");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let error_lines = stderr
+        .lines()
+        .filter(|l| l.trim_start().starts_with("error"))
+        .count();
+
+    let _ = std::fs::remove_dir_all(&dir);
+    CheckReport {
+        error_lines,
+        output: stderr,
+    }
+}
+
 /// Run the full front-to-high pipeline on `wasm`, mirroring the CLI's
 /// `dump-hir` path.
 #[must_use]

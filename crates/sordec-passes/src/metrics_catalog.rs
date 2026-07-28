@@ -301,6 +301,11 @@ pub const MARSHALLING_DECODE_COLLAPSED: &str = "marshalling_decode_collapsed";
 /// Calls to an argument-decode helper neutralised once their results
 /// were rebound.
 pub const MARSHALLING_DECODE_CALLS_ELIDED: &str = "marshalling_decode_calls_elided";
+/// Return-value encodes collapsed to the value, at the ABI boundary.
+pub const MARSHALLING_ENCODE_COLLAPSED: &str = "marshalling_encode_collapsed";
+/// Width-dispatch branches folded away once both arms were proven to
+/// produce the same value.
+pub const MARSHALLING_DISPATCH_FOLDED: &str = "marshalling_dispatch_folded";
 /// SDK argument type-check guards removed — each also emits the
 /// `MarshallingGuardElided` diagnostic, because deleting a trap is a
 /// behavioural claim and should be reviewable without diffing outputs.
@@ -438,6 +443,8 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         // Marshalling elision.
         MARSHALLING_DECODE_COLLAPSED,
         MARSHALLING_DECODE_CALLS_ELIDED,
+        MARSHALLING_ENCODE_COLLAPSED,
+        MARSHALLING_DISPATCH_FOLDED,
         MARSHALLING_GUARDS_ELIDED,
         MARSHALLING_FRAMES_ELIDED,
     ]
