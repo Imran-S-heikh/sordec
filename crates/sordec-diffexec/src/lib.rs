@@ -15,10 +15,24 @@
 //!
 //! # Where this is in its build-out
 //!
-//! Currently [`preflight`] only — the decisions and environment checks that
-//! everything else rests on. The execution half needs our emitter to produce
-//! something that compiles; until then there is nothing to run against the
-//! original. See `plan/BEHAVIOR_HARNESS_PLAN.md` for the task sequence.
+//! [`preflight`] holds the decisions and environment checks everything else rests
+//! on. [`wasm`] decides whether the host will accept a module at all. [`exec`]
+//! runs a contract and records the four observations; [`canon`] makes two
+//! independently-registered contracts comparable; [`diff`] compares them.
+//!
+//! What is **not** here yet is recompilation of our emitter's output, which needs
+//! the emitter to produce something that compiles.
+//!
+//! That is not a blocker on the rest, and the earlier assumption that it was cost
+//! us the whole of M1–M3. Comparison needs a *second wasm*, not specifically our
+//! wasm — so the harness is built and calibrated against B-sides we can produce
+//! today: the shipped wasm against itself, the original source recompiled, and
+//! deliberately mutated sources whose divergence class is known in advance. That
+//! last one is the only B-side that can prove the comparator *detects* anything,
+//! and it does not involve the emitter at all. Our emitter's output is simply the
+//! B-side we cannot supply yet.
+//!
+//! See `plan/BEHAVIOR_HARNESS_PLAN.md` for the task sequence.
 //!
 //! # Shape of the eventual harness
 //!
@@ -44,4 +58,8 @@
 //! garbage input agree perfectly and demonstrate nothing. That outcome is
 //! counted in its own bucket, never folded into a match rate.
 
+pub mod canon;
+pub mod diff;
+pub mod exec;
 pub mod preflight;
+pub mod wasm;

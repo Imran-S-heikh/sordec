@@ -16,7 +16,9 @@
 //! These shell out to cargo and are therefore `#[ignore]`d, per the house
 //! convention (`tools/gate.sh` runs a plain `cargo test --workspace`, which
 //! skips them, and the gate stays fast). The fast counterparts live in
-//! `preflight`'s unit tests and `tests/lockfile.rs`.
+//! `preflight`'s and `wasm`'s unit tests, `tests/lockfile.rs`, and
+//! `tests/observe.rs` — the last of which runs contracts in a host without
+//! touching cargo, so it needs no `#[ignore]` at all.
 //!
 //! Run: `cargo test -p sordec-diffexec --test probe -- --ignored --nocapture`
 
@@ -209,84 +211,15 @@ fn assert_builds_and_loads(sdk_version: &str) {
     println!("soroban-sdk {sdk_version}: built {} bytes", wasm.len());
 
     assert!(
-        section_names(&wasm).iter().any(|s| s == "contractenvmetav0"),
-        "soroban-sdk {sdk_version}: no contractenvmetav0 section — the host rejects \
-         modules without one, so such a build could never be executed"
+        sordec_diffexec::wasm::is_loadable(&wasm),
+        "soroban-sdk {sdk_version}: no {} section — the host rejects modules \
+         without one, so such a build could never be executed",
+        sordec_diffexec::wasm::ENV_META_SECTION
     );
 
     let env = Env::default();
     let address = env.register(wasm.as_slice(), ());
     println!("soroban-sdk {sdk_version}: registered at {address:?}");
-}
-
-/// The wasm section id that marks a custom section. Every other id is a known
-/// section kind, which carries no name.
-const CUSTOM_SECTION_ID: u8 = 0;
-/// Bytes of magic + version at the head of a wasm module.
-const WASM_HEADER_LEN: usize = 8;
-
-/// Read a LEB128 `u32`, returning the value and the bytes consumed.
-///
-/// `None` on a truncated or over-long encoding, which callers treat as
-/// end-of-module rather than an error — a malformed module is simply one we stop
-/// reading.
-fn leb128(bytes: &[u8]) -> Option<(u32, usize)> {
-    let mut value = 0u32;
-    let mut shift = 0;
-    for (i, &byte) in bytes.iter().enumerate().take(5) {
-        value |= u32::from(byte & 0x7f).checked_shl(shift)?;
-        if byte & 0x80 == 0 {
-            return Some((value, i + 1));
-        }
-        shift += 7;
-    }
-    None
-}
-
-/// The name of a custom section, given its complete payload.
-///
-/// A custom section's payload begins with its own LEB128-prefixed name; the rest
-/// is opaque content we have no interest in.
-fn custom_section_name(payload: &[u8]) -> Option<String> {
-    let (name_len, name_len_bytes) = leb128(payload)?;
-    let name = payload
-        .get(name_len_bytes..name_len_bytes + name_len as usize)?;
-    Some(String::from_utf8_lossy(name).into_owned())
-}
-
-/// Custom-section names in a wasm module.
-///
-/// Hand-rolled rather than pulling in `wasmparser`: the walk is a section id, a
-/// LEB128 payload length, and a payload, and we only want the custom sections'
-/// names. Keeping the probe free of dependencies is worth these few lines.
-fn section_names(wasm: &[u8]) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut cursor = WASM_HEADER_LEN;
-
-    while cursor < wasm.len() {
-        let section_id = wasm[cursor];
-        cursor += 1;
-
-        let Some((payload_len, len_bytes)) = leb128(&wasm[cursor..]) else {
-            break;
-        };
-        cursor += len_bytes;
-
-        let Some(payload_end) = cursor
-            .checked_add(payload_len as usize)
-            .filter(|end| *end <= wasm.len())
-        else {
-            break;
-        };
-
-        if section_id == CUSTOM_SECTION_ID
-            && let Some(name) = custom_section_name(&wasm[cursor..payload_end])
-        {
-            names.push(name);
-        }
-        cursor = payload_end;
-    }
-    names
 }
 
 /// Run: `cargo test -p sordec-diffexec --test probe -- --ignored --nocapture`
@@ -321,24 +254,4 @@ fn sdk_23_0_1_builds_and_loads() {
 #[test]
 fn sdk_23_5_3_builds_and_loads() {
     assert_builds_and_loads("23.5.3");
-}
-
-/// A fast check on the section reader, so a bug there cannot make the probes
-/// pass or fail for the wrong reason. Runs in the default suite.
-#[test]
-fn section_names_reads_custom_sections() {
-    // magic + version, then one custom section (id 0) named "meta" with a
-    // single trailing payload byte.
-    let mut wasm = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
-    wasm.extend_from_slice(&[0x00, 0x06, 0x04, b'm', b'e', b't', b'a', 0x2a]);
-    assert_eq!(section_names(&wasm), vec!["meta".to_owned()]);
-
-    // A non-custom section (id 1, a type section) contributes no name.
-    let mut wasm = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
-    wasm.extend_from_slice(&[0x01, 0x01, 0x00]);
-    assert!(section_names(&wasm).is_empty());
-
-    // A truncated module must terminate rather than loop or panic.
-    let wasm = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x00, 0xff];
-    let _ = section_names(&wasm);
 }
