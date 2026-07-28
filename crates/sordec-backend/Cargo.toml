@@ -31,6 +31,11 @@ prettyplease.workspace = true
 sordec-frontend.workspace = true
 wasmparser.workspace = true
 wat.workspace = true
+# Test-only: parse the `Cargo.toml` we emit, so a malformed manifest is caught
+# here rather than by a `cargo build` failure much further downstream. The
+# manifest carries provenance comments and a multi-line dependency block, which
+# substring assertions cannot prove well-formed.
+toml.workspace = true
 # The Rust-emit corpus gate re-parses emitted `src/lib.rs` to assert it is
 # syntactically valid Rust (the structural analogue of the WAT parse gate).
 syn.workspace = true

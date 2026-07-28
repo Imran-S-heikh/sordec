@@ -1,19 +1,21 @@
-//! What the harness needs from the machine, and what the contract needs from
-//! the SDK — resolved before anything is built.
+//! What the harness needs from the machine, resolved before anything is built.
 //!
-//! Two independent questions get answered here, and keeping them apart is the
-//! whole point of the module:
+//! **Which rustc and which wasm target do we recompile a reconstruction with?**
+//! One global answer ([`RECONSTRUCTION_CHANNEL`], [`RECONSTRUCTION_TARGET`]),
+//! because it affects codegen and not semantics.
 //!
-//! - **Which rustc and which wasm target do we recompile *our* reconstruction
-//!   with?** A harness decision. One global answer ([`RECONSTRUCTION_CHANNEL`],
-//!   [`RECONSTRUCTION_TARGET`]) — it affects codegen, not semantics.
-//! - **Which `soroban-sdk` version does *this contract* need?** A recovered
-//!   fact ([`sdk_requirement`]). It absolutely does affect semantics: host
-//!   functions, error codes, event layout and Val marshalling all moved between
-//!   protocols 21 and 23.
+//! The neighbouring question — **which `soroban-sdk` version does *this contract*
+//! need?** — used to be answered here too, and is not. It is a recovered fact that
+//! genuinely does change semantics (host functions, error codes, event layout and
+//! Val marshalling all moved between protocols 21 and 23), and its one real
+//! consumer is the emitter, which writes the reconstruction's `Cargo.toml`. It
+//! therefore lives in `sordec-backend`'s `scaffold::sdk_requirement`. Keeping a
+//! second copy here — a copy nothing called — was an invitation for the two to
+//! drift, and the emitter's is the one that ships.
 //!
-//! Conflating them is tempting because the wasm carries *both* an `rsver` and an
-//! `rssdkver`. Only the second is usable — see [`RECONSTRUCTION_CHANNEL`].
+//! Conflating the two questions is tempting because the wasm carries *both* an
+//! `rsver` and an `rssdkver`. Neither is a rustup channel — see
+//! [`RECONSTRUCTION_CHANNEL`].
 //!
 //! Nothing here runs `rustup`. `rustup target list --toolchain X` *installs* X
 //! when it is absent, so a routine "is this present?" check would mutate the
@@ -41,7 +43,8 @@ use std::process::Command;
 ///    codegen. Both sides of the comparison are read *after* the module loads,
 ///    so any module that loads is comparable regardless of which rustc built
 ///    it. The SDK version is the axis that changes semantics, and that one
-///    *is* per-contract ([`sdk_requirement`]).
+///    *is* per-contract — recovered and pinned by the emitter, in
+///    `sordec-backend`'s `scaffold::sdk_requirement`.
 ///
 /// `1.89` also clears every soroban-sdk MSRV in our corpus (21.7.7 wants
 /// 1.74; 22.x and 23.x want 1.84), and already carries the target.
@@ -96,86 +99,6 @@ impl fmt::Display for Unavailable {
 }
 
 impl std::error::Error for Unavailable {}
-
-/// Which `soroban-sdk` version a contract's reconstruction must build against.
-///
-/// The SDK version is recovered, not chosen, because it changes what the
-/// contract *does*. The ladder in [`sdk_requirement`] produces one of these.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SdkRequirement {
-    /// An exact version, from the `rssdkver` build annotation.
-    ///
-    /// Rendered as an `=` requirement. A caret would let `^23.0.1` resolve to
-    /// 23.5.3 as soon as the network is reachable, quietly swapping the SDK —
-    /// and therefore the behaviour — underneath a contract that told us it was
-    /// built against 23.0.1.
-    Exact(String),
-    /// Only the major version, inferred from the protocol number.
-    ///
-    /// Rendered as a caret requirement: we genuinely do not know the patch, so
-    /// resolving to the newest cached one is the honest choice.
-    Major(u32),
-    /// Neither annotation was present.
-    ///
-    /// Reachable only for a wasm that also lacks `contractenvmetav0` — which
-    /// the host itself refuses to load, so such a contract can never be
-    /// executed either way.
-    Unrecoverable,
-}
-
-impl SdkRequirement {
-    /// The version requirement to write into a `Cargo.toml`, or `None` when
-    /// nothing could be recovered.
-    #[must_use]
-    pub fn cargo_requirement(&self) -> Option<String> {
-        match self {
-            Self::Exact(v) => Some(format!("={v}")),
-            Self::Major(major) => Some(format!("^{major}")),
-            Self::Unrecoverable => None,
-        }
-    }
-}
-
-/// Decide which `soroban-sdk` version to build a reconstruction against.
-///
-/// Takes primitives rather than `sordec_ir::SorobanFacts` so this crate stays
-/// independent of the pipeline it executes; the caller extracts
-/// `contract_meta["rssdkver"]` and `env_meta.protocol`.
-///
-/// The ladder has exactly three rungs and no fourth:
-///
-/// 1. `rssdkver` — an exact version, e.g. `"23.0.1#510d3feb…"`. Best case, and
-///    present whenever `contractmetav0` survived.
-/// 2. `protocol` — from `contractenvmetav0`, which the host *requires*, so this
-///    rung is always available for any wasm that can actually be loaded.
-///    Protocol N implies soroban-sdk major N.
-/// 3. Neither — the wasm has no metadata at all and is unloadable regardless.
-#[must_use]
-pub fn sdk_requirement(rssdkver: Option<&str>, protocol: Option<&str>) -> SdkRequirement {
-    if let Some(version) = rssdkver.and_then(sdk_semver) {
-        return SdkRequirement::Exact(version);
-    }
-    if let Some(major) = protocol.and_then(|p| p.trim().parse::<u32>().ok()) {
-        return SdkRequirement::Major(major);
-    }
-    SdkRequirement::Unrecoverable
-}
-
-/// Extract the leading semver from an `rssdkver` annotation, dropping the
-/// `#<git-hash>` suffix. `None` for anything that is not a plausible version.
-fn sdk_semver(raw: &str) -> Option<String> {
-    let candidate = raw.split('#').next()?.trim();
-    let mut parts = candidate.split('.');
-    // Require at least `major.minor` and a numeric major, so a malformed
-    // annotation degrades to the protocol rung instead of producing a
-    // requirement cargo will reject.
-    let major_is_numeric = parts.next().is_some_and(|m| m.parse::<u32>().is_ok());
-    if major_is_numeric && parts.next().is_some() {
-        Some(candidate.to_owned())
-    } else {
-        None
-    }
-}
 
 /// Resolve the toolchain and target the harness will recompile with.
 ///
@@ -290,54 +213,6 @@ fn rustc_version(toolchain_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---- sdk_requirement: the recovered-fact ladder ----
-
-    #[test]
-    fn rssdkver_wins_and_keeps_the_exact_patch() {
-        // The real shape of the annotation, git hash and all.
-        let req = sdk_requirement(Some("23.0.1#510d3feb724c2b01d7e7ab7652f03b9f8efc3f35"), Some("23"));
-        assert_eq!(req, SdkRequirement::Exact("23.0.1".to_owned()));
-        assert_eq!(req.cargo_requirement().as_deref(), Some("=23.0.1"));
-    }
-
-    #[test]
-    fn exact_requirement_is_pinned_not_caret() {
-        // `^23.0.1` would drift to 23.5.3 once the network is reachable,
-        // silently changing the SDK under a contract that told us 23.0.1.
-        let req = sdk_requirement(Some("23.0.1"), None);
-        assert_eq!(req.cargo_requirement().as_deref(), Some("=23.0.1"));
-    }
-
-    #[test]
-    fn protocol_is_the_fallback_when_metadata_was_stripped() {
-        // `contractmetav0` is optional and often stripped; `contractenvmetav0`
-        // is mandatory, so the protocol rung is always there for a loadable wasm.
-        let req = sdk_requirement(None, Some("21"));
-        assert_eq!(req, SdkRequirement::Major(21));
-        assert_eq!(req.cargo_requirement().as_deref(), Some("^21"));
-    }
-
-    #[test]
-    fn a_malformed_rssdkver_degrades_to_the_protocol_rung() {
-        // Better a correct major than a requirement cargo rejects.
-        assert_eq!(sdk_requirement(Some("unknown"), Some("22")), SdkRequirement::Major(22));
-        assert_eq!(sdk_requirement(Some("#abc123"), Some("22")), SdkRequirement::Major(22));
-        // A bare major with no minor is not a usable version requirement.
-        assert_eq!(sdk_requirement(Some("23"), Some("23")), SdkRequirement::Major(23));
-    }
-
-    #[test]
-    fn neither_annotation_is_unrecoverable_and_yields_no_requirement() {
-        let req = sdk_requirement(None, None);
-        assert_eq!(req, SdkRequirement::Unrecoverable);
-        assert_eq!(req.cargo_requirement(), None);
-    }
-
-    #[test]
-    fn whitespace_in_a_protocol_string_does_not_defeat_the_fallback() {
-        assert_eq!(sdk_requirement(None, Some(" 23 ")), SdkRequirement::Major(23));
-    }
 
     // ---- toolchain detection: filesystem-only, no rustup, no network ----
 

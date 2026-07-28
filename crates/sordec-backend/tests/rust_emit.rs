@@ -225,7 +225,9 @@ fn attestation_cargo_check() {
     let dir = std::env::temp_dir().join(format!("sordec-w5-check-{}", std::process::id()));
     let src = dir.join("src");
     std::fs::create_dir_all(&src).expect("scratch dir");
-    std::fs::write(dir.join("Cargo.toml"), format!("{cargo_toml}\n[workspace]\n")).unwrap();
+    // Written verbatim: the emitted manifest now carries its own `[workspace]`, so
+    // this no longer has to patch one in to make the crate standalone.
+    std::fs::write(dir.join("Cargo.toml"), &cargo_toml).unwrap();
     std::fs::write(src.join("lib.rs"), &rust).unwrap();
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
@@ -277,8 +279,8 @@ fn token_v23_cargo_check_rate() {
     let dir = std::env::temp_dir().join(format!("sordec-w3-check-{}", std::process::id()));
     let src = dir.join("src");
     std::fs::create_dir_all(&src).expect("scratch dir");
-    // Append a `[workspace]` table so cargo treats this as standalone.
-    std::fs::write(dir.join("Cargo.toml"), format!("{cargo_toml}\n[workspace]\n")).unwrap();
+    // Written verbatim — see the note in the w5 check above.
+    std::fs::write(dir.join("Cargo.toml"), &cargo_toml).unwrap();
     std::fs::write(src.join("lib.rs"), &rust).unwrap();
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
@@ -324,6 +326,114 @@ fn hello_add_cargo_toml_is_a_cdylib_crate() {
     for table in ["[package]", "[lib]", "[dependencies]"] {
         assert!(manifest.contains(table), "missing {table}:\n{manifest}");
     }
+}
+
+/// Every emitted manifest carries the `[profile.release]` the corpus was built
+/// with, and says that it is assumed rather than recovered.
+///
+/// Not cosmetic. `overflow-checks` defaults *off* in a release build while every
+/// corpus contract sets it on, so a manifest without it produces a crate that wraps
+/// where the original trapped — a divergence we would have introduced ourselves.
+/// `lto` and `codegen-units = 1` are what stop LLVM emitting a function table, which
+/// the Soroban host rejects outright because it disables `reference-types`, making
+/// their absence a *load* failure rather than a slow build.
+#[test]
+fn every_emitted_manifest_carries_the_corpus_release_profile() {
+    for (name, wasm) in common::fixtures() {
+        let manifest = emit_cargo_toml(&common::build_high(wasm));
+        for flag in [
+            "overflow-checks = true",
+            "lto = true",
+            "codegen-units = 1",
+            "panic = \"abort\"",
+        ] {
+            assert!(manifest.contains(flag), "{name} is missing {flag}:\n{manifest}");
+        }
+        assert!(
+            manifest.contains("Assumed, not recovered"),
+            "{name}: the profile is a guess and must say so:\n{manifest}"
+        );
+    }
+}
+
+/// Every emitted manifest opts out of a parent workspace.
+///
+/// Without this, the documented `sordec decompile --out-dir out/` path writes a
+/// crate cargo refuses to build whenever the output lands inside a workspace. Two
+/// tests in this file used to hand-append `[workspace]` to get around exactly that;
+/// they no longer need to.
+#[test]
+fn every_emitted_manifest_opts_out_of_a_parent_workspace() {
+    for (name, wasm) in common::fixtures() {
+        let manifest = emit_cargo_toml(&common::build_high(wasm));
+        assert!(manifest.contains("[workspace]"), "{name}:\n{manifest}");
+    }
+}
+
+/// Every emitted manifest is valid TOML with the tables cargo needs.
+///
+/// The manifest carries provenance comments and a multi-line dependency block, which
+/// substring assertions cannot prove well-formed. Parsing catches a malformed
+/// manifest here rather than as a mystifying cargo failure much later.
+#[test]
+fn every_emitted_manifest_is_valid_toml() {
+    for (name, wasm) in common::fixtures() {
+        let manifest = emit_cargo_toml(&common::build_high(wasm));
+        let parsed: toml::Table = manifest
+            .parse()
+            .unwrap_or_else(|e| panic!("{name}: emitted manifest is not TOML: {e}\n{manifest}"));
+        for table in ["package", "lib", "dependencies", "profile", "workspace"] {
+            assert!(parsed.contains_key(table), "{name}: no [{table}]:\n{manifest}");
+        }
+    }
+}
+
+/// The SDK version is recovered per contract, and pinned exactly when it is known.
+///
+/// All three rungs of the ladder are exercised by real fixtures rather than
+/// hand-built facts, which is the point: hello-add is a protocol-21 contract, so the
+/// old hardcoded `"23"` fallback emitted the wrong SDK major for it outright.
+#[test]
+fn the_sdk_version_is_recovered_per_contract_and_pinned() {
+    let expected = [
+        // rssdkver present → exact pin. Note hello-add is *not* 23.
+        ("hello-add", "soroban-sdk = \"=21.7.7\""),
+        ("token-v22", "soroban-sdk = \"=22.0.11\""),
+        ("token-v23", "soroban-sdk = \"=23.0.1\""),
+    ];
+    let fixtures = common::fixtures();
+
+    for (name, requirement) in expected {
+        let (_, wasm) = fixtures
+            .iter()
+            .find(|(fixture, _)| *fixture == name)
+            .unwrap_or_else(|| panic!("fixture {name} missing"));
+        let manifest = emit_cargo_toml(&common::build_high(wasm));
+        assert!(
+            manifest.contains(requirement),
+            "{name}: expected `{requirement}`:\n{manifest}"
+        );
+    }
+}
+
+/// A wasm with no recoverable version says so in the manifest rather than
+/// presenting a guess as a fact.
+///
+/// `token-v23-stripped` carries no custom sections at all — the stripping took
+/// `contractenvmetav0` and `contractspecv0` along with `contractmetav0` — so both
+/// rungs of the ladder come up empty. A manifest must still name some version, and
+/// the one artifact the user actually opens is where that guess has to be labelled.
+#[test]
+fn an_unrecoverable_sdk_version_is_labelled_a_guess() {
+    let fixtures = common::fixtures();
+    let (_, wasm) = fixtures
+        .iter()
+        .find(|(name, _)| *name == "token-v23-stripped")
+        .expect("stripped fixture present");
+    let manifest = emit_cargo_toml(&common::build_high(wasm));
+
+    assert!(manifest.contains("could NOT be recovered"), "{manifest}");
+    assert!(manifest.contains("guess"), "{manifest}");
 }
 
 /// Type reconstruction lands on the canonical benchmark: token-v23's
