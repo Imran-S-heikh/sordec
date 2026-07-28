@@ -888,7 +888,7 @@ fn measure_behavior(
     reconstructed: &std::path::Path,
     original_wasm: &std::path::Path,
 ) -> sordec_score::BehaviorInput {
-    use sordec_diffexec::{exec, preflight, recompile, wasm};
+    use sordec_diffexec::{diff, drive, exec, preflight, recompile, wasm};
     use sordec_score::BehaviorInput;
 
     let unavailable =
@@ -938,18 +938,89 @@ fn measure_behavior(
         return unavailable(format!("recompiled reconstruction: {refused}"));
     }
 
-    // 5. And now the wall. Both modules run, and we have nothing to call them with.
-    //    Reported as the coverage fraction it is — zero of however many entrypoints
-    //    the contract declares — rather than as a score of any kind.
-    let entrypoints = wasm::exported_functions(&original)
+    // 5. Arguments, built from the contract's own declared ABI.
+    let plan = match drive::plan(&original) {
+        Ok(plan) => plan,
+        Err(missing) => return unavailable(missing.reason),
+    };
+    let calls = plan.calls();
+    if calls.is_empty() {
+        // Not a zero: nothing was tested, which is a different statement
+        // about the reconstruction than "it behaved wrongly".
+        return unavailable(format!(
+            "both modules build and load, but no entrypoint could be driven — {}",
+            plan.coverage()
+        ));
+    }
+
+    // 6. Drive both sides with identical arguments and compare.
+    let original_run = observe(&original, &calls);
+    let reconstruction_run = observe(&rebuilt, &calls);
+    let comparison = diff::compare(&calls, &original_run, &reconstruction_run);
+
+    let exercised = comparison.exercised();
+    if exercised == 0 {
+        return unavailable(format!(
+            "both modules ran, but every call was a trivial agreement (both sides \
+             failed identically), so nothing was actually compared — {}",
+            plan.coverage()
+        ));
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    let score = comparison.matched() as f64 / exercised as f64;
+    let tuples = [
+        diff::Tuple::Return,
+        diff::Tuple::Events,
+        diff::Tuple::Auth,
+        diff::Tuple::Storage,
+    ]
+    .into_iter()
+    .map(|tuple| {
+        let summary = comparison.by_tuple(tuple);
+        sordec_score::TupleScore {
+            name: tuple.name().to_string(),
+            matched: summary.matched,
+            exercised: summary.exercised,
+        }
+    })
+    .collect();
+
+    let mut behavior = sordec_score::Behavior::new(
+        score,
+        sordec_score::BSide::Reconstruction,
+        plan.drivable(),
+        plan.total(),
+    )
+    .with_tuples(tuples)
+    .with_trivial_agreements(comparison.trivial_agreements())
+    .with_note(plan.coverage());
+    for note in comparison.notes {
+        behavior = behavior.with_note(note);
+    }
+    BehaviorInput::Measured(behavior)
+}
+
+/// Run `calls` against `wasm` and return canonicalised observations.
+///
+/// Canonicalisation is not optional: an address is a fresh random value per
+/// registration, so raw observations from two independently registered
+/// modules disagree on every address even when the contracts are identical.
+fn observe(wasm: &[u8], calls: &[sordec_diffexec::exec::Call]) -> Vec<sordec_diffexec::exec::Observation> {
+    use sordec_diffexec::canon::{AddressBook, Canonicalizer, SELF_LABEL};
+    use sordec_diffexec::exec::Session;
+
+    let mut session = Session::register(wasm).expect("checked loadable above");
+    let mut book = AddressBook::new();
+    book.bind(SELF_LABEL, session.contract_address());
+    let mut canon = Canonicalizer::new(&book);
+    calls
         .iter()
-        .filter(|name| *name != wasm::CONSTRUCTOR_EXPORT)
-        .count();
-    unavailable(format!(
-        "both modules build and load, but 0 of {entrypoints} entrypoints could be \
-         driven: invoking one requires constructing arguments for its signature, which \
-         is not implemented yet"
-    ))
+        .map(|call| {
+            let raw = session.call(call);
+            canon.observation(&raw)
+        })
+        .collect()
 }
 
 /// Render a [`sordec_score::ScoreReport`] as a human-readable report.

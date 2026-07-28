@@ -384,3 +384,76 @@ fn a_behavior_rate_never_renders_without_its_coverage() {
         report.categories.behavior.notes
     );
 }
+
+/// The behavioural net: hello-add's *reconstruction*, recompiled to wasm
+/// and run against the original in a real host, must agree on every
+/// exercised check.
+///
+/// This is the gate the marshalling elision needed. Structure rewards
+/// deleting control flow and cannot tell "deleted the junk we invented"
+/// from "deleted the contract's logic" — both raise the number. Only
+/// behaviour on a contract we actually decompiled can, and this is it.
+///
+/// The generated arguments include 2^56 - 1 and 2^56, which straddle the
+/// point where Soroban switches a `u64` from a small `Val` body to an
+/// object handle. That is precisely the branch the return-encode collapse
+/// removes, so an over-eager collapse fails here rather than silently.
+///
+/// `#[ignore]`d: it decompiles, recompiles to wasm, and executes both
+/// modules. Run with:
+///
+///   cargo test -p sordec-cli --test score -- --ignored --nocapture behavior_on_the_reconstruction
+#[test]
+#[ignore = "decompiles, recompiles to wasm and runs both modules (slow, toolchain-dependent)"]
+fn behavior_on_the_reconstruction_of_hello_add_matches_the_original() {
+    let out = std::env::temp_dir().join(format!("sordec-behavior-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["decompile", HELLO_ADD_WASM, "--out-dir"])
+        .arg(&out)
+        .assert()
+        .success();
+
+    let stdout = Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["score", "--json", "--behavior", HELLO_ADD_WASM])
+        .arg(out.join("hello-add"))
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../samples/contracts/hello-add/source/src"
+        ))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let _ = std::fs::remove_dir_all(&out);
+
+    let v: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    let behavior = &v["behavior"];
+    assert!(
+        !behavior.is_null(),
+        "behaviour must be measured, not unavailable: {v}"
+    );
+    // Only our own reconstruction counts toward the category.
+    assert_eq!(behavior["b_side"]["kind"], "reconstruction", "{behavior}");
+    assert_eq!(behavior["score"], 1.0, "{behavior}");
+    assert_eq!(behavior["entrypoints_driven"], 1, "{behavior}");
+    assert_eq!(behavior["entrypoints_total"], 1, "{behavior}");
+    // Something was actually compared — a rate over zero checks is not a
+    // pass, and the trivial agreements (both sides trapping on overflow)
+    // are excluded from it rather than counted as matches.
+    let returns = behavior["tuples"]
+        .as_array()
+        .expect("tuples")
+        .iter()
+        .find(|t| t["name"] == "return")
+        .expect("return tuple");
+    assert!(
+        returns["exercised"].as_u64().unwrap_or(0) >= 5,
+        "too few checks to mean anything: {returns}"
+    );
+    assert_eq!(returns["matched"], returns["exercised"], "{returns}");
+}
