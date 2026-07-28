@@ -8,25 +8,37 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-# Nothing. The harness deliberately takes primitives (an `rssdkver` string, a
+# Host-side execution of contract wasm. A real dependency, not a dev one: running
+# both sides in an in-process host *is* this crate's job, so the capability
+# belongs to the library rather than to its tests.
+#
+# The `testutils` feature is what provides `Env`, registration from raw wasm
+# bytes, and the auth/event/ledger introspection the comparison reads. Carrying a
+# `testutils` feature outside `[dev-dependencies]` is unusual and deliberate —
+# the harness is a test host.
+#
+# CORRECTION (measured 2026-07-28). This was a dev-dependency because the
+# manifest claimed promoting it "will break `gate.sh`": step 2 runs
+# `RUSTFLAGS="-D warnings" cargo build --release --workspace`, RUSTFLAGS reaches
+# dependencies, and the host graph vendors a 2023-vintage `soroban-wasmi`. That
+# reasoning was wrong. Cargo applies `--cap-lints allow` to registry
+# dependencies, so RUSTFLAGS cannot fail them —
+# `RUSTFLAGS="-D warnings" cargo build --release -p sordec-diffexec --tests`
+# builds `soroban-env-host 23.0.1` and `soroban-wasmi 0.31.1-soroban.20.0.1`
+# clean. The breakage actually observed during B1 was `ed25519-dalek`'s
+# `CryptoRng` bound, which is a hard compile error rather than a lint and is
+# already fixed by the lockfile pin below.
+#
+# That pin is the constraint that IS real: `soroban-env-host` declares
+# `ed25519-dalek = ">=2.0.0"` unbounded across majors, so only the committed
+# `Cargo.lock` holds it at 2.x. See the workspace manifest for the full
+# explanation and the restore command; `tests/lockfile.rs` guards it.
+soroban-sdk.workspace = true
+
+# Nothing else, on purpose. The harness takes primitives (an `rssdkver` string, a
 # protocol string) rather than `sordec_ir::SorobanFacts`, so it stays decoupled
 # from the pipeline whose output it executes — the same independence rule
 # `sordec-score` follows. Callers do the extraction.
-
-[dev-dependencies]
-# Host-side execution of contract wasm, for the probe tests only.
-#
-# A dev-dependency on purpose: `tools/gate.sh` step 2 runs
-# `RUSTFLAGS="-D warnings" cargo build --release --workspace`, and RUSTFLAGS
-# applies to dependencies too. The `testutils` feature pulls `soroban-env-host`,
-# which vendors a 2023-vintage `soroban-wasmi`; compiling that under
-# warnings-as-errors on a current rustc is not something we want gating our
-# build. Step 2 does not build dev-dependencies, so this placement keeps the
-# gate honest. Moving it to `[dependencies]` will break `gate.sh`.
-# NB: this pulls `soroban-env-host`, which only compiles because `Cargo.lock`
-# holds `ed25519-dalek` at 2.x. See the workspace manifest for the full
-# explanation and the restore command; `tests/lockfile.rs` guards it.
-soroban-sdk.workspace = true
 
 [lints]
 workspace = true

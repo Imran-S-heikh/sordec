@@ -62,10 +62,15 @@ clap          = { version = "4.5", features = ["derive"] }
 assert_cmd    = "2.0"
 predicates    = "3.1"
 
-# In-process contract execution — used only as a dev-dependency from
-# `crates/sordec-diffexec/`. `testutils` is what provides `Env`, contract
-# registration from raw wasm bytes, and the auth/event/ledger introspection the
-# behavior harness compares.
+# In-process contract execution — a real dependency of
+# `crates/sordec-diffexec/`, whose job is running both sides in a host.
+# `testutils` is what provides `Env`, contract registration from raw wasm bytes,
+# and the auth/event/ledger introspection the behavior harness compares.
+#
+# It was a dev-dependency until 2026-07-28 on the belief that `-D warnings` in
+# `gate.sh` step 2 would fail the vendored `soroban-wasmi`. Measured false —
+# registry dependencies are `--cap-lints allow`, so RUSTFLAGS cannot fail them.
+# The real hazard is the lockfile pin below, not the lint level.
 #
 # CAUTION — this dependency carries a lockfile constraint that a plain
 # `cargo update` will break. `soroban-env-host` declares
