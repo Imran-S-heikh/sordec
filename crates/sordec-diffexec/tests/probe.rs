@@ -8,10 +8,10 @@
 //! registration. Asserting only `cargo build` would declare victory over the
 //! half of the pipeline that never fails.
 //!
-//! Each probe assembles a crate shaped like the emitter's real output, builds it
-//! for [`RECONSTRUCTION_TARGET`] under [`RECONSTRUCTION_CHANNEL`], and registers
-//! the bytes in an in-process host. The SDK version varies; the toolchain does
-//! not — see `preflight` for why that split is the right one.
+//! Each probe assembles a crate shaped like the emitter's real output, hands it to
+//! `recompile::build`, and registers the bytes in an in-process host. The SDK
+//! version varies; the toolchain does not — see `preflight` for why that split is
+//! the right one.
 //!
 //! These shell out to cargo and are therefore `#[ignore]`d, per the house
 //! convention (`tools/gate.sh` runs a plain `cargo test --workspace`, which
@@ -28,34 +28,12 @@
 #![allow(clippy::print_stdout)]
 
 use std::path::PathBuf;
-use std::process::Command;
 
-use sordec_diffexec::preflight::{self, RECONSTRUCTION_CHANNEL, RECONSTRUCTION_TARGET};
+use sordec_diffexec::recompile;
 use soroban_sdk::Env;
 
-/// The package name of the probe crate. The wasm cargo emits substitutes
-/// underscores, so the two spellings are kept adjacent to stay in step.
+/// The package name of the probe crate.
 const PROBE_PACKAGE: &str = "probe-contract";
-/// Basename of the wasm cargo produces for [`PROBE_PACKAGE`].
-const PROBE_WASM_STEM: &str = "probe_contract";
-
-/// Environment that must not leak from the outer cargo process into the probe
-/// build.
-///
-/// This is `sordec-score`'s `expand::INHERITED_ENV_TO_CLEAR` minus
-/// `RUSTUP_TOOLCHAIN`, and the omission is the point. `expand` *clears* it so
-/// that a fixture's own `rust-toolchain.toml` decides; we *set* it (see
-/// [`build_probe_wasm`]) because for the reconstruction the toolchain is our
-/// decision, not the artifact's. `CARGO_BUILD_TARGET` stays on the list either
-/// way — inherited, it would fight our `--target`.
-const INHERITED_ENV_TO_CLEAR: [&str; 6] = [
-    "RUSTC",
-    "RUSTC_WRAPPER",
-    "RUSTC_WORKSPACE_WRAPPER",
-    "RUSTFLAGS",
-    "CARGO_ENCODED_RUSTFLAGS",
-    "CARGO_BUILD_TARGET",
-];
 
 /// A contract shaped like what the emitter actually produces: `#![no_std]`, a
 /// `#[contract]` unit struct, and one `#[contractimpl]` method taking `Env`
@@ -132,70 +110,32 @@ fn unique_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}-{nanos}-{seq}", std::process::id()))
 }
 
-/// Persistent build directory, one per SDK major.
-///
-/// Persistent because a cold wasm build of soroban-sdk costs ~30s and a warm one
-/// is near-instant; per-major because the three SDK majors are three distinct
-/// dependency graphs, and sharing one directory makes them evict each other's
-/// fingerprints on every alternating run.
-fn target_dir(sdk_version: &str) -> PathBuf {
-    let major = sdk_version.split('.').next().unwrap_or("unknown");
-    std::env::temp_dir().join(format!("sordec-diffexec-probe-target-{major}"))
-}
-
 /// Build the probe crate against `sdk_version` and return the wasm bytes.
+///
+/// The build itself is `recompile::build` — the same code path the real harness
+/// uses, so this probe proves that path rather than a parallel copy of it. All the
+/// probe still owns is the crate it assembles, which is the part under test.
 ///
 /// # Panics
 ///
-/// With cargo's stderr attached when the build fails — these are diagnostic
+/// With cargo's diagnostics attached when the build fails: these are diagnostic
 /// probes, so the output matters more than a tidy error type.
 fn build_probe_wasm(sdk_version: &str) -> Vec<u8> {
-    let plan = preflight::detect().unwrap_or_else(|unavailable| {
-        panic!("toolchain preflight failed: {unavailable}");
-    });
-
     let dir = unique_dir("sordec-diffexec-probe");
     std::fs::create_dir_all(dir.join("src")).expect("create probe crate");
     std::fs::write(dir.join("src/lib.rs"), PROBE_CONTRACT).expect("write lib.rs");
     std::fs::write(dir.join("Cargo.toml"), probe_manifest(&format!("={sdk_version}")))
         .expect("write manifest");
 
-    let manifest = std::fs::canonicalize(dir.join("Cargo.toml")).expect("canonicalize manifest");
-    let out_dir = target_dir(sdk_version);
+    // Per SDK major, because the majors are distinct dependency graphs and one
+    // shared directory makes every alternating run a cold build.
+    let major = sdk_version.split('.').next().unwrap_or("unknown");
+    let bytes = recompile::build(&dir, &recompile::persistent_target_dir(major))
+        .unwrap_or_else(|failure| {
+            panic!("soroban-sdk {sdk_version}: {}", failure.reason());
+        });
 
-    // The bare `cargo` on PATH is the rustup shim, which resolves cargo and
-    // rustc together. `$CARGO` — what `sordec-score::compile` uses — is bound to
-    // the outer toolchain and would pair a newer cargo with 1.89's rustc, which
-    // dies on unrecognised flags.
-    let mut command = Command::new("cargo");
-    command
-        .args(["build", "--release", "--offline", "--target", RECONSTRUCTION_TARGET])
-        .arg("--manifest-path")
-        .arg(&manifest)
-        .env("RUSTUP_TOOLCHAIN", RECONSTRUCTION_CHANNEL)
-        .env("CARGO_TARGET_DIR", &out_dir)
-        .current_dir(&dir);
-    for key in INHERITED_ENV_TO_CLEAR {
-        command.env_remove(key);
-    }
-
-    let output = command.output().expect("launch cargo");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "cargo build failed for soroban-sdk {sdk_version} \
-         (rustc {}, target {RECONSTRUCTION_TARGET}):\n{stderr}",
-        plan.rustc_version
-    );
-
-    let wasm_path = out_dir
-        .join(RECONSTRUCTION_TARGET)
-        .join("release")
-        .join(format!("{PROBE_WASM_STEM}.wasm"));
-    let bytes = std::fs::read(&wasm_path)
-        .unwrap_or_else(|e| panic!("read {}: {e}\ncargo stderr:\n{stderr}", wasm_path.display()));
-
-    // Only the source tree is cleaned up; `out_dir` is deliberately kept warm.
+    // Only the source tree is cleaned up; the target directory stays warm.
     let _ = std::fs::remove_dir_all(&dir);
     bytes
 }

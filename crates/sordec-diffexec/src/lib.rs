@@ -62,4 +62,5 @@ pub mod canon;
 pub mod diff;
 pub mod exec;
 pub mod preflight;
+pub mod recompile;
 pub mod wasm;
