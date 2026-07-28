@@ -332,6 +332,18 @@ pub enum LiftDiagnosticCode {
     /// error code. Emitted by the panic-recovery refinement pass (D8)
     /// for every trap it types as a bare panic.
     PanicWithoutErrorCode,
+
+    /// An SDK argument type-check was removed as ABI marshalling. Emitted
+    /// by the marshalling arg-guard pass, once per removed guard.
+    ///
+    /// Unlike every other code here — each of which reports something we
+    /// could *not* recover — this one reports something we deliberately
+    /// **deleted**. It exists because that deletion is a behavioural
+    /// claim: the host marshals arguments to their `contractspecv0` types
+    /// before dispatch, so the trap is unreachable. That reasoning is
+    /// sound but it is reasoning, and a reviewer is entitled to see every
+    /// place it was applied rather than diff two outputs to find them.
+    MarshallingGuardElided,
 }
 
 impl LiftDiagnosticCode {
@@ -357,6 +369,7 @@ impl LiftDiagnosticCode {
             Self::UnrecognisedPrngCall => "lift::unrecognised_prng_call",
             Self::UnrecognisedCryptoCall => "lift::unrecognised_crypto_call",
             Self::PanicWithoutErrorCode => "lift::panic_without_error_code",
+            Self::MarshallingGuardElided => "lift::marshalling_guard_elided",
         }
     }
 
@@ -387,6 +400,9 @@ impl LiftDiagnosticCode {
             Self::UnrecognisedPrngCall => "PRNG host call outside the recognised catalog",
             Self::UnrecognisedCryptoCall => "crypto host call outside the recognised catalog",
             Self::PanicWithoutErrorCode => "bare panic without a structured error code",
+            Self::MarshallingGuardElided => {
+                "SDK argument type-check removed as ABI marshalling"
+            }
         }
     }
 }

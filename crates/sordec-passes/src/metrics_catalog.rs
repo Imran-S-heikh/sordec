@@ -292,6 +292,23 @@ pub const REFINE_AND_MERGED: &str = "refine_and_merged";
 pub const REFINE_AND_MERGE_BLOCKED: &str = "refine_and_merge_blocked";
 
 // ---------------------------------------------------------------------
+// Marshalling elision
+// ---------------------------------------------------------------------
+
+/// Argument-decode results bound directly to the parameter they decode
+/// (discriminant and payload loads both count).
+pub const MARSHALLING_DECODE_COLLAPSED: &str = "marshalling_decode_collapsed";
+/// Calls to an argument-decode helper neutralised once their results
+/// were rebound.
+pub const MARSHALLING_DECODE_CALLS_ELIDED: &str = "marshalling_decode_calls_elided";
+/// SDK argument type-check guards removed — each also emits the
+/// `MarshallingGuardElided` diagnostic, because deleting a trap is a
+/// behavioural claim and should be reviewable without diffing outputs.
+pub const MARSHALLING_GUARDS_ELIDED: &str = "marshalling_guards_elided";
+/// Balanced shadow-stack prologue/epilogue brackets removed.
+pub const MARSHALLING_FRAMES_ELIDED: &str = "marshalling_frames_elided";
+
+// ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)
 // ---------------------------------------------------------------------
 
@@ -418,6 +435,11 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         REFINE_LOOPS_CLASSIFIED,
         REFINE_AND_MERGED,
         REFINE_AND_MERGE_BLOCKED,
+        // Marshalling elision.
+        MARSHALLING_DECODE_COLLAPSED,
+        MARSHALLING_DECODE_CALLS_ELIDED,
+        MARSHALLING_GUARDS_ELIDED,
+        MARSHALLING_FRAMES_ELIDED,
     ]
 }
 

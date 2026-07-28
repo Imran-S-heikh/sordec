@@ -388,7 +388,13 @@ fn type_ref_to_ir(t: &TypeRef, certainty: Certainty) -> Option<IrType> {
     })
 }
 
-fn known_of_type_ref(t: &TypeRef) -> Option<KnownType> {
+/// The `KnownType` a `contractspecv0` type reference denotes, or `None`
+/// when the spec referenced something we could not resolve.
+///
+/// Shared with [`crate::marshalling`], which needs the *declared* type of
+/// an entrypoint parameter — the authoritative ABI answer — rather than
+/// whatever this pass later infers about the binding.
+pub(crate) fn known_of_type_ref(t: &TypeRef) -> Option<KnownType> {
     Some(match t {
         TypeRef::Primitive(p) => primitive_to_known(*p),
         TypeRef::Composite(c) => composite_to_known(c)?,

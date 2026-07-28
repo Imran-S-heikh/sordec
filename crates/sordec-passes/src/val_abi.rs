@@ -224,6 +224,48 @@ pub fn small_tag_payload_type(tag: u8) -> Option<KnownType> {
     })
 }
 
+/// Payload type implied by an object tag, or `None` for invalid / small
+/// tags.
+///
+/// The object mirror of [`small_tag_payload_type`]. A Soroban value of a
+/// given type has *two* legal encodings — small when the payload fits in
+/// the 56-bit body, an object handle when it does not — and the SDK's
+/// decode glue tests both. So a consumer asking "what type does this
+/// tag denote" needs both halves, and answering with only one would make
+/// the object arm of a decode chain look like a type mismatch.
+#[must_use]
+pub fn object_tag_payload_type(tag: u8) -> Option<KnownType> {
+    Some(match tag {
+        TAG_U64_OBJECT => KnownType::U64,
+        TAG_I64_OBJECT => KnownType::I64,
+        TAG_TIMEPOINT_OBJECT => KnownType::Timepoint,
+        TAG_DURATION_OBJECT => KnownType::Duration,
+        TAG_U128_OBJECT => KnownType::U128,
+        TAG_I128_OBJECT => KnownType::I128,
+        TAG_U256_OBJECT => KnownType::U256,
+        TAG_I256_OBJECT => KnownType::I256,
+        TAG_BYTES_OBJECT => KnownType::Bytes,
+        TAG_STRING_OBJECT => KnownType::String,
+        TAG_SYMBOL_OBJECT => KnownType::Symbol,
+        TAG_ADDRESS_OBJECT => KnownType::Address,
+        TAG_MUXED_ADDRESS_OBJECT => KnownType::MuxedAddress,
+        // Vec/Map denote a type only together with their element types,
+        // which the tag alone does not carry.
+        _ => return None,
+    })
+}
+
+/// Payload type implied by any tag byte, small or object.
+///
+/// The union of [`small_tag_payload_type`] and
+/// [`object_tag_payload_type`] — what a caller wants when it is asking
+/// whether a decode chain's accepted tags agree with a declared
+/// `contractspecv0` parameter type.
+#[must_use]
+pub fn tag_payload_type(tag: u8) -> Option<KnownType> {
+    small_tag_payload_type(tag).or_else(|| object_tag_payload_type(tag))
+}
+
 /// `ScErrorType::Contract` — the error type carried by a user
 /// `#[contracterror]` value (the first `ScErrorType` variant in
 /// `stellar-xdr`). Only `Contract`-type errors map to a user error enum;

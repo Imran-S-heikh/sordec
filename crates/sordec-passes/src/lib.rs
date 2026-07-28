@@ -36,6 +36,7 @@ pub mod interfaces;
 pub mod ledger;
 pub mod lift;
 pub mod lowering;
+pub mod marshalling;
 pub mod metrics_catalog;
 pub mod pass;
 pub mod pipeline;
@@ -62,6 +63,7 @@ pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
+pub use marshalling::{ArgGuardElisionPass, FrameElisionPass, ValDecodeCollapsePass};
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
@@ -155,7 +157,6 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
 /// not dependency. The recognizer chain itself needs no fixpoint: its
 /// dependencies are a straight line and every pass is idempotent.
 #[must_use]
-#[allow(clippy::single_range_in_vec_init)] // fixpoint group, not a range literal
 pub fn default_high_pipeline() -> Pipeline<HighIr> {
     Pipeline::new(
         vec![
@@ -193,14 +194,31 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // group above. Straight-line, no fixpoint.
             Box::new(DispatchLinkPass),
             Box::new(PanicRecoverPass),
+            // Marshalling elision — deletes the ABI glue the source never
+            // wrote, now that every recognizer has named it. A fixpoint
+            // group because the three feed each other in one direction:
+            // collapsing a decode makes its failure guard constant,
+            // removing that guard makes the frame pointer dead, and a dead
+            // frame pointer is what lets the bracket go.
+            Box::new(ValDecodeCollapsePass),
+            Box::new(ArgGuardElisionPass),
+            Box::new(FrameElisionPass),
             Box::new(UnrecognizedScanPass),
             // General type propagation — runs once the recognizers have
             // planted their host-call/val result types, flowing them
-            // through params, arithmetic, phis, and returns.
+            // through params, arithmetic, phis, and returns. Deliberately
+            // *after* elision: the marshalling gates read `signature`
+            // (the authoritative ABI) rather than inferred types, and
+            // propagating over the cleaned IR means no type has to be
+            // threaded through glue that is about to disappear.
             Box::new(TypeInferPass),
             Box::new(TreeifyStatsPass),
             Box::new(StructuringCensusPass),
         ],
-        vec![1..6],
+        // Two fixpoint groups: wave-1 region refinement, and marshalling
+        // elision. Both converge because every member strictly reduces a
+        // measure — nesting depth for the first, live marshalling bindings
+        // for the second.
+        vec![1..6, 24..27],
     )
 }
