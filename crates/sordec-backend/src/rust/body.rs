@@ -167,25 +167,29 @@ impl<'a> FnCtx<'a> {
             .is_some_and(|sig| sig.outputs.is_empty())
     }
 
-    /// Whether `vid`'s recovered type is a *machine-level* one, i.e. safe to
-    /// annotate a hole with.
+    /// Whether `vid`'s recovered type is one it is safe to annotate a hole
+    /// with: a type whose ABI and wasm-machine representations coincide.
     ///
-    /// Only `i32`. The Soroban ABI has no `i32`: every ABI integer is `u32`,
-    /// `i64`, `u64`, `i128`… so an `i32` in recovered output is always a wasm
-    /// machine value — a linear-memory address or a shadow-stack pointer —
-    /// and so is the arithmetic around it. Annotating it supplies exactly the
-    /// constraint inference was missing.
+    /// Only `i32` and `i64`, because those two *are* the wasm value types. A
+    /// recovered `u32` does not coincide — a `u32` travels inside an i64
+    /// `Val`, so the value beside the hole is being masked and shifted as an
+    /// i64 while the IR calls it `u32`. Same for `Address`, `Bytes`,
+    /// `Symbol`, `i128`: each is an object handle or a pair at the machine
+    /// level. Annotating those pins the ABI type onto machine-level code and
+    /// relocates the error instead of removing it.
     ///
-    /// Every other recovered type is ABI-level, and the code *around* the
-    /// hole is still machine-level, so pinning it moves the error rather than
-    /// removing it: `buf::BytesLen` really does yield `u32` per the host ABI,
-    /// while the recovered expression next to it does `i64` arithmetic on the
-    /// `Val`. Measured — annotating every recovered type cost attestation 8
-    /// errors and timelock 6, against what it saved elsewhere.
+    /// Measured, since the first two guesses were wrong: annotating every
+    /// hole cost +150 errors (`Unknown` renders as `Val`, overriding types
+    /// rustc had already inferred from use sites); annotating every recovered
+    /// type cost attestation 8 and timelock 6; annotating only the coinciding
+    /// two is worth -66.
     fn has_machine_type(&self, vid: ValueId) -> bool {
         matches!(
             self.func.bindings.get(vid).map(|b| &b.ty),
-            Some(IrType::Known(KnownType::I32) | IrType::Inferred(KnownType::I32))
+            Some(
+                IrType::Known(KnownType::I32 | KnownType::I64)
+                    | IrType::Inferred(KnownType::I32 | KnownType::I64)
+            )
         )
     }
 
