@@ -22,15 +22,60 @@
 //! displaces the incumbent. That guarantees the fixpoint terminates and is
 //! order-deterministic. A binding the recognizers already proved (`Known`)
 //! is never overwritten.
+//!
+//! ## Inter-procedural propagation
+//!
+//! Value flow does not stop at a call. Without crossing it, a `Call`
+//! result is untyped no matter how well-typed the callee is, and a helper's
+//! parameters are untyped no matter what its callers pass — measured on the
+//! corpus, **97% of `Call` results and 96% of `Project`s were `Unknown`**,
+//! which is what made almost every emitted helper
+//! `fn funcN(arg0: Val, arg1: Val) -> Val` while its callers passed
+//! integers. `Unknown` renders as the ABI-universal `Val`, so that is also
+//! the single largest source of type errors in the emitted Rust.
+//!
+//! So the per-function fixpoint is wrapped in a **module-level** one over a
+//! [`SigTable`]: each function's parameter and return types, joined from
+//! every witness (its call sites, its return sites). A round infers inside
+//! every function, then recomputes the table; the pass stops when neither
+//! moves.
+//!
+//! Two properties make that sound:
+//!
+//! - **Slots use their own three-point lattice** ([`Slot`]): no evidence,
+//!   one agreed type, or conflicting evidence. Both ends render as
+//!   `IrType::Unknown` — "nothing known" and "no sound single type" are
+//!   different reasons for the same honest answer, matching what
+//!   [`phi_join`] already does when a phi's arms disagree.
+//! - **Slots are recomputed from scratch each round**, as a join over all
+//!   witnesses — never raised incrementally. Raising incrementally would
+//!   let the first call site win and leave a later, disagreeing one unable
+//!   to correct it, silently pinning a wrong type onto a signature.
+//!
+//! Monotonicity survives: witnesses' own types only rise, and the join is
+//! monotone in each argument, so table entries ascend a finite-height
+//! lattice. Recursion and mutual recursion therefore need no special
+//! handling — no SCC condensation, just the fixpoint.
+//!
+//! A function with a `contractspecv0` signature is **not** subject to
+//! call-site evidence: the ABI is proven and authoritative, the same stance
+//! [`crate::marshalling`] takes when its gates read `signature` rather than
+//! inferred types.
+//!
+//! Measured on the pinned corpus, crossing calls took typedness from
+//! **60.4% to 80.9%** (`Unknown` 5,425 → 2,618) and `cargo check` errors
+//! from 653 to 345. `Known` did not move: every type this adds is
+//! `Inferred`, and nothing proven is overwritten.
 
 use std::collections::HashMap;
 
-use sordec_common::{Provenance, ProvenanceSource, ValueId};
+use sordec_common::{FuncId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
     BinaryOp, CompositeType, Expr, FunctionSignature, HighFunction, HighIr, IrType, KnownOp,
     KnownType, Literal, PrimitiveType, SemanticOp, TypeRef, UnaryOp, ValObjectKind,
 };
 
+use crate::dataflow::resolve_use;
 use crate::metrics_catalog as mc;
 use crate::pass::{Pass, PassResult};
 
@@ -40,6 +85,12 @@ pub const PASS_NAME: &str = "type-infer";
 /// Safety bound on propagation rounds. The lattice is monotonic so this is
 /// never the reason a run stops in practice; it caps a pathological input.
 const MAX_ROUNDS: usize = 64;
+
+/// Safety bound on module-level rounds. Each one can only raise slots up a
+/// three-point lattice, so the count needed is bounded by call-graph depth;
+/// as with [`MAX_ROUNDS`] this caps a pathological input rather than
+/// stopping a normal run.
+const MAX_MODULE_ROUNDS: usize = 16;
 
 /// The general type-propagation pass. Stateless; see the module docs.
 #[derive(Debug, Default, Clone, Copy)]
@@ -53,8 +104,38 @@ impl Pass<HighIr> for TypeInferPass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
         let mut changed = false;
-        for func in &mut ir.functions {
-            changed |= infer_function(func);
+
+        // Module-level fixpoint: infer inside every function against the
+        // current signature table, then rebuild the table from what that
+        // produced. Both ascend, so this settles; see the module docs.
+        let seed = seed_signatures(ir);
+        let mut sigs = seed.clone();
+        let mut disagreements: u64 = 0;
+        for _ in 0..MAX_MODULE_ROUNDS {
+            let mut round = false;
+            // Counted fresh each round, not accumulated: the loop exits on a
+            // round that changed nothing, so that round's count is the
+            // settled one rather than a running total over rounds.
+            disagreements = 0;
+            for func in &mut ir.functions {
+                let (func_changed, func_disagreements) = infer_function(func, &sigs);
+                round |= func_changed;
+                disagreements += func_disagreements;
+            }
+            let next = recompute_signatures(ir, &seed);
+            if next != sigs {
+                sigs = next;
+                round = true;
+            }
+            changed |= round;
+            if !round {
+                break;
+            }
+        }
+        if disagreements > 0 {
+            result
+                .metrics
+                .increment(mc::TYPES_EVIDENCE_DISAGREEMENTS, disagreements as i64);
         }
         // Census the settled types (feeds the `coverage` typedness metric).
         for func in &ir.functions {
@@ -71,14 +152,18 @@ impl Pass<HighIr> for TypeInferPass {
     }
 }
 
-/// Infer types for one function to a fixpoint; return whether any binding's
-/// type improved. Works on a `ValueId -> IrType` snapshot and writes the
+/// Infer types for one function to a fixpoint against the module's
+/// signature table. Returns whether any binding's type improved, and how
+/// many times inter-procedural evidence disagreed with an equal-rank
+/// incumbent. Works on a `ValueId -> IrType` snapshot and writes the
 /// improvements back with `TypePropagation` provenance.
-fn infer_function(func: &mut HighFunction) -> bool {
+fn infer_function(func: &mut HighFunction, sigs: &SigTable) -> (bool, u64) {
     let mut types: HashMap<ValueId, IrType> =
         func.bindings.iter().map(|(id, b)| (id, b.ty.clone())).collect();
+    let mut disagreements: u64 = 0;
 
     seed_abi(func, &mut types);
+    seed_params(func, sigs, &mut types, &mut disagreements);
 
     for _ in 0..MAX_ROUNDS {
         let mut round_changed = false;
@@ -87,9 +172,15 @@ fn infer_function(func: &mut HighFunction) -> bool {
             if let Some(cand) = infer_expr(&binding.expr, &types) {
                 round_changed |= improve(&mut types, id, cand);
             }
+            // Across a call: the callee's return components.
+            if let Some(cand) = infer_call_result(func, &binding.expr, sigs) {
+                round_changed |= improve_tracked(&mut types, id, cand, &mut disagreements);
+            }
         }
         // Backward: uses constrain their operands / returned values.
         round_changed |= backward(func, &mut types);
+        round_changed |= backward_calls(func, sigs, &mut types, &mut disagreements);
+        round_changed |= backward_returns(func, sigs, &mut types, &mut disagreements);
         if !round_changed {
             break;
         }
@@ -115,7 +206,7 @@ fn infer_function(func: &mut HighFunction) -> bool {
             changed = true;
         }
     }
-    changed
+    (changed, disagreements)
 }
 
 /// Seed the entry parameters and returned values from the `contractspecv0`
@@ -132,6 +223,110 @@ fn seed_abi(func: &HighFunction, types: &mut HashMap<ValueId, IrType>) {
         }
     }
     seed_returns(func, sig, types);
+}
+
+/// Seed this function's own parameters from the inter-procedural table —
+/// what its callers were measured to pass.
+///
+/// Complements [`seed_abi`], which only fires for a function carrying a
+/// `contractspecv0` signature. A helper has no ABI to read, and its call
+/// sites are the only evidence its parameters ever get.
+fn seed_params(
+    func: &HighFunction,
+    sigs: &SigTable,
+    types: &mut HashMap<ValueId, IrType>,
+    disagreements: &mut u64,
+) {
+    let Some(sig) = sigs.get(&func.id) else {
+        return;
+    };
+    for (param, slot) in func.params.iter().zip(&sig.params) {
+        if let Some(ty) = slot.to_ir(Certainty::Inferred) {
+            improve_tracked(types, *param, ty, disagreements);
+        }
+    }
+}
+
+/// A `Call`'s or `Project`'s type, taken from the callee's return
+/// components.
+///
+/// A single-component return types the `Call` binding itself. A multi-value
+/// return has no single `KnownType` to give it, so the call stays untyped
+/// and the components are typed through the `Project`s that read them —
+/// which is the shape [`crate::SretReturnPass`] produces.
+fn infer_call_result(func: &HighFunction, expr: &Expr, sigs: &SigTable) -> Option<IrType> {
+    match expr {
+        Expr::Call { target, .. } => match sigs.get(target)?.returns.as_slice() {
+            [only] => only.to_ir(Certainty::Inferred),
+            _ => None,
+        },
+        Expr::Project { value, index } => {
+            let call = resolve_use(func, *value);
+            let Expr::Call { target, .. } = &func.bindings.get(call)?.expr else {
+                return None;
+            };
+            sigs.get(target)?
+                .returns
+                .get(*index as usize)?
+                .to_ir(Certainty::Inferred)
+        }
+        _ => None,
+    }
+}
+
+/// Back-type call arguments from the callee's parameter types.
+///
+/// Positional, which the corpus verifies is exact: every `Call`'s argument
+/// list matches its callee's `params` one-for-one (`Env` is not an IR
+/// parameter — the emitter prepends it).
+fn backward_calls(
+    func: &HighFunction,
+    sigs: &SigTable,
+    types: &mut HashMap<ValueId, IrType>,
+    disagreements: &mut u64,
+) -> bool {
+    let mut changed = false;
+    for (_, binding) in func.bindings.iter() {
+        let Expr::Call { target, args } = &binding.expr else {
+            continue;
+        };
+        let Some(sig) = sigs.get(target) else {
+            continue;
+        };
+        for (arg, slot) in args.iter().zip(&sig.params) {
+            if let Some(ty) = slot.to_ir(Certainty::Inferred) {
+                changed |= improve_tracked(types, *arg, ty, disagreements);
+            }
+        }
+    }
+    changed
+}
+
+/// Back-type **every** return site's components from the settled return
+/// type.
+///
+/// Not only the sites that already agree: the emitter's `helper_return`
+/// takes its signature from the *first* value-carrying site, so leaving
+/// sites disagreeing would emit a return type that some `return` statements
+/// contradict.
+fn backward_returns(
+    func: &HighFunction,
+    sigs: &SigTable,
+    types: &mut HashMap<ValueId, IrType>,
+    disagreements: &mut u64,
+) -> bool {
+    let Some(sig) = sigs.get(&func.id) else {
+        return false;
+    };
+    let mut changed = false;
+    for site in func.returns.iter().filter(|s| s.len() == sig.returns.len()) {
+        for (value, slot) in site.iter().zip(&sig.returns) {
+            if let Some(ty) = slot.to_ir(Certainty::Inferred) {
+                changed |= improve_tracked(types, *value, ty, disagreements);
+            }
+        }
+    }
+    changed
 }
 
 /// Back-type each returned value from the signature's return type. The
@@ -324,6 +519,190 @@ fn literal_type(lit: &Literal) -> Option<KnownType> {
 }
 
 // ---------------------------------------------------------------------
+// Inter-procedural signature table
+// ---------------------------------------------------------------------
+
+/// Accumulated evidence for one signature slot — a parameter position or a
+/// return component.
+///
+/// A three-point lattice, joined rather than raised. `Bottom` and
+/// `Conflict` both mean "no type to apply", but they are different facts
+/// and keeping them apart is what lets the join be monotone: once a slot is
+/// `Conflict` no further witness can talk it back into a concrete type.
+#[derive(Clone, PartialEq, Debug)]
+enum Slot {
+    /// No witness has said anything yet.
+    Bottom,
+    /// Every witness so far agrees on this type.
+    Agreed(KnownType),
+    /// Witnesses disagree; there is no sound single type.
+    Conflict,
+}
+
+impl Slot {
+    /// Least upper bound. `Bottom` is the identity, `Conflict` absorbing,
+    /// and two different agreed types conflict.
+    fn join(self, other: Slot) -> Slot {
+        match (self, other) {
+            (Slot::Conflict, _) | (_, Slot::Conflict) => Slot::Conflict,
+            (Slot::Bottom, s) | (s, Slot::Bottom) => s,
+            (Slot::Agreed(a), Slot::Agreed(b)) => {
+                if a == b {
+                    Slot::Agreed(a)
+                } else {
+                    Slot::Conflict
+                }
+            }
+        }
+    }
+
+    /// One witness's contribution. An `Unknown` witness is *no evidence*
+    /// (`Bottom`), never a conflict — it has not spoken.
+    fn witness(ty: Option<&IrType>) -> Slot {
+        match base_of(ty) {
+            Some(k) => Slot::Agreed(k),
+            None => Slot::Bottom,
+        }
+    }
+
+    /// The type to apply to a binding, or `None` for both "nothing known"
+    /// and "conflicting" — the honest answer is `Unknown` either way.
+    fn to_ir(&self, certainty: Certainty) -> Option<IrType> {
+        match self {
+            Slot::Agreed(k) => Some(match certainty {
+                Certainty::Known => IrType::Known(k.clone()),
+                Certainty::Inferred => IrType::Inferred(k.clone()),
+            }),
+            Slot::Bottom | Slot::Conflict => None,
+        }
+    }
+}
+
+/// One function's inter-procedural signature: types by parameter position
+/// and by return component.
+#[derive(Clone, Default, PartialEq, Debug)]
+struct FnSig {
+    params: Vec<Slot>,
+    returns: Vec<Slot>,
+}
+
+/// Signature evidence for every function in the module.
+type SigTable = HashMap<FuncId, FnSig>;
+
+/// The common arity of `func`'s value-carrying return sites, or `None` when
+/// there are none or they disagree.
+///
+/// Disagreement means components cannot be addressed positionally, so the
+/// honest answer is to contribute no return information at all rather than
+/// index into rows of different widths. `HighFunction::returns` records
+/// sites faithfully, including 0-value ones, which is why the empty sites
+/// are skipped rather than counted.
+fn return_arity(func: &HighFunction) -> Option<usize> {
+    let mut arity: Option<usize> = None;
+    for site in func.returns.iter().filter(|s| !s.is_empty()) {
+        match arity {
+            None => arity = Some(site.len()),
+            Some(n) if n == site.len() => {}
+            Some(_) => return None,
+        }
+    }
+    arity
+}
+
+/// The table's starting point: `contractspecv0` types where a function has
+/// a signature, `Bottom` everywhere else.
+///
+/// Re-cloned at the head of every recomputation, which is what keeps ABI
+/// slots authoritative and non-ABI slots recomputed from scratch.
+fn seed_signatures(ir: &HighIr) -> SigTable {
+    let mut table = SigTable::new();
+    for func in &ir.functions {
+        let mut sig = FnSig {
+            params: vec![Slot::Bottom; func.params.len()],
+            returns: vec![Slot::Bottom; return_arity(func).unwrap_or(0)],
+        };
+        if let Some(spec) = &func.signature {
+            for (slot, input) in sig.params.iter_mut().zip(&spec.inputs) {
+                if let Some(k) = type_ref_base(&input.ty) {
+                    *slot = Slot::Agreed(k);
+                }
+            }
+            for (slot, out) in sig.returns.iter_mut().zip(&spec.outputs) {
+                if let Some(k) = type_ref_base(out) {
+                    *slot = Slot::Agreed(k);
+                }
+            }
+        }
+        table.insert(func.id, sig);
+    }
+    table
+}
+
+/// Recompute every non-ABI slot as a join over its witnesses.
+///
+/// Returns are witnessed by the function's own return sites; parameters by
+/// every call site in the module that names it. Functions carrying a
+/// `contractspecv0` signature keep the seeded ABI types untouched.
+fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
+    let mut table = seed.clone();
+
+    for func in &ir.functions {
+        if func.signature.is_some() {
+            continue; // ABI is proven; call sites do not get a vote.
+        }
+        let Some(entry) = table.get_mut(&func.id) else {
+            continue;
+        };
+        let arity = entry.returns.len();
+        if arity == 0 {
+            continue;
+        }
+        let mut slots = vec![Slot::Bottom; arity];
+        for site in func.returns.iter().filter(|s| s.len() == arity) {
+            for (slot, value) in slots.iter_mut().zip(site) {
+                let witness = Slot::witness(func.bindings.get(*value).map(|b| &b.ty));
+                *slot = std::mem::replace(slot, Slot::Bottom).join(witness);
+            }
+        }
+        entry.returns = slots;
+    }
+
+    // Parameters: one pass over every call in the module.
+    let mut evidence: HashMap<FuncId, Vec<Slot>> = ir
+        .functions
+        .iter()
+        .filter(|f| f.signature.is_none())
+        .map(|f| (f.id, vec![Slot::Bottom; f.params.len()]))
+        .collect();
+    for caller in &ir.functions {
+        for (_, binding) in caller.bindings.iter() {
+            let Expr::Call { target, args } = &binding.expr else {
+                continue;
+            };
+            let Some(slots) = evidence.get_mut(target) else {
+                continue;
+            };
+            for (slot, arg) in slots.iter_mut().zip(args) {
+                let witness = Slot::witness(caller.bindings.get(*arg).map(|b| &b.ty));
+                *slot = std::mem::replace(slot, Slot::Bottom).join(witness);
+            }
+        }
+    }
+    for (id, slots) in evidence {
+        if let Some(entry) = table.get_mut(&id) {
+            entry.params = slots;
+        }
+    }
+    table
+}
+
+/// The `KnownType` a `TypeRef` denotes, or `None` when it does not resolve
+/// to one.
+fn type_ref_base(t: &TypeRef) -> Option<KnownType> {
+    base_of(type_ref_to_ir(t, Certainty::Known).as_ref())
+}
+
+// ---------------------------------------------------------------------
 // Lattice
 // ---------------------------------------------------------------------
 
@@ -364,6 +743,33 @@ fn improve(types: &mut HashMap<ValueId, IrType>, id: ValueId, cand: IrType) -> b
     } else {
         false
     }
+}
+
+/// [`improve`], but counting the case where inter-procedural evidence names
+/// a *different* type at the same certainty rank as the incumbent.
+///
+/// `improve` deliberately never displaces an equal-rank type, so such a
+/// disagreement is silently dropped. The alternative — lowering both to
+/// `Unknown` — is arguably more honest but restructures what `improve`
+/// means, so the rate was measured before paying for it: **17 across the
+/// whole corpus**, against 7,736 inferred types. The conservative choice
+/// costs essentially nothing, so the lattice stands as documented and this
+/// counter is the guard that says so. A future run where it climbs is the
+/// signal to revisit.
+fn improve_tracked(
+    types: &mut HashMap<ValueId, IrType>,
+    id: ValueId,
+    cand: IrType,
+    disagreements: &mut u64,
+) -> bool {
+    if let Some(incumbent) = types.get(&id)
+        && rank(&cand) == rank(incumbent)
+        && rank(&cand) > 0
+        && base_of(Some(&cand)) != base_of(Some(incumbent))
+    {
+        *disagreements += 1;
+    }
+    improve(types, id, cand)
 }
 
 /// A terse type description for the provenance note.
@@ -466,6 +872,12 @@ mod tests {
 
     fn unknown() -> IrType {
         IrType::Unknown(UnknownReason::InsufficientEvidence)
+    }
+
+    /// Run only the intra-procedural half: no inter-procedural evidence, so
+    /// a single function can be tested without building a module around it.
+    fn infer_isolated(func: &mut HighFunction) -> bool {
+        infer_function(func, &SigTable::new()).0
     }
 
     // ---- lattice ----
@@ -605,6 +1017,197 @@ mod tests {
         );
     }
 
+    // ---- inter-procedural ----
+
+    /// Build a single-block function with the given id, bindings and return
+    /// sites. Reuses `marshalling`'s fixture builder; only the fields it
+    /// hardcodes (`id`, `returns`) are overridden.
+    fn func_at(
+        id: u32,
+        exprs: Vec<Expr>,
+        params: Vec<ValueId>,
+        scheduled: Vec<u32>,
+        returns: Vec<Vec<ValueId>>,
+    ) -> HighFunction {
+        let mut f = crate::marshalling::test_support::func_with(exprs, params, scheduled);
+        f.id = FuncId::from_index(id);
+        f.returns = returns;
+        f
+    }
+
+    fn ty_of(ir: &HighIr, func: u32, value: u32) -> IrType {
+        ir.functions
+            .iter()
+            .find(|f| f.id.index() == func)
+            .expect("function")
+            .bindings
+            .get(ValueId::from_index(value))
+            .expect("binding")
+            .ty
+            .clone()
+    }
+
+    #[test]
+    fn slot_join_is_a_three_point_lattice() {
+        let i64s = || Slot::Agreed(KnownType::I64);
+        let u64s = || Slot::Agreed(KnownType::U64);
+        // Bottom is the identity.
+        assert_eq!(Slot::Bottom.join(i64s()), i64s());
+        assert_eq!(i64s().join(Slot::Bottom), i64s());
+        // Agreement is idempotent; disagreement conflicts.
+        assert_eq!(i64s().join(i64s()), i64s());
+        assert_eq!(i64s().join(u64s()), Slot::Conflict);
+        // Conflict absorbs, in both directions — once there is no sound
+        // single type, no further witness can talk it back into one.
+        assert_eq!(Slot::Conflict.join(i64s()), Slot::Conflict);
+        assert_eq!(i64s().join(Slot::Conflict), Slot::Conflict);
+        assert_eq!(Slot::Conflict.join(Slot::Bottom), Slot::Conflict);
+        // An Unknown witness has not spoken: no evidence, not a conflict.
+        assert_eq!(Slot::witness(Some(&unknown())), Slot::Bottom);
+        assert_eq!(Slot::witness(None), Slot::Bottom);
+        // Neither end of the lattice yields a type to apply.
+        assert_eq!(Slot::Bottom.to_ir(Certainty::Inferred), None);
+        assert_eq!(Slot::Conflict.to_ir(Certainty::Inferred), None);
+    }
+
+    #[test]
+    fn a_call_result_takes_the_callee_return_type() {
+        // fn1() -> i64 { return 7i64 }   fn0() { v0 = fn1() }
+        let callee = func_at(
+            1,
+            vec![Expr::Literal(Literal::I64(7))],
+            vec![],
+            vec![0],
+            vec![vec![ValueId::from_index(0)]],
+        );
+        let caller = func_at(
+            0,
+            vec![Expr::Call { target: FuncId::from_index(1), args: vec![] }],
+            vec![],
+            vec![0],
+            vec![],
+        );
+        let mut ir = crate::marshalling::test_support::module(vec![caller, callee]);
+        assert!(TypeInferPass.run(&mut ir).changed);
+        assert_eq!(
+            ty_of(&ir, 0, 0),
+            IrType::Inferred(KnownType::I64),
+            "the call result is the callee's return type"
+        );
+    }
+
+    #[test]
+    fn project_takes_the_matching_return_component() {
+        // The `SretReturnPass` shape: a multi-value return read by picks.
+        let callee = func_at(
+            1,
+            vec![Expr::Literal(Literal::I64(7)), Expr::Literal(Literal::U64(9))],
+            vec![],
+            vec![0, 1],
+            vec![vec![ValueId::from_index(0), ValueId::from_index(1)]],
+        );
+        let caller = func_at(
+            0,
+            vec![
+                Expr::Call { target: FuncId::from_index(1), args: vec![] },
+                Expr::Project { value: ValueId::from_index(0), index: 0 },
+                Expr::Project { value: ValueId::from_index(0), index: 1 },
+            ],
+            vec![],
+            vec![0, 1, 2],
+            vec![],
+        );
+        let mut ir = crate::marshalling::test_support::module(vec![caller, callee]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Inferred(KnownType::I64), "component 0");
+        assert_eq!(ty_of(&ir, 0, 2), IrType::Inferred(KnownType::U64), "component 1");
+        // A multi-value return has no single type, so the call itself stays
+        // Unknown rather than being given one of the components'.
+        assert!(matches!(ty_of(&ir, 0, 0), IrType::Unknown(_)));
+    }
+
+    /// Two callers, both passing an `i64`: the callee's parameter is that.
+    fn two_callers(second_arg: Literal) -> HighIr {
+        let callee = func_at(
+            1,
+            vec![Expr::Phi { incoming: vec![] }],
+            vec![ValueId::from_index(0)],
+            vec![],
+            vec![],
+        );
+        let caller = |id: u32, lit: Literal| {
+            func_at(
+                id,
+                vec![
+                    Expr::Literal(lit),
+                    Expr::Call {
+                        target: FuncId::from_index(1),
+                        args: vec![ValueId::from_index(0)],
+                    },
+                ],
+                vec![],
+                vec![0, 1],
+                vec![],
+            )
+        };
+        crate::marshalling::test_support::module(vec![
+            caller(0, Literal::I64(1)),
+            callee,
+            caller(2, second_arg),
+        ])
+    }
+
+    #[test]
+    fn a_parameter_is_typed_from_agreeing_call_sites() {
+        let mut ir = two_callers(Literal::I64(2));
+        assert!(TypeInferPass.run(&mut ir).changed);
+        assert_eq!(
+            ty_of(&ir, 1, 0),
+            IrType::Inferred(KnownType::I64),
+            "both call sites pass i64, so the parameter is i64"
+        );
+    }
+
+    #[test]
+    fn disagreeing_call_sites_leave_the_parameter_unknown() {
+        // The case that proves the join: taking the first witness would pin
+        // `i64` onto a parameter one caller passes a `bool` to, and the
+        // emitted signature would then be wrong rather than merely vague.
+        let mut ir = two_callers(Literal::Bool(true));
+        TypeInferPass.run(&mut ir);
+        assert!(
+            matches!(ty_of(&ir, 1, 0), IrType::Unknown(_)),
+            "conflicting evidence has no sound single type, got {:?}",
+            ty_of(&ir, 1, 0)
+        );
+    }
+
+    #[test]
+    fn mutual_recursion_terminates() {
+        // fn0 calls fn1, fn1 calls fn0. The fixpoint is what makes this
+        // safe: no SCC condensation, so a cycle must simply converge.
+        let a = func_at(
+            0,
+            vec![Expr::Call { target: FuncId::from_index(1), args: vec![] }],
+            vec![],
+            vec![0],
+            vec![],
+        );
+        let b = func_at(
+            1,
+            vec![Expr::Call { target: FuncId::from_index(0), args: vec![] }],
+            vec![],
+            vec![0],
+            vec![],
+        );
+        let mut ir = crate::marshalling::test_support::module(vec![a, b]);
+        // Neither returns anything, so there is nothing to learn — the point
+        // is that asking terminates and stays honest.
+        TypeInferPass.run(&mut ir);
+        assert!(matches!(ty_of(&ir, 0, 0), IrType::Unknown(_)));
+        assert!(matches!(ty_of(&ir, 1, 0), IrType::Unknown(_)));
+    }
+
     // ---- end-to-end ----
 
     /// `fn add(u64, u64) -> u64 { v2 = v0 + v1; return v2 }`: params seed
@@ -646,7 +1249,7 @@ mod tests {
             returns: vec![vec![v2]],
         };
 
-        assert!(infer_function(&mut func), "types improved");
+        assert!(infer_isolated(&mut func), "types improved");
         assert_eq!(func.bindings.get(v0).unwrap().ty, IrType::Known(KnownType::U64), "param from spec");
         assert_eq!(func.bindings.get(v2).unwrap().ty, IrType::Inferred(KnownType::U64), "sum propagated");
         // Every improved binding carries a TypePropagation provenance entry.

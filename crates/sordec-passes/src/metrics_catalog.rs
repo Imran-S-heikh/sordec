@@ -349,6 +349,11 @@ pub const TYPES_KNOWN: &str = "types_known";
 pub const TYPES_INFERRED: &str = "types_inferred";
 /// Bindings still [`sordec_ir::IrType::Unknown`] after propagation.
 pub const TYPES_UNKNOWN: &str = "types_unknown";
+/// Times inter-procedural evidence named a different type at the same
+/// certainty rank as the incumbent, and was therefore dropped rather than
+/// displacing it. A visible rate for a deliberately conservative choice;
+/// see `type_infer::improve_tracked`.
+pub const TYPES_EVIDENCE_DISAGREEMENTS: &str = "types_evidence_disagreements";
 
 /// The five resolved/miss counter pairs that define the headline
 /// **deep-facts** ratio: `(resolved, unresolved)`. Membership is the
@@ -438,6 +443,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         TYPES_KNOWN,
         TYPES_INFERRED,
         TYPES_UNKNOWN,
+        TYPES_EVIDENCE_DISAGREEMENTS,
         STRUCTURING_FUNCTIONS_TOTAL,
         STRUCTURING_FUNCTIONS_STRUCTURED,
         STRUCTURING_LOOPS_WHILE_TOP,
