@@ -66,6 +66,12 @@
 //! teach `marshalling` the multi-value call shape, or run the elision
 //! before this pass transforms it away — not on either pass here.
 //!
+//! **Reason 2 is now discharged too.** [`crate::marshalling::decode`]
+//! recognizes both shapes: it classifies the converted helper from its
+//! return components and collapses the caller's `Project`s, including the
+//! write-back this pass deliberately leaves behind. What remains before
+//! wiring is the measurement, not a defect.
+//!
 //! ## Gates
 //!
 //! Each declines rather than approximating:

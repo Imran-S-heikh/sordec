@@ -73,23 +73,39 @@
 //!
 //! `tests/memory_staged.rs` locks both halves of this.
 //!
-//! ## NOT YET WIRED — `sret` collides with the marshalling elision
+//! ## NOT YET WIRED — measured, and awaiting a decision
 //!
-//! With the grouping above, this pass and [`super::sret`] validate
-//! across the whole corpus and structure cleanly. They stay out of the
-//! pipeline for an unrelated reason, measured on hello-add:
-//! [`super::sret`] rewrites the `Val`-decode helper into a multi-value
-//! return, which is the exact shape
-//! [`crate::marshalling`]'s elision matches on. The elision stops firing,
-//! the helper is emitted instead of removed, and the argument decode
-//! turns back into `todo!("memory load")` — hello-add regresses from a
-//! clean body to one that does not compile. Promotion cannot rescue it
-//! either: the `Result` discriminant is stored as `i64` and read back as
-//! `i32`, which `discover` correctly declines as a reinterpretation.
+//! With the grouping above, this pass and [`super::sret`] validate across
+//! the whole corpus and structure cleanly, and
+//! [`crate::marshalling::decode`] now recognizes the multi-value shape
+//! `sret` converts helpers into — so the argument-decode elision survives
+//! the conversion and hello-add still compiles clean.
 //!
-//! The unblocking work is on the recognizer, not here: teach
-//! `marshalling` the multi-value call shape, or run the elision before
-//! `sret` transforms it away.
+//! Measured with the pair wired, `cargo check` errors per fixture:
+//!
+//! ```text
+//! hello-add             0 →   0        token-v22           125 → 127
+//! timelock             53 →  52        token-v23           125 → 127
+//! dex-liquidity-pool  314 → 290        token-v23-stripped  111 → 113
+//! attestation           8 →  10
+//!                                      corpus total  736 → 709  (-27)
+//! ```
+//!
+//! dex is where the memory traffic was, and it is the fixture furthest
+//! from compiling. The `+2`s are churn inside the same type-mismatch
+//! families that already dominate those fixtures, not a new failure mode.
+//!
+//! The known remainder is [`crate::marshalling::guard`]. Its `collect`
+//! requires the guarded arm to be a trap, which is the right gate for a
+//! *tag check* whose condition is not constant. The decode-result guard is
+//! different: `classify_condition` has already proved both sides constant
+//! and the branch not taken, so the arm is dead whatever it contains. In
+//! the converted shape that arm is a value-returning early exit rather
+//! than a trap, so the guard now survives where it used to be elided —
+//! visible on hello-add as a `v8 == v9` over two literals. Relaxing the
+//! trap requirement for the constant-discriminant case only is the next
+//! step, and it is a change to an elision safety gate, so it wants its own
+//! review rather than riding along here.
 //!
 //! ## What it deliberately leaves behind
 //!

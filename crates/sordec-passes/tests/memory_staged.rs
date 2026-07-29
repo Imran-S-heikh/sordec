@@ -34,8 +34,8 @@ use sordec_ir::{
     validate_high, validate_lifted, LiftedFunction, LiftedIr, LiftedValueDef,
 };
 use sordec_passes::{
-    default_high_pipeline, for_each_target, lift_with_waffle, LiftToHigh, LoweringStep,
-    MergeBlockChainsPass, Pass, Pipeline, PruneTrivialPhisPass, ResolveAliasesPass,
+    default_high_pipeline, for_each_target, lift_with_waffle, metrics_catalog as mc, LiftToHigh,
+    LoweringStep, MergeBlockChainsPass, Pass, Pipeline, PruneTrivialPhisPass, ResolveAliasesPass,
     SlotPromotionPass, SretReturnPass, SweepDeadPass, ThreadTrivialJumpsPass,
 };
 
@@ -162,9 +162,27 @@ fn staged_pair_produces_a_valid_module_across_the_corpus() {
             .unwrap_or_else(|e| panic!("[{name}] boundary lowering: {e:?}"));
         validate_high(&high)
             .unwrap_or_else(|e| panic!("[{name}] high validator after lowering: {e:?}"));
-        default_high_pipeline().run(&mut high);
+        let report = default_high_pipeline().run(&mut high);
         validate_high(&high)
             .unwrap_or_else(|e| panic!("[{name}] high validator after recovery: {e:?}"));
+
+        // 4. The recognizer still sees through the conversion. `sret`
+        //    rewrites the SDK decode helper into a multi-value return,
+        //    which is the shape `marshalling::decode` matches on — if
+        //    that recognition lapses, the helper stops being elided and
+        //    is emitted as contract logic the author never wrote.
+        if *name == "hello-add" {
+            let collapsed = report
+                .metric_totals()
+                .into_iter()
+                .find(|(key, _)| *key == mc::MARSHALLING_DECODE_COLLAPSED)
+                .map_or(0, |(_, value)| value);
+            assert!(
+                collapsed > 0,
+                "[{name}] the argument decode must still collapse once `sret` \
+                 has converted the helper to a multi-value return",
+            );
+        }
     }
 }
 

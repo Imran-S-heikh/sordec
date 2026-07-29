@@ -117,11 +117,18 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
             // nobody does. `tests/memory_staged.rs` runs that pipeline and
             // locks it valid corpus-wide.
             //
-            // Not registered yet, and not because of a defect in either
-            // pass: `sret` rewrites the Val-decode helper into a
-            // multi-value return, which is the shape `marshalling`'s
-            // elision matches on, so wiring them today costs hello-add its
-            // clean emission. See the `memory::promote` module docs.
+            // `marshalling::decode` now reads both shapes, so the elision
+            // survives the conversion and hello-add still compiles clean.
+            // Measured with them wired (`cargo check` errors): dex 314 ->
+            // 290, timelock 53 -> 52, hello-add 0 -> 0, against +2 each on
+            // the token family and attestation — net -27 corpus-wide.
+            //
+            // Still not registered, pending a decision on that trade. The
+            // known remainder is `marshalling::guard`: its `is_trap` gate
+            // wants the guarded arm to trap, and in the converted shape
+            // that arm is a value-returning early exit, so a
+            // provably-constant discriminant guard survives where it used
+            // to be elided. See the `memory::promote` module docs.
         ],
         vec![1..5],
     )

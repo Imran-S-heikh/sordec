@@ -141,6 +141,72 @@ pub(crate) fn analyze(func: &HighFunction) -> Option<SretShape> {
     })
 }
 
+/// The same layout question, asked of a function whose out-parameter has
+/// already been converted back into a real multi-value return.
+///
+/// [`crate::SretReturnPass`] performs that conversion at the lifted layer,
+/// which is where it belongs — escape analysis is mem2reg's precondition.
+/// Once it has run, the callee no longer *has* an out-parameter, so
+/// [`analyze`] declines and every consumer downstream of it goes blind.
+/// This is the same recovery against the converted shape.
+///
+/// It is the easier of the two. `analyze` has to prove a pointer never
+/// escapes and then read one value per offset out of memory; here the
+/// components are the return's operands, and each return site is a
+/// complete path in its own right. So this reports **arms directly** —
+/// one row per `Region::Return` — rather than a single value per slot that
+/// a consumer must then re-split by walking phis.
+#[derive(Debug, Clone)]
+pub(crate) struct ReturnShape {
+    /// One row per return site; each row is that path's component values,
+    /// positionally. Every row has the same length.
+    pub arms: Vec<Vec<ValueId>>,
+}
+
+impl ReturnShape {
+    /// Number of components each return carries.
+    pub fn arity(&self) -> usize {
+        self.arms.first().map_or(0, Vec::len)
+    }
+
+    /// The value component `index` takes on each arm, in arm order.
+    pub fn component(&self, index: usize) -> Option<Vec<ValueId>> {
+        self.arms.iter().map(|arm| arm.get(index).copied()).collect()
+    }
+}
+
+/// Recover the component layout of a multi-value-returning helper, or
+/// `None` when it does not have one.
+///
+/// Gates mirror [`analyze`]'s where the question is the same:
+///
+/// - **Helpers only** (`signature.is_none()`), for the identical reason: a
+///   `contractspecv0` entrypoint returns what the ABI says it returns, so
+///   its return arity is not evidence of anything we could undo.
+/// - **Genuinely multi-value.** One component is an ordinary return, not a
+///   converted out-parameter, and admitting it would let every scalar
+///   helper in the module look like a candidate shape.
+/// - **Every return agrees on arity.** Disagreement means the region tree
+///   describes something this analysis cannot read as one layout, and a
+///   consumer indexing components positionally would be indexing into
+///   rows of different widths.
+pub(crate) fn analyze_returns(func: &HighFunction) -> Option<ReturnShape> {
+    if func.signature.is_some() {
+        return None;
+    }
+    let mut arms: Vec<Vec<ValueId>> = Vec::new();
+    func.region.for_each_node(|node| {
+        if let Region::Return { values } = node {
+            arms.push(values.clone());
+        }
+    });
+    let arity = arms.first()?.len();
+    if arity < 2 || arms.iter().any(|arm| arm.len() != arity) {
+        return None;
+    }
+    Some(ReturnShape { arms })
+}
+
 /// Every binding id in `func`, in the order the backend emits them.
 ///
 /// The body walk emits `Region::Basic` blocks in the region tree's
