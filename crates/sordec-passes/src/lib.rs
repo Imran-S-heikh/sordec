@@ -37,6 +37,7 @@ pub mod ledger;
 pub mod lift;
 pub mod lowering;
 pub mod marshalling;
+pub mod memory;
 pub mod metrics_catalog;
 pub mod pass;
 pub mod pipeline;
@@ -63,6 +64,7 @@ pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
+pub use memory::SretReturnPass;
 pub use marshalling::{
     ArgGuardElisionPass, FrameElisionPass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideReturnPass,
@@ -107,6 +109,12 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
             Box::new(ThreadTrivialJumpsPass),
             Box::new(MergeBlockChainsPass),
             Box::new(SweepDeadPass),
+            // `memory::SretReturnPass` belongs here, inside the fixpoint
+            // group — it is LLVM's SROA-then-mem2reg loop. It is not
+            // registered yet: on its own it *moves* the out-parameter
+            // stores from callee to caller rather than removing them, and
+            // until `memory::promote` forwards them it is a strict
+            // regression. See that module's docs.
         ],
         vec![1..5],
     )

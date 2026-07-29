@@ -319,6 +319,13 @@ pub const MARSHALLING_WIDE_RETURNS_RECOVERED: &str = "marshalling_wide_returns_r
 pub const MARSHALLING_WIDE_LOADS_REBOUND: &str = "marshalling_wide_loads_rebound";
 
 // ---------------------------------------------------------------------
+// Shadow-stack memory promotion
+// ---------------------------------------------------------------------
+
+/// Functions whose `sret` out-parameter became a real multi-value return.
+pub const MEMORY_SRET_CONVERTED: &str = "memory_sret_converted";
+
+// ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)
 // ---------------------------------------------------------------------
 
@@ -454,6 +461,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_FRAMES_ELIDED,
         MARSHALLING_WIDE_RETURNS_RECOVERED,
         MARSHALLING_WIDE_LOADS_REBOUND,
+        MEMORY_SRET_CONVERTED,
     ]
 }
 

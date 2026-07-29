@@ -285,15 +285,16 @@ fn lower_value_def(def: &LiftedValueDef, ctx: &LowerCtx<'_>) -> (Expr, String) {
     match def {
         LiftedValueDef::Alias(target) => (Expr::Use(*target), "alias".to_string()),
 
-        LiftedValueDef::PickOutput { from, .. } => (
-            // Multi-result projection isn't modeled at this layer; rare
-            // in Soroban WASM. Preserve the source operand honestly.
-            Expr::Unknown {
-                op_kind: WasmOpcodeKind::Other,
-                args: vec![*from],
-                reason: UnknownReason::UnsupportedPattern,
+        // Multi-result projection. Rare in WASM as compiled by rustc, but
+        // `memory::sret` creates one per component whenever it turns an
+        // out-parameter back into a real return value, so this is a
+        // first-class lowering rather than the honest hole it used to be.
+        LiftedValueDef::PickOutput { from, index } => (
+            Expr::Project {
+                value: *from,
+                index: *index,
             },
-            "pick output".to_string(),
+            format!("pick output {index}"),
         ),
 
         LiftedValueDef::BlockParam { block, index } => {
