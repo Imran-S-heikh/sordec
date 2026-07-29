@@ -4,12 +4,24 @@
 # Runs, in order, every check a commit must pass. Stops on the first
 # failure. Run from anywhere; it resolves the repo root itself.
 #
-# The release-build step is load-bearing and easy to miss: `cargo clippy`
-# runs in the *dev* profile, so it never sees warnings that only exist in a
-# release build or under `#[cfg(not(debug_assertions))]`. A plain
-# warnings-as-errors release build is the only step that catches that class
-# (surfaced by the Phase 3 closeout audit — an unused import that was live
-# in dev but dead in release).
+# The release step is load-bearing and easy to miss: `cargo clippy` runs in
+# the *dev* profile, so it never sees warnings that only exist under
+# `#[cfg(not(debug_assertions))]` (surfaced by the Phase 3 closeout audit —
+# an unused import that was live in dev but dead in release). It is a
+# `check`, not a `build`: warnings come out of the frontend, so checking
+# raises exactly the same ones, and `[profile.release]` here is
+# `lto = true, codegen-units = 1, opt-level = 3` — the full optimising build
+# cost 124 s against 25 s for the check, on a one-file change, and produced
+# nothing the gate reads. Verified rather than assumed: with the
+# release-side use of `debug_validate`'s arguments removed, the check reports
+# both unused variables as errors while dev clippy reports nothing.
+#
+# What that trades away: `check` does not run codegen, so a
+# post-monomorphisation or link failure that only appears in a real release
+# build would slip past. This crate has no `unsafe` and no const-generic
+# machinery, which is why the trade is worth 100 s a run — but a release
+# build belongs in CI, or before a tagged release, where its cost is paid
+# once rather than per commit.
 #
 # Exit codes:
 #   0 — every step passed
@@ -21,22 +33,39 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
 cd "${REPO_ROOT}"
 
-echo "== 1/6 build (workspace) =="
+GATE_START=${SECONDS}
+
+# Announce a step and time the previous one, so a slow gate says *which*
+# part is slow instead of leaving it to be re-measured by hand.
+STEP_START=${SECONDS}
+step() {
+    if [[ -n "${STEP_NAME:-}" ]]; then
+        printf '   ↳ %s: %ds\n' "${STEP_NAME}" "$((SECONDS - STEP_START))"
+    fi
+    STEP_NAME="$1"
+    STEP_START=${SECONDS}
+    echo "== $1 =="
+}
+
+step "1/6 build (workspace)"
 cargo build --workspace
 
-echo "== 2/6 build (release, warnings-as-errors) — the dev-profile blind spot =="
-RUSTFLAGS="-D warnings" cargo build --release --workspace
+step "2/6 check (release, warnings-as-errors) — the dev-profile blind spot"
+# `--all-targets` so test code is checked under release cfg too, which the
+# old `build --release` never covered.
+RUSTFLAGS="-D warnings" cargo check --release --workspace --all-targets
 
-echo "== 3/6 test (workspace) =="
+step "3/6 test (workspace)"
 cargo test --workspace
 
-echo "== 4/6 clippy (all features, all targets, warnings-as-errors) =="
+step "4/6 clippy (all features, all targets, warnings-as-errors)"
 cargo clippy --workspace --all-features --all-targets -- -D warnings
 
-echo "== 5/6 doc (no deps, must be warning-free) =="
+step "5/6 doc (no deps, must be warning-free)"
 cargo doc --workspace --no-deps
 
-echo "== 6/6 fixtures =="
+step "6/6 fixtures"
 bash "${SCRIPT_DIR}/verify-fixtures.sh"
 
-echo "== OK: all gate steps passed =="
+step "done"
+echo "== OK: all gate steps passed in $((SECONDS - GATE_START))s =="
