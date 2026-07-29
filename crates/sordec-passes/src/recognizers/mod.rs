@@ -33,6 +33,10 @@
 //! - [`cross_contract`] — the `d`-module `call` / `try_call` pair
 //!   (`env.invoke_contract` / `env.try_invoke_contract`).
 //! - [`const_prop`] — the inter-procedural upgrade pass (see above).
+//! - [`val_packed_compare`] — comparisons rustc compiled against a
+//!   `U32Val`'s bits rather than its payload. Last in the chain: it needs
+//!   the host-call families named and the constants folded, and the
+//!   marshalling elision downstream reads its output.
 
 pub mod abi_sweep;
 pub mod auth;
@@ -51,6 +55,7 @@ pub(crate) mod symbols;
 pub mod ttl;
 pub mod unrecognized;
 pub mod val_encoding;
+pub mod val_packed_compare;
 pub(crate) mod wrappers;
 
 pub use abi_sweep::AbiSweepPass;
@@ -69,6 +74,7 @@ pub use storage::StoragePass;
 pub use ttl::TtlPass;
 pub use unrecognized::UnrecognizedScanPass;
 pub use val_encoding::ValEncodingPass;
+pub use val_packed_compare::ValPackedComparePass;
 
 use sordec_common::{Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{Expr, HighFunction, IrType, SemanticOp};

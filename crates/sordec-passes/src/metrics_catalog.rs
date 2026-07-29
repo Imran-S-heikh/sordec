@@ -161,6 +161,15 @@ pub const VAL_ENCODE_U32: &str = "val_encode_u32";
 pub const VAL_DECODE_SMALL: &str = "val_decode_small";
 /// `Val` comparison host calls collapsed.
 pub const VAL_COMPARE: &str = "val_compare";
+/// Packed `U32Val` comparisons rewritten to payload comparisons via the
+/// major-field mask, or against a tagged constant — the exact shapes,
+/// resting on no premise beyond the producer's ABI return type.
+pub const VAL_PACKED_COMPARE_MASKED: &str = "val_packed_compare_masked";
+/// Packed `U32Val` comparisons rewritten from an *ordered* comparison
+/// against a `k << 32` boundary. Counted separately from the masked shape
+/// because this one reads the wasm comparison as unsigned, which the
+/// lowering no longer records — see `recognizers::val_packed_compare`.
+pub const VAL_PACKED_COMPARE_ORDERED: &str = "val_packed_compare_ordered";
 
 // ---------------------------------------------------------------------
 // Lifted-IR de-cluttering (Phase 3 W3). Surfaced by the W8 structuring
@@ -422,6 +431,8 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         VAL_ENCODE_U32,
         VAL_DECODE_SMALL,
         VAL_COMPARE,
+        VAL_PACKED_COMPARE_MASKED,
+        VAL_PACKED_COMPARE_ORDERED,
         UNRECOGNISED_HOST_CALL,
         // Structuring section — de-cluttering (W3).
         DECLUTTER_ALIASES_RESOLVED,

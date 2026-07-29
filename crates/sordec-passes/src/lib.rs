@@ -74,7 +74,7 @@ pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
     AbiSweepPass, AuthFlowPass, AuthPass, ClientCallPass, CollectionsPass, ConstPropPass,
     ContextPass, CrossContractPass, DispatcherPass, EnumKeyPass, ErrorConstPass, LinearMemoryPass,
-    StoragePass, TtlPass, UnrecognizedScanPass, ValEncodingPass,
+    StoragePass, TtlPass, UnrecognizedScanPass, ValEncodingPass, ValPackedComparePass,
 };
 pub use refine::{
     AndMergePass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
@@ -221,6 +221,14 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(ErrorConstPass),
             Box::new(ClientCallPass),
             Box::new(AuthFlowPass),
+            // Last in the recognizer chain: reconciles the two readings of
+            // a `U32Val`-returning host call — the ABI type names its
+            // payload, the surrounding code was compiled against its bits.
+            // Needs the host-call families named (`CollectionsPass`,
+            // `ContextPass`) and the constants folded (`ConstPropPass`);
+            // the marshalling elision below reads its output, which is why
+            // it sits above that group rather than inside it.
+            Box::new(ValPackedComparePass),
             // Region-refinement wave 2: region rewrites that consume
             // recognizer output, so they cannot join the pre-recognizer
             // group above. Straight-line, no fixpoint.
@@ -258,7 +266,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // for the second. `marshalling_group_covers_exactly_the_elision_passes`
         // pins the second range by pass name, so inserting a pass above it
         // fails a test instead of silently shifting the window.
-        vec![1..6, 24..28],
+        vec![1..6, 25..29],
     )
 }
 
