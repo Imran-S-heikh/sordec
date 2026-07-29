@@ -57,8 +57,8 @@ pub use dataflow::{
     TraceStop, UseSite, DEFAULT_MAX_DEPTH, DEFAULT_RESOLVE_DEPTH, DEFAULT_USE_DEPTH,
 };
 pub use declutter::{
-    MergeBlockChainsPass, PruneTrivialPhisPass, ResolveAliasesPass, SweepDeadPass,
-    ThreadTrivialJumpsPass,
+    MergeBlockChainsPass, PruneDeadParamsPass, PruneTrivialPhisPass, ResolveAliasesPass,
+    SweepDeadPass, ThreadTrivialJumpsPass,
 };
 pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
@@ -90,15 +90,39 @@ use sordec_ir::{HighIr, LiftedIr};
 /// Build the default lifted-IR de-cluttering pipeline.
 ///
 /// Runs between [`lift_with_waffle`] and the [`LiftToHigh`] lowering.
-/// [`ResolveAliasesPass`] runs once up front — no later pass creates a
-/// *used* alias (trivial-phi tombstones are born use-free). The
-/// remaining de-cluttering passes form a fixpoint group because they
-/// enable each other: threading removes predecessors, which makes more
-/// phis trivial; pruning empties parameter lists, which unlocks chain
-/// merges; the dead sweep removes orphaned blocks' edges, which
-/// un-blocks both. See the [`declutter`] module docs for the
-/// termination measure. `--raw` CLI paths skip this pipeline entirely,
-/// preserving the pristine post-waffle view.
+///
+/// Every pass is inside one fixpoint group, because they enable each
+/// other: threading removes predecessors, which makes more phis trivial;
+/// pruning empties parameter lists, which unlocks chain merges; the dead
+/// sweep removes orphaned blocks' edges, which un-blocks both; removing an
+/// unread parameter drops the arguments feeding it, which can make the
+/// values behind them dead in turn; and stopping the frame escaping into a
+/// callee is what lets its slots promote.
+///
+/// Two orderings inside the group are load-bearing rather than
+/// stylistic:
+///
+/// - [`PruneDeadParamsPass`] follows [`PruneTrivialPhisPass`]. They remove
+///   disjoint kinds — the same parameter for different reasons — and the
+///   cheaper, far more common case going first leaves less for the
+///   fixpoint. Promotion depends on the pair *jointly*: it inserts a
+///   parameter in every reachable block and neither cleanup alone removes
+///   the surplus.
+/// - [`SretReturnPass`] precedes [`SlotPromotionPass`] — LLVM's
+///   SROA-then-mem2reg order. Escape is mem2reg's precondition, so the
+///   ABI change has to happen before the forwarding.
+///
+/// [`ResolveAliasesPass`] is **in** the group rather than once up front,
+/// which its own docs' rationale would otherwise allow: promotion retires
+/// each forwarded load into an alias tombstone whose readers still name
+/// it, and only a chased re-resolution fixes those. Leaving it outside
+/// produced a used-but-unscheduled value that surfaced two stages later as
+/// a region-validator `UseBeforeDef`. `tests/memory_staged.rs` locks both
+/// halves of that.
+///
+/// See the [`declutter`] module docs for the termination measure, which the
+/// two `memory` passes extend. `--raw` CLI paths skip this pipeline
+/// entirely, preserving the pristine post-waffle view.
 #[must_use]
 #[allow(clippy::single_range_in_vec_init)] // fixpoint group, not a range literal
 pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
@@ -106,31 +130,14 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
         vec![
             Box::new(ResolveAliasesPass),
             Box::new(PruneTrivialPhisPass),
+            Box::new(PruneDeadParamsPass),
             Box::new(ThreadTrivialJumpsPass),
             Box::new(MergeBlockChainsPass),
             Box::new(SweepDeadPass),
-            // `memory::SretReturnPass` and `memory::SlotPromotionPass`
-            // belong here, in this order, inside the fixpoint group — it is
-            // LLVM's documented SROA-then-mem2reg loop. Registering them
-            // also means widening the group to `0..7`: promotion creates
-            // *used* aliases, which is exactly what the note above says
-            // nobody does. `tests/memory_staged.rs` runs that pipeline and
-            // locks it valid corpus-wide.
-            //
-            // `marshalling::decode` now reads both shapes, so the elision
-            // survives the conversion and hello-add still compiles clean.
-            // Measured with them wired (`cargo check` errors): dex 314 ->
-            // 290, timelock 53 -> 52, hello-add 0 -> 0, against +2 each on
-            // the token family and attestation — net -27 corpus-wide.
-            //
-            // Still not registered, pending a decision on that trade. The
-            // known remainder is `marshalling::guard`: its `is_trap` gate
-            // wants the guarded arm to trap, and in the converted shape
-            // that arm is a value-returning early exit, so a
-            // provably-constant discriminant guard survives where it used
-            // to be elided. See the `memory::promote` module docs.
+            Box::new(SretReturnPass),
+            Box::new(SlotPromotionPass),
         ],
-        vec![1..5],
+        vec![0..8],
     )
 }
 

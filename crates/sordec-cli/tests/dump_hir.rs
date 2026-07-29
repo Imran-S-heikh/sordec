@@ -885,12 +885,20 @@ fn dump_hir_folds_single_use_pure_chains() {
     // bindings deliberately keep their own line + provenance note rather than
     // folding. Address arithmetic is the remaining mechanically-lowered case,
     // which is what this test is actually about.
+    //
+    // Matched by shape, not by value id. The ids here are whatever the
+    // lifted pipeline happens to allocate, so pinning them made this test
+    // fail on any pass that inserts a value — which is every pass — while
+    // the folding property it exists to check was still holding.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", TOKEN_V23])
         .assert()
         .success()
-        .stdout(predicate::str::contains("add (add v8, v2), v16"));
+        .stdout(
+            predicate::str::is_match(r"add \(add v\d+, v\d+\), v\d+")
+                .expect("a valid regex"),
+        );
 }
 
 #[test]

@@ -171,6 +171,9 @@ pub const VAL_COMPARE: &str = "val_compare";
 pub const DECLUTTER_ALIASES_RESOLVED: &str = "declutter_aliases_resolved";
 /// Trivial block parameters removed (Braun-style pruning).
 pub const DECLUTTER_PHIS_PRUNED: &str = "declutter_phis_pruned";
+/// Block parameters removed because nothing read them — the other half of
+/// "insert maximally, prune back"; see `declutter::prune_dead_params`.
+pub const DECLUTTER_DEAD_PARAMS_PRUNED: &str = "declutter_dead_params_pruned";
 /// Edges retargeted past empty forwarding blocks.
 pub const DECLUTTER_JUMPS_THREADED: &str = "declutter_jumps_threaded";
 /// Unconditional branches to empty return blocks turned into `Return`
@@ -418,6 +421,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         // Structuring section — de-cluttering (W3).
         DECLUTTER_ALIASES_RESOLVED,
         DECLUTTER_PHIS_PRUNED,
+        DECLUTTER_DEAD_PARAMS_PRUNED,
         DECLUTTER_JUMPS_THREADED,
         DECLUTTER_RETURNS_INLINED,
         DECLUTTER_TRAPS_INLINED,

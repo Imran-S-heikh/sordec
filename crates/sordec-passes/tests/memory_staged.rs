@@ -1,15 +1,11 @@
-//! Corpus lock for the staged shadow-stack passes.
+//! Corpus lock for the shadow-stack passes' pipeline preconditions.
 //!
-//! [`SretReturnPass`] and [`SlotPromotionPass`] are built and correct but
-//! deliberately absent from [`sordec_passes::default_lifted_pipeline`] —
-//! `sret` rewrites the Val-decode helper into a multi-value return, which
-//! is the exact shape `marshalling`'s elision matches on, so wiring them
-//! today costs hello-add its clean emission. See the `memory::promote`
-//! module docs.
-//!
-//! Nothing else in the suite runs them end-to-end, so without this file
-//! the pair could rot unnoticed while it waits. These tests pin the two
-//! properties that were expensive to establish:
+//! [`SretReturnPass`] and [`SlotPromotionPass`] are now registered in
+//! [`sordec_passes::default_lifted_pipeline`], so the corpus tests cover
+//! their *output*. What those tests cannot cover is the pipeline shape the
+//! pair depends on, because the default pipeline has it by construction —
+//! and it was expensive to establish, so it is pinned here explicitly
+//! against a pipeline this file builds itself:
 //!
 //! 1. The pair produces a valid module — matched block-parameter arity,
 //!    `validate_lifted`, and `validate_high` both after lowering and
@@ -35,8 +31,8 @@ use sordec_ir::{
 };
 use sordec_passes::{
     default_high_pipeline, for_each_target, lift_with_waffle, metrics_catalog as mc, LiftToHigh,
-    LoweringStep, MergeBlockChainsPass, Pass, Pipeline, PruneTrivialPhisPass, ResolveAliasesPass,
-    SlotPromotionPass, SretReturnPass, SweepDeadPass, ThreadTrivialJumpsPass,
+    LoweringStep, MergeBlockChainsPass, Pass, Pipeline, PruneDeadParamsPass, PruneTrivialPhisPass,
+    ResolveAliasesPass, SlotPromotionPass, SretReturnPass, SweepDeadPass, ThreadTrivialJumpsPass,
 };
 
 use common::FIXTURES;
@@ -52,13 +48,14 @@ fn staged_pipeline(resolve_inside: bool) -> Pipeline<LiftedIr> {
     let passes: Vec<Box<dyn Pass<LiftedIr>>> = vec![
         Box::new(ResolveAliasesPass),
         Box::new(PruneTrivialPhisPass),
+        Box::new(PruneDeadParamsPass),
         Box::new(ThreadTrivialJumpsPass),
         Box::new(MergeBlockChainsPass),
         Box::new(SweepDeadPass),
         Box::new(SretReturnPass),
         Box::new(SlotPromotionPass),
     ];
-    let group = if resolve_inside { 0..7 } else { 1..7 };
+    let group = if resolve_inside { 0..8 } else { 1..8 };
     Pipeline::new(passes, vec![group])
 }
 

@@ -73,39 +73,36 @@
 //!
 //! `tests/memory_staged.rs` locks both halves of this.
 //!
-//! ## NOT YET WIRED — measured, and awaiting a decision
+//! ## Wired — and what it took
 //!
-//! With the grouping above, this pass and [`super::sret`] validate across
-//! the whole corpus and structure cleanly, and
-//! [`crate::marshalling::decode`] now recognizes the multi-value shape
-//! `sret` converts helpers into — so the argument-decode elision survives
-//! the conversion and hello-add still compiles clean.
+//! Registered in [`crate::default_lifted_pipeline`], after
+//! [`super::sret`]. Three things had to be true first, and each was a
+//! separate discovery:
 //!
-//! Measured with the pair wired, `cargo check` errors per fixture:
+//! 1. `ResolveAliasesPass` moved inside the fixpoint group (above).
+//! 2. [`crate::marshalling::decode`] learned the multi-value shape
+//!    `sret` converts decode helpers into. Without that the SDK glue
+//!    stopped being elided and came back as emitted code.
+//! 3. [`crate::PruneDeadParamsPass`] had to exist. "Insert maximally,
+//!    prune back" needs *two* cleanups, and only the trivial-phi half
+//!    was present — see that module for the chain a single unread
+//!    parameter was holding up.
+//!
+//! Measured `cargo check` errors per fixture, before and after:
 //!
 //! ```text
 //! hello-add             0 →   0        token-v22           125 → 127
 //! timelock             53 →  52        token-v23           125 → 127
-//! dex-liquidity-pool  314 → 290        token-v23-stripped  111 → 113
-//! attestation           8 →  10
-//!                                      corpus total  736 → 709  (-27)
+//! dex-liquidity-pool  314 → 226        token-v23-stripped  111 → 113
+//! attestation           8 →   8
+//!                                      corpus total  736 → 653  (-83)
 //! ```
 //!
 //! dex is where the memory traffic was, and it is the fixture furthest
-//! from compiling. The `+2`s are churn inside the same type-mismatch
-//! families that already dominate those fixtures, not a new failure mode.
-//!
-//! The known remainder is [`crate::marshalling::guard`]. Its `collect`
-//! requires the guarded arm to be a trap, which is the right gate for a
-//! *tag check* whose condition is not constant. The decode-result guard is
-//! different: `classify_condition` has already proved both sides constant
-//! and the branch not taken, so the arm is dead whatever it contains. In
-//! the converted shape that arm is a value-returning early exit rather
-//! than a trap, so the guard now survives where it used to be elided —
-//! visible on hello-add as a `v8 == v9` over two literals. Relaxing the
-//! trap requirement for the constant-discriminant case only is the next
-//! step, and it is a change to an elision safety gate, so it wants its own
-//! review rather than riding along here.
+//! from compiling. The `+2` on the token family is churn inside the
+//! type-mismatch families that already dominate those three fixtures —
+//! same error kinds, slightly different proportions — not a new failure
+//! mode. Corpus-wide 52 slots promote across 7 fixtures.
 //!
 //! ## What it deliberately leaves behind
 //!

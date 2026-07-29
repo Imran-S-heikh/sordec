@@ -40,7 +40,7 @@ use sordec_common::{BlockId, ValueId};
 use sordec_ir::{LiftedFunction, LiftedIr, LiftedValueDef};
 
 use crate::dataflow::{for_each_target, CfgFacts};
-use crate::declutter::{for_each_target_mut, rewrite_uses};
+use crate::declutter::rewrite_uses;
 use crate::pass::{Pass, PassResult};
 
 /// Unique pipeline name of this pass.
@@ -174,40 +174,7 @@ fn prune_function(func: &mut LiftedFunction) -> u64 {
         }
     }
 
-    for (_id, block) in func.blocks.iter_mut() {
-        for_each_target_mut(&mut block.terminator, |target| {
-            if let Some(mask) = masks.get(&target.block) {
-                let mut position = 0;
-                target.args.retain(|_| {
-                    let keep = mask.get(position).copied().unwrap_or(true);
-                    position += 1;
-                    keep
-                });
-            }
-        });
-    }
-
-    for (&block_id, mask) in &masks {
-        let block = func
-            .blocks
-            .get_mut(block_id)
-            .expect("mask keys come from the block arena");
-        let mut position = 0;
-        block.params.retain(|_| {
-            let keep = mask.get(position).copied().unwrap_or(true);
-            position += 1;
-            keep
-        });
-        // Renumber survivors' BlockParam defs to their new positions.
-        for (index, &param) in block.params.clone().iter().enumerate() {
-            if let Some(value) = func.values.get_mut(param) {
-                value.def = LiftedValueDef::BlockParam {
-                    block: block_id,
-                    index: index as u32,
-                };
-            }
-        }
-    }
+    super::drop_params(func, &masks);
 
     // Tombstones: pruned params become use-free aliases of their
     // replacement.

@@ -35,7 +35,18 @@
 //! fixture count suggests: 18 functions across the corpus, 13 of them in
 //! `dex-liquidity-pool`, which is the fixture furthest from compiling.
 //!
-//! ## NOT YET WIRED — the dominance gate is missing
+//! ## SUPERSEDED — use `memory::sret` + `memory::promote`
+//!
+//! [`crate::SretReturnPass`] and [`crate::SlotPromotionPass`] are now
+//! registered in [`crate::default_lifted_pipeline`] and do this job at the
+//! lifted layer, where the soundness bug described below does not arise:
+//! `sret` changes only the ABI and leaves the caller's stores where the
+//! call was, and `promote` forwards them away with mem2reg, which *inserts
+//! a phi* at a merge rather than declining. This pass is retained for its
+//! tests and its account of the problem, not as a staged alternative —
+//! wiring it now would double-convert what the lifted pair already did.
+//!
+//! ## The dominance gate this pass is missing
 //!
 //! This pass is complete and tested but deliberately absent from
 //! [`crate::default_high_pipeline`], because switching it on measured

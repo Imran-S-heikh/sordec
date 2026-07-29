@@ -36,41 +36,33 @@
 //! mem2reg's precondition, so the ABI change has to happen first and the
 //! forwarding second.
 //!
-//! ## NOT YET WIRED — it needs [`super::promote`] to be a win
+//! ## Wired, after two reasons were discharged
 //!
-//! Measured with this pass alone in the pipeline, every fixture regressed:
-//! hello-add 0 → 6 `cargo check` errors, attestation 8 → 13, timelock
-//! 53 → 54, token-v23 125 → 147, dex 314 → 416. That is not a defect in
-//! the pass — it is what the design above predicts, for two reasons:
+//! Measured with this pass alone in the pipeline, every fixture
+//! regressed: hello-add 0 → 6 `cargo check` errors, attestation 8 → 13,
+//! timelock 53 → 54, token-v23 125 → 147, dex 314 → 416. That was never a
+//! defect in the pass — it is what the design above predicts, for two
+//! reasons, and both are now addressed:
 //!
 //! 1. It **moves** the out-parameter stores from callee to caller rather
 //!    than removing them, and the backend renders a raw store as a hole.
-//!    Forwarding them away is [`super::promote`]'s job.
+//!    Forwarding them away is [`super::promote`]'s job, and the two are
+//!    registered together.
 //! 2. It supersedes [`crate::marshalling::decode`] for every function it
-//!    converts — that pass recognises an *out-parameter* shape, which no
-//!    longer exists once this one has run — without yet replacing the
-//!    caller-side value forwarding decode was doing. hello-add's decode
-//!    collapse reverts wholesale.
+//!    converts — that pass recognised an *out-parameter* shape, which no
+//!    longer exists once this one has run. `decode` now reads both
+//!    shapes, so the caller-side collapse survives the conversion. On
+//!    hello-add the elision fires exactly as it did before.
 //!
-//! So this and `promote` land together, and retiring the HighIr
-//! marshalling passes they supersede is part of that landing rather than a
-//! follow-up.
+//! The pair lands at −83 `cargo check` errors corpus-wide; see
+//! [`super::promote`] for the per-fixture table.
 //!
-//! Measured with the pair wired (`tests/memory_staged.rs` runs exactly
-//! that pipeline): reason 1 is discharged — the module validates and
-//! structures across the corpus. Reason 2 is not, and promotion cannot
-//! discharge it. On hello-add the caller-side traffic that survives is the
-//! `Result` discriminant, stored as `i64` and read back as `i32`, which
-//! [`super::promote`]'s width/type gate correctly declines as a
-//! reinterpretation. The remaining work is therefore on the recognizer —
-//! teach `marshalling` the multi-value call shape, or run the elision
-//! before this pass transforms it away — not on either pass here.
-//!
-//! **Reason 2 is now discharged too.** [`crate::marshalling::decode`]
-//! recognizes both shapes: it classifies the converted helper from its
-//! return components and collapses the caller's `Project`s, including the
-//! write-back this pass deliberately leaves behind. What remains before
-//! wiring is the measurement, not a defect.
+//! [`crate::marshalling::wide_return`] is the pass this supersedes
+//! outright. It reconstructs the same wide returns at the HighIr layer but
+//! stayed unwired because its caller-side forwarding has no dominance
+//! gate — the bug this split (ABI change here, forwarding in `promote`,
+//! which inserts a phi) exists to avoid. It is now dead weight rather
+//! than a staged alternative.
 //!
 //! ## Gates
 //!

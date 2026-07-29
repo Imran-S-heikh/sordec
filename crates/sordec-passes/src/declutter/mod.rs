@@ -27,8 +27,29 @@
 //! from them is an honest `changed` flag and a termination measure.
 //! Every pass here strictly decreases the tuple
 //! `(reachable blocks, CFG edges, scheduled instructions, block
-//! params)` or reports `changed: false`, so the
-//! [`crate::default_lifted_pipeline`] fixpoint group terminates.
+//! params)` or reports `changed: false`.
+//!
+//! Two passes in [`crate::default_lifted_pipeline`]'s fixpoint group are
+//! not from this module and do **not** decrease that tuple, so the group
+//! terminates on a lexicographic extension of it:
+//!
+//! - [`crate::SlotPromotionPass`] *increases* block params and scheduled
+//!   instructions — that is its whole method (a parameter in every
+//!   reachable block, plus an initial constant). It strictly decreases
+//!   **the number of promotable frame slots**: promoting one retires
+//!   every load and store that made it promotable, so `discover` cannot
+//!   see it again. Its `second_run_reports_no_work` test is that
+//!   property stated as a test.
+//! - [`ResolveAliasesPass`] moves nothing at all, so it decreases no
+//!   component of the tuple. It strictly decreases **the number of
+//!   alias uses**, which is bounded and which nothing in the group
+//!   increases except promotion — and promotion creates finitely many
+//!   per slot it retires.
+//!
+//! Ordering the extended measure as `(promotable slots, alias uses, the
+//! four original components)` gives a well-founded descent for the whole
+//! group: promotion is the only pass that raises the later components,
+//! and it strictly lowers the first.
 //!
 //! ## Tombstones, not compaction
 //!
@@ -41,19 +62,80 @@
 //! across the whole pipeline for diffable dumps.
 
 mod merge_chains;
+mod prune_dead_params;
 mod prune_phis;
 mod resolve_aliases;
 mod sweep_dead;
 mod thread_jumps;
 
 pub use merge_chains::MergeBlockChainsPass;
+pub use prune_dead_params::PruneDeadParamsPass;
 pub use prune_phis::PruneTrivialPhisPass;
 pub use resolve_aliases::ResolveAliasesPass;
 pub use sweep_dead::SweepDeadPass;
 pub use thread_jumps::ThreadTrivialJumpsPass;
 
-use sordec_common::ValueId;
+use std::collections::HashMap;
+
+use sordec_common::{BlockId, ValueId};
 use sordec_ir::{BlockTarget, LiftedFunction, LiftedTerminator, LiftedValueDef};
+
+/// Drop the block parameters a per-block keep-mask marks `false`, and the
+/// matching positional argument from every edge into those blocks.
+///
+/// Shared by [`PruneTrivialPhisPass`] and [`PruneDeadParamsPass`], which
+/// disagree about *which* parameters to remove but must perform the
+/// removal identically — parameters and edge arguments are matched
+/// positionally, so a discrepancy between the two would corrupt every
+/// parameter after the dropped one.
+///
+/// Three things happen, in this order:
+///
+/// 1. **Every terminator** is swept, including those of *unreachable*
+///    predecessors. They never execute, but their argument lists still
+///    have to match the arity of the block they name.
+/// 2. Each masked block's parameter list is filtered.
+/// 3. Survivors' [`LiftedValueDef::BlockParam`] `index` fields are
+///    renumbered to their new positions.
+///
+/// The removed parameters' own defs are left to the caller: the two
+/// passes leave different residue, because one has a replacement value to
+/// point at and the other does not.
+pub(crate) fn drop_params(func: &mut LiftedFunction, masks: &HashMap<BlockId, Vec<bool>>) {
+    for (_id, block) in func.blocks.iter_mut() {
+        for_each_target_mut(&mut block.terminator, |target| {
+            if let Some(mask) = masks.get(&target.block) {
+                let mut position = 0;
+                target.args.retain(|_| {
+                    let keep = mask.get(position).copied().unwrap_or(true);
+                    position += 1;
+                    keep
+                });
+            }
+        });
+    }
+
+    for (&block_id, mask) in masks {
+        let Some(block) = func.blocks.get_mut(block_id) else {
+            continue;
+        };
+        let mut position = 0;
+        block.params.retain(|_| {
+            let keep = mask.get(position).copied().unwrap_or(true);
+            position += 1;
+            keep
+        });
+        // Renumber survivors' BlockParam defs to their new positions.
+        for (index, &param) in block.params.clone().iter().enumerate() {
+            if let Some(value) = func.values.get_mut(param) {
+                value.def = LiftedValueDef::BlockParam {
+                    block: block_id,
+                    index: index as u32,
+                };
+            }
+        }
+    }
+}
 
 /// Visit every [`BlockTarget`] of a terminator mutably.
 ///
