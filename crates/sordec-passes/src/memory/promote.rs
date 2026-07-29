@@ -47,36 +47,49 @@
 //!   value is provably unobserved, which is what makes materialising a zero
 //!   for it sound rather than a guess.
 //!
-//! ## NOT YET WIRED — one edge argument is mis-placed
+//! ## This pass creates *used* aliases — resolution must run after it
 //!
-//! The analysis is right and the transform is nearly right, but wiring
-//! this pass breaks four of five fixtures with `UseBeforeDef` from the
-//! region validator, so it stays out of the pipeline.
+//! [`crate::default_lifted_pipeline`] documents the invariant that
+//! [`crate::ResolveAliasesPass`] runs once up front because "no later
+//! pass creates a *used* alias". **This pass breaks that invariant.**
+//! The rewrite walk below retires each forwarded load from its block and
+//! leaves an `Alias` tombstone behind, but the load's readers still name
+//! it — so the alias is used, and with resolution stranded at the head of
+//! the pipeline nothing ever rewires them.
 //!
-//! Exact reproduction, hello-add `func_1` after `sret` + promotion of the
-//! slot at offset 8:
+//! The result is a value that is used but scheduled nowhere. The lifted
+//! IR still validates (reference integrity is intact), so the damage
+//! surfaces two stages later: lowering renders it as a `Use` binding no
+//! block schedules, and the region validator's emission-order dominance
+//! walk reports `UseBeforeDef` at whichever refinement pass calls
+//! `debug_validate` first — `refine-polarity`, which is not the culprit.
 //!
-//! ```text
-//! v58 = pick1 v7
-//! branch_if v10 → bb3(v58), else bb4      ← bb4 gets no argument
-//! …
-//! bb3(v62: i64):                          ← bb3 got the new parameter
-//! ```
+//! So wiring this pass requires moving `ResolveAliasesPass` **inside**
+//! the fixpoint group. Chasing is load-bearing, not incidental:
+//! `promote` runs once per slot from a slot list discovered before any
+//! promotion, so a store into slot 2 whose value is slot 1's
+//! already-retired load names a stale alias id. `resolve_function`
+//! follows those chains; a one-shot rewrite here would not.
 //!
-//! Both successors are reachable and both should have received the new
-//! parameter, so both edges should carry an argument. One did not, and a
-//! parameter list that does not match its in-edges is exactly what the
-//! validator reports downstream.
+//! `tests/memory_staged.rs` locks both halves of this.
 //!
-//! The wiring loop only pushes an argument when the *target* is in
-//! `parameterised`, which is the right rule — arguments are positional, so
-//! an argument to a block with no new parameter would shift every
-//! parameter after it. The open question is why `bb4` is missing from that
-//! set despite being reachable. Two candidates worth checking first: the
-//! pass runs repeatedly inside the fixpoint group while the CFG is being
-//! rewritten around it by the de-cluttering passes, so `cfg` may describe
-//! a shape that no longer holds; and `promote` is called once per slot
-//! from a `reachable` list computed before any of them ran.
+//! ## NOT YET WIRED — `sret` collides with the marshalling elision
+//!
+//! With the grouping above, this pass and [`super::sret`] validate
+//! across the whole corpus and structure cleanly. They stay out of the
+//! pipeline for an unrelated reason, measured on hello-add:
+//! [`super::sret`] rewrites the `Val`-decode helper into a multi-value
+//! return, which is the exact shape
+//! [`crate::marshalling`]'s elision matches on. The elision stops firing,
+//! the helper is emitted instead of removed, and the argument decode
+//! turns back into `todo!("memory load")` — hello-add regresses from a
+//! clean body to one that does not compile. Promotion cannot rescue it
+//! either: the `Result` discriminant is stored as `i64` and read back as
+//! `i32`, which `discover` correctly declines as a reinterpretation.
+//!
+//! The unblocking work is on the recognizer, not here: teach
+//! `marshalling` the multi-value call shape, or run the elision before
+//! `sret` transforms it away.
 //!
 //! ## What it deliberately leaves behind
 //!

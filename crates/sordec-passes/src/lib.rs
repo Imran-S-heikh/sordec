@@ -111,9 +111,17 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
             Box::new(SweepDeadPass),
             // `memory::SretReturnPass` and `memory::SlotPromotionPass`
             // belong here, in this order, inside the fixpoint group — it is
-            // LLVM's documented SROA-then-mem2reg loop. Not registered yet:
-            // promotion still mis-wires one edge argument. See the module
-            // docs for the exact reproduction.
+            // LLVM's documented SROA-then-mem2reg loop. Registering them
+            // also means widening the group to `0..7`: promotion creates
+            // *used* aliases, which is exactly what the note above says
+            // nobody does. `tests/memory_staged.rs` runs that pipeline and
+            // locks it valid corpus-wide.
+            //
+            // Not registered yet, and not because of a defect in either
+            // pass: `sret` rewrites the Val-decode helper into a
+            // multi-value return, which is the shape `marshalling`'s
+            // elision matches on, so wiring them today costs hello-add its
+            // clean emission. See the `memory::promote` module docs.
         ],
         vec![1..5],
     )

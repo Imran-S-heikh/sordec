@@ -14,6 +14,13 @@
 //! later *creates* aliases as tombstones for pruned params, but those
 //! are born use-free: nothing ever needs re-resolution, which is why
 //! this pass runs once outside the declutter fixpoint group.
+//!
+//! That placement is a claim about the passes currently registered, not
+//! a property of alias resolution. [`crate::SlotPromotionPass`] retires
+//! forwarded loads into tombstones whose readers still name them —
+//! *used* aliases — so this pass must move inside the fixpoint group on
+//! the day that one is wired. See its module docs for what an
+//! unresolved used alias costs downstream.
 
 use sordec_common::{IrId, ValueId};
 use sordec_ir::{LiftedFunction, LiftedIr, LiftedValueDef};

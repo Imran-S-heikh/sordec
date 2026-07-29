@@ -56,6 +56,16 @@
 //! marshalling passes they supersede is part of that landing rather than a
 //! follow-up.
 //!
+//! Measured with the pair wired (`tests/memory_staged.rs` runs exactly
+//! that pipeline): reason 1 is discharged — the module validates and
+//! structures across the corpus. Reason 2 is not, and promotion cannot
+//! discharge it. On hello-add the caller-side traffic that survives is the
+//! `Result` discriminant, stored as `i64` and read back as `i32`, which
+//! [`super::promote`]'s width/type gate correctly declines as a
+//! reinterpretation. The remaining work is therefore on the recognizer —
+//! teach `marshalling` the multi-value call shape, or run the elision
+//! before this pass transforms it away — not on either pass here.
+//!
 //! ## Gates
 //!
 //! Each declines rather than approximating:
