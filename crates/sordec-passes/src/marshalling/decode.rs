@@ -383,12 +383,22 @@ fn discriminant_component(func: &HighFunction, shape: &sret::ReturnShape) -> Opt
 }
 
 /// Whether every arm of `value` resolves to `0` or `1`.
+///
+/// **An empty arm set is not evidence.** `arms_of` returns `Some(vec![])`
+/// for a zero-incoming phi, which is what an entrypoint parameter is at
+/// this layer, and `[].iter().all(..)` is vacuously `true`. That made a
+/// parameter indistinguishable from a discriminant, so
+/// [`discriminant_and_payload`] saw `(true, true)` and declined every
+/// helper whose payload slot holds its own `Val` argument unchanged —
+/// exactly the `BytesN<N>::try_from_val` shape, which validates and passes
+/// through rather than unwrapping. `attestation`'s `func_2`, shared by
+/// `attest.signer` and `check.claimed`, is the witness.
 fn all_arms_are_flags(func: &HighFunction, value: ValueId) -> bool {
     match arms_of(func, value) {
-        Some(values) => values
+        Some(values) if !values.is_empty() => values
             .iter()
             .all(|v| matches!(trace_int(func, *v), Some(0 | 1))),
-        None => false,
+        _ => false,
     }
 }
 
@@ -762,12 +772,12 @@ fn on_call(
     let Some(declared) = declared_param_type(func, actual) else {
         return (invalidate, Claimed::None);
     };
-    // Every tag the helper tests must denote the declared type.
-    if !helper
-        .tags
-        .iter()
-        .all(|t| val_abi::tag_payload_type(*t).as_ref() == Some(&declared))
-    {
+    // Every tag the helper tests must be able to *carry* the declared
+    // type. `tag_carries` rather than `tag_payload_type == declared`: a
+    // `BytesN<N>` argument arrives in a plain `BytesObject`, so the tag
+    // denotes `Bytes` while the declaration says `BytesN(N)`, and equality
+    // would reject a helper that agrees with us perfectly.
+    if !helper.tags.iter().all(|t| val_abi::tag_carries(*t, &declared)) {
         return (invalidate, Claimed::None);
     }
     let act = Active {
