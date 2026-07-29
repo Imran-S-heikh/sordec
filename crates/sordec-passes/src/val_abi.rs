@@ -62,6 +62,23 @@ pub const MAJOR_BITS: u32 = 32;
 /// Number of minor bits (lower portion of the body; bits 8-31).
 pub const MINOR_BITS: u32 = 24;
 
+/// Bit position where the major field starts — the shift a `U32Val` /
+/// `I32Val` payload is packed by, and the one an unpack undoes.
+///
+/// Derived rather than written as `32` so it cannot drift from
+/// [`TAG_BITS`] and [`MINOR_BITS`]; the coincidence that it equals
+/// [`MAJOR_BITS`] is not something to lean on.
+pub const MAJOR_SHIFT: u32 = TAG_BITS + MINOR_BITS;
+
+/// Mask selecting the major field alone (bits 32-63), clearing both the
+/// tag byte and the minor field.
+///
+/// This is the constant rustc materialises when it compares a
+/// `U32Val`'s payload without shifting it down first — `x & MAJOR_MASK ==
+/// k << MAJOR_SHIFT` in place of `x >> MAJOR_SHIFT == k`. See
+/// `recognizers::val_packed_compare`, which reverses that choice.
+pub const MAJOR_MASK: u64 = !0u64 << MAJOR_SHIFT;
+
 /// Largest u64 representable inline in a small Val (2^56 − 1).
 pub const MAX_SMALL_U64: u64 = (1u64 << BODY_BITS) - 1;
 /// Largest i64 representable inline (2^55 − 1).
@@ -264,6 +281,67 @@ pub fn object_tag_payload_type(tag: u8) -> Option<KnownType> {
 #[must_use]
 pub fn tag_payload_type(tag: u8) -> Option<KnownType> {
     small_tag_payload_type(tag).or_else(|| object_tag_payload_type(tag))
+}
+
+/// The `u32` a constant `U32Val` carries, or `None` when `bits` is not a
+/// small `U32Val`.
+///
+/// A `U32Val` packs `tag = bits[0..8] ==` [`TAG_U32_VAL`] with the payload
+/// in the major field and a zero minor; this returns that payload. Shared
+/// rather than re-derived: `dataflow::trace_bytes` and
+/// `dataflow::const_prop` each grew a private copy of exactly this
+/// arithmetic, and `recognizers::val_packed_compare` would have been a
+/// third.
+#[must_use]
+pub fn decode_u32val(bits: u64) -> Option<u32> {
+    if (bits & TAG_MASK) != u64::from(TAG_U32_VAL) {
+        return None;
+    }
+    // The payload occupies the top `MAJOR_BITS` (32); `as u32` keeps
+    // exactly it.
+    Some((bits >> MAJOR_SHIFT) as u32)
+}
+
+/// Whether a Val carrying `tag` can be a value of declared type
+/// `declared` — the ABI *carrier* relation, which is weaker than
+/// [`tag_payload_type`] equality and is what a marshalling gate wants.
+///
+/// [`tag_payload_type`] answers "what type does this tag denote", and it
+/// answers with the widest type the tag can hold, because a tag byte is
+/// all it is given. That makes it the wrong question for a gate asking
+/// "does this tag check agree with what `contractspecv0` declares": a
+/// `BytesN<32>` parameter travels the host boundary as a plain
+/// `BytesObject`, so the tag denotes `Bytes` while the declaration says
+/// `BytesN(32)` and a `==` comparison reports a disagreement that does
+/// not exist.
+///
+/// The fix belongs here rather than in the tag table. A tag byte carries
+/// no length, so `object_tag_payload_type` has nothing to return an `N`
+/// from; the refinement is only knowable from the *declaration*, which is
+/// exactly what this function is handed.
+///
+/// Refinements accepted, and why each is a fact about the encoding rather
+/// than a convenience:
+///
+/// - `BytesN<N>` under [`TAG_BYTES_OBJECT`] — `BytesN<N>` has no
+///   encoding of its own. The SDK's `TryFromVal` for it is
+///   `Bytes::try_from_val` followed by a length test, so the *tag* it
+///   accepts is precisely `BytesObject`.
+///
+/// Everything else defers to [`tag_payload_type`] equality. Notably
+/// absent: `Vec`/`Map`/`Tuple`/`UserDefined` under `VecObject`/
+/// `MapObject`. Those refinements are equally real, but no corpus fixture
+/// witnesses one, and each accepted refinement widens what a marshalling
+/// pass is allowed to delete. They join when something exercises them.
+#[must_use]
+pub fn tag_carries(tag: u8, declared: &KnownType) -> bool {
+    if tag_payload_type(tag).as_ref() == Some(declared) {
+        return true;
+    }
+    matches!(
+        (tag, declared),
+        (TAG_BYTES_OBJECT, KnownType::BytesN(_))
+    )
 }
 
 /// `ScErrorType::Contract` — the error type carried by a user
@@ -1257,6 +1335,74 @@ mod tests {
         assert_eq!(MAX_SMALL_U64, 72_057_594_037_927_935); // 2^56 - 1 (seen in corpus)
         assert_eq!(MAX_SMALL_I64, 36_028_797_018_963_967); // 2^55 - 1
         assert_eq!(MIN_SMALL_I64, -36_028_797_018_963_968); // -2^55
+    }
+
+    #[test]
+    fn major_field_constants_match_the_layout() {
+        assert_eq!(MAJOR_SHIFT, 32);
+        assert_eq!(MAJOR_MASK, 0xFFFF_FFFF_0000_0000);
+        // The two decimal spellings the corpus actually contains, as they
+        // appear in emitted Rust: the mask as a negative i64, and a packed
+        // length bound.
+        assert_eq!(MAJOR_MASK as i64, -4_294_967_296);
+        assert_eq!(64u64 << MAJOR_SHIFT, 274_877_906_944);
+        assert_eq!(32u64 << MAJOR_SHIFT, 137_438_953_472);
+        assert_eq!(1u64 << MAJOR_SHIFT, 4_294_967_296);
+    }
+
+    #[test]
+    fn u32val_decodes_only_under_its_own_tag() {
+        // `U32Val(18)` — the `Symbol::new` length argument in the
+        // attestation fixture, which is where this decimal comes from.
+        assert_eq!(decode_u32val(77_309_411_332), Some(18));
+        assert_eq!(decode_u32val(u64::from(TAG_U32_VAL)), Some(0));
+        assert_eq!(
+            decode_u32val((u64::from(u32::MAX) << MAJOR_SHIFT) | u64::from(TAG_U32_VAL)),
+            Some(u32::MAX)
+        );
+        // A U64Small carrying the same major must not decode as a u32.
+        assert_eq!(decode_u32val((18u64 << MAJOR_SHIFT) | u64::from(TAG_U64_SMALL)), None);
+        assert_eq!(decode_u32val(0), None, "tag Void is not U32Val");
+    }
+
+    #[test]
+    fn tag_carries_accepts_a_bytes_object_for_a_declared_bytes_n() {
+        // The relation this function exists for: `BytesN<N>` has no
+        // encoding of its own and rides in a plain `BytesObject`, so a
+        // `==` against `tag_payload_type` reports a disagreement that is
+        // not real. Both corpus widths.
+        assert!(tag_carries(TAG_BYTES_OBJECT, &KnownType::BytesN(32)));
+        assert!(tag_carries(TAG_BYTES_OBJECT, &KnownType::BytesN(64)));
+        // The un-refined case still works.
+        assert!(tag_carries(TAG_BYTES_OBJECT, &KnownType::Bytes));
+    }
+
+    #[test]
+    fn tag_carries_still_rejects_a_genuine_disagreement() {
+        // The whole value of the gate is that a mismatch means our
+        // picture is wrong. Widening must not cost that.
+        assert!(!tag_carries(TAG_BYTES_OBJECT, &KnownType::Address));
+        assert!(!tag_carries(TAG_BYTES_OBJECT, &KnownType::U64));
+        assert!(!tag_carries(TAG_ADDRESS_OBJECT, &KnownType::BytesN(32)));
+        assert!(!tag_carries(TAG_STRING_OBJECT, &KnownType::BytesN(32)));
+        // Deliberately not (yet) accepted — no fixture witnesses them, and
+        // each refinement widens what a marshalling pass may delete.
+        assert!(!tag_carries(TAG_VEC_OBJECT, &KnownType::Vec(Box::new(IrType::Known(
+            KnownType::U32
+        )))));
+    }
+
+    #[test]
+    fn tag_carries_agrees_with_tag_payload_type_on_every_valid_tag() {
+        // Pin that the refinement is exactly one pair wide. Any future
+        // arm added to `tag_carries` has to update this test, which is
+        // the point: the accepted set is reviewable in one place.
+        for tag in 0u8..=255 {
+            let Some(denoted) = tag_payload_type(tag) else {
+                continue;
+            };
+            assert!(tag_carries(tag, &denoted), "tag {tag} must carry what it denotes");
+        }
     }
 
     #[test]

@@ -33,7 +33,7 @@ use sordec_ir::{
 };
 
 use super::high::{resolve_use, trace_int};
-use crate::val_abi::{TAG_MASK, TAG_U32_VAL};
+use crate::val_abi::decode_u32val;
 
 /// Depth cap for peeling chained width conversions ahead of a constant.
 /// Conversion chains in real code are one deep (the `i32 -> i64` extend
@@ -115,19 +115,6 @@ fn conversion_operand(func: &HighFunction, id: ValueId) -> Option<ValueId> {
     }
 }
 
-/// Decode a raw 64-bit `Val` as a `U32Val`: verify the tag byte and
-/// extract the `u32` from the major word. `None` if the tag is not
-/// `U32Val`.
-fn decode_u32val(bits: u64) -> Option<u32> {
-    if (bits & TAG_MASK) == u64::from(TAG_U32_VAL) {
-        // The u32 lives in the major (bits 32-63); the shift result is
-        // ≤ u32::MAX, so the cast is exact.
-        Some((bits >> 32) as u32)
-    } else {
-        None
-    }
-}
-
 /// Resolve a `(pointer, length)` pair to the constant bytes it names, if
 /// both operands are locally-provable `U32Val` constants and a single
 /// active data segment covers `[pointer, pointer + length)`.
@@ -154,6 +141,7 @@ pub fn trace_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::val_abi::TAG_U32_VAL;
     use sordec_common::{Arena, BlockId, FuncId, Provenance, ProvenanceSource, UnknownReason};
     use sordec_ir::{Binding, DataSegment, HighBlock, IrType, Region};
 

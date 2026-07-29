@@ -53,7 +53,7 @@ use sordec_common::{FuncId, IrId, ValueId};
 use sordec_ir::{Expr, HighFunction, HighIr, KnownOp, KnownType, Literal, SemanticOp, WasmOpcodeKind};
 
 use super::high::resolve_use;
-use crate::val_abi::{decode_small_symbol, TAG_MASK, TAG_U32_VAL};
+use crate::val_abi::{decode_small_symbol, decode_u32val};
 
 /// Defensive recursion bound for [`Resolver`] walks, mirroring
 /// [`DEFAULT_MAX_DEPTH`](super::DEFAULT_MAX_DEPTH). Cycles are handled
@@ -547,8 +547,8 @@ fn decode_terminal_literal(lit: &Literal, flavor: Flavor) -> Option<Literal> {
         },
         Flavor::U32Val => match lit {
             // 64-bit literals are raw Vals: tag-check then decode.
-            Literal::I64(bits) => decode_u32val_bits(*bits as u64).map(Literal::U32),
-            Literal::U64(bits) => decode_u32val_bits(*bits).map(Literal::U32),
+            Literal::I64(bits) => decode_u32val(*bits as u64).map(Literal::U32),
+            Literal::U64(bits) => decode_u32val(*bits).map(Literal::U32),
             // 32-bit literals are bare (unwrapped) offsets.
             Literal::U32(n) => Some(Literal::U32(*n)),
             Literal::I32(n) => u32::try_from(*n).ok().map(Literal::U32),
@@ -565,16 +565,6 @@ fn decode_terminal_literal(lit: &Literal, flavor: Flavor) -> Option<Literal> {
     }
 }
 
-/// Decode a raw 64-bit `Val` as a `U32Val` (tag byte 4; payload in the
-/// major word). `None` on any other tag.
-fn decode_u32val_bits(bits: u64) -> Option<u32> {
-    if (bits & TAG_MASK) == u64::from(TAG_U32_VAL) {
-        Some((bits >> 32) as u32)
-    } else {
-        None
-    }
-}
-
 // ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
@@ -582,6 +572,7 @@ fn decode_u32val_bits(bits: u64) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::val_abi::TAG_U32_VAL;
     use sordec_common::{Arena, BlockId, Provenance, ProvenanceSource, UnknownReason};
     use sordec_ir::{
         Binding, DataSegment, HighBlock, IrType, MemoryImage, Region, WasmFacts,
