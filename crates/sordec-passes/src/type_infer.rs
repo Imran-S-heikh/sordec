@@ -75,7 +75,8 @@ use sordec_ir::{
     KnownType, Literal, PrimitiveType, SemanticOp, TypeRef, UnaryOp, ValObjectKind,
 };
 
-use crate::dataflow::resolve_use;
+use crate::dataflow::{resolve_use, HighUseIndex};
+use crate::effects::expr_effects;
 use crate::metrics_catalog as mc;
 use crate::pass::{Pass, PassResult};
 
@@ -160,6 +161,8 @@ impl Pass<HighIr> for TypeInferPass {
 fn infer_function(func: &mut HighFunction, sigs: &SigTable) -> (bool, u64) {
     let mut types: HashMap<ValueId, IrType> =
         func.bindings.iter().map(|(id, b)| (id, b.ty.clone())).collect();
+    // Structure does not change during inference, so this is built once.
+    let uses = HighUseIndex::build(func);
     let mut disagreements: u64 = 0;
 
     seed_abi(func, &mut types);
@@ -178,7 +181,7 @@ fn infer_function(func: &mut HighFunction, sigs: &SigTable) -> (bool, u64) {
             }
         }
         // Backward: uses constrain their operands / returned values.
-        round_changed |= backward(func, &mut types);
+        round_changed |= backward(func, &uses, &mut types);
         round_changed |= backward_calls(func, sigs, &mut types, &mut disagreements);
         round_changed |= backward_returns(func, sigs, &mut types, &mut disagreements);
         if !round_changed {
@@ -348,9 +351,30 @@ fn seed_returns(
 
 /// Backward rules: propagate from a use back to its operands. Returns
 /// whether anything improved this round.
-fn backward(func: &HighFunction, types: &mut HashMap<ValueId, IrType>) -> bool {
+///
+/// Bindings nothing reads are skipped when they are also pure — they are
+/// residue, and residue must not dictate types. A recognizer that rewrites a
+/// tag check into [`KnownOp::ValTagCheck`] leaves the raw `and v1, 255`
+/// behind unread, and taking that as evidence types `v1` as the machine
+/// `i64` it is at the bit level, contradicting the `BytesN<32>` the ABI
+/// proves and the recognized op agrees with. The dead binding then wins,
+/// because `improve` will not displace an equal rank.
+///
+/// The same discipline [`crate::marshalling::sret`] and
+/// [`crate::SlotPromotionPass`] both document: scan what the program
+/// actually does, never the leftovers. The check is one level deep, not
+/// transitive — a binding read only by another dead binding still counts as
+/// read, which errs toward keeping evidence.
+fn backward(
+    func: &HighFunction,
+    uses: &HighUseIndex,
+    types: &mut HashMap<ValueId, IrType>,
+) -> bool {
     let mut changed = false;
-    for (_, binding) in func.bindings.iter() {
+    for (id, binding) in func.bindings.iter() {
+        if uses.is_unused(id) && expr_effects(&binding.expr).is_pure_total() {
+            continue;
+        }
         match &binding.expr {
             // Arithmetic: both operands share the result's integer type.
             Expr::Binary { op, lhs, rhs } if is_arithmetic(*op) => {
@@ -1045,6 +1069,81 @@ mod tests {
             .expect("binding")
             .ty
             .clone()
+    }
+
+    #[test]
+    fn a_dead_pure_binding_does_not_type_its_operands() {
+        // Attestation's shape. A recognizer rewrote the tag check into
+        // `has_tag(v0, …)` and left the raw `and v0, 255i64` behind with no
+        // readers. Taking that as evidence types the parameter as the `i64`
+        // it is at the bit level, which then beats the `BytesN<32>` the ABI
+        // proves — `improve` will not displace an equal rank, so the dead
+        // binding wins permanently.
+        let callee = func_at(
+            1,
+            vec![
+                Expr::Phi { incoming: vec![] },        // v0 the parameter
+                Expr::Literal(Literal::I64(255)),     // v1
+                Expr::Binary {                        // v2 — DEAD, unread
+                    op: BinaryOp::BitAnd,
+                    lhs: ValueId::from_index(0),
+                    rhs: ValueId::from_index(1),
+                },
+            ],
+            vec![ValueId::from_index(0)],
+            vec![1, 2],
+            vec![],
+        );
+        // One caller, passing a `Bytes`.
+        let caller = func_at(
+            0,
+            vec![
+                Expr::Literal(Literal::Bytes(vec![1, 2, 3])),
+                Expr::Call {
+                    target: FuncId::from_index(1),
+                    args: vec![ValueId::from_index(0)],
+                },
+            ],
+            vec![],
+            vec![0, 1],
+            vec![],
+        );
+        let mut ir = crate::marshalling::test_support::module(vec![caller, callee]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(
+            ty_of(&ir, 1, 0),
+            IrType::Inferred(KnownType::Bytes),
+            "the live call site decides, not the dead mask"
+        );
+    }
+
+    #[test]
+    fn a_live_pure_binding_still_types_its_operands() {
+        // The same shape with the mask *read*, so it is real code: the
+        // filter must not have disabled backward propagation generally.
+        let mut func = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },    // v0
+                Expr::Literal(Literal::I64(255)),  // v1
+                Expr::Binary {                     // v2 = v0 & v1
+                    op: BinaryOp::BitAnd,
+                    lhs: ValueId::from_index(0),
+                    rhs: ValueId::from_index(1),
+                },
+            ],
+            vec![],
+            vec![1, 2],
+            vec![vec![ValueId::from_index(2)]], // v2 is returned ⇒ live
+        );
+        func.params = vec![];
+        let mut ir = crate::marshalling::test_support::module(vec![func]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(
+            ty_of(&ir, 0, 0),
+            IrType::Inferred(KnownType::I64),
+            "a read mask is evidence about its operand"
+        );
     }
 
     #[test]
