@@ -54,11 +54,37 @@ const MODULE_NAMES: &[&str] = &["token"];
 /// form, returning the names to import. The set is sorted (a `BTreeSet`) so
 /// the emitted `use` list is deterministic.
 pub(crate) fn collapse(items: &mut [syn::Item]) -> BTreeSet<String> {
-    let mut collapser = Collapser { imports: BTreeSet::new() };
+    let shadowed = locally_defined(items);
+    let mut collapser = Collapser { imports: BTreeSet::new(), shadowed };
     for item in items {
         collapser.visit_item_mut(item);
     }
     collapser.imports
+}
+
+/// Type names this module defines itself.
+///
+/// A recovered `#[contracterror] enum Error` or `#[contracttype] struct Vec`
+/// occupies a name the SDK also exports, and collapsing
+/// `soroban_sdk::Error` to `Error` there would both import a colliding name
+/// and silently re-point every use at the wrong type. Such a path stays
+/// fully qualified instead — the one case where the long form is the
+/// *correct* rendering rather than a failure to shorten.
+///
+/// Attestation is the live witness: it declares `enum Error`, and the SDK's
+/// `Error` became reachable as a binding type only once holes started
+/// carrying their recovered type.
+fn locally_defined(items: &[syn::Item]) -> BTreeSet<String> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Enum(e) => Some(e.ident.to_string()),
+            syn::Item::Struct(s) => Some(s.ident.to_string()),
+            syn::Item::Type(t) => Some(t.ident.to_string()),
+            syn::Item::Union(u) => Some(u.ident.to_string()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The `use soroban_sdk::{…};` for the merged import set, or `None` when the
@@ -73,6 +99,8 @@ pub(crate) fn use_item(names: &BTreeSet<String>) -> Option<syn::Item> {
 
 struct Collapser {
     imports: BTreeSet<String>,
+    /// Names the module defines itself; see [`locally_defined`].
+    shadowed: BTreeSet<String>,
 }
 
 impl VisitMut for Collapser {
@@ -91,7 +119,9 @@ impl VisitMut for Collapser {
                 (Some(first), Some(second)) if first.ident == "soroban_sdk" => {
                     let name = second.ident.to_string();
                     let leaf = path.segments.len() == 2;
-                    if MODULE_NAMES.contains(&name.as_str())
+                    if self.shadowed.contains(&name) {
+                        None // the module defines this name; stay qualified
+                    } else if MODULE_NAMES.contains(&name.as_str())
                         || (leaf
                             && (TYPE_NAMES.contains(&name.as_str())
                                 || MACRO_NAMES.contains(&name.as_str())))
@@ -158,6 +188,24 @@ mod tests {
         let out = render(&items[0]);
         assert!(out.contains("token :: Client :: new"), "{out}");
         assert!(!out.contains("soroban_sdk"), "{out}");
+    }
+
+    #[test]
+    fn a_name_the_module_defines_is_never_imported_over() {
+        // Attestation's shape: a recovered `#[contracterror] enum Error`
+        // alongside a reference to the SDK's own `Error`. Collapsing would
+        // emit `use soroban_sdk::{Error}` beside `pub enum Error` — E0255,
+        // and every use of the short name would resolve to the wrong type.
+        let mut items: Vec<syn::Item> = vec![
+            parse_quote!(pub enum Error { A = 1 }),
+            parse_quote!(fn f(x: soroban_sdk::Error, a: soroban_sdk::Address) {}),
+        ];
+        let imports = collapse(&mut items);
+        assert!(!imports.contains("Error"), "must not import a shadowed name: {imports:?}");
+        assert!(imports.contains("Address"), "unshadowed names still collapse");
+        let out = render(&items[1]);
+        assert!(out.contains("soroban_sdk :: Error"), "stays qualified: {out}");
+        assert!(out.contains("a : Address"), "{out}");
     }
 
     #[test]

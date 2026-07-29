@@ -133,10 +133,7 @@ impl<'a> FnCtx<'a> {
             .into_iter()
             .map(|vid| {
                 let name = self.value_ident(vid);
-                let ty = match self.func.bindings.get(vid) {
-                    Some(b) => ir_type(&b.ty, self.reg, self.policy),
-                    None => self.policy.unknown_type(None),
-                };
+                let ty = self.value_type(vid);
                 parse_quote!(let mut #name: #ty;)
             })
             .collect()
@@ -152,13 +149,52 @@ impl<'a> FnCtx<'a> {
         ids.into_iter()
             .map(|vid| {
                 let name = self.value_ident(vid);
-                let ty = match self.func.bindings.get(vid) {
-                    Some(b) => ir_type(&b.ty, self.reg, self.policy),
-                    None => self.policy.unknown_type(None),
-                };
+                let ty = self.value_type(vid);
                 parse_quote!(let #name: #ty;)
             })
             .collect()
+    }
+
+    /// Whether `contractspecv0` declares this function as returning nothing.
+    ///
+    /// Only a spec'd function answers `true`: a helper's return arity is
+    /// recovered from its body, so its returned value is all the evidence
+    /// there is and dropping it would delete a real result.
+    fn returns_nothing_by_abi(&self) -> bool {
+        self.func
+            .signature
+            .as_ref()
+            .is_some_and(|sig| sig.outputs.is_empty())
+    }
+
+    /// Whether `vid`'s recovered type is a *machine-level* one, i.e. safe to
+    /// annotate a hole with.
+    ///
+    /// Only `i32`. The Soroban ABI has no `i32`: every ABI integer is `u32`,
+    /// `i64`, `u64`, `i128`… so an `i32` in recovered output is always a wasm
+    /// machine value — a linear-memory address or a shadow-stack pointer —
+    /// and so is the arithmetic around it. Annotating it supplies exactly the
+    /// constraint inference was missing.
+    ///
+    /// Every other recovered type is ABI-level, and the code *around* the
+    /// hole is still machine-level, so pinning it moves the error rather than
+    /// removing it: `buf::BytesLen` really does yield `u32` per the host ABI,
+    /// while the recovered expression next to it does `i64` arithmetic on the
+    /// `Val`. Measured — annotating every recovered type cost attestation 8
+    /// errors and timelock 6, against what it saved elsewhere.
+    fn has_machine_type(&self, vid: ValueId) -> bool {
+        matches!(
+            self.func.bindings.get(vid).map(|b| &b.ty),
+            Some(IrType::Known(KnownType::I32) | IrType::Inferred(KnownType::I32))
+        )
+    }
+
+    /// The recovered type of a binding, degrading through the hole policy.
+    fn value_type(&self, vid: ValueId) -> syn::Type {
+        match self.func.bindings.get(vid) {
+            Some(b) => ir_type(&b.ty, self.reg, self.policy),
+            None => self.policy.unknown_type(None),
+        }
     }
 
     /// A region as its own braced block (a branch arm, loop body, scope).
@@ -282,12 +318,42 @@ impl<'a> FnCtx<'a> {
             } else {
                 let name = self.value_ident(vid);
                 if self.escaping.contains(&vid) {
+                    // The hoisted declaration already carries the type.
                     out.push(parse_quote!(#name = #value;));
+                } else if Self::is_hole_expr(&value) && self.has_machine_type(vid) {
+                    // `todo!(…)` has type `!`, so an unannotated `let` leaves
+                    // the binding's type to inference. Where the uses pin it,
+                    // inference does *better* than we can — it reads the
+                    // actual use sites. Where they do not, the never-type
+                    // fallback makes the binding `()` and every use then
+                    // fails (`() - i32`).
+                    //
+                    // So annotate only a machine-level `i32` — see
+                    // `has_machine_type` for why that is the one safe case.
+                    // Measured: annotating unconditionally cost +150 errors
+                    // (`Unknown` renders as `Val`, forced onto values rustc
+                    // had inferred correctly), and annotating every recovered
+                    // type still cost the two smallest fixtures 14 between
+                    // them.
+                    let ty = self.value_type(vid);
+                    out.push(parse_quote!(let #name: #ty = #value;));
                 } else {
                     out.push(parse_quote!(let #name = #value;));
                 }
             }
         }
+    }
+
+    /// Whether an emitted value is one of the hole policy's `todo!(…)`
+    /// expressions.
+    ///
+    /// Asked of the rendered expression rather than of the IR node, so the
+    /// answer cannot drift from what [`super::hole::HolePolicy`] actually
+    /// emits: the set of expression kinds that become holes lives in
+    /// `expr.rs`, and duplicating it here is exactly the kind of second copy
+    /// that goes stale.
+    fn is_hole_expr(value: &syn::Expr) -> bool {
+        matches!(value, syn::Expr::Macro(m) if m.mac.path.is_ident("todo"))
     }
 
     /// Phi assignments for one edge: `vP = <source>;` per transfer pair.
@@ -300,6 +366,16 @@ impl<'a> FnCtx<'a> {
     }
 
     fn return_stmt(&self, values: &[ValueId]) -> syn::Stmt {
+        // A spec'd entrypoint declaring no output returns nothing, whatever
+        // the wasm hands back. The SDK's exported wrapper always returns a
+        // `Val` — `Void` for a Rust `fn … -> ()` — so a faithful body walk
+        // produces `return <the Void>;` against a signature with no return
+        // type. The ABI is authoritative about the arity, so the value is
+        // dropped: `contractspecv0` says this function returns nothing, and
+        // `__constructor` is the corpus witness.
+        if values.len() == 1 && self.returns_nothing_by_abi() {
+            return parse_quote!(return;);
+        }
         match values {
             [] => parse_quote!(return;),
             [one] => {

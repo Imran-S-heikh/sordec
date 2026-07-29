@@ -74,7 +74,62 @@ impl HolePolicy for StrictNoGuess {
         // literal. The `todo!` token here is quoted into the emitted AST,
         // not a real invocation in this crate, so `clippy::todo` does not
         // fire on it.
-        let label = Literal::string(label);
+        let label = Literal::string(&escape_braces(label));
         parse_quote!(todo!(#label))
+    }
+}
+
+/// Double every brace in a hole label.
+///
+/// `todo!` is `panic!`-shaped: its first argument is a **format string**, so
+/// a brace in the label is read as the start of a placeholder and the
+/// emitted crate fails to compile with `invalid format string` — not a hole,
+/// a broken build. Labels quote recovered names, and recovered names contain
+/// braces: timelock's dispatcher yields
+/// `symbol_dispatch TimeBoundKind{Before, After}`.
+///
+/// Doubling is preferred over passing the label as an argument
+/// (`todo!("{}", "…")`) because it keeps the emitted source reading as
+/// `todo!("…")`, and over stripping braces because the label is evidence —
+/// it should survive intact for a reader.
+fn escape_braces(label: &str) -> String {
+    if !label.contains(['{', '}']) {
+        return label.to_string();
+    }
+    let mut out = String::with_capacity(label.len() + 8);
+    for ch in label.chars() {
+        match ch {
+            '{' => out.push_str("{{"),
+            '}' => out.push_str("}}"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_brace_in_a_label_is_doubled_so_the_crate_still_builds() {
+        // The real witness: timelock's dispatcher recovers an enum with its
+        // variants, and `todo!` reads the first brace as a placeholder.
+        assert_eq!(
+            escape_braces("symbol_dispatch TimeBoundKind{Before, After}"),
+            "symbol_dispatch TimeBoundKind{{Before, After}}"
+        );
+        // Untouched when there is nothing to escape — most labels.
+        assert_eq!(escape_braces("memory load"), "memory load");
+    }
+
+    #[test]
+    fn the_emitted_literal_carries_the_escaped_form() {
+        let expr = StrictNoGuess.unknown_expr("enum X{A}");
+        let rendered = quote::quote!(#expr).to_string();
+        assert!(
+            rendered.contains("{{A}}"),
+            "the hole must reach the source escaped, got {rendered}"
+        );
     }
 }
