@@ -324,6 +324,12 @@ pub const MARSHALLING_WIDE_LOADS_REBOUND: &str = "marshalling_wide_loads_rebound
 
 /// Functions whose `sret` out-parameter became a real multi-value return.
 pub const MEMORY_SRET_CONVERTED: &str = "memory_sret_converted";
+/// Shadow-stack slots promoted from linear memory to SSA values.
+pub const MEMORY_SLOTS_PROMOTED: &str = "memory_slots_promoted";
+/// Slot loads replaced by the value the slot held.
+pub const MEMORY_LOADS_FORWARDED: &str = "memory_loads_forwarded";
+/// Slot stores retired once their value was forwarded.
+pub const MEMORY_STORES_REMOVED: &str = "memory_stores_removed";
 
 // ---------------------------------------------------------------------
 // Terminal unrecognized-host-call scan (headline denominator input)
@@ -462,6 +468,9 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_WIDE_RETURNS_RECOVERED,
         MARSHALLING_WIDE_LOADS_REBOUND,
         MEMORY_SRET_CONVERTED,
+        MEMORY_SLOTS_PROMOTED,
+        MEMORY_LOADS_FORWARDED,
+        MEMORY_STORES_REMOVED,
     ]
 }
 

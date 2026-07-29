@@ -74,7 +74,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use sordec_common::{BlockId, FuncId, ValueId};
+use sordec_common::{BlockId, FuncId, IrId as _, ValueId};
 use sordec_ir::{
     LiftedFunction, LiftedIr, LiftedTerminator, LiftedType, LiftedValue, LiftedValueDef, WasmOp,
 };
@@ -138,10 +138,11 @@ impl Pass<LiftedIr> for SretReturnPass {
         // caller cannot be rewritten leaves that caller passing a frame to
         // a function that no longer takes one — a module that does not
         // type-check, produced silently.
+        let imported = imported_function_count(&ir.facts);
         let vetoed: Vec<FuncId> = ir
             .functions
             .iter()
-            .flat_map(|f| unconvertible_callees(f, &plans))
+            .flat_map(|f| unconvertible_callees(f, &plans, imported))
             .collect();
         for id in vetoed {
             plans.remove(&id);
@@ -151,7 +152,7 @@ impl Pass<LiftedIr> for SretReturnPass {
         }
 
         for func in &mut ir.functions {
-            rewrite_call_sites(func, &plans);
+            rewrite_call_sites(func, &plans, imported);
         }
         for func in &mut ir.functions {
             if let Some(plan) = plans.get(&func.id) {
@@ -170,12 +171,20 @@ impl Pass<LiftedIr> for SretReturnPass {
 
 /// Can `func`'s out-parameter become a return value?
 fn convertible(func: &LiftedFunction) -> Option<SretPlan> {
+    macro_rules! decline {
+        // Named rather than a bare `return None` so each gate is greppable
+        // and the reason is visible at the site that enforces it.
+        ($why:literal) => {{
+            let _ = $why;
+            return None;
+        }};
+    }
     // A function that already returns something is a shape this does not
     // model.
     if func.blocks.iter().any(|(_, b)| {
         matches!(&b.terminator, LiftedTerminator::Return { values } if !values.is_empty())
     }) {
-        return None;
+        decline!("already returns a value");
     }
 
     const OUT_INDEX: usize = 0;
@@ -192,7 +201,7 @@ fn convertible(func: &LiftedFunction) -> Option<SretPlan> {
         .map(|(id, _)| id)
         .collect();
     if returns.is_empty() {
-        return None;
+        decline!("no reachable return");
     }
 
     let mut slots: BTreeMap<u32, (Slot, ValueId, ValueId)> = BTreeMap::new();
@@ -213,7 +222,7 @@ fn convertible(func: &LiftedFunction) -> Option<SretPlan> {
                     .iter()
                     .any(|a| canon_addr(func, *a).0 == out_param)
                 {
-                    return None;
+                    decline!("out-pointer consumed by a non-store operator");
                 }
                 continue;
             };
@@ -222,14 +231,14 @@ fn convertible(func: &LiftedFunction) -> Option<SretPlan> {
                 // A store elsewhere is fine, unless it stores the pointer
                 // itself — that is an escape.
                 if canon_addr(func, *args.get(1)?).0 == out_param {
-                    return None;
+                    decline!("out-pointer stored as a value");
                 }
                 continue;
             }
             // Every storing block must dominate every return, or "the value
             // in this slot at return" is path-dependent.
             if !returns.iter().all(|r| cfg.dominates(block_id, *r)) {
-                return None;
+                decline!("a storing block does not dominate every return");
             }
             let stored = *args.get(1)?;
             let slot = Slot {
@@ -239,18 +248,18 @@ fn convertible(func: &LiftedFunction) -> Option<SretPlan> {
             };
             // Two stores to one offset make the slot's value ambiguous.
             if slots.insert(slot.offset, (slot, stored, id)).is_some() {
-                return None;
+                decline!("two stores to one offset");
             }
         }
     }
     if slots.is_empty() {
-        return None;
+        decline!("no stores through the out-pointer");
     }
 
     // The entry parameter must not be read anywhere else — including by the
     // terminators, which is how a pointer gets returned or branched on.
     if reads_outside_stores(func, out_param, &slots) {
-        return None;
+        decline!("out-pointer read outside the stores");
     }
 
     Some(SretPlan {
@@ -353,13 +362,14 @@ fn store_memarg(op: &WasmOp) -> Option<waffle::MemoryArg> {
 fn unconvertible_callees(
     func: &LiftedFunction,
     plans: &HashMap<FuncId, SretPlan>,
+    imported: u32,
 ) -> Vec<FuncId> {
     let mut vetoed = Vec::new();
     for (_, value) in func.values.iter() {
         let LiftedValueDef::Operator { op, args } = &value.def else {
             continue;
         };
-        let Some(target) = call_target(op) else {
+        let Some(target) = call_target(op, imported) else {
             continue;
         };
         let Some(plan) = plans.get(&target) else {
@@ -373,19 +383,44 @@ fn unconvertible_callees(
     vetoed
 }
 
-/// The callee of a direct call operator.
-fn call_target(op: &WasmOp) -> Option<FuncId> {
-    match &op.0 {
-        waffle::Operator::Call { function_index } => {
-            Some(FuncId::new(function_index.index() as u32))
-        }
-        _ => None,
-    }
+/// The callee of a direct call operator, as a **local** [`FuncId`].
+///
+/// WASM's function index space puts every host import first, so a
+/// `call`'s `function_index` is not the index of a local function — the
+/// lift shifts by the import count when it builds `FuncId`s
+/// (`lowering::lift_to_high::lower_call` does the same arithmetic).
+/// Reading the raw index as a `FuncId` silently names the wrong callee,
+/// which is worse than naming none: call sites stop matching their callee
+/// while the callee is still rewritten, and the module quietly stops
+/// type-checking.
+fn call_target(op: &WasmOp, imported: u32) -> Option<FuncId> {
+    let waffle::Operator::Call { function_index } = &op.0 else {
+        return None;
+    };
+    let global = function_index.index() as u32;
+    // An import is a host call; it has no body here to convert.
+    global
+        .checked_sub(imported)
+        .map(FuncId::from_index)
+}
+
+/// How many of the module's imports are functions — the offset between
+/// WASM's global function index space and our local one.
+fn imported_function_count(facts: &sordec_ir::WasmFacts) -> u32 {
+    facts
+        .imports
+        .iter()
+        .filter(|i| matches!(i.kind, sordec_ir::ImportKind::Func(_)))
+        .count() as u32
 }
 
 /// Drop the frame argument from every converted call and re-store the
 /// returned components in its place.
-fn rewrite_call_sites(func: &mut LiftedFunction, plans: &HashMap<FuncId, SretPlan>) {
+fn rewrite_call_sites(
+    func: &mut LiftedFunction,
+    plans: &HashMap<FuncId, SretPlan>,
+    imported: u32,
+) {
     // Collect first: the rewrite appends to `values`, which cannot happen
     // while iterating it.
     let sites: Vec<(BlockId, usize, ValueId, FuncId)> = func
@@ -402,7 +437,7 @@ fn rewrite_call_sites(func: &mut LiftedFunction, plans: &HashMap<FuncId, SretPla
             let LiftedValueDef::Operator { op, .. } = &func.values.get(id)?.def else {
                 return None;
             };
-            let target = call_target(op)?;
+            let target = call_target(op, imported)?;
             plans.contains_key(&target).then_some((block_id, position, id, target))
         })
         .collect();
@@ -648,7 +683,7 @@ mod tests {
             )],
         );
         caller.id = FuncId::new(1);
-        rewrite_call_sites(&mut caller, &plans);
+        rewrite_call_sites(&mut caller, &plans, 0);
 
         // The frame argument is gone.
         let LiftedValueDef::Operator { args, .. } = &caller.values.get(v(2)).unwrap().def else {

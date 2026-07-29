@@ -50,8 +50,10 @@
 //! then splits and promotes the slots that remain.
 
 pub(crate) mod frame;
+pub mod promote;
 pub mod sret;
 
+pub use promote::SlotPromotionPass;
 pub use sret::SretReturnPass;
 
 #[cfg(test)]
@@ -94,22 +96,34 @@ pub(crate) mod census {
         lifted.functions
     }
 
+    /// What the *real* lifted pipeline does on each fixture.
+    ///
+    /// Reports the pipeline's own counters rather than re-running a pass
+    /// by hand, because a hand-run pass on already-processed IR measures a
+    /// no-op and reads as "the pass does nothing".
     #[test]
     #[ignore = "corpus census; run explicitly"]
     #[allow(clippy::print_stdout)]
-    fn sret_census() {
-        use crate::pass::Pass as _;
+    fn pipeline_census() {
+        use crate::metrics_catalog as keys;
         for (name, wasm) in FIXTURES {
             let parsed = sordec_frontend::parse(wasm).expect("parses");
             let mut ir = crate::lift_with_waffle(wasm, &parsed.wasm_facts, parsed.soroban_facts.as_ref())
                 .expect("lifts")
                 .lifted;
-            crate::default_lifted_pipeline().run(&mut ir);
-            let before = ir.functions.len();
-            let result = super::SretReturnPass.run(&mut ir);
-            let converted = result.metrics.get(crate::metrics_catalog::MEMORY_SRET_CONVERTED).unwrap_or(0);
-            let valid = sordec_ir::validate_lifted(&ir).is_ok();
-            println!("{name}: {converted} of {before} functions converted; IR valid = {valid}");
+            let report = crate::default_lifted_pipeline().run(&mut ir);
+            let totals = report.metric_totals();
+            let get = |k: &str| totals.get(k).copied().unwrap_or(0);
+            let frames = ir.functions.iter().filter(|f| super::frame::detect(f).is_some()).count();
+            println!("{name}: frames left {frames}");
+            println!(
+                "{name}: sret {} · slots {} · loads {} · stores {} · valid {}",
+                get(keys::MEMORY_SRET_CONVERTED),
+                get(keys::MEMORY_SLOTS_PROMOTED),
+                get(keys::MEMORY_LOADS_FORWARDED),
+                get(keys::MEMORY_STORES_REMOVED),
+                sordec_ir::validate_lifted(&ir).is_ok(),
+            );
         }
     }
 
