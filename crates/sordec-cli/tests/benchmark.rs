@@ -148,6 +148,30 @@ fn overall_band(name: &str) -> (f64, f64) {
     // compiles. That is not a gap in the harness — it is validated against nine
     // known-answer divergence vectors and against each fixture's own recompiled
     // source — it is the emitter's turn.
+    //
+    // **attestation re-derived 2026-07-29, and only attestation.** 0.3856 ->
+    // 0.7468, from the packed-`U32Val` comparison recognizer plus the crypto /
+    // prng / symbol / bytes-len lowerings and the emitter's hole-aware dead-hole
+    // sweep. The move is `semantic` 0.0000 -> 1.0000: attestation's five facts
+    // were all `crypto:*` / `prng:*` ops that the pipeline named correctly in a
+    // hole string and the emitter had no idiom for, so it scored zero against a
+    // source credited with five. `structure` also moved 0.1111 -> 0.1390 as the
+    // dead holes went (bloat 9.0x -> 8.0x).
+    //
+    // Every other fixture stayed inside the band it already had — checked, not
+    // assumed. That is the expected shape: holes score no semantic facts, so
+    // deleting a dead one cannot move the number, and the crypto/prng vocabulary
+    // is exercised by no other fixture in the corpus. Corpus `cargo check` went
+    // 248 -> 243 diagnostics over the same change (attestation 3 -> 0, token-v23
+    // 53 -> 52, token-v23-stripped 44 -> 43, the rest flat), so attestation is
+    // now the second fixture that compiles, after hello-add.
+    //
+    // Its behaviour is measured rather than unchecked, and is 1.0000 over 2 of 6
+    // entrypoints (20 of 20 return checks). It does not appear in this band:
+    // `measure` scores without `--behavior`, so the category renormalizes out
+    // here exactly as it does for every other fixture. The number is reproduced
+    // by `sordec score <recon-dir> <src> --behavior <orig.wasm>`; the other four
+    // entrypoints need `Bytes` argument construction (B9/B10), not emitter work.
     match name {
         "hello-add" => (0.53, 0.57),
         "token-v22" => (0.54, 0.58),
@@ -155,7 +179,7 @@ fn overall_band(name: &str) -> (f64, f64) {
         "token-v23-stripped" => (0.15, 0.19),
         "timelock" => (0.56, 0.60),
         "dex-liquidity-pool" => (0.49, 0.53),
-        "attestation" => (0.37, 0.41),
+        "attestation" => (0.73, 0.77),
         _ => (0.00, 1.00),
     }
 }

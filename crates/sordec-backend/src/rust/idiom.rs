@@ -13,12 +13,29 @@
 //! checks) and every other op return `None` — they stay `todo!()` holes
 //! ([`super::expr`]), honestly, until a later wave elides or recovers them.
 //! An `Unknown` storage tier also returns `None`: naming a tier we did not
-//! prove would be a guess (K2).
+//! prove would be a guess (K2), and so is an unresolved `SymbolNew`.
+//!
+//! ## Two rules the crypto/prng chains depend on
+//!
+//! **Spell the chain unbroken.** The scorer keys a crypto/prng fact on the
+//! *receiver* being a method call named `crypto` / `prng`
+//! (`extract::receiver_keyed_fact`), and that matcher does no
+//! cosmetic-stripping and no let-resolution. `(#e.crypto()).sha256(..)`,
+//! a hoisted `let c = #e.crypto();`, and the UFCS form all score zero.
+//! `ctx.env()` returning the bare ident `e` is what keeps this safe.
+//!
+//! **One op, one chain.** Semantic is a multiset comparison, and
+//! attestation's source has `crypto:sha256` twice. Inlining a recovered
+//! op at each use site instead of binding it once would report three and
+//! cost precision; the emitter's one-`let`-per-binding shape is what keeps
+//! the counts honest.
 
 use quote::format_ident;
 use syn::parse_quote;
 
-use sordec_ir::{ClientInterface, EnumKey, KnownOp, KnownTier, StorageTier};
+use sordec_ir::{
+    BufOpKind, ClientInterface, CryptoOpKind, EnumKey, KnownOp, KnownTier, PrngOpKind, StorageTier,
+};
 
 use crate::rust::body::FnCtx;
 use crate::rust::ty::ident;
@@ -131,9 +148,103 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             Some(parse_quote!(#enum_name::#variant))
         }
 
+        // ---- Crypto ----
+        // `Hash<N>` is unwrapped with `to_bytes()` rather than the
+        // source's `.into()`. `.into()` needs a target type from context,
+        // and one of the corpus sites has none: `check` binds the digest
+        // only to feed an op that is still a hole, so `let v = …into();`
+        // is an unconstrained `Into` and fails to infer. `to_bytes()`
+        // names `BytesN<N>` outright, compiles in every position, and is
+        // fact-identical to the scorer (`crypto:sha256` is keyed on the
+        // `.crypto()` receiver, and the trailing method is ignored).
+        KnownOp::CryptoOp {
+            kind: CryptoOpKind::ComputeHashSha256,
+            args,
+        } => {
+            let data = ctx.value_ref(*args.first()?);
+            Some(parse_quote!(#e.crypto().sha256(&#data).to_bytes()))
+        }
+        KnownOp::CryptoOp {
+            kind: CryptoOpKind::ComputeHashKeccak256,
+            args,
+        } => {
+            let data = ctx.value_ref(*args.first()?);
+            Some(parse_quote!(#e.crypto().keccak256(&#data).to_bytes()))
+        }
+        // Returns `()` and traps on failure, so it lands in statement
+        // position — no binding, no conversion.
+        KnownOp::CryptoOp {
+            kind: CryptoOpKind::VerifySigEd25519,
+            args,
+        } => {
+            let [key, msg, sig] = args[..] else { return None };
+            let (key, msg, sig) = (ctx.value_ref(key), ctx.value_ref(msg), ctx.value_ref(sig));
+            Some(parse_quote!(#e.crypto().ed25519_verify(&#key, &#msg, &#sig)))
+        }
+
+        // ---- PRNG ----
+        KnownOp::PrngOp {
+            kind: PrngOpKind::PrngU64InInclusiveRange,
+            args,
+        } => {
+            let [lo, hi] = args[..] else { return None };
+            let (lo, hi) = (ctx.value_ref(lo), ctx.value_ref(hi));
+            Some(parse_quote!(#e.prng().gen_range(#lo..=#hi)))
+        }
+
+        // ---- Buffers ----
+        // Fact-neutral to the scorer (`len` is deliberately outside the
+        // semantic vocabulary — see `sordec-score`'s T17 note), so this is
+        // compile-gate and structure work: it is what lets a recovered
+        // `message.len() == 0` read as the source line instead of a hole.
+        KnownOp::BufOp {
+            kind: BufOpKind::BytesLen,
+            args,
+        } => {
+            let bytes = ctx.value_ref(*args.first()?);
+            Some(parse_quote!(#bytes.len()))
+        }
+
+        // ---- Linear-memory constructors ----
+        // Only when the slice resolved to real text (K2): an unresolved
+        // one would have to invent the contents.
+        //
+        // Written fully qualified deliberately. `imports::collapse` only
+        // shortens a two-segment `soroban_sdk::X`, and a module may also
+        // locally define a colliding `Symbol`, so the qualified path is
+        // the spelling that always compiles.
+        KnownOp::SymbolNew {
+            resolved: Some(text),
+            ..
+        } => {
+            let lit = syn::LitStr::new(text, proc_macro2::Span::call_site());
+            Some(parse_quote!(soroban_sdk::Symbol::new(&#e, #lit)))
+        }
+
         // Everything else stays an honest hole (later waves).
         _ => None,
     }
+}
+
+/// Whether [`known_op_expr`]'s chain for `op` renders **none** of the
+/// operands the IR records for it.
+///
+/// Almost every lowering reads its operands, so almost every op answers
+/// `false`. The exception is a linear-memory constructor whose contents
+/// resolved: `symbol_new(lm_pos, len)` becomes
+/// `Symbol::new(&e, "attestation_domain")`, which names the recovered text
+/// and never mentions the pointer or the length.
+///
+/// [`super::liveness`] needs this. It counts reads from the IR, so without
+/// it the discarded `lm_pos` keeps a whole chain of address arithmetic
+/// alive — and that chain is unrecovered, so it emits as `todo!()` and the
+/// entrypoint panics before reaching the `Symbol::new` that made the chain
+/// dead in the first place. `attestation`'s `domain` is the witness.
+///
+/// **Any lowering added above that drops operands must be listed here.**
+/// The pairing is checked by `an_operand_dropping_lowering_is_declared`.
+pub(crate) fn ignores_operands(op: &KnownOp) -> bool {
+    matches!(op, KnownOp::SymbolNew { resolved: Some(_), .. })
 }
 
 /// The tier method (`persistent`/`instance`/`temporary`), or `None` for an

@@ -81,16 +81,62 @@ impl<'a> FnCtx<'a> {
         policy: &'a dyn HolePolicy,
     ) -> Self {
         let names = ValueNames::build(func);
-        let liveness = Liveness::build(func);
         let escaping = escaping_values(func);
-        Self {
+        let mut ctx = Self {
             high,
             func,
             reg,
             policy,
             names,
-            liveness,
+            // Provisional: every binding live. Only naming and rendering
+            // are consulted while settling, and neither reads liveness.
+            liveness: Liveness::build(func),
             escaping,
+        };
+        ctx.liveness = ctx.settle_liveness();
+        ctx
+    }
+
+    /// Recount reads until the dead set stops growing.
+    ///
+    /// Dropping a binding can make its operands dead in turn, so one count
+    /// is not enough. Each round asks the *real* renderer whether a binding
+    /// would survive — `expr::binding_expr` plus [`Self::is_hole_expr`],
+    /// exactly what [`Self::basic_block_stmts`] will ask later — so the set
+    /// this computes cannot drift from the set that actually gets emitted.
+    ///
+    /// Terminates because `dead` only grows and is bounded by the binding
+    /// count.
+    fn settle_liveness(&self) -> Liveness {
+        let mut dead: HashSet<ValueId> = HashSet::new();
+        loop {
+            let liveness = Liveness::build_excluding(self.func, &dead);
+            let mut grew = false;
+            self.func.region.for_each_node(|node| {
+                let Region::Basic(b) = node else { return };
+                let Some(block) = self.func.blocks.get(*b) else {
+                    return;
+                };
+                for &vid in &block.bindings {
+                    if dead.contains(&vid) || self.escaping.contains(&vid) {
+                        continue;
+                    }
+                    let Some(binding) = self.func.bindings.get(vid) else {
+                        continue;
+                    };
+                    if matches!(binding.expr, Expr::Phi { .. }) || !liveness.is_unused(vid) {
+                        continue;
+                    }
+                    let value = expr::binding_expr(self, binding);
+                    if !liveness::survives_unused(&binding.expr, Self::is_hole_expr(&value)) {
+                        dead.insert(vid);
+                        grew = true;
+                    }
+                }
+            });
+            if !grew {
+                return liveness;
+            }
         }
     }
 
@@ -316,7 +362,7 @@ impl<'a> FnCtx<'a> {
                 // Escaping ⇒ read in a sibling scope ⇒ not unused, so an
                 // eliminated value never leaves a hoisted decl unassigned.
                 debug_assert!(!self.escaping.contains(&vid), "escaping value must be used");
-                if liveness::is_effectful(&binding.expr) {
+                if liveness::survives_unused(&binding.expr, Self::is_hole_expr(&value)) {
                     out.push(parse_quote!(#value;));
                 }
             } else {
