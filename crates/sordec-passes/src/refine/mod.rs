@@ -37,8 +37,10 @@ mod and_merge;
 mod dispatch_link;
 mod guard_clause;
 mod loop_classify;
+mod overflow_guard;
 mod panic_recover;
 mod polarity;
+mod scope_fallthrough;
 mod switch_dedup;
 mod trap_inline;
 
@@ -46,8 +48,10 @@ pub use and_merge::AndMergePass;
 pub use dispatch_link::DispatchLinkPass;
 pub use guard_clause::GuardClausePass;
 pub use loop_classify::LoopClassifyPass;
+pub use overflow_guard::OverflowGuardElisionPass;
 pub use panic_recover::PanicRecoverPass;
 pub use polarity::PolarityPass;
+pub use scope_fallthrough::ScopeFallthroughPass;
 pub use switch_dedup::SwitchDedupPass;
 pub use trap_inline::TrapInlinePass;
 

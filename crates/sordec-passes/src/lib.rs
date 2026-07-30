@@ -78,7 +78,8 @@ pub use recognizers::{
 };
 pub use refine::{
     AndMergePass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
-    PolarityPass, SwitchDedupPass, TrapInlinePass,
+    OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, SwitchDedupPass,
+    TrapInlinePass,
 };
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringCensusPass, StructuringStatsPass};
@@ -248,6 +249,14 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // `cargo check` errors across the corpus. See its module docs.
             Box::new(ArgGuardElisionPass),
             Box::new(FrameElisionPass),
+            // Compiler-inserted control flow the source never wrote, in the
+            // order one exposes the next: dropping the overflow guard can
+            // leave its merge scope with a single tail `Break`, which is then
+            // a fallthrough rather than a jump. Both are one-directional —
+            // neither rewrites a binding — so they sit after the marshalling
+            // fixpoint group rather than inside it.
+            Box::new(OverflowGuardElisionPass),
+            Box::new(ScopeFallthroughPass),
             Box::new(UnrecognizedScanPass),
             // General type propagation — runs once the recognizers have
             // planted their host-call/val result types, flowing them

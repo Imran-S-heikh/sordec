@@ -292,11 +292,24 @@ pub const REFINE_DISPATCH_LINKED: &str = "refine_dispatch_linked";
 pub const REFINE_BARE_PANICS: &str = "refine_bare_panics";
 /// Trap leaves typed as unwrap-shaped, tag-checked panics (W7 D8).
 pub const REFINE_UNWRAPS: &str = "refine_unwraps";
+/// Trap leaves typed as rustc's arithmetic overflow check — a guard the
+/// source never wrote, which `#[contractimpl]` + `overflow-checks = true`
+/// regenerate from the arithmetic itself.
+pub const REFINE_ARITH_OVERFLOWS: &str = "refine_arith_overflows";
+/// Arithmetic overflow guards removed — each also emits the
+/// `MarshallingGuardElided` diagnostic, because deleting a *reachable*
+/// trap is a behavioural claim resting on `overflow-checks = true`
+/// regenerating it from the arithmetic we re-emit.
+pub const REFINE_OVERFLOW_GUARDS_ELIDED: &str = "refine_overflow_guards_elided";
 /// Switch arms structurally equal to their default, folded into the
 /// wildcard (W7 D5).
 pub const REFINE_SWITCH_ARMS_DEDUPED: &str = "refine_switch_arms_deduped";
 /// Loops proven to a source shape and `LoopKind`-tagged (W7 D3).
 pub const REFINE_LOOPS_CLASSIFIED: &str = "refine_loops_classified";
+/// Labeled scopes whose only exit was a tail `Break` — i.e. falling off
+/// their own end — elided along with that break. Structuring residue the
+/// marshalling elision exposes when it folds a width dispatch.
+pub const REFINE_SCOPES_FALLTHROUGH: &str = "refine_scopes_fallthrough";
 /// Shared-else diamonds merged into one `&&` guard (W7 D7).
 pub const REFINE_AND_MERGED: &str = "refine_and_merged";
 /// Diamonds matching the D7 shape but blocked by the effect or
@@ -468,6 +481,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         // Structuring section — region refinement (D-category).
         REFINE_POLARITY_FLIPPED,
         REFINE_GUARDS_HOISTED,
+        REFINE_SCOPES_FALLTHROUGH,
         REFINE_TRAPS_INLINED,
         REFINE_SHARED_TRAP_WITH_BINDINGS,
         REFINE_TRAPS_DUPLICATED,
@@ -475,6 +489,8 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         REFINE_DISPATCH_LINKED,
         REFINE_BARE_PANICS,
         REFINE_UNWRAPS,
+        REFINE_ARITH_OVERFLOWS,
+        REFINE_OVERFLOW_GUARDS_ELIDED,
         REFINE_SWITCH_ARMS_DEDUPED,
         REFINE_LOOPS_CLASSIFIED,
         REFINE_AND_MERGED,
