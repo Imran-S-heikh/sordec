@@ -180,14 +180,26 @@ fn coverage_on_hello_add_reports_no_recovery_miss() {
             .find(|e| e["code"].as_str() == Some(code))
             .and_then(|e| e["count"].as_u64())
     };
-    // The panic lint is a *recovery* census taken where traps are typed,
-    // which is before elision runs — so it counts all five sites, two of
-    // which the marshalling pass then deletes. Three survive into the
-    // emitted crate (the overflow trap and its two glue wrappers). The
-    // two numbers describe different moments on purpose; read together
-    // they say "five traps recovered, two of them ABI marshalling".
-    assert_eq!(count("lift::panic_without_error_code"), Some(5));
-    assert_eq!(count("lift::marshalling_guard_elided"), Some(2));
+    // Two censuses taken at different moments, on purpose.
+    //
+    // The panic lint counts traps where they are *typed*, before any
+    // elision. hello-add has five, and four are reported here: the fifth
+    // is rustc's arithmetic overflow check, which `panic_recover`
+    // classifies as `ArithOverflow` rather than `Bare` — a recovered fact
+    // about the source (it wrote `a + b`, not a branch), so it is not a
+    // missing error code.
+    //
+    // The elision lint counts guards *deleted*: two SDK argument checks
+    // relocated into the `#[contractimpl]` wrapper, plus that overflow
+    // guard, which `overflow-checks = true` regenerates from the
+    // arithmetic we re-emit.
+    //
+    // Read together: five traps recovered, three of them compiler-inserted
+    // and removed. The emitted crate contains no `panic!()` at all — its
+    // source is `a + b`, and the two glue wrappers go unreachable with the
+    // guard that called them.
+    assert_eq!(count("lift::panic_without_error_code"), Some(4));
+    assert_eq!(count("lift::marshalling_guard_elided"), Some(3));
 }
 
 #[test]

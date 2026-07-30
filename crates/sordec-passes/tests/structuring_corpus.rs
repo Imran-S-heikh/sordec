@@ -37,9 +37,20 @@ use sordec_passes::{
 
 /// The front half of the real pipeline: parse, lift, declutter, lower
 /// (which structures at the boundary), recognize. Returns the
-/// decluttered lifted IR (CFG ground truth) alongside the high IR and
+/// decluttered lifted IR (CFG ground truth), the high IR **as the
+/// structurer emitted it**, the high IR after the full pass pipeline, and
 /// the pipeline report.
-fn structure_fixture(wasm: &[u8]) -> (LiftedIr, HighIr, PipelineReport) {
+///
+/// The two high-IR snapshots are not interchangeable, and which one a lock
+/// belongs on is a question about what the lock protects. "Every reachable
+/// block appears exactly once" is a statement about the *structurer*: it
+/// must not silently drop or duplicate work while turning a CFG into a
+/// tree. It is **not** true after the pipeline, and increasingly so — the
+/// marshalling and overflow elisions delete regions on purpose, each
+/// recording a diagnostic for the block it removed. Asserting it on the
+/// post-pipeline tree would make every future elision look like a
+/// structuring bug.
+fn structure_fixture(wasm: &[u8]) -> (LiftedIr, HighIr, HighIr, PipelineReport) {
     let parsed = sordec_frontend::parse(wasm).expect("frontend parses fixture");
     let mut lifted = lift_with_waffle(wasm, &parsed.wasm_facts, parsed.soroban_facts.as_ref())
         .expect("lifter accepts fixture")
@@ -49,8 +60,9 @@ fn structure_fixture(wasm: &[u8]) -> (LiftedIr, HighIr, PipelineReport) {
     let mut high = LiftToHigh
         .lower(lifted.clone())
         .expect("boundary lowering succeeds");
+    let structured = high.clone();
     let report = default_high_pipeline().run(&mut high);
-    (lifted, high, report)
+    (lifted, structured, high, report)
 }
 
 #[test]
@@ -70,7 +82,7 @@ fn refinement_recovers_the_measured_guard_shape() {
     let mut totals: std::collections::BTreeMap<&'static str, i64> =
         std::collections::BTreeMap::new();
     for (_, wasm) in FIXTURES {
-        let (_, _, report) = structure_fixture(wasm);
+        let (_, _, _, report) = structure_fixture(wasm);
         for (key, value) in report.metric_totals() {
             *totals.entry(key).or_insert(0) += value;
         }
@@ -143,9 +155,13 @@ fn corpus_satisfies_ir_validators() {
     // leaves) and region-order dominance the W6/W7 refinement passes
     // will lean on.
     for (name, wasm) in FIXTURES {
-        let (lifted, high, _) = structure_fixture(wasm);
+        let (lifted, structured, high, _) = structure_fixture(wasm);
         validate_lifted(&lifted)
             .unwrap_or_else(|e| panic!("[{name}] lifted validator: {e:?}"));
+        // Both snapshots: the structurer must hand refinement a valid tree,
+        // and refinement must hand the emitter one back.
+        validate_high(&structured)
+            .unwrap_or_else(|e| panic!("[{name}] high validator (structured): {e:?}"));
         validate_high(&high).unwrap_or_else(|e| panic!("[{name}] high validator: {e:?}"));
     }
 }
@@ -153,7 +169,7 @@ fn corpus_satisfies_ir_validators() {
 #[test]
 fn corpus_structures_with_zero_unstructured_regions() {
     for (name, wasm) in FIXTURES {
-        let (lifted, high, report) = structure_fixture(wasm);
+        let (lifted, structured, high, report) = structure_fixture(wasm);
 
         for (lifted_func, high_func) in lifted.functions.iter().zip(&high.functions) {
             // Lock 1 (K3): zero Unstructured.
@@ -170,9 +186,28 @@ fn corpus_structures_with_zero_unstructured_regions() {
             // trap inlining (D2) legitimately dissolves a shared bare
             // terminator's block, and only such blocks. Unreachable
             // blocks (declutter tombstones) never appear.
+            //
+            // Asserted on the **structurer's** tree, not the pipeline's.
+            // This lock catches the two structurer bug classes — dropped
+            // and duplicated subtrees — and both are properties of turning
+            // a CFG into a tree. Elision passes then delete regions on
+            // purpose (`marshalling::guard`, `refine::overflow_guard`),
+            // including blocks that carry bindings: the panic glue an
+            // overflow check calls is real content that is genuinely not
+            // part of the source. Holding the post-pipeline tree to
+            // "exactly once" would report every such removal as a
+            // structuring bug. What the elisions must preserve — reference
+            // integrity, label enclosure, transfer validity — is checked by
+            // `debug_validate` after each pass and by
+            // `corpus_satisfies_ir_validators` on both snapshots.
+            let structured_func = structured
+                .functions
+                .iter()
+                .find(|f| f.id == high_func.id)
+                .expect("the pipeline neither adds nor removes functions");
             let cfg = CfgFacts::build(lifted_func);
             let mut basic_counts: HashMap<BlockId, u32> = HashMap::new();
-            high_func.region.for_each_node(|region| {
+            structured_func.region.for_each_node(|region| {
                 if let Region::Basic(b) = region {
                     *basic_counts.entry(*b).or_insert(0) += 1;
                 }
@@ -256,7 +291,7 @@ fn scan_code_section(wasm: &[u8]) -> Vec<OpcodeCensus> {
 #[test]
 fn skeleton_matches_original_wasm_nesting() {
     for (name, wasm) in FIXTURES {
-        let (_, high, _) = structure_fixture(wasm);
+        let (_, _, high, _) = structure_fixture(wasm);
         let originals = scan_code_section(wasm);
         // Defined-function order is the correlation key: code-section
         // entry i is lifted function i by construction of the lift.

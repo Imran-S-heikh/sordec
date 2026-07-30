@@ -43,6 +43,7 @@ use sordec_ir::{
 };
 
 use super::debug_validate;
+use crate::dataflow::resolve_use;
 use crate::pass::{Pass, PassResult};
 
 /// Unique pipeline name of this pass.
@@ -53,6 +54,8 @@ pub const PASS_NAME: &str = "refine-panic-recover";
 const M_BARE: &str = "refine_bare_panics";
 /// Trap leaves typed as unwrap-shaped (tag-checked) panics.
 const M_UNWRAP: &str = "refine_unwraps";
+/// Trap leaves typed as rustc's arithmetic overflow check.
+const M_ARITH_OVERFLOW: &str = "refine_arith_overflows";
 
 /// The `Val` tag mask — a cond comparing `x & 0xFF` against a constant
 /// is the SDK's small-vs-object tag dispatch, i.e. an unwrap shape.
@@ -83,6 +86,10 @@ impl Pass<HighIr> for PanicRecoverPass {
             result.metrics.increment(M_UNWRAP, stats.unwraps);
             result.changed = true;
         }
+        if stats.arith_overflows > 0 {
+            result.metrics.increment(M_ARITH_OVERFLOW, stats.arith_overflows);
+            result.changed = true;
+        }
         debug_validate(ir, PASS_NAME);
         result
     }
@@ -92,6 +99,7 @@ impl Pass<HighIr> for PanicRecoverPass {
 struct Stats {
     bare: i64,
     unwraps: i64,
+    arith_overflows: i64,
 }
 
 /// Bottom-up rewrite: children first, then this node's own trap shapes.
@@ -186,6 +194,21 @@ fn recover(
 /// region (either the leaf itself or a sequence ending in one),
 /// classified by the guard condition. Skips trap paths already typed by
 /// the `PanicWithError` host-call recognizer.
+///
+/// ## Re-typing an already-`Bare` trap
+///
+/// [`recover`] walks children before parents, so an arm shaped
+/// `Seq([Basic(…), Unreachable])` — a guard whose trap is reached through
+/// panic glue, like rustc's overflow check calling `core::panicking` —
+/// has already been typed `Bare` by the *fallthrough* rule below by the
+/// time the enclosing `If` is judged. The guard condition is stronger
+/// evidence than "this sequence ends in a trap", so it wins.
+///
+/// Deliberately restricted to upgrading into
+/// [`PanicKind::ArithOverflow`]: re-typing `Bare` into `Unwrap` here
+/// would also be defensible, but it would shift the bare/unwrap split
+/// that `sordec-score`'s semantic category reads, and that is a separate
+/// change with its own measurement.
 fn retype_trailing_trap(
     then_region: &mut Region,
     cond: ValueId,
@@ -194,19 +217,31 @@ fn retype_trailing_trap(
     stats: &mut Stats,
     result: &mut PassResult,
 ) {
+    let kind = classify(cond, func);
+    // Only an overflow classification may claim a trap the fallthrough
+    // rule has already typed — see the doc comment.
+    let retypes_bare = kind == PanicKind::ArithOverflow;
+    if retypes_bare && is_bare_panic(then_region) {
+        retract_bare(func_id, stats, result);
+        *then_region = typed_panic(kind, Some(cond), func_id, stats, result);
+        return;
+    }
     let trap: &mut Region = match then_region {
         Region::Unreachable => then_region,
         Region::Sequence(items) => {
-            if !matches!(items.last(), Some(Region::Unreachable))
+            let retyping = retypes_bare && items.last().is_some_and(is_bare_panic);
+            if !(matches!(items.last(), Some(Region::Unreachable)) || retyping)
                 || panics_with_error(&items[..items.len() - 1], func)
             {
                 return;
+            }
+            if retyping {
+                retract_bare(func_id, stats, result);
             }
             items.last_mut().expect("checked non-empty")
         }
         _ => return,
     };
-    let kind = classify(cond, func);
     *trap = typed_panic(kind, Some(cond), func_id, stats, result);
 }
 
@@ -237,12 +272,14 @@ fn typed_panic(
             );
         }
         PanicKind::Unwrap => stats.unwraps += 1,
+        PanicKind::ArithOverflow => stats.arith_overflows += 1,
     }
     Region::Panic { kind }
 }
 
 /// Classify a guard condition: `Val` tag evidence marks the trap as an
-/// unwrap; anything else is a bare panic.
+/// unwrap; a carry/borrow test on one arithmetic binding marks it as
+/// rustc's overflow check; anything else is a bare panic.
 fn classify(cond: ValueId, func: &HighFunction) -> PanicKind {
     let Some(binding) = func.bindings.get(cond) else {
         return PanicKind::Bare;
@@ -256,8 +293,107 @@ fn classify(cond: ValueId, func: &HighFunction) -> PanicKind {
             lhs,
             rhs,
         } if is_tag_mask(func, *lhs) || is_tag_mask(func, *rhs) => PanicKind::Unwrap,
+        Expr::Binary {
+            op: BinaryOp::Lt | BinaryOp::Gt,
+            lhs,
+            rhs,
+        } if is_overflow_test(func, *lhs, *rhs) => PanicKind::ArithOverflow,
         _ => PanicKind::Bare,
     }
+}
+
+/// Whether comparing `x` against `y` is rustc's arithmetic overflow test.
+///
+/// Under `overflow-checks = true` rustc guards every `+`/`-` with a
+/// wrapping op plus a comparison. The two shapes are not alike, and both
+/// appear in the corpus:
+///
+/// ```text
+/// s = a + b;  if s <u a { trap }      <- add carry: result vs own operand
+/// if a <u b { trap };  d = a - b      <- sub borrow: the two operands
+/// ```
+///
+/// **The discriminator is derivation, not shape.** A contract's own
+/// `if balance < amount { … }` compares two values that no single
+/// arithmetic binding relates, so it is not matched — which is the whole
+/// safety of this classification, because the two read identically at the
+/// comparison alone.
+///
+/// Deliberately requires the operands to be *the same binding's*, not
+/// merely "some add exists nearby": the corpus census found 5 matches
+/// against 122 comparison guards it declines.
+fn is_overflow_test(func: &HighFunction, x: ValueId, y: ValueId) -> bool {
+    let (x, y) = (resolve_use(func, x), resolve_use(func, y));
+    // add carry — one side is the sum, the other is one of its addends.
+    let carries = |sum: ValueId, addend: ValueId| {
+        matches!(
+            arith_operands(func, sum),
+            Some((BinaryOp::Add, a, b)) if a == addend || b == addend
+        )
+    };
+    if carries(x, y) || carries(y, x) {
+        return true;
+    }
+    // sub borrow — the compared pair are the operands of one subtraction.
+    func.bindings.iter().any(|(_, binding)| {
+        matches!(
+            &binding.expr,
+            Expr::Binary { op: BinaryOp::Sub, lhs, rhs }
+                if resolve_use(func, *lhs) == x && resolve_use(func, *rhs) == y
+        )
+    })
+}
+
+/// `value`'s arithmetic operator and its two resolved operands, when it is
+/// an `Add` or `Sub`.
+fn arith_operands(
+    func: &HighFunction,
+    value: ValueId,
+) -> Option<(BinaryOp, ValueId, ValueId)> {
+    let Expr::Binary {
+        op: op @ (BinaryOp::Add | BinaryOp::Sub),
+        lhs,
+        rhs,
+    } = &func.bindings.get(value)?.expr
+    else {
+        return None;
+    };
+    Some((*op, resolve_use(func, *lhs), resolve_use(func, *rhs)))
+}
+
+/// Undo the fallthrough rule's `Bare` typing of a trap that the guard
+/// condition has since claimed.
+///
+/// [`recover`] walks children before parents, so the fallthrough rule has
+/// already counted the trap *and* emitted its `PanicWithoutErrorCode`
+/// diagnostic by the time the enclosing `If` re-classifies it. Both have
+/// to come back, or `sordec coverage` reports a bare panic that the
+/// emitted crate does not contain.
+///
+/// The diagnostic is identified by code plus location: the fallthrough
+/// rule records `Location::Function` (it has no condition to point at),
+/// while every condition-classified one records `Location::Value`. So the
+/// last function-located entry for this function is exactly the one just
+/// pushed.
+fn retract_bare(func_id: FuncId, stats: &mut Stats, result: &mut PassResult) {
+    stats.bare -= 1;
+    let retracting = result.diagnostics.iter().rposition(|d| {
+        d.code == LiftDiagnosticCode::PanicWithoutErrorCode.into()
+            && d.location == Some(Location::Function(func_id))
+    });
+    if let Some(index) = retracting {
+        result.diagnostics.remove(index);
+    }
+}
+
+/// A trap leaf the fallthrough rule already typed as a bare panic.
+fn is_bare_panic(region: &Region) -> bool {
+    matches!(
+        region,
+        Region::Panic {
+            kind: PanicKind::Bare
+        }
+    )
 }
 
 /// Is `value` an `x & 0xFF` masking of the `Val` tag byte?

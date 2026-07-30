@@ -393,6 +393,15 @@ pub enum PanicKind {
     /// tag check or decoded-discriminant equality, so the source
     /// unwrapped a value it had just type-tested.
     Unwrap,
+    /// rustc's arithmetic overflow check, emitted under
+    /// `overflow-checks = true`: the guarding condition compares an
+    /// arithmetic result against one of its own operands (add carry) or
+    /// the two operands of a subtraction against each other (sub borrow).
+    ///
+    /// The source wrote `a + b`, not a branch. Recorded rather than
+    /// assumed, so that eliding it stays a separate, reviewable decision
+    /// from recognizing it.
+    ArithOverflow,
 }
 
 /// One arm of a [`Region::Switch`].

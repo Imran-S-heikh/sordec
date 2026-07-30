@@ -180,6 +180,7 @@ pub(crate) fn label_panic(kind: PanicKind) -> String {
     match kind {
         PanicKind::Bare => "panic!() [no error code]".to_string(),
         PanicKind::Unwrap => "panic!() [unwrap: tag-checked]".to_string(),
+        PanicKind::ArithOverflow => "panic!() [arithmetic overflow check]".to_string(),
     }
 }
 

@@ -446,6 +446,9 @@ fn render_region(
             // executes here) in view.
             PanicKind::Bare => writeln!(out, "{ind}panic!()  ;; no error code")?,
             PanicKind::Unwrap => writeln!(out, "{ind}panic!()  ;; unwrap: tag-checked trap")?,
+            PanicKind::ArithOverflow => {
+                writeln!(out, "{ind}panic!()  ;; rustc arithmetic overflow check")?;
+            }
         },
         Region::Unstructured { entry, .. } => {
             // Not reached from render_function (it routes Unstructured
