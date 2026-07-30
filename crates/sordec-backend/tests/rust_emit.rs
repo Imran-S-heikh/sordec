@@ -57,9 +57,8 @@ fn hello_add_emits_a_real_add_body() {
         src.contains("pub fn add(e: Env, a: u64, b: u64) -> u64 {"),
         "spec method signature with env:\n{src}"
     );
-    // SSA destruction: a hoisted `let mut` phi, assigned and returned.
+    // SSA destruction: a hoisted `let mut` phi, assigned and yielded.
     assert!(src.contains("let mut v"), "phi hoisted as let mut:\n{src}");
-    assert!(src.contains("return v"), "explicit return of a value:\n{src}");
 
     // The arguments read as themselves: each decode collapsed to the
     // parameter it decodes, so no frame pointer is threaded anywhere.
@@ -68,13 +67,38 @@ fn hello_add_emits_a_real_add_body() {
     assert!(!src.contains("func0("), "the decode helper has no callers:\n{src}");
     assert!(!src.contains("fn func0"), "and is not emitted at all:\n{src}");
 
-    // The contract's own logic survives: `a + b` and the overflow trap
-    // rustc emits for it under `overflow-checks = true`.
+    // The contract's own logic survives, and *only* it: the source is
+    // `a + b`, so that is the whole body.
     assert!(src.contains(" + "), "the addition survives:\n{src}");
-    assert!(src.contains("panic!()"), "the overflow trap survives:\n{src}");
 
     // Nothing in the entrypoint is a hole any more.
     assert!(!src.contains("todo!"), "no unrecovered holes remain:\n{src}");
+
+    // Zero control flow, which is what the source has. Three separate
+    // shapes had to go, and each is worth naming because each is a
+    // *compiler*-inserted construct the source never wrote:
+    //
+    // - the overflow guard rustc emits under `overflow-checks = true`
+    //   (`refine::overflow_guard`) — relocated, not removed: our emitted
+    //   manifest pins the same flag, so rustc regenerates it from the
+    //   `a + b` above;
+    // - the merge scope left behind when the return-value width dispatch
+    //   folded, whose single `break` was a fallthrough
+    //   (`refine::scope_fallthrough`);
+    // - the explicit `return`, where Rust source writes a tail expression.
+    //
+    // This assertion is the acceptance test for hello-add's `structure`
+    // category: with the original at zero tokens too, the category reports
+    // `unchecked` rather than 0.0000.
+    for token in ["if ", "match ", "loop ", "while ", "break", "continue", "return"] {
+        assert!(
+            !src.contains(token),
+            "hello-add's source has no control flow; found `{token}`:\n{src}"
+        );
+    }
+    assert!(!src.contains("panic!()"), "the overflow trap is elided:\n{src}");
+    // Its panic-glue helpers go with it — nothing calls them any more.
+    assert!(!src.contains("fn func2"), "panic glue is unreachable:\n{src}");
 }
 
 /// The headline gate for the marshalling work: hello-add's reconstruction

@@ -70,7 +70,42 @@ pub(crate) fn emit_body(
     let mut stmts = ctx.phi_declarations();
     stmts.extend(ctx.escaping_declarations());
     ctx.region_stmts(&func.region, &mut stmts);
+    tail_expression(&mut stmts);
     parse_quote!({ #(#stmts)* })
+}
+
+/// Turn a trailing `return <expr>;` into a tail expression, and drop a
+/// trailing bare `return;`.
+///
+/// The wasm says `return`, so the body walk faithfully emits one — but Rust
+/// says the same thing with a tail expression, and that is what source is
+/// written in. The difference is not cosmetic in two ways:
+///
+/// - `sordec-score`'s structure skeleton counts `syn::ExprReturn` as a
+///   control-flow token, so an explicit `return` the source never wrote is
+///   surplus control flow measured against the original. 205 of the 206
+///   returns the corpus currently emits are trailing.
+/// - clippy's `needless_return` fires on the current output, and the
+///   reconstruction is a deliverable.
+///
+/// Applied to the **outermost** statement list only, which is what makes it
+/// safe without any analysis: an early `return` inside an `if` arm or a
+/// labeled scope is a nested statement and never reaches here (a `Scope`
+/// becomes one `label: { … }` statement, see [`FnCtx::region_stmts`]). A body
+/// whose last region is a trap ends in `panic!();` / `unreachable!();` and is
+/// left alone.
+fn tail_expression(stmts: &mut Vec<syn::Stmt>) {
+    // Only a *semicolon-terminated* `return`, i.e. one in statement
+    // position. `Stmt::Expr(_, None)` is already a tail expression.
+    let Some(syn::Stmt::Expr(syn::Expr::Return(ret), Some(_))) = stmts.last() else {
+        return;
+    };
+    let returned = ret.expr.clone();
+    stmts.pop();
+    // `return;` leaves nothing behind: the unit value is the block's own.
+    if let Some(expr) = returned {
+        stmts.push(syn::Stmt::Expr(*expr, None));
+    }
 }
 
 impl<'a> FnCtx<'a> {

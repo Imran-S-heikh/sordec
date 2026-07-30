@@ -172,14 +172,50 @@ fn overall_band(name: &str) -> (f64, f64) {
     // here exactly as it does for every other fixture. The number is reproduced
     // by `sordec score <recon-dir> <src> --behavior <orig.wasm>`; the other four
     // entrypoints need `Bytes` argument construction (B9/B10), not emitter work.
+    // **hello-add and attestation re-derived 2026-07-30, lever 2 step one.**
+    // Three compiler-inserted control-flow shapes stopped being emitted:
+    // rustc's arithmetic overflow guard (`refine::overflow_guard`), a merge
+    // scope whose single `break` was a fallthrough
+    // (`refine::scope_fallthrough`), and the explicit trailing `return`
+    // where Rust source writes a tail expression. None is in the source;
+    // all three were measured against an original that never wrote them.
+    //
+    // hello-add **0.5455 -> 1.0000**, and the mechanism is worth recording
+    // because the number looks too good otherwise. Its source is `a + b`,
+    // i.e. *zero* control-flow tokens, and it emitted three. At zero on
+    // both sides `structure` takes `structure.rs`'s flowless branch, drops
+    // out of numerator and denominator, and the category reports
+    // `unchecked` — 1.0000 is unreachable there by construction. `semantic`
+    // and `behavior` were already unchecked, so `interface` (1.0000, and
+    // unchanged) is all that remains in the mean. The category did not
+    // score perfectly; it stopped being measurable, which is exactly what
+    // score-2.0.0 T13d chose for a contract with no control flow.
+    //
+    // attestation **0.7468 -> 0.7794**, structure 0.1390 -> 0.2500, from
+    // the same three shapes.
+    //
+    // Every other fixture moved *within* its band and none was re-derived:
+    // token-v22 0.5626 -> 0.5656, token-v23 0.4778 -> 0.4806,
+    // token-v23-stripped 0.1694 -> 0.1721, timelock 0.5799 -> 0.5811,
+    // dex 0.5086 -> 0.5106. Small because the trailing `return` is the only
+    // one of the three that is common (205 of 206 returns the corpus emits
+    // are trailing); the overflow guard hits 6 sites corpus-wide and the
+    // vacuous scope 2, rustc having outlined most overflow checks into
+    // shared helpers. Aggregate 0.5129 -> 0.5842.
+    //
+    // Corpus `cargo check` went 243 -> 240 diagnostics with no fixture
+    // rising, and both behaviour measurements held at 1.0000 — including
+    // hello-add's, which is the oracle for the overflow elision: its
+    // argument sweep drives `(u64::MAX, 1)` deliberately, and the three
+    // calls that trap still "fail identically" on both sides.
     match name {
-        "hello-add" => (0.53, 0.57),
+        "hello-add" => (0.99, 1.00),
         "token-v22" => (0.54, 0.58),
         "token-v23" => (0.45, 0.49),
         "token-v23-stripped" => (0.15, 0.19),
         "timelock" => (0.56, 0.60),
         "dex-liquidity-pool" => (0.49, 0.53),
-        "attestation" => (0.73, 0.77),
+        "attestation" => (0.76, 0.80),
         _ => (0.00, 1.00),
     }
 }
