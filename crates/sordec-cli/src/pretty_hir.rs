@@ -866,10 +866,15 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io:
             durability: _,
             key,
             resolved_key,
+            probe,
         } => {
+            // A probe is rendered distinctly: it is the one storage op
+            // the emitter deliberately does not spell, so a reader
+            // diffing the dump against the output needs to see why.
             write!(
                 out,
-                "storage_has<{}>({})",
+                "storage_has{}<{}>({})",
+                if *probe { ":sdk-option-probe" } else { "" },
                 tier_str(tier),
                 key_str(key, resolved_key, ctx)
             )
@@ -1785,6 +1790,7 @@ mod tests {
             durability: v(2),
             key: v(1),
             resolved_key: None,
+            probe: false,
         }));
         let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "storage_has<?>(v1)");

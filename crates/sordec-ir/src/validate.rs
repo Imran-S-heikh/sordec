@@ -35,6 +35,12 @@
 //!   matters is that each transfer *source* is defined before its
 //!   branch. This is the invariant Rust emission actually needs — CFG
 //!   dominance does not survive restructuring for free.
+//! - **Call arity**: every [`crate::Expr::Call`] names a function the
+//!   module has and passes exactly as many arguments as that function
+//!   declares parameters. The one check here that is not decidable from
+//!   a single function, and the one an inter-procedural pass can break —
+//!   [`crate::HighIr`]'s specializer deletes parameters and must update
+//!   every call site in step.
 //!
 //! "Every reachable block appears in the region tree" needs the lifted
 //! CFG to know what *is* reachable, so it lives in the structuring
@@ -206,6 +212,41 @@ pub fn validate_lifted_function(func: &LiftedFunction) -> Result<(), ValidateErr
 pub fn validate_high(ir: &HighIr) -> Result<(), ValidateError> {
     for func in &ir.functions {
         validate_high_function(func)?;
+    }
+    check_call_arity(ir)
+}
+
+/// Every direct call names a real function and agrees with it on arity.
+///
+/// The only module-level check here: everything else about a function is
+/// decidable from that function alone. This one is not, and it is the
+/// invariant an inter-procedural pass can break — deleting a parameter
+/// and forgetting a call site, or retargeting a call to a callee with a
+/// different signature, both land here rather than as mysterious output
+/// several stages later.
+fn check_call_arity(ir: &HighIr) -> Result<(), ValidateError> {
+    for func in &ir.functions {
+        for (value, binding) in func.bindings.iter() {
+            let Expr::Call { target, args } = &binding.expr else {
+                continue;
+            };
+            let Some(callee) = ir.function(*target) else {
+                return Err(ValidateError::UnknownCallTarget {
+                    function: func.id,
+                    value,
+                    target: *target,
+                });
+            };
+            if args.len() != callee.params.len() {
+                return Err(ValidateError::CallArityMismatch {
+                    function: func.id,
+                    value,
+                    target: *target,
+                    args: args.len(),
+                    params: callee.params.len(),
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -619,6 +660,35 @@ pub enum ValidateError {
         value: ValueId,
     },
 
+    /// An `Expr::Call` names a function index the module does not have.
+    UnknownCallTarget {
+        /// Function containing the call.
+        function: FuncId,
+        /// The call binding.
+        value: ValueId,
+        /// The target it names.
+        target: FuncId,
+    },
+
+    /// An `Expr::Call` disagrees with its callee about arity.
+    ///
+    /// The two are only ever written together, so a mismatch means some
+    /// pass changed one side and not the other — the failure mode
+    /// inter-procedural rewriting introduces, and the reason this is a
+    /// validated invariant rather than a review item.
+    CallArityMismatch {
+        /// Function containing the call.
+        function: FuncId,
+        /// The call binding.
+        value: ValueId,
+        /// The callee.
+        target: FuncId,
+        /// Arguments the call passes.
+        args: usize,
+        /// Parameters the callee declares.
+        params: usize,
+    },
+
     /// Some IR-layer-specific invariant failed; the message describes which.
     /// Used as a catch-all while the validator is being fleshed out.
     // JUSTIFY: free-form diagnostic; not load-bearing logic.
@@ -868,6 +938,81 @@ mod tests {
             Err(ValidateError::DanglingValue {
                 function: FuncId::new(0),
                 value: v(7),
+            })
+        );
+    }
+
+    // --- the module-level call invariant ---
+
+    /// A two-function module: `caller` calls `FuncId(1)` with `args`
+    /// arguments; the callee declares `params` of them.
+    fn calling_module(args: usize, params: usize) -> HighIr {
+        let call = Expr::Call {
+            target: FuncId::new(1),
+            args: (0..args).map(|i| v(i as u32 + 1)).collect(),
+        };
+        let mut bindings = vec![binding(0, call)];
+        for i in 0..args {
+            bindings.push(binding(i as u32 + 1, Expr::Literal(crate::Literal::I64(0))));
+        }
+        let scheduled: Vec<u32> = (1..=args as u32).chain(std::iter::once(0)).collect();
+        let caller = func(bindings, vec![block(0, scheduled)], Region::Basic(bb(0)));
+
+        let mut callee = func(
+            (0..params)
+                .map(|i| binding(i as u32, Expr::Phi { incoming: vec![] }))
+                .collect(),
+            vec![block(0, vec![])],
+            Region::Basic(bb(0)),
+        );
+        callee.id = FuncId::new(1);
+        callee.params = (0..params as u32).map(v).collect();
+
+        HighIr {
+            facts: crate::WasmFacts {
+                imports: vec![],
+                exports: vec![],
+                function_type_indices: vec![],
+                function_bodies: vec![],
+                custom_sections: vec![],
+            },
+            soroban_facts: None,
+            functions: vec![caller, callee],
+            memory: crate::MemoryImage::empty(),
+        }
+    }
+
+    #[test]
+    fn matching_call_arity_validates() {
+        assert_eq!(validate_high(&calling_module(2, 2)), Ok(()));
+    }
+
+    #[test]
+    fn call_arity_disagreeing_with_the_callee_is_rejected() {
+        // The shape an inter-procedural rewrite breaks: a parameter was
+        // deleted and a call site was not updated to match.
+        assert_eq!(
+            validate_high(&calling_module(2, 1)),
+            Err(ValidateError::CallArityMismatch {
+                function: FuncId::new(0),
+                value: v(0),
+                target: FuncId::new(1),
+                args: 2,
+                params: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn call_to_a_function_the_module_lacks_is_rejected() {
+        let mut ir = calling_module(1, 1);
+        ir.functions.truncate(1);
+        assert_eq!(
+            validate_high(&ir),
+            Err(ValidateError::UnknownCallTarget {
+                function: FuncId::new(0),
+                value: v(0),
+                target: FuncId::new(1),
             })
         );
     }

@@ -62,6 +62,23 @@ pub const ENUM_KEY_UNRESOLVED: &str = "enum_key_unresolved";
 pub const ENUM_KEY_CTOR_MATCHED: &str = "enum_key_ctor_matched";
 
 // ---------------------------------------------------------------------
+// Function specialization (undoing rustc's identical-code folding)
+// ---------------------------------------------------------------------
+
+/// Copies of compiler-merged helpers created, one per de-shared site.
+pub const SPECIALIZE_CLONED: &str = "specialize_cloned";
+/// Call sites retargeted onto a copy, or re-aritied by pinning.
+pub const SPECIALIZE_RETARGETED: &str = "specialize_retargeted";
+/// Parameters replaced by the constant their caller always passes.
+pub const SPECIALIZE_PARAMS_PINNED: &str = "specialize_params_pinned";
+/// Merged helpers left merged (cycle, budget, unpinnable region shape).
+pub const SPECIALIZE_DECLINED: &str = "specialize_declined";
+
+/// `has` calls proven to be the SDK's `Option` discriminant rather than a
+/// source-level `.has()`.
+pub const STORAGE_OPTION_PROBE: &str = "storage_option_probe";
+
+// ---------------------------------------------------------------------
 // TTL amounts (beyond-kickoff ratio; D3)
 // ---------------------------------------------------------------------
 

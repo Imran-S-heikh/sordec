@@ -49,8 +49,21 @@ pub(crate) fn recovered_facts(high: &HighIr) -> Vec<FunctionFacts> {
         .filter(|i| matches!(i.kind, sordec_ir::ImportKind::Func(_)))
         .count() as u32;
 
+    // Stop at the last function that *has* a body in the binary.
+    //
+    // `SpecializePass` appends copies of compiler-merged helpers past
+    // that point, so `HighIr::functions` is no longer the same length as
+    // `function_bodies`. Those copies are real and the Rust emitter
+    // renders them — but they exist in no wasm, so there is no
+    // disassembly to anchor them to and `anchor_functions` never yields
+    // an index for them. Emitting facts for them would leave entries no
+    // annotation could ever carry, which is precisely what the
+    // round-trip corpus test checks.
+    let local_bodies = high.facts.function_bodies.len();
+
     high.functions
         .iter()
+        .take(local_bodies)
         .map(|func| FunctionFacts {
             title: function_title(func, registry, import_offset),
             facts: function_facts(func),
@@ -126,7 +139,10 @@ mod tests {
                 imports: vec![],
                 exports: vec![],
                 function_type_indices: vec![],
-                function_bodies: vec![],
+                // One body per local function, as every real module has.
+                // `recovered_facts` stops at the last function with a
+                // body, so a module claiming none would report none.
+                function_bodies: vec![sordec_ir::ByteRange { start: 0, end: 1 }],
                 custom_sections: vec![],
             },
             soroban_facts: None,

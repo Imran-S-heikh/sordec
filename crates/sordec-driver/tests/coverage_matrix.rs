@@ -223,13 +223,20 @@ fn coverage_matrix_prints_and_holds_invariants() {
         );
     }
 
-    // W7 deep-facts pin: token-v23 resolves 15 of 20 attempted deep facts
-    // (storage-tier 8/10, enum-key 6/8, ttl 1/2) = 75%. This is the exact
-    // number the `sordec coverage` headline publishes; pinned here (the
-    // driver test is the home for exact numbers, per the CLI test header).
+    // W7 deep-facts pin: token-v23 resolves 20 of 25 attempted deep facts
+    // (storage-tier 11/13, enum-key 8/10, ttl 1/2) = 80%. This is the
+    // exact number the `sordec coverage` headline publishes; pinned here
+    // (the driver test is the home for exact numbers, per the CLI test
+    // header).
+    //
+    // Was 15/20 (75%) before `SpecializePass`. Both numerator and
+    // denominator grew because de-sharing a compiler-merged helper makes
+    // *more* storage sites visible, not because the same sites got
+    // better: each source-level `put_*`/`get_*` that rustc folded into
+    // one body is now its own op with its own key and tier to resolve.
     let (resolved, attempted) = deep_facts("token-v23", &matrix);
-    assert_eq!(attempted, 20, "token-v23 deep facts attempted");
-    assert_eq!(resolved, 15, "token-v23 deep facts resolved");
+    assert_eq!(attempted, 25, "token-v23 deep facts attempted");
+    assert_eq!(resolved, 20, "token-v23 deep facts resolved");
 
     // --- A6/H3: structuring coverage columns (measured 2026-07-20) ---
     //
@@ -244,14 +251,21 @@ fn coverage_matrix_prints_and_holds_invariants() {
     // kinds (do_while_bottom / guarded_do_while / infinite) are zero
     // corpus-wide — the classifier declines a shape it cannot prove
     // rather than guessing — and are asserted zero in the loop below.
+    //
+    // Function totals include the copies `SpecializePass` makes of the
+    // helpers rustc merged, so they exceed the binary's local-function
+    // count: +3 on each token, +4 on timelock, +17 on dex. The loop and
+    // switch columns are unchanged, because the merged helpers are
+    // straight-line storage accessors — a de-shared body duplicates the
+    // storage op, not the control flow.
     let structuring: &[(&str, i64, i64, i64, i64, i64, i64)] = &[
         // fixture,           f_total, f_struct, while_top, unclass, switches, dispatch_linked
         ("hello-add", 5, 5, 0, 0, 0, 0),
-        ("token-v22", 48, 48, 6, 1, 1, 0),
-        ("token-v23", 46, 46, 6, 1, 2, 0),
-        ("token-v23-stripped", 46, 46, 6, 1, 2, 0),
-        ("timelock", 18, 18, 4, 1, 1, 1),
-        ("dex-liquidity-pool", 50, 50, 4, 2, 1, 0),
+        ("token-v22", 51, 51, 6, 1, 1, 0),
+        ("token-v23", 49, 49, 6, 1, 2, 0),
+        ("token-v23-stripped", 49, 49, 6, 1, 2, 0),
+        ("timelock", 22, 22, 4, 1, 1, 1),
+        ("dex-liquidity-pool", 67, 67, 4, 2, 1, 0),
         ("attestation", 8, 8, 0, 0, 0, 0),
     ];
     for &(fx, f_total, f_struct, while_top, unclass, switches, dispatch_linked) in structuring {

@@ -33,6 +33,7 @@ pub mod effects;
 pub mod error;
 pub mod host_calls;
 pub mod interfaces;
+pub mod interproc;
 pub mod ledger;
 pub mod lift;
 pub mod lowering;
@@ -62,12 +63,13 @@ pub use declutter::{
 };
 pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
+pub use interproc::SpecializePass;
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use memory::{SlotPromotionPass, SretReturnPass};
 pub use marshalling::{
-    ArgGuardElisionPass, FrameElisionPass, ValDecodeCollapsePass, ValEncodeCollapsePass,
-    WideReturnPass,
+    ArgGuardElisionPass, FrameElisionPass, OptionProbePass, ValDecodeCollapsePass,
+    ValEncodeCollapsePass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
@@ -156,6 +158,14 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
 /// peels. [`EnumKeyPass`] runs after [`ConstPropPass`] — not a hard
 /// dependency (its evidence is local constants + rodata + frame facts),
 /// but it keeps the refiners-before-consumers reading of the manifest.
+/// [`SpecializePass`] runs *ahead of every recognizer that reads a
+/// constant*, which puts it between [`ValEncodingPass`] and
+/// [`StoragePass`]. It splits the helpers rustc merged, so the
+/// recognizers below see one fact per body instead of a meet over
+/// disagreeing callers — a hard dependency in one direction and none in
+/// the other, since it rewrites no operand a recognizer would claim. It
+/// follows `ValEncodingPass` only so the `U32Val` wrappers are already
+/// collapsed when it traces call-site arguments to literals.
 /// [`AbiSweepPass`] runs after [`StoragePass`] and [`CollectionsPass`]
 /// so every prior `l`/`m`/`v`/`b` claim happens first — its `l`-deploy
 /// pickup is then unambiguous. [`DispatcherPass`] runs immediately after
@@ -205,6 +215,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(LoopClassifyPass),
             // Recognizer chain (order rationale above).
             Box::new(ValEncodingPass),
+            Box::new(SpecializePass),
             Box::new(StoragePass),
             Box::new(AuthPass),
             Box::new(ContextPass),
@@ -220,6 +231,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // const-folding done (ConstPropPass) + the declared error enums,
             // and must precede TypeInferPass so the Error type is planted.
             Box::new(ErrorConstPass),
+            // Needs both halves of the `Option` shape named: the tier
+            // from `StoragePass` and the key from `EnumKeyPass`, since
+            // the pairing is proved on key identity at a proven tier.
+            Box::new(OptionProbePass),
             Box::new(ClientCallPass),
             Box::new(AuthFlowPass),
             // Last in the recognizer chain: reconciles the two readings of
@@ -275,7 +290,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // for the second. `marshalling_group_covers_exactly_the_elision_passes`
         // pins the second range by pass name, so inserting a pass above it
         // fails a test instead of silently shifting the window.
-        vec![1..6, 25..29],
+        vec![1..6, 27..31],
     )
 }
 

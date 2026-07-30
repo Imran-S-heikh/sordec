@@ -23,9 +23,15 @@
 //!
 //! ## What it does NOT do
 //!
-//! - No inter-procedural tier resolution. rustc hoists storage ops into
-//!   helper functions that take the tier as a parameter; those sites
-//!   read as `Unknown` until cross-function constant propagation exists.
+//! - No inter-procedural tier resolution *of its own*. rustc hoists
+//!   storage ops into helper functions that take the tier as a
+//!   parameter, and [`trace_int`] stops at a parameter. Those sites are
+//!   reached from the other side instead:
+//!   [`SpecializePass`](crate::interproc::SpecializePass) runs first and
+//!   folds the constant its callers agree on into the helper's body, so
+//!   by the time this pass looks, the durability argument is a local
+//!   literal. A tier that still reads `Unknown` here is one no call site
+//!   proved.
 //! - No `StorageTier::Inferred` — v1 emits `Known` or `Unknown` only.
 //! - No TTL threshold / extend_to constant resolution (the
 //!   `DAY_IN_LEDGERS` magic numbers) — a later recognizer's scope.
@@ -166,81 +172,135 @@ fn try_storage(func: &HighFunction, id: ValueId, expr: &Expr) -> Option<StorageM
     })
 }
 
+/// Which operands of an `l`-module storage call carry the key and the
+/// durability tier.
+///
+/// Every tier-bearing storage op passes its key first; only `set`
+/// (`l._`, which interposes the value) puts the durability anywhere but
+/// second. Extracted from [`classify`] because
+/// [`SpecializePass`](crate::interproc::SpecializePass) needs the same
+/// two positions *before* this pass runs, while the call is still a
+/// [`SemanticOp::Unknown`]. One owner, so the two can never drift — the
+/// `val_abi` table idiom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StorageOperands {
+    /// Argument index of the storage key.
+    pub key: usize,
+    /// Argument index of the durability discriminant.
+    pub durability: usize,
+}
+
+/// The key + durability positions of an `l`-module storage call, or
+/// `None` for the tier-less ops (contract-level TTL extension), the
+/// deploy family, and any wrong arity.
+pub(crate) fn storage_operands(host_fn: &str, argc: usize) -> Option<StorageOperands> {
+    match (host_fn, argc) {
+        // set(key, value, durability) — the one op with an interposed value.
+        ("_", 3) => Some(StorageOperands {
+            key: 0,
+            durability: 2,
+        }),
+        // has / get / remove (key, durability).
+        ("0" | "1" | "2", 2) => Some(StorageOperands {
+            key: 0,
+            durability: 1,
+        }),
+        // extend_ttl(key, durability, threshold, extend_to) and its v2
+        // five-operand form.
+        ("7", 4) | ("f", 5) => Some(StorageOperands {
+            key: 0,
+            durability: 1,
+        }),
+        _ => None,
+    }
+}
+
 /// Dispatch on the `l`-module export letter, guarding arity. Returns
 /// `None` for wrong arity or for non-storage `l` functions (the deploy
 /// ops), leaving them unrecognized.
 fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Recognized> {
+    // Key + durability come from the shared table; the op-specific
+    // extras (value, thresholds) stay with their arms.
+    let tiered = storage_operands(host_fn, args.len());
     match (host_fn, args.len()) {
         // ---- CRUD ----
         ("_", 3) => {
-            let (tier, resolved) = resolve_tier(func, args[2]);
+            let ops = tiered?;
+            let (tier, resolved) = resolve_tier(func, args[ops.durability]);
             Some(Recognized {
                 op: KnownOp::StorageSet {
                     tier,
-                    durability: args[2],
-                    key: args[0],
+                    durability: args[ops.durability],
+                    key: args[ops.key],
                     resolved_key: None,
                     value: args[1],
                 },
                 ty: KnownType::Unit,
                 metric: M_SET,
                 tier_resolved: Some(resolved),
-                note: tier_note("storage-set", func, args[2]),
+                note: tier_note("storage-set", func, args[ops.durability]),
             })
         }
         ("0", 2) => {
-            let (tier, resolved) = resolve_tier(func, args[1]);
+            let ops = tiered?;
+            let (tier, resolved) = resolve_tier(func, args[ops.durability]);
             Some(Recognized {
                 op: KnownOp::StorageHas {
                     tier,
-                    durability: args[1],
-                    key: args[0],
+                    durability: args[ops.durability],
+                    key: args[ops.key],
                     resolved_key: None,
+                    // Whether this is the SDK's own `Option` probe is a
+                    // later pass's proof, not something the ABI says.
+                    probe: false,
                 },
                 ty: KnownType::Bool,
                 metric: M_HAS,
                 tier_resolved: Some(resolved),
-                note: tier_note("storage-has", func, args[1]),
+                note: tier_note("storage-has", func, args[ops.durability]),
             })
         }
         ("1", 2) => {
-            let (tier, resolved) = resolve_tier(func, args[1]);
+            let ops = tiered?;
+            let (tier, resolved) = resolve_tier(func, args[ops.durability]);
             Some(Recognized {
                 op: KnownOp::StorageGet {
                     tier,
-                    durability: args[1],
-                    key: args[0],
+                    durability: args[ops.durability],
+                    key: args[ops.key],
                     resolved_key: None,
                 },
                 ty: KnownType::Val,
                 metric: M_GET,
                 tier_resolved: Some(resolved),
-                note: tier_note("storage-get", func, args[1]),
+                note: tier_note("storage-get", func, args[ops.durability]),
             })
         }
         ("2", 2) => {
-            let (tier, resolved) = resolve_tier(func, args[1]);
+            let ops = tiered?;
+            let (tier, resolved) = resolve_tier(func, args[ops.durability]);
             Some(Recognized {
                 op: KnownOp::StorageRemove {
                     tier,
-                    durability: args[1],
-                    key: args[0],
+                    durability: args[ops.durability],
+                    key: args[ops.key],
                     resolved_key: None,
                 },
                 ty: KnownType::Unit,
                 metric: M_REMOVE,
                 tier_resolved: Some(resolved),
-                note: tier_note("storage-remove", func, args[1]),
+                note: tier_note("storage-remove", func, args[ops.durability]),
             })
         }
         // ---- TTL ----
         ("7", 4) => {
-            let (tier, resolved) = resolve_tier(func, args[1]);
+            let ops = tiered?;
+            let (tier, resolved) = resolve_tier(func, args[ops.durability]);
             Some(Recognized {
                 op: KnownOp::StorageExtendTtl {
                     tier,
-                    durability: args[1],
-                    key: args[0],
+                    durability: args[ops.durability],
+                    key: args[ops.key],
                     resolved_key: None,
                     threshold: args[2],
                     extend_to: args[3],
@@ -250,7 +310,7 @@ fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Reco
                 ty: KnownType::Unit,
                 metric: M_EXTEND_TTL,
                 tier_resolved: Some(resolved),
-                note: tier_note("storage-extend-ttl", func, args[1]),
+                note: tier_note("storage-extend-ttl", func, args[ops.durability]),
             })
         }
         ("8", 2) => Some(Recognized {
@@ -299,12 +359,13 @@ fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Reco
             note: "extend-contract-code-ttl".to_string(),
         }),
         ("f", 5) => {
-            let (tier, resolved) = resolve_tier(func, args[1]);
+            let ops = tiered?;
+            let (tier, resolved) = resolve_tier(func, args[ops.durability]);
             Some(Recognized {
                 op: KnownOp::StorageExtendTtlV2 {
                     tier,
-                    durability: args[1],
-                    key: args[0],
+                    durability: args[ops.durability],
+                    key: args[ops.key],
                     resolved_key: None,
                     extend_to: args[2],
                     min_extension: args[3],
@@ -313,7 +374,7 @@ fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Reco
                 ty: KnownType::Unit,
                 metric: M_EXTEND_TTL,
                 tier_resolved: Some(resolved),
-                note: tier_note("storage-extend-ttl-v2", func, args[1]),
+                note: tier_note("storage-extend-ttl-v2", func, args[ops.durability]),
             })
         }
         ("g", 5) => Some(Recognized {
@@ -447,6 +508,49 @@ mod tests {
             | Expr::Semantic(SemanticOp::Known(KnownOp::StorageHas { tier, .. }))
             | Expr::Semantic(SemanticOp::Known(KnownOp::StorageRemove { tier, .. })) => tier.clone(),
             other => panic!("expected a tiered storage op, got {other:?}"),
+        }
+    }
+
+    // --- the shared operand table ---
+
+    #[test]
+    fn operand_table_agrees_with_every_tier_bearing_arm() {
+        // The table is the single owner of these two positions; the
+        // specializer reads it before this pass has run. Drift between
+        // the two would silently de-share on the wrong argument.
+        for (host_fn, argc, key, durability) in [
+            ("_", 3, 0, 2), // set interposes the value
+            ("0", 2, 0, 1),
+            ("1", 2, 0, 1),
+            ("2", 2, 0, 1),
+            ("7", 4, 0, 1),
+            ("f", 5, 0, 1),
+        ] {
+            let ops = storage_operands(host_fn, argc)
+                .unwrap_or_else(|| panic!("l.{host_fn}/{argc} is tier-bearing"));
+            assert_eq!(ops.key, key, "l.{host_fn} key position");
+            assert_eq!(ops.durability, durability, "l.{host_fn} durability position");
+        }
+    }
+
+    #[test]
+    fn operand_table_declines_tier_less_and_malformed_calls() {
+        // Contract-level TTL ops take no key; the deploy family is
+        // another recognizer's scope; a wrong arity is malformed.
+        for (host_fn, argc) in [
+            ("8", 2),
+            ("9", 3),
+            ("c", 3),
+            ("d", 3),
+            ("g", 5),
+            ("3", 3),
+            ("1", 3),
+            ("_", 2),
+        ] {
+            assert!(
+                storage_operands(host_fn, argc).is_none(),
+                "l.{host_fn}/{argc} must not report operand positions"
+            );
         }
     }
 

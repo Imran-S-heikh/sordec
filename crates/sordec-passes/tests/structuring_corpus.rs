@@ -295,10 +295,20 @@ fn skeleton_matches_original_wasm_nesting() {
         let originals = scan_code_section(wasm);
         // Defined-function order is the correlation key: code-section
         // entry i is lifted function i by construction of the lift.
-        assert_eq!(
-            originals.len(),
+        //
+        // `SpecializePass` appends copies of the helpers rustc merged, so
+        // the lift can hold *more* functions than the binary has bodies.
+        // The correlation still holds over the prefix — appending never
+        // renumbers — and a copy is verbatim, so its nesting is its
+        // source's and re-checking it would prove nothing new. What must
+        // never happen is a body going missing, which is what the
+        // inequality pins.
+        assert!(
+            high.functions.len() >= originals.len(),
+            "[{name}] every code-section entry must have a lifted function \
+             ({} lifted, {} in the binary)",
             high.functions.len(),
-            "[{name}] defined-function count agrees with the lift",
+            originals.len(),
         );
 
         for (high_func, original) in high.functions.iter().zip(&originals) {

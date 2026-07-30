@@ -200,6 +200,18 @@ pub enum KnownOp {
         /// its evidence gate passes; `None` until proven. See
         /// [`EnumKey`].
         resolved_key: Option<EnumKey>,
+        /// Set when this existence check was proven to be the SDK's own,
+        /// not one the source wrote.
+        ///
+        /// `Storage::get::<K, V>` returns `Option<V>`, and on wasm that
+        /// is a `has` on the key followed by a guarded `get` on the same
+        /// key and tier. Both host calls are real and both stay in the
+        /// IR — but only the `get` corresponds to a line of source, so
+        /// an emitter that spells this one as `.has(&k)` reports a call
+        /// the author never made. Proven by
+        /// [`OptionProbeePass`](../../../sordec-passes/src/marshalling/option_probe.rs);
+        /// `false` until then.
+        probe: bool,
     },
 
     /// `env.storage().<tier>().remove::<_>(&key)`.
@@ -807,13 +819,17 @@ impl KnownOp {
             }
         };
         match self {
-            KnownOp::StorageGet {
+            // `StorageHas` carries the extra non-value `probe` flag, so
+            // it cannot share the or-pattern; its value fields are
+            // otherwise identical.
+            KnownOp::StorageHas {
                 tier: _,
                 durability,
                 key,
                 resolved_key,
+                probe: _,
             }
-            | KnownOp::StorageHas {
+            | KnownOp::StorageGet {
                 tier: _,
                 durability,
                 key,

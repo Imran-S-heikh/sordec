@@ -57,6 +57,11 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             let v = ctx.value_ref(*value);
             Some(parse_quote!(#e.storage().#tier().set(&#k, &#v)))
         }
+        // A proven SDK `Option` probe is not a call the source made — the
+        // `get` it guards is. Spelling it would report a `.has()` the
+        // author never wrote, so decline for the same reason an unproven
+        // tier declines: we will not name what we know is not there.
+        KnownOp::StorageHas { probe: true, .. } => None,
         KnownOp::StorageHas { tier, key, resolved_key, .. } => {
             let tier = tier_method(tier)?;
             let k = key_expr(ctx, *key, resolved_key);

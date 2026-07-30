@@ -321,6 +321,7 @@ mod tests {
             durability: ValueId::new(1),
             key: ValueId::new(7),
             resolved_key: None,
+            probe: false,
         };
         assert_eq!(label_known_op(&op), "storage_has<?> v7");
     }

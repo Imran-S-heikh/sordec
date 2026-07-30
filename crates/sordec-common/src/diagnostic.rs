@@ -344,6 +344,17 @@ pub enum LiftDiagnosticCode {
     /// sound but it is reasoning, and a reviewer is entitled to see every
     /// place it was applied rather than diff two outputs to find them.
     MarshallingGuardElided,
+    /// A helper that rustc merged from several source functions was left
+    /// merged: its storage evidence dead-ends at a parameter, but the
+    /// specializer declined to split it (call-graph cycle, growth budget
+    /// exhausted, or a region shape it cannot pin a constant into).
+    /// Emitted by the `specialize` pass, once per declined function.
+    ///
+    /// Every one of these is a *recoverable* fact left on the table —
+    /// the storage key or tier behind it stays unnamed for no deeper
+    /// reason than a budget. That is why it reports by name rather than
+    /// only by counter.
+    SpecializationDeclined,
 }
 
 impl LiftDiagnosticCode {
@@ -370,6 +381,7 @@ impl LiftDiagnosticCode {
             Self::UnrecognisedCryptoCall => "lift::unrecognised_crypto_call",
             Self::PanicWithoutErrorCode => "lift::panic_without_error_code",
             Self::MarshallingGuardElided => "lift::marshalling_guard_elided",
+            Self::SpecializationDeclined => "lift::specialization_declined",
         }
     }
 
@@ -402,6 +414,9 @@ impl LiftDiagnosticCode {
             Self::PanicWithoutErrorCode => "bare panic without a structured error code",
             Self::MarshallingGuardElided => {
                 "SDK argument type-check removed as ABI marshalling"
+            }
+            Self::SpecializationDeclined => {
+                "compiler-merged helper left merged — storage evidence stays parameter-bound"
             }
         }
     }

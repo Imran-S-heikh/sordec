@@ -208,13 +208,40 @@ fn overall_band(name: &str) -> (f64, f64) {
     // hello-add's, which is the oracle for the overflow elision: its
     // argument sweep drives `(u64::MAX, 1)` deliberately, and the three
     // calls that trap still "fail identically" on both sides.
+    // Re-derived 2026-07-30 with `SpecializePass` + `OptionProbePass`.
+    //
+    // rustc's identical-code folding merges source helpers that differ
+    // only in a constant into one body, with the constant demoted to a
+    // parameter — dex's `get_total_shares`/`get_reserve_a`/`get_reserve_b`
+    // are one function called with 2, 3, 4. Every recognizer then
+    // declined correctly, because a meet over disagreeing callers is
+    // `None`. The specializer splits those bodies back apart, which is
+    // the exact inverse of the transform that lost the information, and
+    // the existing recognizers resolve with no change to them.
+    //
+    // The two fixtures with merged storage families move; the rest are
+    // untouched. timelock 0.5811 -> 0.6493 (semantic 0.5926 -> 0.7857,
+    // and its enum keys go 2/4 -> 6/6 named); dex 0.5106 -> 0.5639
+    // (semantic 0.4000 -> 0.5517, enum keys 1/6 -> 10/16). Aggregate
+    // 0.5842 -> 0.6016.
+    //
+    // The tokens land back exactly where they were, and that is the
+    // interesting part rather than a null result. De-sharing first
+    // *cost* them ~0.01 each, because `Storage::get` returns `Option`
+    // and compiles to a `has` guarding a `get`: recovering those probes
+    // well enough to name them made the emitter report `.has()` calls
+    // that appear in no source. `OptionProbePass` proves which `has`
+    // calls are the SDK's and stops the emitter spelling them.
+    // timelock's `is_initialized` is a real `.has()` and still scores as
+    // one — which is why the probe is proven per site rather than
+    // assumed from the op.
     match name {
         "hello-add" => (0.99, 1.00),
         "token-v22" => (0.54, 0.58),
         "token-v23" => (0.45, 0.49),
         "token-v23-stripped" => (0.15, 0.19),
-        "timelock" => (0.56, 0.60),
-        "dex-liquidity-pool" => (0.49, 0.53),
+        "timelock" => (0.63, 0.67),
+        "dex-liquidity-pool" => (0.54, 0.58),
         "attestation" => (0.76, 0.80),
         _ => (0.00, 1.00),
     }

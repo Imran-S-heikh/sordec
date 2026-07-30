@@ -719,11 +719,19 @@ fn dump_hir_names_enum_storage_keys_on_both_tokens() {
 
 #[test]
 fn dump_hir_names_enum_storage_keys_by_value_on_timelock_and_dex() {
-    // All-unit DataKey enums pass the discriminant by value; the
-    // monomorphic sites name (timelock claim's Balance get + remove,
-    // dex's TokenA getter). The shared polymorphic helpers (timelock's
-    // has serving Init AND Balance, dex's getter serving TokenB..Shares)
-    // must stay honestly unnamed — the meet refuses disagreement.
+    // All-unit DataKey enums pass the discriminant by value. The
+    // monomorphic sites always named (timelock claim's Balance get +
+    // remove, dex's TokenA getter); the shared polymorphic helpers used
+    // to stay unnamed, because a meet over disagreeing callers is
+    // honestly `None`.
+    //
+    // `SpecializePass` removes the disagreement rather than weakening
+    // the meet: rustc folded timelock's two `set` call sites into one
+    // body and dex's five `get_*`/`put_*` families into two, and
+    // de-sharing gives each fact its own body again. So `DataKey::Init`
+    // and `DataKey::TokenB` — the two this test previously pinned as
+    // *unnameable* — now name, and the rule that produced the old
+    // behaviour is unchanged.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
         .args(["dump-hir", TIMELOCK])
@@ -731,7 +739,11 @@ fn dump_hir_names_enum_storage_keys_by_value_on_timelock_and_dex() {
         .success()
         .stdout(predicate::str::contains("storage_get<instance>(v13: DataKey::Balance)"))
         .stdout(predicate::str::contains("storage_remove<instance>(v163: DataKey::Balance)"))
-        .stdout(predicate::str::contains(": DataKey::Init").not());
+        // The de-shared `set` family: one body per key, as the source wrote.
+        .stdout(predicate::str::contains("storage_set<instance>(v0: DataKey::Init, v1)"))
+        .stdout(predicate::str::contains(
+            "storage_set<instance>(v0: DataKey::Balance, v1)",
+        ));
 
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
@@ -739,7 +751,51 @@ fn dump_hir_names_enum_storage_keys_by_value_on_timelock_and_dex() {
         .assert()
         .success()
         .stdout(predicate::str::contains(": DataKey::TokenA"))
-        .stdout(predicate::str::contains(": DataKey::TokenB").not());
+        .stdout(predicate::str::contains(": DataKey::TokenB"))
+        .stdout(predicate::str::contains(": DataKey::ReserveA"))
+        .stdout(predicate::str::contains(": DataKey::ReserveB"))
+        .stdout(predicate::str::contains(": DataKey::TotalShares"))
+        // Still honestly unnamed: `Shares(Address)` is a payload variant
+        // reached by value, and the by-value channel carries no payload,
+        // so the enum-key footprint gate declines it. De-sharing does not
+        // manufacture evidence it never had.
+        .stdout(predicate::str::contains(": DataKey::Shares").not());
+}
+
+#[test]
+fn dump_hir_separates_the_sdk_option_probe_from_a_real_has() {
+    // `Storage::get` returns `Option`, so on wasm it is a `has` guarding
+    // a `get` on the same key. Recovering those probes well enough to
+    // name them is what makes it possible to report a `.has()` the
+    // source never wrote — so each one is proven per site, not assumed
+    // from the op.
+    //
+    // timelock is the fixture that can tell the two apart: its
+    // `is_initialized` is a real `env.storage().instance().has(&Init)`,
+    // while the `has` on `Balance` is the SDK probe in front of
+    // `claim`'s `get(&Balance).unwrap()`.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", TIMELOCK])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "storage_has:sdk-option-probe<instance>(v1: DataKey::Balance)",
+        ))
+        .stdout(predicate::str::contains(
+            "storage_has<instance>(v1: DataKey::Init)",
+        ));
+
+    // dex's source calls `.has()` nowhere at all, so every one of its
+    // existence checks is the SDK's.
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["dump-hir", DEX])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "storage_has:sdk-option-probe<instance>(v1: DataKey::ReserveA)",
+        ));
 }
 
 #[test]
