@@ -187,6 +187,10 @@ pub const VAL_PACKED_COMPARE_MASKED: &str = "val_packed_compare_masked";
 /// because this one reads the wasm comparison as unsigned, which the
 /// lowering no longer records — see `recognizers::val_packed_compare`.
 pub const VAL_PACKED_COMPARE_ORDERED: &str = "val_packed_compare_ordered";
+/// `Bool` Vals narrowed to a machine bool by the SDK's `== 1`. A `Bool`
+/// Val has no body, so its bits *are* its value — exact by the encoding's
+/// definition, which is why it is counted apart from the packed shapes.
+pub const VAL_PACKED_COMPARE_BOOL: &str = "val_packed_compare_bool";
 
 // ---------------------------------------------------------------------
 // Lifted-IR de-cluttering (Phase 3 W3). Surfaced by the W8 structuring
@@ -463,6 +467,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         VAL_COMPARE,
         VAL_PACKED_COMPARE_MASKED,
         VAL_PACKED_COMPARE_ORDERED,
+        VAL_PACKED_COMPARE_BOOL,
         UNRECOGNISED_HOST_CALL,
         // Structuring section — de-cluttering (W3).
         DECLUTTER_ALIASES_RESOLVED,

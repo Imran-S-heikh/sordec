@@ -1,4 +1,4 @@
-//! Comparisons rustc compiled against a `U32Val`'s *bits* rather than its
+//! Comparisons rustc compiled against a Val's *bits* rather than its
 //! *payload*.
 //!
 //! ## The contradiction this resolves
@@ -39,13 +39,14 @@
 //! arithmetic, and reading it as a Val payload would be wrong. Typing
 //! alone therefore cannot decide this; the op family has to.
 //!
-//! ## The three shapes, and what each rests on
+//! ## The four shapes, and what each rests on
 //!
 //! | shape | pattern | payload predicate | premise |
 //! |---|---|---|---|
 //! | A | `(p & MAJOR_MASK) {==,!=} k << 32` | `payload {==,!=} k` | none |
 //! | B-eq | `p {==,!=} ((k << 32) \| 4)` | `payload {==,!=} k` | none |
 //! | B-lt | `p < k << 32` | `payload < k` | unsigned |
+//! | C | `b {==,!=} {0,1}` | `b` / `!b` | none |
 //!
 //! **A** is exact. `bits & MAJOR_MASK` is `payload << 32` for any
 //! well-formed `U32Val`, and `<< 32` is injective on 32-bit values, so
@@ -65,6 +66,23 @@
 //! was derived from is `i64.lt_u`, so the reading is the right one; it is
 //! an inference from the SDK's compiled shape, not a proof, and the
 //! binding's provenance says so. `sordec-diffexec` is what settles it.
+//!
+//! **C is the degenerate case, and it is exact by the encoding's own
+//! definition.** A `Bool` Val carries no body: `Tag::False` is `0` and
+//! `Tag::True` is `1` ([`crate::val_abi::TAG_FALSE`] /
+//! [`TAG_TRUE`](crate::val_abi::TAG_TRUE)), so the whole 64-bit word *is*
+//! `0` or `1`. `bits == 1` is therefore the value itself and `bits == 0`
+//! its negation — no shift, no mask, and nothing to be unsigned about.
+//! rustc spells the test that way because at the machine level it only
+//! ever had an `i64`.
+//!
+//! This is the shape behind `env.storage().<tier>().has(&k)`, whose result
+//! the SDK immediately narrows with `== 1`. It matters more than its
+//! triviality suggests: [`KnownType::Bool`] does not coincide with the
+//! wasm value type, so the emitter cannot annotate a hole standing where
+//! the `has` was, and `todo!()`'s `!` falls back to `()` — the failure is
+//! `can't compare `()` with `i64``, the exact symptom the U32Val half of
+//! this pass was written for.
 //!
 //! `Le`/`Gt`/`Ge` are deliberately **not** recognized. Each maps to a
 //! payload predicate with a *different* operator (`p <=ᵘ k << 32` is
@@ -103,6 +121,8 @@ pub const PASS_NAME: &str = "val-packed-compare";
 // carry different evidence and a reviewer wants to see the ratio.
 const M_MASKED: &str = "val_packed_compare_masked";
 const M_ORDERED: &str = "val_packed_compare_ordered";
+/// Shape C — a `Bool` Val narrowed to a machine bool by `== 1`.
+const M_BOOL: &str = "val_packed_compare_bool";
 
 /// Rewrites bit-packed `U32Val` comparisons into payload comparisons.
 #[derive(Debug, Default, Clone, Copy)]
@@ -155,11 +175,12 @@ fn recognize_function(func: &mut HighFunction) -> (bool, PassMetrics) {
     (changed, metrics)
 }
 
-/// Match one comparison binding against the three shapes.
+/// Match one comparison binding against the four shapes.
 ///
-/// `cmp` is the comparison binding itself; it is rewritten only for the
+/// `cmp` is the comparison binding itself; it is rewritten for the
 /// `< 1 << 32` normalization, where the payload predicate is spelled
-/// `== 0` instead.
+/// `== 0` instead, and for shape C, which replaces the comparison
+/// outright.
 fn try_site(
     func: &HighFunction,
     uses: &HighUseIndex,
@@ -168,12 +189,102 @@ fn try_site(
     lhs: ValueId,
     rhs: ValueId,
 ) -> Option<Site> {
+    // Shape C first, and outside `try_oriented`: it neither re-types a
+    // literal nor aliases a mask, so the use-count gate those rewrites
+    // need does not apply to it and would only decline sites sharing a
+    // `1i64`.
+    if let Some(site) = try_bool_val(func, cmp, op, lhs, rhs) {
+        return Some(site);
+    }
     // The packed constant may sit on either side. Both readings are tried
     // rather than assumed, and the operator is never mirrored: operands
     // are rewritten in place, so their order — and hence the operator's
     // meaning — is preserved.
     try_oriented(func, uses, cmp, op, lhs, rhs, ConstSide::Rhs)
         .or_else(|| try_oriented(func, uses, cmp, op, rhs, lhs, ConstSide::Lhs))
+}
+
+/// Shape C — `b {==,!=} {0,1}` where `b` is an ABI-proven `Bool` Val.
+///
+/// Replaces the comparison with the Val itself (or its negation), because
+/// a `Bool` Val's bits *are* its value. Unlike the packed shapes this
+/// rewrites the comparison binding rather than its operands: there is no
+/// payload to extract, so there is nothing left for the comparison to do.
+fn try_bool_val(
+    func: &HighFunction,
+    cmp: ValueId,
+    op: BinaryOp,
+    lhs: ValueId,
+    rhs: ValueId,
+) -> Option<Site> {
+    // Either orientation; the constant identifies itself.
+    let (value, konst) = [(lhs, rhs), (rhs, lhs)]
+        .into_iter()
+        .find(|(v, _)| bool_val_producer(func, *v))?;
+    let (_, bits) = direct_int_literal(func, konst)?;
+
+    // `Bool`'s two encodings, as bit patterns. Named rather than spelled
+    // `0`/`1` so the derivation stays visible: these are tag bytes, and a
+    // `Bool` Val has no body for them to share the word with.
+    const TRUE_BITS: u64 = val_abi::TAG_TRUE as u64;
+    const FALSE_BITS: u64 = val_abi::TAG_FALSE as u64;
+
+    let negated = match (op, bits) {
+        (BinaryOp::Eq, TRUE_BITS) | (BinaryOp::Ne, FALSE_BITS) => false,
+        (BinaryOp::Eq, FALSE_BITS) | (BinaryOp::Ne, TRUE_BITS) => true,
+        // Any other constant is not a well-formed `Bool` Val, so this is
+        // not the shape — decline rather than reinterpret it.
+        _ => return None,
+    };
+
+    let (expr, note) = if negated {
+        (
+            Expr::Unary {
+                op: sordec_ir::UnaryOp::Not,
+                value,
+            },
+            "Bool Val compared against Tag::False — the SDK's negated narrowing",
+        )
+    } else {
+        (
+            Expr::Use(value),
+            "Bool Val compared against Tag::True — the SDK's narrowing to a machine bool",
+        )
+    };
+    Some(Site {
+        rewrites: vec![Rewrite {
+            id: cmp,
+            expr,
+            ty: Some(IrType::Known(KnownType::Bool)),
+            source: ProvenanceSource::SdkPattern,
+            note: note.to_string(),
+            metric: M_BOOL,
+        }],
+        metric: M_BOOL,
+    })
+}
+
+/// Whether `value` is an ABI-proven `Bool`-valued host call.
+///
+/// Membership is by **op family**, exactly as [`u32val_producer`] does and
+/// for the same reason: a `bool`-typed binding is not evidence, since
+/// every comparison in the IR is typed `bool` and comparing one of *those*
+/// against `1` is ordinary logic, not marshalling.
+fn bool_val_producer(func: &HighFunction, value: ValueId) -> bool {
+    let id = resolve_use(func, value);
+    let Some(Expr::Semantic(SemanticOp::Known(op))) = binding_expr(func, id) else {
+        return false;
+    };
+    let ty = match op {
+        // `l.0` — the only storage op returning a Bool.
+        KnownOp::StorageHas { .. } => KnownType::Bool,
+        KnownOp::MapOp { kind, .. } => val_abi::map_kind_result_type(kind),
+        KnownOp::VecOp { kind, .. } => val_abi::vec_kind_result_type(kind),
+        KnownOp::BufOp { kind, .. } => val_abi::buf_kind_result_type(kind),
+        KnownOp::CryptoOp { kind, .. } => val_abi::crypto_kind_result_type(kind),
+        _ => return false,
+    };
+    matches!(ty, KnownType::Bool)
 }
 
 /// Which operand of the comparison holds the packed constant.
@@ -480,6 +591,132 @@ mod tests {
     fn run(func: &mut HighFunction) -> PassMetrics {
         let (_, metrics) = recognize_function(func);
         metrics
+    }
+
+    /// `env.storage().<tier>().has(&k)` — a `Bool`-valued host call.
+    fn storage_has(key: ValueId) -> Expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::StorageHas {
+            tier: sordec_ir::StorageTier::Known(sordec_ir::KnownTier::Instance),
+            durability: key,
+            key,
+            resolved_key: None,
+            probe: false,
+        }))
+    }
+
+    // --- shape C: a Bool Val narrowed by `== 1` ---
+
+    #[test]
+    fn a_bool_val_compared_against_true_is_the_val_itself() {
+        // The SDK's `has` wrapper: `v1 = has(v0); v2 = 1; v3 = v1 == v2`.
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            storage_has(v(0)),
+            Expr::Literal(Literal::I64(1)),
+            Expr::Binary { op: BinaryOp::Eq, lhs: v(1), rhs: v(2) },
+        ]);
+        assert_eq!(run(&mut func).get(M_BOOL), Some(1));
+        // The comparison *is* the Val — a Bool Val's bits are its value.
+        assert!(matches!(func.bindings.get(v(3)).unwrap().expr, Expr::Use(p) if p == v(1)));
+        assert_eq!(
+            func.bindings.get(v(3)).unwrap().ty,
+            IrType::Known(KnownType::Bool)
+        );
+    }
+
+    #[test]
+    fn a_bool_val_compared_against_false_is_its_negation() {
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            storage_has(v(0)),
+            Expr::Literal(Literal::I64(0)),
+            Expr::Binary { op: BinaryOp::Eq, lhs: v(1), rhs: v(2) },
+        ]);
+        assert_eq!(run(&mut func).get(M_BOOL), Some(1));
+        assert!(matches!(
+            func.bindings.get(v(3)).unwrap().expr,
+            Expr::Unary { op: sordec_ir::UnaryOp::Not, value } if value == v(1)
+        ));
+    }
+
+    #[test]
+    fn the_constant_is_recognized_on_either_side() {
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            storage_has(v(0)),
+            Expr::Literal(Literal::I64(1)),
+            Expr::Binary { op: BinaryOp::Eq, lhs: v(2), rhs: v(1) },
+        ]);
+        assert_eq!(run(&mut func).get(M_BOOL), Some(1));
+        assert!(matches!(func.bindings.get(v(3)).unwrap().expr, Expr::Use(p) if p == v(1)));
+    }
+
+    #[test]
+    fn a_shared_constant_still_matches() {
+        // Shape C re-types nothing, so the use-count gate the packed
+        // shapes need must not apply to it: both comparisons match.
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            storage_has(v(0)),
+            storage_has(v(0)),
+            Expr::Literal(Literal::I64(1)),
+            Expr::Binary { op: BinaryOp::Eq, lhs: v(1), rhs: v(3) },
+            Expr::Binary { op: BinaryOp::Eq, lhs: v(2), rhs: v(3) },
+        ]);
+        assert_eq!(run(&mut func).get(M_BOOL), Some(2));
+    }
+
+    #[test]
+    fn an_ordinary_bool_compared_against_one_is_left_alone() {
+        // Every comparison in the IR is typed `bool`. Comparing one of
+        // those against 1 is logic, not marshalling — which is why
+        // membership is by op family, never by recovered type.
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            Expr::Phi { incoming: vec![] },
+            Expr::Binary { op: BinaryOp::Lt, lhs: v(0), rhs: v(1) },
+            Expr::Literal(Literal::I64(1)),
+            Expr::Binary { op: BinaryOp::Eq, lhs: v(2), rhs: v(3) },
+        ]);
+        assert_eq!(run(&mut func).get(M_BOOL), None);
+    }
+
+    #[test]
+    fn a_non_bool_host_call_is_not_this_shape() {
+        // `bytes_len` is a U32Val; `== 1` on it is the packed shapes'
+        // business, not this one.
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            bytes_len(v(0)),
+            Expr::Literal(Literal::I64(1)),
+            Expr::Binary { op: BinaryOp::Eq, lhs: v(1), rhs: v(2) },
+        ]);
+        assert_eq!(run(&mut func).get(M_BOOL), None);
+    }
+
+    #[test]
+    fn a_constant_that_is_not_a_bool_encoding_is_declined() {
+        // 2 is not a well-formed `Bool` Val, so the shape does not hold
+        // and nothing is reinterpreted.
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            storage_has(v(0)),
+            Expr::Literal(Literal::I64(2)),
+            Expr::Binary { op: BinaryOp::Eq, lhs: v(1), rhs: v(2) },
+        ]);
+        assert_eq!(run(&mut func).get(M_BOOL), None);
+    }
+
+    #[test]
+    fn bool_shape_is_idempotent() {
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            storage_has(v(0)),
+            Expr::Literal(Literal::I64(1)),
+            Expr::Binary { op: BinaryOp::Eq, lhs: v(1), rhs: v(2) },
+        ]);
+        assert_eq!(run(&mut func).get(M_BOOL), Some(1));
+        assert_eq!(run(&mut func).get(M_BOOL), None, "no comparison left to match");
     }
 
     #[test]
