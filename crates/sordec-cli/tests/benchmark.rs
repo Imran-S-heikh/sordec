@@ -235,13 +235,34 @@ fn overall_band(name: &str) -> (f64, f64) {
     // timelock's `is_initialized` is a real `.has()` and still scores as
     // one — which is why the probe is proven per site rather than
     // assumed from the op.
+    // Re-centred 2026-07-31 after Job A — the labeled-scope tax.
+    //
+    // Wasm spells `if`/`else` as `block` + `br`, the structurer reproduces
+    // that faithfully, and nothing converted it back: 246 emitted `break`s
+    // against sources containing none at all. Two transforms, both in
+    // `refine` because that is the layer that produced the shape. The
+    // first deletes breaks at a *tail exit* — where falling off the end
+    // reaches the same continuation — which is the reading the old
+    // predicate had backwards. The second turns a guarded break into the
+    // `else` arm it skips past.
+    //
+    // 246 breaks -> 103. Structure moved on every fixture: token-v23
+    // 0.0707 -> 0.0920, dex 0.0551 -> 0.0723, token-v22 0.0703 -> 0.0940,
+    // timelock 0.0647 -> 0.0740. Aggregate 0.6016 -> 0.6054.
+    //
+    // Small against the size of the gap, and the reason is worth keeping
+    // rather than dressing up: structure is Dice over streams still ~20x
+    // the source's, so removing 20 tokens of 774 cannot move it far. The
+    // breaks were never the bulk — the `if`s are (68 emitted against the
+    // source's 10 on token-v23). Corpus `cargo check` 238 -> 236, gate
+    // unchanged at 2/7, behaviour 1.0000 on both measured fixtures.
     match name {
         "hello-add" => (0.99, 1.00),
-        "token-v22" => (0.54, 0.58),
-        "token-v23" => (0.45, 0.49),
-        "token-v23-stripped" => (0.15, 0.19),
+        "token-v22" => (0.55, 0.59),
+        "token-v23" => (0.47, 0.51),
+        "token-v23-stripped" => (0.16, 0.20),
         "timelock" => (0.63, 0.67),
-        "dex-liquidity-pool" => (0.54, 0.58),
+        "dex-liquidity-pool" => (0.55, 0.59),
         "attestation" => (0.76, 0.80),
         _ => (0.00, 1.00),
     }
