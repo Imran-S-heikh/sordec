@@ -316,6 +316,21 @@ pub enum UnaryOp {
     Not,
     /// Bitwise NOT.
     BitNot,
+    /// WASM `i32.eqz` / `i64.eqz` — "the operand is zero".
+    ///
+    /// Distinct from [`Not`](Self::Not) because the two are only the same
+    /// operation on a boolean. rustc spells both `!flag` and `n == 0` as
+    /// `eqz`, and which one it meant is a question about the operand's
+    /// type, not about the opcode. Keeping the opcode's own identity here
+    /// leaves that question to the emitter, which is where the recovered
+    /// type is known — rendering `!x` for a `Bool` and `x == 0` otherwise.
+    /// Collapsing it into `Not` at lift time would emit Rust's *bitwise*
+    /// `!` for every integer operand, which is a different value.
+    ///
+    /// Unary despite meaning a comparison, so the one-op-to-one-`Expr`
+    /// lowering contract holds without minting a zero literal it has no
+    /// way to schedule.
+    Eqz,
     /// Count leading zeros.
     Clz,
     /// Count trailing zeros.

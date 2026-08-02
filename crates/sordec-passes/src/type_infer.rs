@@ -448,6 +448,11 @@ fn unary_result(op: UnaryOp, operand: Option<&IrType>) -> Option<IrType> {
         }
         // Bit-count intrinsics yield u32.
         UnaryOp::Clz | UnaryOp::Ctz | UnaryOp::Popcnt => Some(IrType::Inferred(KnownType::U32)),
+        // `eqz` is a comparison wearing a unary opcode: whatever the
+        // operand's width, the answer is a boolean. Typing it so is what
+        // lets a nested `eqz(eqz(x))` render its outer half as `!…` rather
+        // than a second `== 0` against a bool.
+        UnaryOp::Eqz => Some(IrType::Inferred(KnownType::Bool)),
         // Float ops don't occur in Soroban; leave untyped.
         UnaryOp::Sqrt | UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Trunc => None,
     }

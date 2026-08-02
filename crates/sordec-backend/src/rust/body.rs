@@ -186,6 +186,21 @@ impl<'a> FnCtx<'a> {
         self.names.expr(vid)
     }
 
+    /// Whether `vid`'s recovered type is `bool`.
+    ///
+    /// Asked only by [`UnaryOp::Eqz`](sordec_ir::UnaryOp::Eqz), which is one
+    /// opcode covering two Rust operators: `!flag` on a boolean and `n == 0`
+    /// on an integer. Both readings are always *valid Rust*, so an
+    /// unrecovered type has to pick one, and `== 0` is the safe default —
+    /// it is what `eqz` means on the wasm value types, and rendering `!` on
+    /// an integer would silently emit a bitwise complement instead.
+    pub(crate) fn is_boolean(&self, vid: ValueId) -> bool {
+        matches!(
+            self.func.bindings.get(vid).map(|b| &b.ty),
+            Some(IrType::Known(KnownType::Bool) | IrType::Inferred(KnownType::Bool))
+        )
+    }
+
     /// The identifier a `ValueId` is bound and referenced under.
     fn value_ident(&self, vid: ValueId) -> syn::Ident {
         self.names.ident(vid)

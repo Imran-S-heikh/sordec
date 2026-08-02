@@ -1449,6 +1449,7 @@ fn unary_str(op: UnaryOp) -> &'static str {
         UnaryOp::Neg => "neg",
         UnaryOp::Not => "not",
         UnaryOp::BitNot => "bitnot",
+        UnaryOp::Eqz => "eqz",
         UnaryOp::Clz => "clz",
         UnaryOp::Ctz => "ctz",
         UnaryOp::Popcnt => "popcnt",

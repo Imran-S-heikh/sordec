@@ -21,7 +21,9 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
     match &binding.expr {
         Expr::Literal(lit) => literal_expr(ctx, lit, &binding.ty),
         Expr::Use(v) => ctx.value_ref(*v),
-        Expr::Unary { op, value } => unary_expr(*op, ctx.value_ref(*value)),
+        Expr::Unary { op, value } => {
+            unary_expr(*op, ctx.value_ref(*value), ctx.is_boolean(*value))
+        }
         Expr::Binary { op, lhs, rhs } => {
             binary_expr(*op, ctx.value_ref(*lhs), ctx.value_ref(*rhs))
         }
@@ -177,11 +179,17 @@ fn literal_expr(ctx: &FnCtx, lit: &Literal, ty: &IrType) -> syn::Expr {
     }
 }
 
-fn unary_expr(op: UnaryOp, v: syn::Expr) -> syn::Expr {
+fn unary_expr(op: UnaryOp, v: syn::Expr, operand_is_bool: bool) -> syn::Expr {
     match op {
         UnaryOp::Neg => parse_quote!(-#v),
         // Rust `!` is both logical and bitwise not; the operand type picks.
         UnaryOp::Not | UnaryOp::BitNot => parse_quote!(!#v),
+        // One wasm opcode, two Rust operators. `!` is the right spelling
+        // only for a boolean — on an integer Rust's `!` is the bitwise
+        // complement, a different value — so an unproven type takes the
+        // literal reading, which is what `eqz` means on a wasm value type.
+        UnaryOp::Eqz if operand_is_bool => parse_quote!(!#v),
+        UnaryOp::Eqz => parse_quote!(#v == 0),
         UnaryOp::Clz => parse_quote!(#v.leading_zeros()),
         UnaryOp::Ctz => parse_quote!(#v.trailing_zeros()),
         UnaryOp::Popcnt => parse_quote!(#v.count_ones()),
@@ -250,14 +258,31 @@ mod tests {
             render(&syn::parse_str::<syn::Expr>("a.rotate_left(b)").unwrap()),
         );
         assert_eq!(
-            render(&unary_expr(UnaryOp::Clz, parse_quote!(x))),
+            render(&unary_expr(UnaryOp::Clz, parse_quote!(x), false)),
             render(&syn::parse_str::<syn::Expr>("x.leading_zeros()").unwrap()),
         );
     }
 
     #[test]
     fn unary_neg_and_not_render_as_operators() {
-        assert_eq!(render(&unary_expr(UnaryOp::Neg, parse_quote!(x))), render(&parse_quote!(-x)));
-        assert_eq!(render(&unary_expr(UnaryOp::Not, parse_quote!(x))), render(&parse_quote!(!x)));
+        assert_eq!(render(&unary_expr(UnaryOp::Neg, parse_quote!(x), false)), render(&parse_quote!(-x)));
+        assert_eq!(render(&unary_expr(UnaryOp::Not, parse_quote!(x), true)), render(&parse_quote!(!x)));
+    }
+
+    #[test]
+    fn eqz_renders_by_the_operand_type() {
+        // One wasm opcode, two Rust operators. Getting this backwards is
+        // not a style slip: Rust's `!` on an integer is the bitwise
+        // complement, so `!n` and `n == 0` are different values.
+        assert_eq!(
+            render(&unary_expr(UnaryOp::Eqz, parse_quote!(flag), true)),
+            render(&parse_quote!(!flag)),
+            "a boolean operand is a logical negation"
+        );
+        assert_eq!(
+            render(&unary_expr(UnaryOp::Eqz, parse_quote!(n), false)),
+            render(&syn::parse_str::<syn::Expr>("n == 0").unwrap()),
+            "an integer operand is a comparison against zero"
+        );
     }
 }

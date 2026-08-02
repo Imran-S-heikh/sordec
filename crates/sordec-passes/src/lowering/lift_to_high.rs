@@ -515,13 +515,22 @@ fn binary_op(w: &waffle::Operator) -> Option<BinaryOp> {
 
 /// Map a unary WASM operator to a [`UnaryOp`]. `None` for non-unary ops.
 ///
-/// Note: `Eqz` ("== 0") is intentionally NOT mapped — it has no faithful
-/// unary shape without fabricating a zero operand, so it falls through to
-/// `Expr::Unknown`. `Nearest` likewise has no `UnaryOp` variant.
+/// `Eqz` used to be left out here, on the grounds that it "has no faithful
+/// unary shape without fabricating a zero operand". The objection was real
+/// but aimed at the wrong target: this function cannot mint the zero
+/// (one operator yields one `Expr`, with nowhere to schedule a second
+/// binding), yet nothing forced the *representation* to be a comparison.
+/// [`UnaryOp::Eqz`] names the opcode instead and leaves the Rust spelling
+/// — `!x` on a boolean, `x == 0` on an integer — to the emitter, which is
+/// where the operand's recovered type is known. It was the single largest
+/// lifting gap on the corpus: 60 holes, 42 of them guarding an `if`.
+///
+/// `Nearest` still has no `UnaryOp` variant.
 fn unary_op(w: &waffle::Operator) -> Option<UnaryOp> {
     use waffle::Operator as W;
     use UnaryOp as U;
     Some(match w {
+        W::I32Eqz | W::I64Eqz => U::Eqz,
         W::I32Clz | W::I64Clz => U::Clz,
         W::I32Ctz | W::I64Ctz => U::Ctz,
         W::I32Popcnt | W::I64Popcnt => U::Popcnt,
@@ -702,6 +711,42 @@ mod tests {
     }
 
     #[test]
+    fn eqz_lowers_to_a_unary_rather_than_a_hole() {
+        // Supersedes `eqz_lowers_to_unknown_not_fabricated_compare`, which
+        // pinned the fall-through to `Expr::Unknown`. That test's concern
+        // was right — this lowering must not fabricate a zero operand it
+        // has nowhere to schedule — but dropping the opcode on the floor
+        // was the wrong way to honour it: 60 holes on the corpus, 42 of
+        // them guarding an `if`. Naming the opcode fabricates nothing, and
+        // the binding count below is what says so.
+        for eqz in [waffle::Operator::I32Eqz, waffle::Operator::I64Eqz] {
+            let ir = lifted_one_fn(
+                facts_with(vec![], vec![]),
+                vec![
+                    op(waffle::Operator::I64Const { value: 7 }, vec![]),
+                    op(eqz, vec![v(0)]),
+                ],
+            );
+            let b = lower_and_bindings(ir);
+            assert!(
+                matches!(
+                    b.get(v(1)).unwrap().expr,
+                    Expr::Unary {
+                        op: UnaryOp::Eqz,
+                        ..
+                    }
+                ),
+                "eqz must not fall through to Expr::Unknown"
+            );
+            assert_eq!(
+                b.len(),
+                2,
+                "one operator still yields one binding — no synthesised zero"
+            );
+        }
+    }
+
+    #[test]
     fn load_lowers_with_offset() {
         let memory = waffle::MemoryArg {
             align: 3,
@@ -867,22 +912,6 @@ mod tests {
                 op_kind: WasmOpcodeKind::Conversion,
                 ..
             }
-        ));
-    }
-
-    #[test]
-    fn eqz_lowers_to_unknown_not_fabricated_compare() {
-        let ir = lifted_one_fn(
-            facts_with(vec![], vec![]),
-            vec![
-                op(waffle::Operator::I64Const { value: 0 }, vec![]),
-                op(waffle::Operator::I64Eqz, vec![v(0)]),
-            ],
-        );
-        let b = lower_and_bindings(ir);
-        assert!(matches!(
-            b.get(v(1)).unwrap().expr,
-            Expr::Unknown { .. }
         ));
     }
 
