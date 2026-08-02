@@ -331,6 +331,15 @@ pub const REFINE_LOOPS_CLASSIFIED: &str = "refine_loops_classified";
 /// their own end — elided along with that break. Structuring residue the
 /// marshalling elision exposes when it folds a width dispatch.
 pub const REFINE_SCOPES_FALLTHROUGH: &str = "refine_scopes_fallthrough";
+/// `Break`s rewritten to a `Transfer` because they sat at a **tail exit** —
+/// a position from which falling off the end reaches the same continuation
+/// the break jumps to. Wasm spells `if`/`else` with forward branches and the
+/// structurer reproduces them; these are the half that carry no information.
+pub const REFINE_TAIL_EXIT_BREAKS: &str = "refine_tail_exit_breaks";
+/// Scopes that kept their label because a real forward jump still names it.
+/// The residue after tail-exit elision, and the sizing signal for whether an
+/// `if`/`else` reconstruction is worth building.
+pub const REFINE_SCOPES_LIVE_LABEL: &str = "refine_scopes_live_label";
 /// Shared-else diamonds merged into one `&&` guard (W7 D7).
 pub const REFINE_AND_MERGED: &str = "refine_and_merged";
 /// Diamonds matching the D7 shape but blocked by the effect or
@@ -504,6 +513,8 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         REFINE_POLARITY_FLIPPED,
         REFINE_GUARDS_HOISTED,
         REFINE_SCOPES_FALLTHROUGH,
+        REFINE_TAIL_EXIT_BREAKS,
+        REFINE_SCOPES_LIVE_LABEL,
         REFINE_TRAPS_INLINED,
         REFINE_SHARED_TRAP_WITH_BINDINGS,
         REFINE_TRAPS_DUPLICATED,

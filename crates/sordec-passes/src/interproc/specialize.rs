@@ -231,7 +231,7 @@ fn param_positions(
     };
     if let Expr::Call { target, args } = &binding.expr {
         // Only internal helpers; an exported callee is not a constructor.
-        if !ir.function(*target).is_some_and(|f| f.name.is_none()) {
+        if ir.function(*target).is_none_or(|f| f.name.is_some()) {
             return;
         }
         if args.iter().any(|arg| trace_int(func, *arg).is_some()) {

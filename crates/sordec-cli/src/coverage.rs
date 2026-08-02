@@ -340,6 +340,14 @@ pub struct RefinementCounts {
     pub loops_classified: i64,
     /// Client-call element lists recovered by the copy-loop trace (D9).
     pub client_args_via_copy_loop: i64,
+    /// `Break`s at a tail exit rewritten to a `Transfer` — the wasm
+    /// forward-branch residue that carried no information.
+    pub tail_exit_breaks: i64,
+    /// Scopes spliced away once their last exit went.
+    pub scopes_elided: i64,
+    /// Scopes that kept their label for a real forward jump — the residue,
+    /// and the widening signal for an `if`/`else` reconstruction.
+    pub scopes_live_label: i64,
 }
 
 /// Lifted-IR de-cluttering counters (W3).
@@ -995,6 +1003,9 @@ fn build_structuring(t: &BTreeMap<&'static str, i64>) -> StructuringCoverage {
             and_merge_blocked: metric(t, mc::REFINE_AND_MERGE_BLOCKED),
             loops_classified: metric(t, mc::REFINE_LOOPS_CLASSIFIED),
             client_args_via_copy_loop: metric(t, mc::CLIENT_ARGS_VIA_COPY_LOOP),
+            tail_exit_breaks: metric(t, mc::REFINE_TAIL_EXIT_BREAKS),
+            scopes_elided: metric(t, mc::REFINE_SCOPES_FALLTHROUGH),
+            scopes_live_label: metric(t, mc::REFINE_SCOPES_LIVE_LABEL),
         },
         declutter: DeclutterCounts {
             aliases_resolved: metric(t, mc::DECLUTTER_ALIASES_RESOLVED),
@@ -1313,6 +1324,11 @@ fn render_structuring(out: &mut impl Write, s: &StructuringCoverage) -> io::Resu
         re.and_merge_blocked,
         re.loops_classified,
         re.client_args_via_copy_loop,
+    )?;
+    writeln!(
+        out,
+        "    scope exits:    tail-exit breaks elided ×{}, scopes spliced ×{}, live labels ×{}   (live = a real forward jump remains)",
+        re.tail_exit_breaks, re.scopes_elided, re.scopes_live_label,
     )?;
 
     let dc = &s.declutter;

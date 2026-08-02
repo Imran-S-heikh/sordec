@@ -29,6 +29,26 @@ use super::{debug_validate, is_bare_exit, is_terminating};
 use crate::pass::{Pass, PassResult};
 use crate::structuring::seq;
 
+/// Whether `else_body` may be hoisted out from under `then_region`.
+///
+/// Two conditions, and both are load-bearing:
+///
+/// - The `then` must not fall through, or the hoisted body would run on
+///   both paths instead of only `!cond`.
+/// - **The D4 asymmetry**: never strand a bare exit after a
+///   content-carrying `then`. `if c { BIG } else { break }` hoisted reads
+///   as the opposite of a guard clause — the exit ends up after the block
+///   it was guarding. That shape is polarity's (D4) to flip when the
+///   condition inverts; when it cannot, the nested form reads better and
+///   stays.
+fn can_hoist(then_region: &Region, else_body: &Region) -> bool {
+    if !is_terminating(then_region) {
+        return false;
+    }
+    let strands_a_bare_exit = is_bare_exit(else_body) && !is_bare_exit(then_region);
+    !strands_a_bare_exit
+}
+
 /// Unique pipeline name of this pass.
 pub const PASS_NAME: &str = "refine-guard-clause";
 
@@ -105,12 +125,7 @@ fn hoist(region: Region, hoisted: &mut i64) -> Region {
             let then_region = hoist(*then_region, hoisted);
             let else_region = else_region.map(|e| hoist(*e, hoisted));
             match else_region {
-                Some(else_body)
-                    if is_terminating(&then_region)
-                        // The D4 asymmetry: never strand a bare exit
-                        // after a content-carrying then.
-                        && !(is_bare_exit(&else_body) && !is_bare_exit(&then_region)) =>
-                {
+                Some(else_body) if can_hoist(&then_region, &else_body) => {
                     *hoisted += 1;
                     seq(vec![
                         Region::If {
