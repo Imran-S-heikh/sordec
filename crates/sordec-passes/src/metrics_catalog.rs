@@ -340,6 +340,10 @@ pub const REFINE_TAIL_EXIT_BREAKS: &str = "refine_tail_exit_breaks";
 /// The residue after tail-exit elision, and the sizing signal for whether an
 /// `if`/`else` reconstruction is worth building.
 pub const REFINE_SCOPES_LIVE_LABEL: &str = "refine_scopes_live_label";
+/// Scopes whose guarded forward `Break` was recovered as an `else` arm,
+/// deleting the label. Wasm spells `if`/`else` as a forward branch; this is
+/// the half of that residue `REFINE_TAIL_EXIT_BREAKS` cannot reach.
+pub const REFINE_SCOPE_TO_IF_ELSE: &str = "refine_scope_to_if_else";
 /// Shared-else diamonds merged into one `&&` guard (W7 D7).
 pub const REFINE_AND_MERGED: &str = "refine_and_merged";
 /// Diamonds matching the D7 shape but blocked by the effect or
@@ -515,6 +519,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         REFINE_SCOPES_FALLTHROUGH,
         REFINE_TAIL_EXIT_BREAKS,
         REFINE_SCOPES_LIVE_LABEL,
+        REFINE_SCOPE_TO_IF_ELSE,
         REFINE_TRAPS_INLINED,
         REFINE_SHARED_TRAP_WITH_BINDINGS,
         REFINE_TRAPS_DUPLICATED,

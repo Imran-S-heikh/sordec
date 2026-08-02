@@ -80,7 +80,8 @@ pub use recognizers::{
 };
 pub use refine::{
     AndMergePass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
-    OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, SwitchDedupPass,
+    OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass,
+    SwitchDedupPass,
     TrapInlinePass,
 };
 pub use sordec_common::LiftDiagnostics;
@@ -271,7 +272,20 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // neither rewrites a binding — so they sit after the marshalling
             // fixpoint group rather than inside it.
             Box::new(OverflowGuardElisionPass),
+            // Wasm's forward-branch spelling of `if`/`else`, undone in two
+            // steps that feed each other: the first deletes the breaks that
+            // jump where control was already going, the second turns a
+            // guarded break into the `else` arm it skips past — which
+            // exposes fresh tail exits for the first. Hence a fixpoint pair.
+            //
+            // They sit here, far from `GuardClausePass`, on purpose. That
+            // pass performs the second one's exact inverse, and in one group
+            // they would oscillate. `ScopeIfElsePass` also removes the
+            // trailing `Break` that made the arm terminate, so the shape it
+            // emits is one `GuardClausePass` cannot match — belt and braces,
+            // and its own test pins the belt.
             Box::new(ScopeFallthroughPass),
+            Box::new(ScopeIfElsePass),
             Box::new(UnrecognizedScanPass),
             // General type propagation — runs once the recognizers have
             // planted their host-call/val result types, flowing them
@@ -287,10 +301,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // Two fixpoint groups: wave-1 region refinement, and marshalling
         // elision. Both converge because every member strictly reduces a
         // measure — nesting depth for the first, live marshalling bindings
-        // for the second. `marshalling_group_covers_exactly_the_elision_passes`
-        // pins the second range by pass name, so inserting a pass above it
-        // fails a test instead of silently shifting the window.
-        vec![1..6, 27..31],
+        // for the second, and labeled exits for the third.
+        // `marshalling_group_covers_exactly_the_elision_passes` and
+        // `scope_exit_group_covers_exactly_its_pair` pin those ranges by
+        // pass name, so inserting a pass above one fails a test instead of
+        // silently shifting the window.
+        vec![1..6, 27..31, 32..34],
     )
 }
 
@@ -301,6 +317,32 @@ mod tests {
     /// A fixpoint group is a pair of raw indices into the manifest, so
     /// adding a pass anywhere above one silently moves the window over the
     /// wrong passes. This pins the marshalling group by name.
+    /// Same pinning for the scope-exit pair. It matters more than most:
+    /// the group must stay clear of `GuardClausePass`, whose transform is
+    /// the inverse of `ScopeIfElsePass`.
+    #[test]
+    fn scope_exit_group_covers_exactly_its_pair() {
+        let pipeline = default_high_pipeline();
+        let names: Vec<&str> = pipeline.pass_names();
+        let group = pipeline
+            .fixpoint_groups()
+            .iter()
+            .find(|r| names[r.start] == refine::SCOPE_FALLTHROUGH_PASS_NAME)
+            .expect("the scope-exit group starts at the fallthrough pass");
+        assert_eq!(
+            &names[group.clone()],
+            &[
+                refine::SCOPE_FALLTHROUGH_PASS_NAME,
+                refine::SCOPE_IF_ELSE_PASS_NAME,
+            ]
+        );
+        // The inverse transform must not share the group.
+        assert!(
+            !names[group.clone()].contains(&refine::GUARD_CLAUSE_PASS_NAME),
+            "guard-clause hoisting is ScopeIfElsePass's inverse and would oscillate"
+        );
+    }
+
     #[test]
     fn marshalling_group_covers_exactly_the_elision_passes() {
         let pipeline = default_high_pipeline();

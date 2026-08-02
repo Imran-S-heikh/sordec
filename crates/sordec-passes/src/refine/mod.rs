@@ -41,6 +41,7 @@ mod overflow_guard;
 mod panic_recover;
 mod polarity;
 mod scope_fallthrough;
+mod scope_if_else;
 mod switch_dedup;
 mod trap_inline;
 
@@ -52,6 +53,18 @@ pub use overflow_guard::OverflowGuardElisionPass;
 pub use panic_recover::PanicRecoverPass;
 pub use polarity::PolarityPass;
 pub use scope_fallthrough::ScopeFallthroughPass;
+pub use scope_if_else::ScopeIfElsePass;
+
+// Pass names, re-exported for the manifest's fixpoint-group pin tests.
+// `crate`-scoped so the submodules stay private — only their identities
+// leak — and `cfg(test)` because the manifest itself names the passes by
+// their types, not their strings.
+#[cfg(test)]
+pub(crate) use guard_clause::PASS_NAME as GUARD_CLAUSE_PASS_NAME;
+#[cfg(test)]
+pub(crate) use scope_fallthrough::PASS_NAME as SCOPE_FALLTHROUGH_PASS_NAME;
+#[cfg(test)]
+pub(crate) use scope_if_else::PASS_NAME as SCOPE_IF_ELSE_PASS_NAME;
 pub use switch_dedup::SwitchDedupPass;
 pub use trap_inline::TrapInlinePass;
 

@@ -293,7 +293,7 @@ fn elide_tail_exits(out: BlockId, region: Region, n: &mut i64) -> Region {
 
 /// How many `Break`s in `body` target `out`, not descending into a nested
 /// scope that re-declares it (those belong to the inner scope).
-fn count_breaks_to(out: BlockId, body: &Region) -> usize {
+pub(super) fn count_breaks_to(out: BlockId, body: &Region) -> usize {
     match body {
         Region::Break { target, .. } if *target == out => 1,
         Region::Scope { out: inner, .. } if *inner == out => 0,
@@ -319,7 +319,7 @@ fn count_breaks_to(out: BlockId, body: &Region) -> usize {
 
 /// Whether any nested `Scope` inside `body` declares `out` as its own
 /// label.
-fn redeclares(out: BlockId, body: &Region) -> bool {
+pub(super) fn redeclares(out: BlockId, body: &Region) -> bool {
     match body {
         Region::Scope { out: inner, body } => *inner == out || redeclares(out, body),
         Region::Sequence(items) => items.iter().any(|i| redeclares(out, i)),
@@ -353,7 +353,7 @@ fn redeclares(out: BlockId, body: &Region) -> bool {
 /// invariant `validate`'s `UnenclosedLabel` catches, and a future shape
 /// (a `Break` targeting a merge block we do not model as a `Scope`) would
 /// silently break it.
-fn breaks_stay_enclosed(body: &Region, declared: &mut HashSet<BlockId>) -> bool {
+pub(super) fn breaks_stay_enclosed(body: &Region, declared: &mut HashSet<BlockId>) -> bool {
     match body {
         Region::Scope { out, body } => {
             let fresh = declared.insert(*out);
