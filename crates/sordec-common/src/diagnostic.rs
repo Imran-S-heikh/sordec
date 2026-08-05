@@ -355,6 +355,16 @@ pub enum LiftDiagnosticCode {
     /// reason than a budget. That is why it reports by name rather than
     /// only by counter.
     SpecializationDeclined,
+    /// A local function body was recognised as a known library function by
+    /// its structural fingerprint. Emitted by the `sdk-attribution` pass,
+    /// once per identified body.
+    ///
+    /// Reported rather than merely counted because this is the claim that
+    /// later licenses *deleting* the body. A fingerprint match is strong
+    /// evidence — the same code up to module-local indices — but it is
+    /// evidence, not a theorem about behaviour, so every application of it
+    /// is visible to a reviewer without diffing two outputs.
+    SdkFunctionIdentified,
 }
 
 impl LiftDiagnosticCode {
@@ -381,6 +391,7 @@ impl LiftDiagnosticCode {
             Self::UnrecognisedCryptoCall => "lift::unrecognised_crypto_call",
             Self::PanicWithoutErrorCode => "lift::panic_without_error_code",
             Self::MarshallingGuardElided => "lift::marshalling_guard_elided",
+            Self::SdkFunctionIdentified => "lift::sdk_function_identified",
             Self::SpecializationDeclined => "lift::specialization_declined",
         }
     }
@@ -418,6 +429,7 @@ impl LiftDiagnosticCode {
             Self::SpecializationDeclined => {
                 "compiler-merged helper left merged — storage evidence stays parameter-bound"
             }
+            Self::SdkFunctionIdentified => "body recognised as a known library function",
         }
     }
 }
@@ -914,6 +926,7 @@ mod tests {
             LiftDiagnosticCode::AuthContextArgsMismatch,
             LiftDiagnosticCode::UnrecognisedPrngCall,
             LiftDiagnosticCode::UnrecognisedCryptoCall,
+            LiftDiagnosticCode::SdkFunctionIdentified,
             LiftDiagnosticCode::PanicWithoutErrorCode,
         ];
         let keys: HashSet<&str> = all.iter().map(|c| c.key()).collect();

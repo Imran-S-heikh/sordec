@@ -147,14 +147,17 @@ fn coverage_on_hello_add_reports_no_recovery_miss() {
     // unknown host calls. Any *miss* code appearing here is a recovery
     // regression.
     //
-    // Two informational codes do fire, and neither is a miss. The D8 pass
-    // lints hello-add's bare panics, and the marshalling pass reports each
+    // Three informational codes do fire, and none is a miss. The D8 pass
+    // lints hello-add's bare panics; the marshalling pass reports each
     // argument guard it deleted — deliberately, because deleting a trap is
     // a behavioural claim and a reviewer should not have to diff two
-    // outputs to find where it was made.
-    const INFORMATIONAL: [&str; 2] = [
+    // outputs to find where it was made; and the attribution pass reports
+    // each body the signature catalogue recognised, for the same reason,
+    // since naming a body as SDK code is what later licenses removing it.
+    const INFORMATIONAL: [&str; 3] = [
         "lift::panic_without_error_code",
         "lift::marshalling_guard_elided",
+        "lift::sdk_function_identified",
     ];
 
     let out = Command::cargo_bin("sordec")

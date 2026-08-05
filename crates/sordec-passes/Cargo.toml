@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 sordec-common.workspace = true
 sordec-ir.workspace = true
+sordec-sigs.workspace = true
 waffle.workspace = true
 thiserror.workspace = true
 # `serde` + `serde_json` parse the vendored `host_calls/env.json`

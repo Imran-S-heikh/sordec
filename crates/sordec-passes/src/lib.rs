@@ -27,6 +27,7 @@
 //! auth chain, cross-contract clients) land in this crate during
 //! Phase 2 as separate modules.
 
+pub mod attribution;
 pub mod dataflow;
 pub mod declutter;
 pub mod effects;
@@ -63,6 +64,7 @@ pub use declutter::{
 };
 pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
+pub use attribution::SdkAttributionPass;
 pub use interproc::SpecializePass;
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
@@ -215,6 +217,14 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // group above has settled the body shapes it reads.
             Box::new(LoopClassifyPass),
             // Recognizer chain (order rationale above).
+            //
+            // `SdkAttributionPass` leads it. It reads only `ir.facts` — the
+            // fingerprints the frontend computed from the original bytes —
+            // so it depends on no pass and no pass can invalidate it, and
+            // running first means every recognizer below can consult what a
+            // body *is* rather than infer it from shape. Diagnostics-only
+            // today; the passes that act on its answers come later.
+            Box::new(SdkAttributionPass),
             Box::new(ValEncodingPass),
             Box::new(SpecializePass),
             Box::new(StoragePass),
@@ -306,7 +316,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // `scope_exit_group_covers_exactly_its_pair` pin those ranges by
         // pass name, so inserting a pass above one fails a test instead of
         // silently shifting the window.
-        vec![1..6, 27..31, 32..34],
+        vec![1..6, 28..32, 33..35],
     )
 }
 

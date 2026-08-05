@@ -1920,6 +1920,7 @@ dependencies = [
  "serde",
  "sordec-common",
  "sordec-ir",
+ "sordec-sigs",
  "soroban-meta",
  "soroban-spec 25.3.1",
  "stellar-xdr 25.0.0",
@@ -1946,6 +1947,7 @@ dependencies = [
  "sordec-common",
  "sordec-frontend",
  "sordec-ir",
+ "sordec-sigs",
  "thiserror 2.0.18",
  "waffle",
  "wasmparser 0.240.0",
@@ -1962,6 +1964,14 @@ dependencies = [
  "syn 2.0.117",
  "thiserror 2.0.18",
  "toml",
+]
+
+[[package]]
+name = "sordec-sigs"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "wasmparser 0.240.0",
 ]
 
 [[package]]
