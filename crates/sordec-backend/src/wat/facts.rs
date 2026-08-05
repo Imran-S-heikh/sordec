@@ -143,6 +143,7 @@ mod tests {
                 // `recovered_facts` stops at the last function with a
                 // body, so a module claiming none would report none.
                 function_bodies: vec![sordec_ir::ByteRange { start: 0, end: 1 }],
+                function_fingerprints: vec![],
                 custom_sections: vec![],
             },
             soroban_facts: None,

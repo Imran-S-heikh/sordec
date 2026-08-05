@@ -151,6 +151,7 @@ mod tests {
                 .into_iter()
                 .map(|(start, end)| ByteRange { start, end })
                 .collect(),
+            function_fingerprints: vec![],
             custom_sections: vec![],
         }
     }

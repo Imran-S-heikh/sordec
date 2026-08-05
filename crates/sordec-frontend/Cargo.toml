@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 sordec-common.workspace = true
 sordec-ir.workspace = true
+sordec-sigs.workspace = true
 wasmparser.workspace = true
 soroban-spec.workspace = true
 soroban-meta.workspace = true

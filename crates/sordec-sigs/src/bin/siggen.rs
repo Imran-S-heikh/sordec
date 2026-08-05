@@ -19,6 +19,12 @@
 //! developer tool, and keeping the library at two dependencies is worth more
 //! than the ergonomics.
 
+// The workspace warns on `eprintln!` because library crates must report
+// through the diagnostic infrastructure rather than write to a stream. This
+// is a standalone developer binary whose entire output *is* that stream, so
+// the rule does not apply to it.
+#![allow(clippy::print_stderr)]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

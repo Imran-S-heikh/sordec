@@ -13,6 +13,7 @@
 use sordec_ir::{
     ByteRange, CustomSection, Export, ExportKind, Import, ImportKind, WasmFacts,
 };
+use sordec_sigs::{Fingerprint, HostImports, fingerprint};
 use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
 
 use crate::error::{FrontendError, FrontendResult};
@@ -128,13 +129,53 @@ pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
         }
     }
 
+    // Fingerprints are computed after the walk rather than inside it: a
+    // body's fingerprint needs the *complete* import list to tell a host
+    // call from a module-local one, and while a valid module orders imports
+    // before code, nothing here should depend on that.
+    let function_fingerprints = fingerprint_bodies(wasm, &imports, &function_bodies);
+
     Ok(WasmFacts {
         imports,
         exports,
         function_type_indices,
         function_bodies,
+        function_fingerprints,
         custom_sections,
     })
+}
+
+/// Fingerprint every local function body, parallel to `bodies`.
+///
+/// A body that cannot be fingerprinted yields `None` rather than failing
+/// the parse. Two reasons it may not: it is shorter than the size gate, or
+/// `wasmparser` cannot read its instruction stream. Neither is fatal here —
+/// identification is an enhancement, and a module whose code section is
+/// genuinely malformed will fail later in the lifter, with a better error
+/// than this function could give.
+fn fingerprint_bodies(
+    wasm: &[u8],
+    imports: &[Import],
+    bodies: &[ByteRange],
+) -> Vec<Option<u128>> {
+    // Only *function* imports occupy the index space a `call` immediate
+    // indexes into; memories, tables and globals do not.
+    let host_names: Vec<String> = imports
+        .iter()
+        .filter(|i| matches!(i.kind, ImportKind::Func(_)))
+        .map(|i| format!("{}.{}", i.module, i.name))
+        .collect();
+    let hosts = HostImports::new(host_names);
+
+    bodies
+        .iter()
+        .map(|range| {
+            let start = usize::try_from(range.start).ok()?;
+            let end = usize::try_from(range.end).ok()?;
+            let body = wasm.get(start..end)?;
+            fingerprint(body, &hosts).ok().flatten().map(Fingerprint::to_u128)
+        })
+        .collect()
 }
 
 /// Translate `wasmparser::TypeRef` into our typed [`ImportKind`].
@@ -164,5 +205,42 @@ fn export_kind_from_external_kind(kind: ExternalKind) -> ExportKind {
         ExternalKind::Memory => ExportKind::Memory,
         ExternalKind::Global => ExportKind::Global,
         ExternalKind::Tag => ExportKind::Tag,
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+
+    /// The shipped fixture carries no names; its labelled rebuild carries
+    /// 46. Their code sections are byte-identical, so **the fingerprints
+    /// must be identical too** — that is what proves identification reads
+    /// code rather than symbols, and is the regression that would catch a
+    /// label leaking from the oracle into the decompile path.
+    #[test]
+    fn fingerprints_ignore_the_name_section() {
+        let stripped = std::fs::read("../../samples/contracts/token-v23/token-v23.wasm")
+            .expect("fixture present");
+        let labelled_path = format!(
+            "{}/.cache/sordec/oracle/wasm/fixture-token-v23__soroban_token_contract.wasm",
+            std::env::var("HOME").unwrap_or_default()
+        );
+        let Ok(labelled) = std::fs::read(&labelled_path) else {
+            // The oracle corpus is a development artefact, not committed.
+            // Skip rather than fail on a machine that has not built it.
+            return;
+        };
+
+        let a = parse_module(&stripped).expect("stripped parses");
+        let b = parse_module(&labelled).expect("labelled parses");
+
+        assert_eq!(
+            a.function_fingerprints, b.function_fingerprints,
+            "a name section must not change a single fingerprint"
+        );
+        assert!(
+            a.function_fingerprints.iter().any(Option::is_some),
+            "the fixture should fingerprint at least one body"
+        );
     }
 }

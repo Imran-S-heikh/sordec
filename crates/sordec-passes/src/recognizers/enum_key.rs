@@ -788,6 +788,7 @@ mod tests {
                 exports: vec![],
                 function_type_indices: vec![],
                 function_bodies: vec![],
+                function_fingerprints: vec![],
                 custom_sections: vec![],
             },
             soroban_facts: Some(facts),

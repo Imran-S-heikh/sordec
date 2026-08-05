@@ -56,6 +56,27 @@ pub struct WasmFacts {
     /// text; nothing at parse time interprets them.
     pub function_bodies: Vec<ByteRange>,
 
+    /// Masked structural fingerprint of each *local* function's body, in
+    /// declaration order — parallel to `function_bodies`. `None` where the
+    /// body was too short to identify safely.
+    ///
+    /// This is what lets a body be recognised as a known SDK function even
+    /// though the module carries no names: it hashes the instruction
+    /// stream with the operands that are assigned *per module* (callee
+    /// indices, global indices) masked out, so the same library code
+    /// fingerprints alike wherever it was linked. See `sordec-sigs` for
+    /// the normalisation rules and the measurements behind them.
+    ///
+    /// Held as the raw `u128` rather than `sordec_sigs::Fingerprint` to
+    /// keep this crate — a record of decoded facts, and `serde`-derived —
+    /// independent of the crate that interprets them. Consumers wrap it
+    /// back into the newtype.
+    ///
+    /// Empty for modules parsed before fingerprinting existed, and for
+    /// hand-built facts in tests; consumers must treat a short vector as
+    /// "not fingerprinted" rather than index into it blindly.
+    pub function_fingerprints: Vec<Option<u128>>,
+
     /// Custom sections in declaration order. Soroban contracts contain at
     /// least one (`contractspecv0`); generic WASM may have none.
     pub custom_sections: Vec<CustomSection>,
