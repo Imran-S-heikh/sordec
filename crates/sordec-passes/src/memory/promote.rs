@@ -116,11 +116,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use sordec_common::{BlockId, ValueId};
 use sordec_ir::{
-    LiftedFunction, LiftedIr, LiftedTerminator, LiftedType, LiftedValue, LiftedValueDef, WasmOp,
+    LiftedFunction, LiftedIr, LiftedType, LiftedValue, LiftedValueDef, WasmOp,
 };
 
 use super::frame::{self, canon_addr};
-use crate::dataflow::{for_each_target, CfgFacts};
+use super::slots::{access_shape, address_closure, addresses_only_flow_to, scheduled};
+use crate::dataflow::CfgFacts;
 use crate::declutter::for_each_target_mut;
 use crate::metrics_catalog::{
     MEMORY_LOADS_FORWARDED, MEMORY_SLOTS_PROMOTED, MEMORY_STORES_REMOVED,
@@ -306,136 +307,6 @@ fn discover(func: &LiftedFunction, base: ValueId, cfg: &CfgFacts) -> Option<Vec<
     )
 }
 
-/// Every value id that some reachable block actually schedules, plus the
-/// block parameters.
-///
-/// **Every scan in this module works over this set, never over the whole
-/// arena.** De-cluttering leaves unscheduled residue behind — alias
-/// tombstones and dead phis that still name a frame address — and the
-/// arenas are push-only, so that residue is permanent. Counting it as a use
-/// made 25 of token-v23's 29 frames look like they escaped. The same
-/// mistake, in its `HighIr` form, previously made every out-parameter in
-/// the corpus look un-analysable.
-fn scheduled(func: &LiftedFunction, cfg: &CfgFacts) -> HashSet<ValueId> {
-    let mut live: HashSet<ValueId> = HashSet::new();
-    for (block_id, block) in func.blocks.iter() {
-        if !cfg.is_reachable(block_id) {
-            continue;
-        }
-        live.extend(block.instructions.iter().copied());
-        live.extend(block.params.iter().copied());
-    }
-    live
-}
-
-/// Every value that *is* a frame address: the base, its aliases, and any
-/// `add` of one of those with a constant.
-fn address_closure(
-    func: &LiftedFunction,
-    base: ValueId,
-    live: &HashSet<ValueId>,
-) -> HashSet<ValueId> {
-    let mut closure: HashSet<ValueId> = HashSet::new();
-    closure.insert(base);
-    for (id, value) in func.values.iter() {
-        if !live.contains(&id) {
-            continue;
-        }
-        let derived = match &value.def {
-            LiftedValueDef::Alias(from) => closure.contains(from),
-            LiftedValueDef::Operator { .. } => canon_addr(func, id).0 == base,
-            _ => false,
-        };
-        if derived {
-            closure.insert(id);
-        }
-    }
-    closure
-}
-
-/// Whether every consumer of a frame address is an access we accounted for,
-/// further address arithmetic, or the frame bracket's own `global.set`.
-///
-/// This is the aliasing gate. It is written as "what is allowed" rather
-/// than "what is forbidden" so that an operator nobody thought about
-/// declines instead of slipping through.
-fn addresses_only_flow_to(
-    func: &LiftedFunction,
-    addresses: &HashSet<ValueId>,
-    accessors: &HashSet<ValueId>,
-    live: &HashSet<ValueId>,
-) -> bool {
-    for (id, value) in func.values.iter() {
-        if !live.contains(&id) || accessors.contains(&id) || addresses.contains(&id) {
-            continue;
-        }
-        let consumes = match &value.def {
-            LiftedValueDef::Operator { op, args } => {
-                let mentions = args.iter().any(|a| addresses.contains(a));
-                // The bracket publishes the pointer back to its global; that
-                // is the frame's own bookkeeping, not an escape into code
-                // that could alias a slot.
-                mentions && !is_global_set(op)
-            }
-            LiftedValueDef::Alias(from) | LiftedValueDef::PickOutput { from, .. } => {
-                addresses.contains(from)
-            }
-            LiftedValueDef::BlockParam { .. } => false,
-        };
-        if consumes {
-            return false;
-        }
-    }
-    // A frame address that leaves through a terminator escapes the function.
-    !func.blocks.iter().any(|(_, block)| {
-        let mut escapes = false;
-        for_each_target(&block.terminator, |t| {
-            escapes |= t.args.iter().any(|a| addresses.contains(a));
-        });
-        if let LiftedTerminator::Return { values } = &block.terminator {
-            escapes |= values.iter().any(|v| addresses.contains(v));
-        }
-        escapes
-    })
-}
-
-fn is_global_set(op: &WasmOp) -> bool {
-    matches!(op.0, waffle::Operator::GlobalSet { .. })
-}
-
-/// What one memory access does.
-struct AccessShape {
-    is_store: bool,
-    width: u32,
-    memarg_offset: u32,
-    ty: LiftedType,
-}
-
-/// Classify a memory operator, or `None` for anything that is not one.
-///
-/// Sub-word accesses are deliberately absent. An `i64.load8_u` reads one
-/// byte of a slot and sign/zero-extends it; promoting that would need the
-/// slot modelled as bytes rather than as a scalar, and the corpus does not
-/// contain one on a frame.
-fn access_shape(op: &WasmOp) -> Option<AccessShape> {
-    let (is_store, width, ty, memarg) = match &op.0 {
-        waffle::Operator::I32Load { memory } => (false, 4, LiftedType::I32, memory),
-        waffle::Operator::I64Load { memory } => (false, 8, LiftedType::I64, memory),
-        waffle::Operator::F32Load { memory } => (false, 4, LiftedType::F32, memory),
-        waffle::Operator::F64Load { memory } => (false, 8, LiftedType::F64, memory),
-        waffle::Operator::I32Store { memory } => (true, 4, LiftedType::I32, memory),
-        waffle::Operator::I64Store { memory } => (true, 8, LiftedType::I64, memory),
-        waffle::Operator::F32Store { memory } => (true, 4, LiftedType::F32, memory),
-        waffle::Operator::F64Store { memory } => (true, 8, LiftedType::F64, memory),
-        _ => return None,
-    };
-    Some(AccessShape {
-        is_store,
-        width,
-        memarg_offset: memarg.offset,
-        ty,
-    })
-}
 
 // ---------------------------------------------------------------------
 // mem2reg — promoting one scalar
@@ -588,7 +459,9 @@ fn push_zero(func: &mut LiftedFunction, ty: LiftedType) -> ValueId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataflow::for_each_target;
     use crate::test_util::{block, func_with, i32_const, op, target, v};
+    use sordec_ir::LiftedTerminator;
 
     fn mem() -> waffle::Memory {
         waffle::Memory::from(0)

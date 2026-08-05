@@ -69,7 +69,7 @@ pub use recognizers::symbol_encoder::SymbolEncoderPass;
 pub use interproc::SpecializePass;
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
-pub use memory::{SlotPromotionPass, SretReturnPass};
+pub use memory::{ArgPromotionPass, SlotPromotionPass, SretReturnPass};
 pub use marshalling::{
     ArgGuardElisionPass, FrameElisionPass, KeyConstructionElisionPass, OptionProbePass, ValDecodeCollapsePass,
     ValEncodeCollapsePass, WideReturnPass,
@@ -104,7 +104,10 @@ use sordec_ir::{HighIr, LiftedIr};
 /// sweep removes orphaned blocks' edges, which un-blocks both; removing an
 /// unread parameter drops the arguments feeding it, which can make the
 /// values behind them dead in turn; and stopping the frame escaping into a
-/// callee is what lets its slots promote.
+/// callee is what lets its slots promote. That last one is why the group
+/// matters most here: a helper that forwards its pointer to another helper
+/// only stops escaping once the *inner* one is promoted, so the outer
+/// candidate appears on a later iteration and not the first.
 ///
 /// Two orderings inside the group are load-bearing rather than
 /// stylistic:
@@ -115,9 +118,13 @@ use sordec_ir::{HighIr, LiftedIr};
 ///   fixpoint. Promotion depends on the pair *jointly*: it inserts a
 ///   parameter in every reachable block and neither cleanup alone removes
 ///   the surplus.
-/// - [`SretReturnPass`] precedes [`SlotPromotionPass`] — LLVM's
-///   SROA-then-mem2reg order. Escape is mem2reg's precondition, so the
-///   ABI change has to happen before the forwarding.
+/// - [`ArgPromotionPass`] and [`SretReturnPass`] both precede
+///   [`SlotPromotionPass`] — LLVM's SROA-then-mem2reg order. Escape is
+///   mem2reg's precondition, so the ABI changes have to happen before the
+///   forwarding. The two handle opposite directions of the same escape (a
+///   pointer the callee reads through, and one it writes through) and
+///   `argpromote` goes first only so that a function which is somehow both
+///   is claimed by the pass that needs no placeholder value.
 ///
 /// [`ResolveAliasesPass`] is **in** the group rather than once up front,
 /// which its own docs' rationale would otherwise allow: promotion retires
@@ -141,10 +148,11 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
             Box::new(ThreadTrivialJumpsPass),
             Box::new(MergeBlockChainsPass),
             Box::new(SweepDeadPass),
+            Box::new(ArgPromotionPass),
             Box::new(SretReturnPass),
             Box::new(SlotPromotionPass),
         ],
-        vec![0..8],
+        vec![0..9],
     )
 }
 

@@ -44,16 +44,33 @@
 //!
 //! ## Order
 //!
-//! [`frame`] identifies the bracket (analysis only). [`sret`] converts
-//! out-parameters into real multi-value returns, which is what stops the
-//! frame *escaping* into a callee — mem2reg's precondition. [`promote`]
-//! then splits and promotes the slots that remain.
+//! [`frame`] identifies the bracket (analysis only). [`argpromote`] and
+//! [`sret`] then run as a pair, because between them they are what stops
+//! the frame *escaping* into a callee — mem2reg's precondition. They handle
+//! the two directions a pointer can be passed:
+//!
+//! - `argpromote` — the callee only **reads** through it (an `&T`
+//!   argument), so the loads move out to the call sites.
+//! - `sret` — the callee only **writes** through it (a wide return value),
+//!   so the stores become real returned components.
+//!
+//! Only then can [`promote`] split and promote the slots that remain.
+//!
+//! Two analyses are shared rather than duplicated across those passes,
+//! because a disagreement between them would be a disagreement about which
+//! memory traffic is safe to delete: [`slots`] answers "what is an address,
+//! and does anything unaccounted-for consume one", and [`calls`] answers
+//! "which local function does this `call` name, and can its caller set be
+//! trusted".
 
+pub mod argpromote;
 pub(crate) mod calls;
 pub(crate) mod frame;
 pub mod promote;
+pub(crate) mod slots;
 pub mod sret;
 
+pub use argpromote::ArgPromotionPass;
 pub use promote::SlotPromotionPass;
 pub use sret::SretReturnPass;
 
@@ -118,7 +135,9 @@ pub(crate) mod census {
             let frames = ir.functions.iter().filter(|f| super::frame::detect(f).is_some()).count();
             println!("{name}: frames left {frames}");
             println!(
-                "{name}: sret {} · slots {} · loads {} · stores {} · valid {}",
+                "{name}: argp {} · hoisted {} · sret {} · slots {} · loads {} · stores {} · valid {}",
+                get(keys::MEMORY_ARGS_PROMOTED),
+                get(keys::MEMORY_LOADS_HOISTED),
                 get(keys::MEMORY_SRET_CONVERTED),
                 get(keys::MEMORY_SLOTS_PROMOTED),
                 get(keys::MEMORY_LOADS_FORWARDED),

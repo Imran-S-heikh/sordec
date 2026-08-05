@@ -158,11 +158,6 @@ impl CallIndex {
     pub(crate) fn is_exported(&self, func: FuncId) -> bool {
         self.exported.contains(&func)
     }
-
-    /// How many of the module's imports are functions.
-    pub(crate) fn imported_function_count(&self) -> u32 {
-        self.imported
-    }
 }
 
 /// Shift a `call`'s WASM function index into our local [`FuncId`] space.
@@ -246,7 +241,6 @@ mod tests {
     fn shifts_past_host_imports() {
         let ir = module(vec![caller_of_one(), leaf()], 2, vec![]);
         let index = CallIndex::build(&ir);
-        assert_eq!(index.imported_function_count(), 2);
         // WASM index 3 with 2 imports is local function 1, not 3.
         let sites = index.sites_targeting(FuncId::from_index(1));
         assert_eq!(sites.len(), 1);

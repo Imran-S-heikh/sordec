@@ -381,6 +381,13 @@ pub const MARSHALLING_WIDE_LOADS_REBOUND: &str = "marshalling_wide_loads_rebound
 // Shadow-stack memory promotion
 // ---------------------------------------------------------------------
 
+/// Functions whose read-only pointer parameter became scalar parameters.
+pub const MEMORY_ARGS_PROMOTED: &str = "memory_args_promoted";
+
+/// Loads moved out of a promoted callee and onto its call sites. Counted
+/// per call site, because that is where the work lands.
+pub const MEMORY_LOADS_HOISTED: &str = "memory_loads_hoisted";
+
 /// Functions whose `sret` out-parameter became a real multi-value return.
 pub const MEMORY_SRET_CONVERTED: &str = "memory_sret_converted";
 /// Shadow-stack slots promoted from linear memory to SSA values.
@@ -542,6 +549,8 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_FRAMES_ELIDED,
         MARSHALLING_WIDE_RETURNS_RECOVERED,
         MARSHALLING_WIDE_LOADS_REBOUND,
+        MEMORY_ARGS_PROMOTED,
+        MEMORY_LOADS_HOISTED,
         MEMORY_SRET_CONVERTED,
         MEMORY_SLOTS_PROMOTED,
         MEMORY_LOADS_FORWARDED,
