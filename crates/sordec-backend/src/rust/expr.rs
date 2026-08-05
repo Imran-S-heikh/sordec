@@ -171,12 +171,38 @@ fn literal_expr(ctx: &FnCtx, lit: &Literal, ty: &IrType) -> syn::Expr {
         // Soroban forbids floats in contracts, so these should not occur;
         // hole them rather than risk a non-finite token.
         Literal::F32(_) | Literal::F64(_) => ctx.policy.unknown_expr("float literal"),
-        // Symbol/String/Bytes construction needs the `Env`; recovered as a
-        // host idiom in a later wave.
+        // A *small* symbol needs no `Env`: `symbol_short!` is a const macro
+        // that packs up to nine characters of `[_0-9A-Za-z]` into the Val's
+        // bits at compile time, which is exactly the encoding the recovered
+        // literal came from. Anything outside that — longer, or a character
+        // the small alphabet cannot hold — really does need
+        // `Symbol::new(&env, …)` and stays a hole until an `Env` is in
+        // scope to hand it.
+        Literal::Symbol(s) if is_small_symbol(s) => {
+            let lit = syn::LitStr::new(s, proc_macro2::Span::call_site());
+            parse_quote!(soroban_sdk::symbol_short!(#lit))
+        }
         Literal::Symbol(s) => ctx.policy.unknown_expr(&format!("Symbol {s:?}")),
         Literal::String(s) => ctx.policy.unknown_expr(&format!("String {s:?}")),
         Literal::Bytes(_) => ctx.policy.unknown_expr("Bytes literal"),
     }
+}
+
+/// Whether a symbol fits soroban's *small* encoding, which
+/// `symbol_short!` can build with no `Env`.
+///
+/// The SDK packs each character into six bits and reserves the low eight
+/// for the tag, leaving room for nine. The alphabet is exactly
+/// `[_0-9A-Za-z]` — the encoder maps `_` to 1, digits to 2..=11, uppercase
+/// to 12..=37 and lowercase to 38..=63, and has no code for anything else.
+///
+/// Both halves matter: a tenth character overflows the payload, and a
+/// character outside the alphabet is what makes the SDK fall back to
+/// building a heap `SymbolObject` through the host instead.
+fn is_small_symbol(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 9
+        && s.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric())
 }
 
 fn unary_expr(op: UnaryOp, v: syn::Expr, operand_is_bool: bool) -> syn::Expr {

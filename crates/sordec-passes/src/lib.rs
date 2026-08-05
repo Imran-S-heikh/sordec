@@ -65,6 +65,7 @@ pub use declutter::{
 pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
 pub use attribution::SdkAttributionPass;
+pub use recognizers::symbol_encoder::SymbolEncoderPass;
 pub use interproc::SpecializePass;
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
@@ -231,6 +232,14 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(AuthPass),
             Box::new(ContextPass),
             Box::new(LinearMemoryPass),
+            // Folds the SDK's *inlined* small-symbol encoder, which
+            // `LinearMemoryPass` cannot see: that pass classifies the
+            // `symbol_new_from_linear_memory` **host call**, and this
+            // encoder's fast path makes no host call at all. It sits
+            // directly after so the two symbol paths — host-built and
+            // inlined — are resolved together, and before `CollectionsPass`
+            // and `DispatcherPass`, which read symbols the encoder produces.
+            Box::new(SymbolEncoderPass),
             Box::new(CollectionsPass),
             Box::new(DispatcherPass),
             Box::new(AbiSweepPass),
@@ -316,7 +325,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // `scope_exit_group_covers_exactly_its_pair` pin those ranges by
         // pass name, so inserting a pass above one fails a test instead of
         // silently shifting the window.
-        vec![1..6, 28..32, 33..35],
+        vec![1..6, 29..33, 34..36],
     )
 }
 

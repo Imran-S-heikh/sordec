@@ -45,7 +45,7 @@ const TYPE_NAMES: &[&str] = &[
 ];
 
 /// soroban-sdk macros the emitter writes as `soroban_sdk::<macro>!(…)`.
-const MACRO_NAMES: &[&str] = &["panic_with_error"];
+const MACRO_NAMES: &[&str] = &["panic_with_error", "symbol_short"];
 
 /// soroban-sdk submodules kept as a short prefix (`token::Client::new`).
 const MODULE_NAMES: &[&str] = &["token"];
@@ -122,9 +122,17 @@ impl VisitMut for Collapser {
                     if self.shadowed.contains(&name) {
                         None // the module defines this name; stay qualified
                     } else if MODULE_NAMES.contains(&name.as_str())
-                        || (leaf
-                            && (TYPE_NAMES.contains(&name.as_str())
-                                || MACRO_NAMES.contains(&name.as_str())))
+                        // A type collapses whether it is used as a type
+                        // (`soroban_sdk::Address`) or as the receiver of an
+                        // associated function (`soroban_sdk::Symbol::new`).
+                        // Both shorten to the same import, and the
+                        // `shadowed` check above is what makes it safe —
+                        // that, not the qualified spelling, is the defence
+                        // against a module defining its own `Symbol`.
+                        || TYPE_NAMES.contains(&name.as_str())
+                        // A macro path has no trailing segments, so it must
+                        // be the leaf.
+                        || (leaf && MACRO_NAMES.contains(&name.as_str()))
                     {
                         Some(name)
                     } else {

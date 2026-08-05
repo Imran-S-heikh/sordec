@@ -38,6 +38,7 @@
 //!   the host-call families named and the constants folded, and the
 //!   marshalling elision downstream reads its output.
 
+pub mod symbol_encoder;
 pub mod abi_sweep;
 pub mod auth;
 pub mod auth_flow;
