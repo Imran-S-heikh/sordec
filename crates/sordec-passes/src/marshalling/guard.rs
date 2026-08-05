@@ -164,7 +164,7 @@ fn collect(func: &HighFunction, empty: &HashSet<BlockId>) -> HashMap<ValueId, St
 /// Precomputed so [`is_trap`] can be a pure function of the region tree
 /// plus this set: `strip` rebuilds `func.region` by value and cannot hold
 /// a borrow of `func` at the same time.
-fn empty_blocks(func: &HighFunction) -> HashSet<BlockId> {
+pub(super) fn empty_blocks(func: &HighFunction) -> HashSet<BlockId> {
     func.blocks
         .iter()
         .filter(|(_, block)| block.bindings.is_empty())
@@ -186,7 +186,7 @@ fn empty_blocks(func: &HighFunction) -> HashSet<BlockId> {
 /// those bindings are work, and work before a trap is not "nothing but
 /// trap". A `Basic` naming a block absent from `empty` is therefore
 /// treated as non-empty — the conservative direction.
-fn is_trap(region: &Region, empty: &HashSet<BlockId>) -> bool {
+pub(super) fn is_trap(region: &Region, empty: &HashSet<BlockId>) -> bool {
     match region {
         Region::Unreachable | Region::Panic { .. } => true,
         Region::Sequence(items) => {
@@ -346,7 +346,7 @@ fn declared_param_type(func: &HighFunction, value: ValueId) -> Option<KnownType>
 /// Bottom-up rewrite dropping every collected guard. Mirrors
 /// [`crate::refine::guard_clause`]'s shape so the tree stays in the
 /// canonical no-nested-`Sequence` form.
-fn strip(
+pub(super) fn strip(
     region: Region,
     guards: &HashMap<ValueId, String>,
     empty: &HashSet<BlockId>,

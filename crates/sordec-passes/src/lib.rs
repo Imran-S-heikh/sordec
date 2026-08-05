@@ -71,7 +71,7 @@ pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use memory::{SlotPromotionPass, SretReturnPass};
 pub use marshalling::{
-    ArgGuardElisionPass, FrameElisionPass, OptionProbePass, ValDecodeCollapsePass,
+    ArgGuardElisionPass, FrameElisionPass, KeyConstructionElisionPass, OptionProbePass, ValDecodeCollapsePass,
     ValEncodeCollapsePass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -283,6 +283,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // gate first, and switching it on without one measured +14
             // `cargo check` errors across the corpus. See its module docs.
             Box::new(ArgGuardElisionPass),
+            // The derived `#[contracttype]` enum-to-`Val` converter behind
+            // a storage key the recognizers already resolved. Inside this
+            // group because eliding the converter can leave its frame slot
+            // dead, which is what `FrameElisionPass` below then collects.
+            Box::new(KeyConstructionElisionPass),
             Box::new(FrameElisionPass),
             // Compiler-inserted control flow the source never wrote, in the
             // order one exposes the next: dropping the overflow guard can
@@ -325,7 +330,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // `scope_exit_group_covers_exactly_its_pair` pin those ranges by
         // pass name, so inserting a pass above one fails a test instead of
         // silently shifting the window.
-        vec![1..6, 29..33, 34..36],
+        vec![1..6, 29..34, 35..37],
     )
 }
 
@@ -377,6 +382,7 @@ mod tests {
                 marshalling::decode::PASS_NAME,
                 marshalling::encode::PASS_NAME,
                 marshalling::guard::PASS_NAME,
+                marshalling::key_construction::PASS_NAME,
                 marshalling::frame::PASS_NAME,
             ],
         );

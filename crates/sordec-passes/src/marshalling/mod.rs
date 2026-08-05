@@ -56,6 +56,7 @@ pub mod decode;
 pub mod encode;
 pub mod frame;
 pub mod guard;
+pub mod key_construction;
 pub mod option_probe;
 pub(crate) mod sret;
 pub mod wide_return;
@@ -64,6 +65,7 @@ pub use decode::ValDecodeCollapsePass;
 pub use encode::ValEncodeCollapsePass;
 pub use frame::FrameElisionPass;
 pub use guard::ArgGuardElisionPass;
+pub use key_construction::KeyConstructionElisionPass;
 pub use option_probe::OptionProbePass;
 pub use wide_return::WideReturnPass;
 
