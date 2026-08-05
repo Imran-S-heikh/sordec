@@ -297,12 +297,20 @@ fn discover(func: &LiftedFunction, base: ValueId, cfg: &CfgFacts) -> Option<Vec<
         }
         end = u64::from(slot.offset) + u64::from(slot.width);
     }
-    // A slot nothing writes has no value to forward; a slot nothing reads is
-    // dead traffic that `SweepDeadPass` is better placed to remove.
+    // A slot nothing writes has no value to forward.
+    //
+    // A slot nothing *reads* is kept, and its stores are removed rather
+    // than promoted. `SweepDeadPass` will not do it — it keeps every store
+    // by design, because in general a store is observable — but here it is
+    // provably not: reaching this point means the frame passed the escape
+    // gate above, so no pointer to these bytes leaves the function, and a
+    // write nobody in it loads cannot be seen by anyone. Leaving them
+    // behind became load-bearing once [`super::forward`] started retiring
+    // the loads that used to keep such slots on this path.
     Some(
         slots
             .into_values()
-            .filter(|s| !s.conflicted && !s.stores.is_empty() && !s.loads.is_empty())
+            .filter(|s| !s.conflicted && !s.stores.is_empty())
             .collect(),
     )
 }
@@ -316,6 +324,20 @@ fn discover(func: &LiftedFunction, base: ValueId, cfg: &CfgFacts) -> Option<Vec<
 /// written first; see the note at the call site for why that check cannot
 /// happen here.
 fn promote(func: &mut LiftedFunction, slot: &SlotAccess, cfg: &CfgFacts) -> bool {
+    // Nothing reads the slot, so there is no value to thread and no merge
+    // to express: the stores are simply unobservable (see `discover` for
+    // why that is proved rather than assumed) and can go on their own.
+    // Taking the general path here would insert a block parameter in every
+    // block for a variable with no readers, leaving the two cleanup passes
+    // to undo work that never needed doing.
+    if slot.loads.is_empty() {
+        let retired: HashSet<ValueId> = slot.stores.iter().map(|s| s.id).collect();
+        for (_, block) in func.blocks.iter_mut() {
+            block.instructions.retain(|id| !retired.contains(id));
+        }
+        return true;
+    }
+
     let reachable: Vec<BlockId> = func
         .blocks
         .iter()

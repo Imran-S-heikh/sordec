@@ -316,6 +316,43 @@ fn attestation_cargo_check() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Measurement (not a gate): the **corpus compile rate** — how many
+/// fixtures emit a crate that `cargo check` accepts, and how far the rest
+/// are from it.
+///
+/// The per-fixture checks above each answer one question and stop. This
+/// answers the one that gets quoted ("2 of 7"), which until now had to be
+/// reassembled by hand from separate runs — and a number nobody can
+/// reproduce in one command is a number that drifts. Error *lines*, not
+/// distinct errors: it is a progress signal, so the only properties that
+/// matter are that it is honest and comparable run to run.
+///
+///   cargo test -p sordec-backend -- --ignored --nocapture compile_rate
+#[test]
+#[ignore = "shells out to cargo check per fixture (slow, toolchain-dependent)"]
+// This test's entire purpose is to *report* a measurement to the operator.
+#[allow(clippy::print_stdout)]
+fn corpus_compile_rate() {
+    let mut passing = 0usize;
+    let mut total_errors = 0usize;
+    let fixtures = common::fixtures();
+    println!("\nfixture               cargo check");
+    for (name, wasm) in &fixtures {
+        let report = common::cargo_check_emitted(wasm);
+        if report.error_lines == 0 {
+            passing += 1;
+            println!("{name:<21} PASS");
+        } else {
+            total_errors += report.error_lines;
+            println!("{name:<21} {} error line(s)", report.error_lines);
+        }
+    }
+    println!(
+        "\ncompile rate: {passing} of {} · {total_errors} error line(s) across the rest",
+        fixtures.len()
+    );
+}
+
 /// Measurement (not a gate): emit token-v23 as a crate and run
 /// `cargo check` against the cached `soroban-sdk`, reporting the outcome.
 /// This is W3's honest "compile rate measured" deliverable — expected

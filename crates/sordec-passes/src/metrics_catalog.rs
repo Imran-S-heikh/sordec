@@ -388,6 +388,11 @@ pub const MEMORY_ARGS_PROMOTED: &str = "memory_args_promoted";
 /// per call site, because that is where the work lands.
 pub const MEMORY_LOADS_HOISTED: &str = "memory_loads_hoisted";
 
+/// Loads bound to a preceding store's value within one block, without any
+/// escape analysis. Distinct from `MEMORY_LOADS_FORWARDED`, which counts
+/// the ones `promote` retires as part of promoting a whole slot.
+pub const MEMORY_LOADS_FORWARDED_LOCALLY: &str = "memory_loads_forwarded_locally";
+
 /// Functions whose `sret` out-parameter became a real multi-value return.
 pub const MEMORY_SRET_CONVERTED: &str = "memory_sret_converted";
 /// Shadow-stack slots promoted from linear memory to SSA values.
@@ -551,6 +556,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_WIDE_LOADS_REBOUND,
         MEMORY_ARGS_PROMOTED,
         MEMORY_LOADS_HOISTED,
+        MEMORY_LOADS_FORWARDED_LOCALLY,
         MEMORY_SRET_CONVERTED,
         MEMORY_SLOTS_PROMOTED,
         MEMORY_LOADS_FORWARDED,

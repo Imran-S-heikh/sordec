@@ -54,6 +54,11 @@
 //! - `sret` — the callee only **writes** through it (a wide return value),
 //!   so the stores become real returned components.
 //!
+//! [`forward`] then binds any load whose value a store in the same block
+//! just wrote — the reads, whether or not the traffic itself can go. It
+//! needs no escape analysis, so it reaches the frames the pair above could
+//! not free.
+//!
 //! Only then can [`promote`] split and promote the slots that remain.
 //!
 //! Two analyses are shared rather than duplicated across those passes,
@@ -65,12 +70,14 @@
 
 pub mod argpromote;
 pub(crate) mod calls;
+pub mod forward;
 pub(crate) mod frame;
 pub mod promote;
 pub(crate) mod slots;
 pub mod sret;
 
 pub use argpromote::ArgPromotionPass;
+pub use forward::StoreForwardPass;
 pub use promote::SlotPromotionPass;
 pub use sret::SretReturnPass;
 
@@ -135,9 +142,10 @@ pub(crate) mod census {
             let frames = ir.functions.iter().filter(|f| super::frame::detect(f).is_some()).count();
             println!("{name}: frames left {frames}");
             println!(
-                "{name}: argp {} · hoisted {} · sret {} · slots {} · loads {} · stores {} · valid {}",
+                "{name}: argp {} · hoisted {} · fwd {} · sret {} · slots {} · loads {} · stores {} · valid {}",
                 get(keys::MEMORY_ARGS_PROMOTED),
                 get(keys::MEMORY_LOADS_HOISTED),
+                get(keys::MEMORY_LOADS_FORWARDED_LOCALLY),
                 get(keys::MEMORY_SRET_CONVERTED),
                 get(keys::MEMORY_SLOTS_PROMOTED),
                 get(keys::MEMORY_LOADS_FORWARDED),

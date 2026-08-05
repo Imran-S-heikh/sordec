@@ -69,7 +69,7 @@ pub use recognizers::symbol_encoder::SymbolEncoderPass;
 pub use interproc::SpecializePass;
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
-pub use memory::{ArgPromotionPass, SlotPromotionPass, SretReturnPass};
+pub use memory::{ArgPromotionPass, SlotPromotionPass, SretReturnPass, StoreForwardPass};
 pub use marshalling::{
     ArgGuardElisionPass, FrameElisionPass, KeyConstructionElisionPass, OptionProbePass, ValDecodeCollapsePass,
     ValEncodeCollapsePass, WideReturnPass,
@@ -125,6 +125,12 @@ use sordec_ir::{HighIr, LiftedIr};
 ///   pointer the callee reads through, and one it writes through) and
 ///   `argpromote` goes first only so that a function which is somehow both
 ///   is claimed by the pass that needs no placeholder value.
+/// - [`StoreForwardPass`] sits between them and [`SlotPromotionPass`]
+///   because it consumes what they produce: both relocate memory traffic,
+///   and it is the pass that removes the *reads* of that traffic on the
+///   frames `promote` declines whole. Running it before them would find
+///   nothing; running it after `promote` would find only what `promote`
+///   had already retired.
 ///
 /// [`ResolveAliasesPass`] is **in** the group rather than once up front,
 /// which its own docs' rationale would otherwise allow: promotion retires
@@ -150,9 +156,10 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
             Box::new(SweepDeadPass),
             Box::new(ArgPromotionPass),
             Box::new(SretReturnPass),
+            Box::new(StoreForwardPass),
             Box::new(SlotPromotionPass),
         ],
-        vec![0..9],
+        vec![0..10],
     )
 }
 
