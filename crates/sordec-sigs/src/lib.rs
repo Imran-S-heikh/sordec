@@ -1,0 +1,73 @@
+//! SDK function identification by masked structural fingerprint.
+//!
+//! # The problem this exists to solve
+//!
+//! A compiled Soroban contract is a blend. It contains the code its author
+//! wrote *and* the Soroban SDK, inlined and linked in by rustc, with
+//! nothing in the binary marking which is which. The decompiler's job is to
+//! write back what the author typed — one line of `env.storage().get(..)`,
+//! not the fifty instructions that line expands to — so telling the two
+//! apart is the load-bearing question.
+//!
+//! Measured on `token-v23`: the source's control flow is **33 tokens** and
+//! the reconstruction's is **538**, with recall already at 1.0. Every token
+//! the author wrote is recovered; the entire deficit is SDK glue we cannot
+//! yet name and therefore cannot delete.
+//!
+//! # How it is answered
+//!
+//! Rebuilding a contract with `profile.release.strip=false` reproduces its
+//! code section byte-for-byte while adding a `name` section, so any source
+//! we hold yields exact per-function attribution. That oracle is a
+//! development instrument only — deployed contracts are stripped — but it
+//! is enough to *build a catalogue*: fingerprint every SDK function found
+//! in a labelled build, then look up the unlabelled bodies of a contract we
+//! have never seen.
+//!
+//! [`fingerprint`] is the key; [`catalogue`] is the lookup.
+//!
+//! # What it delivers, measured
+//!
+//! Over nine contracts from five organisations:
+//!
+//! | | |
+//! |---|---|
+//! | raw byte hashing | 1/10 — the reason naive signature matching was written off |
+//! | masked fingerprint, same author | 45–70% of library bytes |
+//! | masked fingerprint, unrelated authors | 6–29% of library bytes |
+//! | **false positives, 14 runs** | **0** |
+//!
+//! The last row is the one that governs the design. This decides what to
+//! **delete**: a miss costs a little score, a false positive corrupts the
+//! output. Every gate in this crate is therefore fail-closed — ambiguity
+//! removes a candidate rather than picking between readings.
+//!
+//! Expect roughly 20–35% of library functions on an unseen third-party
+//! contract. That is real, and it is not everything: about 63% of a
+//! contract's control flow lives in SDK code rustc *inlined* into other
+//! bodies, which has no separate function to fingerprint and is handled by
+//! IR-level recognizers instead.
+//!
+//! # Layout
+//!
+//! - [`fingerprint`] — the normalisation rules and the hash, shared
+//!   verbatim between catalogue generation and lookup so the two cannot
+//!   drift.
+//! - [`catalogue`] — the generated table and its lookup.
+
+#![forbid(unsafe_code)]
+
+pub mod catalogue;
+pub mod fingerprint;
+
+pub use catalogue::{Catalogue, CrateOrigin, SigEntry};
+pub use fingerprint::{Fingerprint, HostImports, MIN_INSTRUCTIONS, fingerprint};
+
+/// What can go wrong turning bytes into a fingerprint.
+#[derive(Debug, thiserror::Error)]
+pub enum SigError {
+    /// `wasmparser` rejected the instruction stream, so the input is not a
+    /// well-formed function body.
+    #[error("malformed WASM function body: {0}")]
+    Decode(#[from] wasmparser::BinaryReaderError),
+}
