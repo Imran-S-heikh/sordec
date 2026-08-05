@@ -49,6 +49,7 @@
 //! frame *escaping* into a callee — mem2reg's precondition. [`promote`]
 //! then splits and promotes the slots that remain.
 
+pub(crate) mod calls;
 pub(crate) mod frame;
 pub mod promote;
 pub mod sret;

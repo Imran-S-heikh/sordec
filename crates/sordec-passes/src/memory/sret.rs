@@ -79,6 +79,13 @@
 //!   recorded nowhere.
 //! - **Every call site is convertible.** A signature change is module-wide;
 //!   one caller that cannot be rewritten vetoes the callee entirely.
+//! - **The function is not exported, and the module has no indirect
+//!   calls.** Both mean the caller set this pass can see is not the whole
+//!   of it — and an exported function's signature is the contract ABI, not
+//!   an internal detail. Neither fires on the current corpus (entrypoints
+//!   take and return `Val`, never an out-pointer), so both are defensive;
+//!   they are here because the failure they prevent is a contract whose ABI
+//!   changed silently. See [`super::calls`] for the shared rule.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -86,8 +93,8 @@ use sordec_common::{BlockId, FuncId, IrId as _, ValueId};
 use sordec_ir::{
     LiftedFunction, LiftedIr, LiftedTerminator, LiftedType, LiftedValue, LiftedValueDef, WasmOp,
 };
-use waffle::entity::EntityRef as _;
 
+use super::calls::CallIndex;
 use super::frame::canon_addr;
 use crate::dataflow::CfgFacts;
 use crate::metrics_catalog::MEMORY_SRET_CONVERTED;
@@ -133,9 +140,19 @@ impl Pass<LiftedIr> for SretReturnPass {
     fn run(&self, ir: &mut LiftedIr) -> PassResult {
         let mut result = PassResult::default();
 
+        let calls = CallIndex::build(ir);
+        // An indirect call anywhere means no caller set is complete, so no
+        // signature in the module may change.
+        if calls.has_indirect_calls() {
+            return result;
+        }
+
         let mut plans: HashMap<FuncId, SretPlan> = ir
             .functions
             .iter()
+            // An exported function's signature is the contract ABI, and its
+            // internal call sites are not the complete caller set.
+            .filter(|f| !calls.is_exported(f.id))
             .filter_map(|f| convertible(f).map(|plan| (f.id, plan)))
             .collect();
         if plans.is_empty() {
@@ -146,12 +163,7 @@ impl Pass<LiftedIr> for SretReturnPass {
         // caller cannot be rewritten leaves that caller passing a frame to
         // a function that no longer takes one — a module that does not
         // type-check, produced silently.
-        let imported = imported_function_count(&ir.facts);
-        let vetoed: Vec<FuncId> = ir
-            .functions
-            .iter()
-            .flat_map(|f| unconvertible_callees(f, &plans, imported))
-            .collect();
+        let vetoed: Vec<FuncId> = unconvertible_callees(ir, &calls, &plans);
         for id in vetoed {
             plans.remove(&id);
         }
@@ -160,7 +172,7 @@ impl Pass<LiftedIr> for SretReturnPass {
         }
 
         for func in &mut ir.functions {
-            rewrite_call_sites(func, &plans, imported);
+            rewrite_call_sites(func, &plans, &calls);
         }
         for func in &mut ir.functions {
             if let Some(plan) = plans.get(&func.id) {
@@ -366,60 +378,36 @@ fn store_memarg(op: &WasmOp) -> Option<waffle::MemoryArg> {
 // Caller analysis
 // ---------------------------------------------------------------------
 
-/// Callees `func` calls in a way this pass cannot rewrite.
+/// Planned callees with a call site this pass cannot rewrite.
+///
+/// A signature change is module-wide, so one unrewritable site vetoes its
+/// callee entirely — checked here, before anything is touched.
 fn unconvertible_callees(
-    func: &LiftedFunction,
+    ir: &LiftedIr,
+    calls: &CallIndex,
     plans: &HashMap<FuncId, SretPlan>,
-    imported: u32,
 ) -> Vec<FuncId> {
     let mut vetoed = Vec::new();
-    for (_, value) in func.values.iter() {
-        let LiftedValueDef::Operator { op, args } = &value.def else {
-            continue;
-        };
-        let Some(target) = call_target(op, imported) else {
-            continue;
-        };
-        let Some(plan) = plans.get(&target) else {
-            continue;
-        };
-        // The frame argument must be there to drop.
-        if args.get(plan.out_index).is_none() {
+    for (&target, plan) in plans {
+        let unrewritable = calls.sites_targeting(target).iter().any(|site| {
+            let Some(caller) = ir.functions.get(site.caller.index() as usize) else {
+                // A site we cannot even find is a site we cannot rewrite.
+                return true;
+            };
+            let Some(value) = caller.values.get(site.call) else {
+                return true;
+            };
+            let LiftedValueDef::Operator { args, .. } = &value.def else {
+                return true;
+            };
+            // The frame argument must be there to drop.
+            args.get(plan.out_index).is_none()
+        });
+        if unrewritable {
             vetoed.push(target);
         }
     }
     vetoed
-}
-
-/// The callee of a direct call operator, as a **local** [`FuncId`].
-///
-/// WASM's function index space puts every host import first, so a
-/// `call`'s `function_index` is not the index of a local function — the
-/// lift shifts by the import count when it builds `FuncId`s
-/// (`lowering::lift_to_high::lower_call` does the same arithmetic).
-/// Reading the raw index as a `FuncId` silently names the wrong callee,
-/// which is worse than naming none: call sites stop matching their callee
-/// while the callee is still rewritten, and the module quietly stops
-/// type-checking.
-fn call_target(op: &WasmOp, imported: u32) -> Option<FuncId> {
-    let waffle::Operator::Call { function_index } = &op.0 else {
-        return None;
-    };
-    let global = function_index.index() as u32;
-    // An import is a host call; it has no body here to convert.
-    global
-        .checked_sub(imported)
-        .map(FuncId::from_index)
-}
-
-/// How many of the module's imports are functions — the offset between
-/// WASM's global function index space and our local one.
-fn imported_function_count(facts: &sordec_ir::WasmFacts) -> u32 {
-    facts
-        .imports
-        .iter()
-        .filter(|i| matches!(i.kind, sordec_ir::ImportKind::Func(_)))
-        .count() as u32
 }
 
 /// Drop the frame argument from every converted call and re-store the
@@ -427,7 +415,7 @@ fn imported_function_count(facts: &sordec_ir::WasmFacts) -> u32 {
 fn rewrite_call_sites(
     func: &mut LiftedFunction,
     plans: &HashMap<FuncId, SretPlan>,
-    imported: u32,
+    calls: &CallIndex,
 ) {
     // Collect first: the rewrite appends to `values`, which cannot happen
     // while iterating it.
@@ -445,7 +433,7 @@ fn rewrite_call_sites(
             let LiftedValueDef::Operator { op, .. } = &func.values.get(id)?.def else {
                 return None;
             };
-            let target = call_target(op, imported)?;
+            let target = calls.target(op)?;
             plans.contains_key(&target).then_some((block_id, position, id, target))
         })
         .collect();
@@ -570,6 +558,45 @@ mod tests {
         waffle::Memory::from(0)
     }
 
+    /// A function whose only instruction is a `call_indirect`.
+    fn indirect_caller() -> LiftedFunction {
+        let mut f = func_with(
+            vec![op(
+                waffle::Operator::CallIndirect {
+                    sig_index: waffle::Signature::from(0),
+                    table_index: waffle::Table::from(0),
+                },
+                vec![],
+            )],
+            vec![block(
+                0,
+                vec![],
+                vec![v(0)],
+                LiftedTerminator::Return { values: vec![] },
+            )],
+        );
+        f.id = FuncId::new(1);
+        f
+    }
+
+    /// A module with no imports and no exports, so every function in it is
+    /// a plain local callee.
+    fn module(functions: Vec<LiftedFunction>) -> LiftedIr {
+        LiftedIr {
+            facts: sordec_ir::WasmFacts {
+                imports: vec![],
+                exports: vec![],
+                function_type_indices: vec![],
+                function_bodies: vec![],
+                function_fingerprints: vec![],
+                custom_sections: vec![],
+            },
+            soroban_facts: None,
+            functions,
+            memory: sordec_ir::MemoryImage::empty(),
+        }
+    }
+
     /// `read_balance`-shaped: `(out, arg)`, two slots, one return.
     fn wide_callee() -> LiftedFunction {
         func_with(
@@ -691,7 +718,8 @@ mod tests {
             )],
         );
         caller.id = FuncId::new(1);
-        rewrite_call_sites(&mut caller, &plans, 0);
+        let calls = CallIndex::build(&module(vec![wide_callee(), caller.clone()]));
+        rewrite_call_sites(&mut caller, &plans, &calls);
 
         // The frame argument is gone.
         let LiftedValueDef::Operator { args, .. } = &caller.values.get(v(2)).unwrap().def else {
@@ -716,20 +744,35 @@ mod tests {
     }
 
     #[test]
+    fn an_exported_function_is_never_converted() {
+        // Its signature is the contract ABI: the internal call sites this
+        // pass can see are not the complete caller set.
+        let mut ir = module(vec![wide_callee()]);
+        ir.facts.exports.push(sordec_ir::Export {
+            name: "read_balance".to_string(),
+            kind: sordec_ir::ExportKind::Func,
+            index: 0,
+        });
+        assert!(
+            !SretReturnPass.run(&mut ir).changed,
+            "an exported out-parameter must be left alone"
+        );
+    }
+
+    #[test]
+    fn an_indirect_call_anywhere_stops_the_pass() {
+        // A table-called function has callers no scan can see, so no
+        // signature in the module may change.
+        let mut ir = module(vec![wide_callee(), indirect_caller()]);
+        assert!(
+            !SretReturnPass.run(&mut ir).changed,
+            "an incomplete caller set vetoes the whole module"
+        );
+    }
+
+    #[test]
     fn second_run_reports_no_work() {
-        let mut ir = LiftedIr {
-            facts: sordec_ir::WasmFacts {
-                imports: vec![],
-                exports: vec![],
-                function_type_indices: vec![],
-                function_bodies: vec![],
-                function_fingerprints: vec![],
-                custom_sections: vec![],
-            },
-            soroban_facts: None,
-            functions: vec![wide_callee()],
-            memory: sordec_ir::MemoryImage::empty(),
-        };
+        let mut ir = module(vec![wide_callee()]);
         assert!(SretReturnPass.run(&mut ir).changed);
         assert!(
             !SretReturnPass.run(&mut ir).changed,
