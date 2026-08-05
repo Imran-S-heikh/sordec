@@ -189,27 +189,32 @@ impl Pass<LiftedIr> for SretReturnPass {
 // Callee analysis
 // ---------------------------------------------------------------------
 
-/// Can `func`'s out-parameter become a return value?
+/// Can one of `func`'s parameters become a return value?
+///
+/// The out-pointer is **searched for**, not assumed to be first.
+/// [`crate::marshalling::sret::SretShape`] records `out_index` rather than
+/// assuming it, on the grounds that "an assumption made in two places is an
+/// assumption that can drift"; this is the other place, and it was the one
+/// holding the assumption.
+///
+/// **Measured: every conversion on the corpus is still at index 0**, so the
+/// search buys no fixture a conversion it was not already getting. What it
+/// does buy is the multi-candidate case below, which *is* real — dex has a
+/// function with two written parameters, and it surfaced only because an
+/// earlier draft declined on ambiguity and cost that fixture a conversion.
+///
+/// The functions that take a frame pointer at a later position turn out not
+/// to be out-parameter functions at all: they read through it, or forward
+/// it onward. Recording that because "the pass never looked there" was true
+/// and "so it would convert if it did" did not follow.
 fn convertible(func: &LiftedFunction) -> Option<SretPlan> {
-    macro_rules! decline {
-        // Named rather than a bare `return None` so each gate is greppable
-        // and the reason is visible at the site that enforces it.
-        ($why:literal) => {{
-            let _ = $why;
-            return None;
-        }};
-    }
     // A function that already returns something is a shape this does not
     // model.
     if func.blocks.iter().any(|(_, b)| {
         matches!(&b.terminator, LiftedTerminator::Return { values } if !values.is_empty())
     }) {
-        decline!("already returns a value");
+        return None;
     }
-
-    const OUT_INDEX: usize = 0;
-    let entry = func.blocks.get(func.entry)?;
-    let out_param = *entry.params.get(OUT_INDEX)?;
 
     let cfg = CfgFacts::build(func);
     let returns: Vec<BlockId> = func
@@ -221,7 +226,48 @@ fn convertible(func: &LiftedFunction) -> Option<SretPlan> {
         .map(|(id, _)| id)
         .collect();
     if returns.is_empty() {
-        decline!("no reachable return");
+        return None;
+    }
+
+    // The **first** qualifying parameter, not the only one. Two written
+    // parameters do happen (dex has one such function), and converting one
+    // of them is sound whatever the other is: the rewrite changes that
+    // parameter's position alone and leaves the rest of the signature
+    // exactly as it was. So there is no ambiguity about the *transform* —
+    // only about which to spend, and taking them in order is deterministic
+    // and matches what this pass did when the position was a constant.
+    //
+    // The second is then lost rather than deferred: a converted function
+    // `already returns a value`, so a later fixpoint iteration declines it
+    // at the first gate. No corpus function needs the second one, and
+    // recovering both would mean a plan carrying several out-indices —
+    // worth doing only once something asks for it.
+    let params = func.blocks.get(func.entry)?.params.clone();
+    params
+        .into_iter()
+        .enumerate()
+        .find_map(|(out_index, out_param)| plan_for(func, out_index, out_param, &cfg, &returns))
+}
+
+/// The plan for treating `out_param` as the out-pointer, or `None` when any
+/// gate declines.
+///
+/// Every decline here is about *this* parameter, so the search above moves
+/// on to the next one rather than giving up on the function.
+fn plan_for(
+    func: &LiftedFunction,
+    out_index: usize,
+    out_param: ValueId,
+    cfg: &CfgFacts,
+    returns: &[BlockId],
+) -> Option<SretPlan> {
+    macro_rules! decline {
+        // Named rather than a bare `return None` so each gate is greppable
+        // and the reason is visible at the site that enforces it.
+        ($why:literal) => {{
+            let _ = $why;
+            return None;
+        }};
     }
 
     let mut slots: BTreeMap<u32, (Slot, ValueId, ValueId)> = BTreeMap::new();
@@ -283,7 +329,7 @@ fn convertible(func: &LiftedFunction) -> Option<SretPlan> {
     }
 
     Some(SretPlan {
-        out_index: OUT_INDEX,
+        out_index,
         slots: slots.values().map(|(s, _, _)| *s).collect(),
         values: slots.values().map(|(_, v, _)| *v).collect(),
         stores: slots.values().map(|(_, _, id)| *id).collect(),
@@ -653,12 +699,87 @@ mod tests {
         ));
     }
 
+    /// Run the per-parameter gates for one parameter position.
+    ///
+    /// Some gates are about a single candidate rather than the function, so
+    /// asserting them through `convertible` would really be asserting that
+    /// *no other* parameter qualifies either — a different claim, and one
+    /// that made the escape test below pass for the wrong reason.
+    fn plan_at(func: &LiftedFunction, index: usize) -> Option<SretPlan> {
+        let cfg = CfgFacts::build(func);
+        let returns: Vec<BlockId> = func
+            .blocks
+            .iter()
+            .filter(|(id, b)| {
+                matches!(b.terminator, LiftedTerminator::Return { .. }) && cfg.is_reachable(*id)
+            })
+            .map(|(id, _)| id)
+            .collect();
+        let param = *func.blocks.get(func.entry)?.params.get(index)?;
+        plan_for(func, index, param, &cfg, &returns)
+    }
+
     #[test]
     fn a_pointer_that_escapes_is_not_convertible() {
         // Storing the pointer itself, rather than through it.
         let mut func = wide_callee();
         func.values.get_mut(v(5)).unwrap().def = store(mem(), 8, v(1), v(0));
-        assert!(convertible(&func).is_none(), "an escaping pointer declines");
+        assert!(
+            plan_at(&func, 0).is_none(),
+            "an escaping pointer declines"
+        );
+    }
+
+    #[test]
+    fn the_out_parameter_is_found_at_a_later_position() {
+        // rustc puts it first when it is the only one; dex has one at
+        // position 4 feeding 17 call sites, and assuming 0 made the pass
+        // report "not an out-parameter function" rather than declining.
+        let func = func_with(
+            vec![
+                param(0, 0),               // v0 an ordinary argument
+                param(0, 1),               // v1 the out-pointer
+                i32_const(7),              // v2
+                i32_const(9),              // v3
+                store(mem(), 0, v(1), v(2)),
+                store(mem(), 8, v(1), v(3)),
+            ],
+            vec![block(
+                0,
+                vec![v(0), v(1)],
+                vec![v(2), v(3), v(4), v(5)],
+                LiftedTerminator::Return { values: vec![] },
+            )],
+        );
+        let plan = convertible(&func).expect("convertible");
+        assert_eq!(plan.out_index, 1);
+        assert_eq!(plan.values, vec![v(2), v(3)]);
+    }
+
+    #[test]
+    fn two_written_parameters_take_the_first() {
+        // Converting one is sound whatever the other is — the rewrite
+        // touches that position alone. Declining instead cost dex a
+        // conversion it had been getting when the position was a constant.
+        let func = func_with(
+            vec![
+                param(0, 0),
+                param(0, 1),
+                i32_const(7),
+                store(mem(), 0, v(0), v(2)),
+                store(mem(), 0, v(1), v(2)),
+            ],
+            vec![block(
+                0,
+                vec![v(0), v(1)],
+                vec![v(2), v(3), v(4)],
+                LiftedTerminator::Return { values: vec![] },
+            )],
+        );
+        let plan = convertible(&func).expect("the first one converts");
+        assert_eq!(plan.out_index, 0);
+        // The second stays a pointer: this pass models one wide return.
+        assert!(plan_at(&func, 1).is_some(), "it qualified, it was not chosen");
     }
 
     #[test]
