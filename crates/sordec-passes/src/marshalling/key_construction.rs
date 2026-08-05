@@ -84,8 +84,21 @@ impl Pass<HighIr> for KeyConstructionElisionPass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
 
-        for func in &mut ir.functions {
-            let Some(plan) = plan_for(func) else { continue };
+        // Plan against an immutable view first: deciding whether a call is
+        // the derived validator or a storage probe means inspecting the
+        // *callee*, which cannot be read while its caller is borrowed
+        // mutably.
+        let plans: Vec<(usize, Plan)> = ir
+            .functions
+            .iter()
+            .enumerate()
+            .filter_map(|(i, f)| plan_for(f, &ir.functions).map(|p| (i, p)))
+            .collect();
+
+        for (index, plan) in plans {
+            let Some(func) = ir.functions.get_mut(index) else {
+                continue;
+            };
 
             // Drop the guards first: `strip` rewrites the region tree, and
             // doing it before the bindings change keeps the two steps
@@ -145,7 +158,7 @@ struct Plan {
     guards: HashMap<ValueId, String>,
 }
 
-fn plan_for(func: &HighFunction) -> Option<Plan> {
+fn plan_for(func: &HighFunction, all: &[HighFunction]) -> Option<Plan> {
     // Every key value a storage op resolved to a named variant. Only these
     // license anything: an unresolved key still needs its converter.
     let resolved: HashSet<ValueId> = func
@@ -179,25 +192,54 @@ fn plan_for(func: &HighFunction) -> Option<Plan> {
         if !matches!(binding.expr, Expr::Call { .. }) {
             continue;
         }
-        calls.push(id);
 
-        // Anything that consumes the key is the derived validation; the
-        // trap it guards is what this pass relocates.
+        // Collect every consumer of the key first, then decide as a
+        // group. Eliding the producer while a consumer survives leaves
+        // that consumer taking a `()` — which is exactly what happened
+        // before this was written as an all-or-nothing decision: the
+        // emitted code grew `fn func46(e: Env, arg0: ())` where the
+        // parameter had been a `Symbol`.
+        //
+        // The host-effect test is what separates the two kinds of
+        // consumer, and leaving it out cost a real branch.
+        // `storage().get()` compiles to a `has` probe and a `get` on the
+        // same key, and the probe is *also* a call taking the key and
+        // returning `bool`. Shape alone cannot tell it from the derived
+        // type check; effects can — a type check reads nothing, a storage
+        // probe reads the ledger.
+        let mut consumers = Vec::new();
+        let mut all_elidable = true;
         for (vid, vb) in func.bindings.iter() {
-            let Expr::Call { args, .. } = &vb.expr else {
+            let Expr::Call { target, args } = &vb.expr else {
                 continue;
             };
             if !args.iter().any(|a| resolve_use(func, *a) == id) {
                 continue;
             }
+            if touches_host(all, *target) {
+                all_elidable = false;
+                break;
+            }
+            consumers.push(vid);
+        }
+
+        // Fail closed. A key whose consumers are not all derived
+        // marshalling keeps its converter: the surplus costs structure
+        // score, whereas a half-elided chain is wrong output.
+        if !all_elidable {
+            continue;
+        }
+
+        calls.push(id);
+        for vid in consumers {
             calls.push(vid);
 
             // `strip` matches on the `if`'s *condition*, and the condition
-            // is the negation — the derived code traps when validation
-            // fails. Registering the validator itself would never match,
-            // and registering both polarities would be wrong: `if valid {
-            // trap }` is not a validation guard, it is something else, and
-            // eliding it would delete a real branch.
+            // is the negation — derived code traps when validation fails.
+            // Registering the validator itself would never match, and
+            // registering both polarities would be wrong: `if valid {
+            // trap }` is a different branch, and eliding it would delete
+            // real control flow.
             for (nid, nb) in func.bindings.iter() {
                 let Expr::Unary { op, value } = &nb.expr else {
                     continue;
@@ -213,6 +255,26 @@ fn plan_for(func: &HighFunction) -> Option<Plan> {
         return None;
     }
     Some(Plan { calls, guards })
+}
+
+/// Whether a callee reads or writes mutable host state.
+///
+/// The discriminator between the derived type validator (pure — it only
+/// inspects a `Val`'s tag) and an SDK storage probe (reads the ledger).
+/// Both take the key and return `bool`, so signature cannot separate them.
+///
+/// A callee that is not in the module — an import, or an index the lifter
+/// never resolved — answers `true`. Declining to elide is the safe
+/// direction: a missed elision costs structure score, a wrong one deletes
+/// the author's control flow.
+fn touches_host(all: &[HighFunction], target: sordec_common::FuncId) -> bool {
+    let Some(callee) = all.iter().find(|f| f.id == target) else {
+        return true;
+    };
+    callee.bindings.iter().any(|(_, b)| {
+        let e = crate::effects::expr_effects(&b.expr);
+        e.reads_host || e.writes_host
+    })
 }
 
 #[cfg(test)]
@@ -288,6 +350,39 @@ mod tests {
         }
     }
 
+    /// A callee with no bindings — pure, so `touches_host` says no.
+    fn pure_callee(id: u32) -> HighFunction {
+        let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
+        blocks.push(HighBlock { id: BlockId::from_index(0), bindings: vec![] });
+        HighFunction {
+            id: FuncId::from_index(id),
+            name: None,
+            signature: None,
+            blocks,
+            bindings: Arena::new(),
+            region: Region::Unreachable,
+            params: vec![],
+            returns: vec![],
+        }
+    }
+
+    /// A callee that reads the ledger — the storage probe this pass must
+    /// never mistake for the derived type check.
+    fn storage_callee(id: u32) -> HighFunction {
+        let mut f = pure_callee(id);
+        f.bindings.push(seed(
+            v(0),
+            Expr::Semantic(SemanticOp::Known(KnownOp::StorageHas {
+                tier: StorageTier::Known(KnownTier::Temporary),
+                durability: v(0),
+                key: v(0),
+                resolved_key: None,
+                probe: false,
+            })),
+        ));
+        f
+    }
+
     fn ir(func: HighFunction) -> HighIr {
         HighIr {
             facts: WasmFacts {
@@ -299,7 +394,7 @@ mod tests {
                 custom_sections: vec![],
             },
             soroban_facts: None,
-            functions: vec![func],
+            functions: vec![func, pure_callee(8), pure_callee(9)],
             memory: MemoryImage::empty(),
         }
     }
@@ -390,6 +485,32 @@ mod tests {
         let r = KeyConstructionElisionPass.run(&mut m);
         assert_eq!(r.metrics.get(M_GUARD), None);
         assert!(contains_if(&m.functions[0].region), "work before a trap is not a guard");
+    }
+
+    /// Regression, and the reason elision is all-or-nothing.
+    ///
+    /// `storage().get()` compiles to a `has` probe plus a `get` on the same
+    /// key, and the probe is a call taking the key and returning `bool` —
+    /// indistinguishable from the derived type check by shape. Eliding the
+    /// converter while the probe survived left the probe taking a `()`
+    /// (`fn func46(e: Env, arg0: ())` appeared in real output) and deleted
+    /// the author's own `if let Some(..)`, taking structure recall from
+    /// 1.0000 to 0.9697.
+    #[test]
+    fn a_host_reading_consumer_blocks_the_whole_elision() {
+        let mut m = ir(func_with(true));
+        // Make the consumer a storage probe rather than a pure type check.
+        m.functions[1] = storage_callee(8);
+
+        let r = KeyConstructionElisionPass.run(&mut m);
+
+        assert!(!r.changed, "a chain with a live consumer must stay whole");
+        assert!(
+            matches!(expr_at(&m, 0), Expr::Call { .. }),
+            "the converter must survive when its consumer does — eliding it \
+             alone would leave the consumer taking a unit"
+        );
+        assert!(contains_if(&m.functions[0].region));
     }
 
     #[test]
