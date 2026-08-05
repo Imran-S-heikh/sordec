@@ -76,7 +76,10 @@ pub fn shipped_catalogue() -> Catalogue {
 }
 
 pub use catalogue::{Catalogue, CatalogueBuilder, CrateOrigin, OwnedEntry, SigEntry};
-pub use fingerprint::{Fingerprint, HostImports, MIN_INSTRUCTIONS, fingerprint};
+pub use fingerprint::{
+    Fingerprint, HostImports, MIN_INSTRUCTIONS, MIN_UNMASKED_INSTRUCTIONS, fingerprint,
+    fingerprint_module,
+};
 pub use oracle::{LabelledFunction, LabelledModule, read_labelled};
 
 /// What can go wrong turning bytes into a fingerprint.

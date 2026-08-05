@@ -48,15 +48,48 @@ fn main() -> ExitCode {
 const USAGE: &str = "\
 usage:
   siggen generate --out <file.rs> <labelled.wasm>...
-  siggen validate --train <labelled.wasm>... -- <held-out.wasm>...";
+  siggen validate --train <labelled.wasm>... -- <held-out.wasm>...\n  siggen identify <contract.wasm>...";
 
 fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("generate") => generate(&args[1..]),
         Some("validate") => validate(&args[1..]),
+        Some("identify") => identify(&args[1..]),
         Some(other) => Err(format!("unknown command `{other}`")),
         None => Err("no command given".into()),
     }
+}
+
+/// Report what the **shipped** catalogue makes of a module.
+///
+/// Takes a stripped contract — the real thing, no oracle rebuild — and
+/// prints the shipped catalogue's verdict per local function index, which
+/// is the same index the decompiler's `funcN` names use. This is the tool
+/// for asking "what does sordec think this contract's helpers are".
+fn identify(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("no module given".into());
+    }
+    let catalogue = sordec_sigs::shipped_catalogue();
+    eprintln!("shipped catalogue: {} entries\n", catalogue.len());
+
+    for path in args {
+        let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
+        let prints = sordec_sigs::fingerprint_module(&bytes).map_err(|e| format!("{path}: {e}"))?;
+        let hits = prints
+            .iter()
+            .filter(|f| f.is_some_and(|f| catalogue.lookup(f).is_some()))
+            .count();
+        eprintln!("{path}: {} bodies, {hits} identified", prints.len());
+        for (i, fp) in prints.iter().enumerate() {
+            let Some(entry) = fp.and_then(|f| catalogue.lookup(f)) else {
+                continue;
+            };
+            eprintln!("  func{i:<4} {}", entry.path);
+        }
+        eprintln!();
+    }
+    Ok(())
 }
 
 /// Collect `--out <path>` plus positional wasm paths.

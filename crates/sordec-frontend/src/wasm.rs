@@ -13,7 +13,7 @@
 use sordec_ir::{
     ByteRange, CustomSection, Export, ExportKind, Import, ImportKind, WasmFacts,
 };
-use sordec_sigs::{Fingerprint, HostImports, fingerprint};
+use sordec_sigs::{Fingerprint, fingerprint_module};
 use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
 
 use crate::error::{FrontendError, FrontendResult};
@@ -133,7 +133,15 @@ pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
     // body's fingerprint needs the *complete* import list to tell a host
     // call from a module-local one, and while a valid module orders imports
     // before code, nothing here should depend on that.
-    let function_fingerprints = fingerprint_bodies(wasm, &imports, &function_bodies);
+    // Delegates to `sordec-sigs` rather than reimplementing the walk: two
+    // copies of the normalisation rules would be two keyspaces, and they
+    // would diverge silently as a catalogue that stops matching. A body
+    // that cannot be fingerprinted yields `None` rather than failing the
+    // parse — identification is an enhancement, and a genuinely malformed
+    // code section fails later in the lifter with a better error.
+    let function_fingerprints = fingerprint_module(wasm)
+        .map(|v| v.into_iter().map(|f| f.map(Fingerprint::to_u128)).collect())
+        .unwrap_or_default();
 
     Ok(WasmFacts {
         imports,
@@ -143,39 +151,6 @@ pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
         function_fingerprints,
         custom_sections,
     })
-}
-
-/// Fingerprint every local function body, parallel to `bodies`.
-///
-/// A body that cannot be fingerprinted yields `None` rather than failing
-/// the parse. Two reasons it may not: it is shorter than the size gate, or
-/// `wasmparser` cannot read its instruction stream. Neither is fatal here —
-/// identification is an enhancement, and a module whose code section is
-/// genuinely malformed will fail later in the lifter, with a better error
-/// than this function could give.
-fn fingerprint_bodies(
-    wasm: &[u8],
-    imports: &[Import],
-    bodies: &[ByteRange],
-) -> Vec<Option<u128>> {
-    // Only *function* imports occupy the index space a `call` immediate
-    // indexes into; memories, tables and globals do not.
-    let host_names: Vec<String> = imports
-        .iter()
-        .filter(|i| matches!(i.kind, ImportKind::Func(_)))
-        .map(|i| format!("{}.{}", i.module, i.name))
-        .collect();
-    let hosts = HostImports::new(host_names);
-
-    bodies
-        .iter()
-        .map(|range| {
-            let start = usize::try_from(range.start).ok()?;
-            let end = usize::try_from(range.end).ok()?;
-            let body = wasm.get(start..end)?;
-            fingerprint(body, &hosts).ok().flatten().map(Fingerprint::to_u128)
-        })
-        .collect()
 }
 
 /// Translate `wasmparser::TypeRef` into our typed [`ImportKind`].

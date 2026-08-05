@@ -288,6 +288,52 @@ pub fn fingerprint(
     Ok(Some(hasher.finish()))
 }
 
+/// Fingerprint every local function body in a module, in declaration order.
+///
+/// Works on a **stripped** module: it reads only the import and code
+/// sections, never names. `None` marks a body that declined the size gates.
+///
+/// This is the shared implementation. The frontend calls it so a decompile
+/// and the `siggen` tooling cannot drift apart — two copies of the
+/// normalisation rules would be two keyspaces, and the divergence would
+/// show up as a catalogue that silently stops matching.
+///
+/// # Errors
+///
+/// [`SigError::Decode`] if `wasmparser` rejects the module.
+pub fn fingerprint_module(wasm: &[u8]) -> Result<Vec<Option<Fingerprint>>, SigError> {
+    use wasmparser::{Parser, Payload, TypeRef};
+
+    let mut host_names = Vec::<String>::new();
+    let mut bodies = Vec::<(usize, usize)>::new();
+
+    for payload in Parser::new(0).parse_all(wasm) {
+        match payload? {
+            Payload::ImportSection(reader) => {
+                for import in reader {
+                    let import = import?;
+                    // Only function imports occupy the index space a `call`
+                    // immediate indexes into.
+                    if matches!(import.ty, TypeRef::Func(_)) {
+                        host_names.push(format!("{}.{}", import.module, import.name));
+                    }
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                let r = body.range();
+                bodies.push((r.start, r.end));
+            }
+            _ => {}
+        }
+    }
+
+    let hosts = HostImports::new(host_names);
+    bodies
+        .into_iter()
+        .map(|(start, end)| fingerprint(wasm.get(start..end).unwrap_or_default(), &hosts))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
