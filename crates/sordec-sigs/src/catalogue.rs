@@ -16,12 +16,30 @@
 //! arbitrated.** There is no tie-break, no most-recently-seen, no
 //! preferring the longer body. Identification decides what the decompiler
 //! deletes; a wrong answer there corrupts output, while a missing answer
-//! only leaves surplus code we were emitting anyway. The asymmetry is the
-//! whole argument, and it is why zero false positives held across fourteen
-//! measured runs.
+//! only leaves surplus code we were emitting anyway. That asymmetry is the
+//! whole argument.
 //!
 //! Deduplication is by *path*, not by occurrence: the same function found
 //! in six corpus contracts is one entry, not a conflict.
+//!
+//! # This gate alone is not sufficient, and that was measured
+//!
+//! Dropping ambiguity *within* the catalogue does not stop a **held-out**
+//! function colliding with an entry. Growing the corpus from two modules to
+//! nine surfaced exactly that: `dex::get_balance_a` and `get_balance_b`
+//! matched `soroban_sdk::ledger::Ledger::sequence`, because all three are
+//! `local.get 0; call <local>; call <local>; end` and the callee — the only
+//! thing telling them apart — is deliberately masked.
+//!
+//! An earlier round of this work reported "zero false positives" on a
+//! two-module corpus. That was true and it was under-tested; a bigger
+//! catalogue has more surface to collide with. The fix is upstream, in
+//! [`crate::fingerprint::MIN_UNMASKED_INSTRUCTIONS`], which declines a body
+//! whose content is mostly masked. It cost 1 match of 37 and took false
+//! positives back to zero.
+//!
+//! The lesson worth keeping: a safety property measured on a small corpus
+//! is a property of that corpus.
 
 use crate::fingerprint::Fingerprint;
 
@@ -59,29 +77,98 @@ impl CrateOrigin {
         }
     }
 
-    /// Classify a demangled or mangled symbol path.
+    /// Classify a mangled symbol by the crate that **defines** it.
     ///
-    /// Returns `None` for anything not attributable to a known library,
-    /// which is the common case: it is the contract author's own code.
+    /// Returns `None` for anything not attributable to a known library —
+    /// which is the important case, because it is the contract author's own
+    /// code and must never be catalogued.
+    ///
+    /// # Why the defining crate, not any crate mentioned
+    ///
+    /// Searching the whole symbol for a library name is wrong, and the
+    /// corpus proves it. `#[contracttype]` on a user's struct expands to
+    /// `impl TryFromVal<Env, UserType> for Val`, which mangles as:
+    ///
+    /// ```text
+    /// _ZN13soroban_votes7storage168_$LT$impl..soroban_env_common..convert..TryFromVal..$GT$12try_from_val
+    /// ```
+    ///
+    /// The symbol names `soroban_env_common` because that is where the
+    /// *trait* lives, but the code is generated into the **contract's own
+    /// crate** and is that contract's to keep. Cataloguing it would put a
+    /// contract's derive output in a table used to decide what to delete
+    /// from other contracts.
+    ///
+    /// So the leading path component decides. When it is a plain crate
+    /// name, that is the answer. When the symbol opens with an `impl`
+    /// descriptor there is no leading crate — `<i128 as
+    /// soroban_env_common::TryFromVal>::try_from_val` is defined wherever
+    /// the trait or type is — and only then does the trait's crate stand in
+    /// for it.
     #[must_use]
     pub fn classify(symbol: &str) -> Option<Self> {
-        // Order matters: `soroban_env_guest` and `soroban_env_common` both
-        // contain `soroban_env`, and an `impl` block can name several
-        // crates in one symbol, so the most specific wins.
+        match defining_crate(symbol) {
+            // A plain leading crate name is authoritative in both
+            // directions: it names a library, or it names the contract.
+            Some(name) => Self::from_crate_name(name),
+            // An `impl` descriptor, or an unmangled name. Fall back to the
+            // most specific library named anywhere in it.
+            None => Self::from_mention(symbol),
+        }
+    }
+
+    /// Exact match on a crate name.
+    fn from_crate_name(name: &str) -> Option<Self> {
+        match name {
+            "soroban_sdk" => Some(Self::Sdk),
+            "soroban_env_common" => Some(Self::EnvCommon),
+            "soroban_env_guest" => Some(Self::EnvGuest),
+            "core" => Some(Self::Core),
+            "alloc" => Some(Self::Alloc),
+            _ => None,
+        }
+    }
+
+    /// Most specific library mentioned anywhere in a symbol.
+    ///
+    /// `soroban_env_guest` and `soroban_env_common` share a prefix and an
+    /// `impl` can name both, so the narrower one is tested first.
+    fn from_mention(symbol: &str) -> Option<Self> {
         if symbol.contains("soroban_env_guest") {
             Some(Self::EnvGuest)
         } else if symbol.contains("soroban_env_common") {
             Some(Self::EnvCommon)
         } else if symbol.contains("soroban_sdk") {
             Some(Self::Sdk)
-        } else if symbol.starts_with("_ZN5alloc") || symbol.contains("alloc..") {
+        } else if symbol.contains("alloc..") {
             Some(Self::Alloc)
-        } else if symbol.starts_with("_ZN4core") || symbol.contains("core..") {
+        } else if symbol.contains("core..") {
             Some(Self::Core)
         } else {
             None
         }
     }
+}
+
+/// The leading path component of a legacy-mangled Rust symbol.
+///
+/// `_ZN11soroban_sdk7storage3get…` yields `soroban_sdk`. Returns `None`
+/// when the symbol is not `_ZN`-mangled, or when the first component is an
+/// `impl` descriptor (`_$LT$…`) rather than a crate name.
+fn defining_crate(symbol: &str) -> Option<&str> {
+    let rest = symbol.strip_prefix("_ZN")?;
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return None;
+    }
+    let (len, tail) = rest.split_at(digits);
+    let len: usize = len.parse().ok()?;
+    let component = tail.get(..len)?;
+    // `_$LT$` opens an `impl` block; there is no crate name to read.
+    if component.starts_with("_$LT$") {
+        return None;
+    }
+    Some(component)
 }
 
 /// One catalogued library function.
@@ -359,5 +446,86 @@ mod tests {
             CrateOrigin::classify("_ZN22soroban_token_contract9allowance14read_allowance"),
             None
         );
+    }
+
+    /// An `impl` block with no leading crate name is defined wherever its
+    /// trait or type lives, so the trait's crate stands in.
+    #[test]
+    fn impl_blocks_fall_back_to_the_trait_crate() {
+        assert_eq!(
+            CrateOrigin::classify(
+                "_ZN104_$LT$i128$u20$as$u20$soroban_env_common..convert..TryFromVal$GT$12try_from_val"
+            ),
+            Some(CrateOrigin::EnvCommon)
+        );
+    }
+
+    /// Regression: `#[contracttype]` generates `impl TryFromVal` **into the
+    /// contract's own crate**. The symbol names `soroban_env_common`
+    /// because that is where the trait lives, but the code belongs to the
+    /// contract and must never be catalogued as library.
+    #[test]
+    fn derive_generated_contract_code_is_not_library() {
+        let symbol = "_ZN13soroban_votes7storage168_$LT$impl$u20$soroban_env_common..convert..TryFromVal$LT$soroban_sdk..env..Env$C$soroban_votes..storage..EmissionConfig$GT$$u20$for$u20$soroban_env_common..val..Val$GT$12try_from_val";
+        assert_eq!(
+            CrateOrigin::classify(symbol),
+            None,
+            "a contract's own derive output is the contract's, whatever traits it names"
+        );
+    }
+
+    #[test]
+    fn defining_crate_parsing() {
+        assert_eq!(defining_crate("_ZN11soroban_sdk7storage3get"), Some("soroban_sdk"));
+        assert_eq!(defining_crate("_ZN4core6result13unwrap_failed"), Some("core"));
+        // An impl descriptor has no crate to read.
+        assert_eq!(defining_crate("_ZN104_$LT$i128$u20$as$u20$foo$GT$3bar"), None);
+        // Not `_ZN`-mangled at all.
+        assert_eq!(defining_crate("plain_name"), None);
+        // Malformed: length runs past the end.
+        assert_eq!(defining_crate("_ZN99short"), None);
+    }
+}
+
+#[cfg(test)]
+mod shipped_tests {
+    use super::*;
+
+    /// The shipped table must satisfy the invariants `Catalogue::new`
+    /// debug-asserts, on a release build too.
+    #[test]
+    fn shipped_catalogue_is_sorted_and_unique() {
+        let c = crate::shipped_catalogue();
+        assert!(!c.is_empty(), "the shipped catalogue should not be empty");
+        let e = c.entries();
+        assert!(
+            e.windows(2).all(|w| w[0].fingerprint < w[1].fingerprint),
+            "entries must be strictly ascending for binary search"
+        );
+    }
+
+    /// Every shipped entry must be attributable to a library. An entry
+    /// whose path is a contract's own crate would mean the generator
+    /// catalogued somebody's contract logic, which is the one thing that
+    /// could license deleting a future contract's real code.
+    #[test]
+    fn no_contract_code_is_catalogued() {
+        for entry in crate::shipped_catalogue().entries() {
+            assert_eq!(
+                CrateOrigin::classify(entry.path),
+                Some(entry.origin),
+                "catalogued entry is not library code: {}",
+                entry.path
+            );
+        }
+    }
+
+    /// Round-trip: every entry is findable by its own fingerprint.
+    #[test]
+    fn every_entry_is_reachable() {
+        let c = crate::shipped_catalogue();
+        for entry in c.entries() {
+            assert_eq!(c.lookup(entry.fingerprint).map(|e| e.path), Some(entry.path));
+        }
     }
 }

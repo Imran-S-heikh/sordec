@@ -83,13 +83,35 @@ const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
 /// only 80–83% of the time, while everything at ten bytes or more was
 /// **100%** unique. Four instructions is the conservative reading of that
 /// boundary.
-///
-/// This is a second line of defence, not the primary one. Ambiguity is
-/// resolved where it can be resolved properly — at catalogue *generation*,
-/// where two paths hashing alike causes both to be dropped (see
-/// [`crate::catalogue`]). This gate only stops trivial bodies from
-/// consuming catalogue space to begin with.
 pub const MIN_INSTRUCTIONS: usize = 4;
+
+/// Fewest instructions a body must have that are **not** masked.
+///
+/// Raw length is the wrong gate, and a measured false positive is what
+/// showed it. These three bodies are byte-distinct, semantically unrelated,
+/// and fingerprint identically:
+///
+/// ```text
+/// 00 2000 109c80808000 10a280808000 0b   dex::get_balance_a
+/// 00 2000 109e80808000 10a280808000 0b   dex::get_balance_b
+/// 00 2000 108782808000 10a182808000 0b   soroban_sdk::ledger::Ledger::sequence
+/// ```
+///
+/// Each is `local.get 0; call <local>; call <local>; end` — four
+/// instructions, clearing [`MIN_INSTRUCTIONS`], of which **two are calls
+/// whose target is deliberately masked**. The callee is the only thing
+/// telling them apart, and erasing it is the entire point of the design.
+/// What is left carries no identity, so the catalogue matched a liquidity
+/// pool's balance getter to a ledger-sequence accessor.
+///
+/// So the real question is not "how long is this body" but "how much of it
+/// still says something after normalisation". A body must clear both gates.
+///
+/// Note this cannot be fixed by resolving local callees instead: their
+/// indices are precisely what varies between modules. It could be fixed by
+/// fingerprinting callees recursively, which is a much larger design and
+/// buys little — bodies this trivial are not worth identifying.
+pub const MIN_UNMASKED_INSTRUCTIONS: usize = 4;
 
 /// A masked structural fingerprint of one function body.
 ///
@@ -223,6 +245,10 @@ pub fn fingerprint(
     }
 
     let mut hasher = Fnv1a::new();
+    // How many instructions survive normalisation with their identity
+    // intact. A stream that is mostly masked tags hashes the same as any
+    // other stream of the same shape — see [`MIN_UNMASKED_INSTRUCTIONS`].
+    let mut unmasked = 0_usize;
     for (i, (op, start)) in ops.iter().enumerate() {
         // The last instruction runs to the end of the body; every other one
         // stops where its successor begins.
@@ -234,9 +260,12 @@ pub fn fingerprint(
                 // A host import: its name is stable across modules and SDK
                 // versions, and is the only thing distinguishing one host
                 // call from another once the index is gone.
+                // A host import names a specific operation, so it survives
+                // normalisation and counts toward the body's identity.
                 Some(name) => {
                     hasher.write(tag::CALL_HOST);
                     hasher.write(name.as_bytes());
+                    unmasked += 1;
                 }
                 // A module-local callee: the index is an artefact of this
                 // module's layout and carries no identity.
@@ -245,8 +274,15 @@ pub fn fingerprint(
             Operator::CallIndirect { .. } => hasher.write(tag::CALL_INDIRECT),
             Operator::GlobalGet { .. } | Operator::GlobalSet { .. } => hasher.write(tag::GLOBAL),
             // Everything else is structural and hashed exactly as encoded.
-            _ => hasher.write(span),
+            _ => {
+                hasher.write(span);
+                unmasked += 1;
+            }
         }
+    }
+
+    if unmasked < MIN_UNMASKED_INSTRUCTIONS {
+        return Ok(None);
     }
 
     Ok(Some(hasher.finish()))
@@ -365,6 +401,53 @@ mod tests {
         let hosts = HostImports::default();
         // `local.get 0; end` — two instructions, under the gate.
         assert_eq!(fingerprint(&body(&[0x20, 0x00]), &hosts).unwrap(), None);
+    }
+
+    /// Regression for a **measured false positive**: a catalogue built from
+    /// third-party contracts matched `dex::get_balance_a` and
+    /// `get_balance_b` to `soroban_sdk::ledger::Ledger::sequence`.
+    ///
+    /// All three are `local.get 0; call <local>; call <local>; end`. That
+    /// clears the raw-length gate, but two of the four instructions are
+    /// calls whose target is masked, so nothing discriminating is left.
+    /// These are the real bodies, byte for byte.
+    #[test]
+    fn a_body_that_is_mostly_masked_calls_is_declined() {
+        let hosts = HostImports::default();
+        let get_balance_a = hex(b"002000109c8080800010a2808080000b");
+        let get_balance_b = hex(b"002000109e8080800010a2808080000b");
+        let ledger_sequence = hex(b"00200010878280800010a1828080000b");
+
+        for (label, bytes) in [
+            ("dex::get_balance_a", &get_balance_a),
+            ("dex::get_balance_b", &get_balance_b),
+            ("Ledger::sequence", &ledger_sequence),
+        ] {
+            assert_eq!(
+                fingerprint(bytes, &hosts).unwrap(),
+                None,
+                "{label} carries no identity once its callees are masked and must be declined"
+            );
+        }
+    }
+
+    /// The same shape becomes identifiable once the calls are to *host*
+    /// imports, which are named rather than masked — confirming the gate
+    /// counts discriminating content and not merely instructions.
+    #[test]
+    fn the_same_shape_survives_when_the_calls_are_host_imports() {
+        let hosts = HostImports::new(vec!["l.7".into(), "m.9".into()]);
+        // local.get 0; call 0; call 1; end
+        let with_host_calls = body(&[0x20, 0x00, 0x10, 0x00, 0x10, 0x01]);
+        assert!(fingerprint(&with_host_calls, &hosts).unwrap().is_some());
+    }
+
+    fn hex(s: &[u8]) -> Vec<u8> {
+        s.chunks(2)
+            .map(|p| {
+                u8::from_str_radix(std::str::from_utf8(p).expect("ascii"), 16).expect("hex digits")
+            })
+            .collect()
     }
 
     #[test]
