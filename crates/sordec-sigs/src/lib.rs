@@ -59,9 +59,11 @@
 
 pub mod catalogue;
 pub mod fingerprint;
+pub mod oracle;
 
-pub use catalogue::{Catalogue, CrateOrigin, SigEntry};
+pub use catalogue::{Catalogue, CatalogueBuilder, CrateOrigin, OwnedEntry, SigEntry};
 pub use fingerprint::{Fingerprint, HostImports, MIN_INSTRUCTIONS, fingerprint};
+pub use oracle::{LabelledFunction, LabelledModule, read_labelled};
 
 /// What can go wrong turning bytes into a fingerprint.
 #[derive(Debug, thiserror::Error)]
@@ -70,4 +72,10 @@ pub enum SigError {
     /// well-formed function body.
     #[error("malformed WASM function body: {0}")]
     Decode(#[from] wasmparser::BinaryReaderError),
+
+    /// A module offered as an oracle carries no function names, so it was
+    /// not built with `profile.release.strip=false` and cannot label
+    /// anything. Never raised on the decompile path, which reads no names.
+    #[error("module has no `name` section: rebuild with profile.release.strip=false")]
+    NoNameSection,
 }
