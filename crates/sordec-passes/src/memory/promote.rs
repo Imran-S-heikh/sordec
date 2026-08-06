@@ -124,7 +124,9 @@ use super::slots::{access_shape, address_closure, addresses_only_flow_to, schedu
 use crate::dataflow::CfgFacts;
 use crate::declutter::for_each_target_mut;
 use crate::metrics_catalog::{
-    MEMORY_LOADS_FORWARDED, MEMORY_SLOTS_PROMOTED, MEMORY_STORES_REMOVED,
+    MEMORY_FRAME_DECLINED_OPAQUE, MEMORY_FRAME_DECLINED_OTHER, MEMORY_FRAME_DECLINED_OVERLAP,
+    MEMORY_FRAME_DECLINED_READ_ONLY, MEMORY_FRAME_DECLINED_WRITE_ONLY, MEMORY_LOADS_FORWARDED,
+    MEMORY_SLOTS_PROMOTED, MEMORY_STORES_REMOVED,
 };
 use crate::pass::{Pass, PassResult};
 
@@ -176,6 +178,21 @@ impl Pass<LiftedIr> for SlotPromotionPass {
 
     fn run(&self, ir: &mut LiftedIr) -> PassResult {
         let mut result = PassResult::default();
+
+        // Census first, over an immutable view. A declined frame is the
+        // pass's most common outcome and until now its least explicable:
+        // rejection is whole-frame, so the pass could only report "no". The
+        // census says which *other* pass would have to exist to unblock
+        // each one, which is what turns the shadow stack from a mood into a
+        // work list.
+        //
+        // It runs as its own phase because classifying an escape means
+        // reading the *callee*, which cannot be borrowed while the caller
+        // is being rewritten. That costs one extra `discover` per declined
+        // frame; the pass is not hot enough for that to matter, and the
+        // alternative is threading the reasons through the rewrite.
+        census(ir, &mut result);
+
         for func in &mut ir.functions {
             let Some(layout) = frame::detect(func) else {
                 continue;
@@ -209,6 +226,67 @@ impl Pass<LiftedIr> for SlotPromotionPass {
         }
         result
     }
+}
+
+/// Record why each frame this pass will not promote was declined.
+///
+/// Only declines are counted. A promoted frame needs no explanation, and
+/// counting successes here as well would duplicate
+/// [`MEMORY_SLOTS_PROMOTED`].
+fn census(ir: &LiftedIr, result: &mut PassResult) {
+    let calls = super::calls::CallIndex::build(ir);
+    for func in &ir.functions {
+        let Some(layout) = frame::detect(func) else {
+            continue;
+        };
+        let cfg = CfgFacts::build(func);
+        if discover(func, layout.base, &cfg).is_some() {
+            continue;
+        }
+        let live = scheduled(func, &cfg);
+        let addresses = address_closure(func, layout.base, &live);
+        let accessors = accessors_of(func, &cfg, &addresses);
+        let key = match super::slots::first_escape(func, ir, &calls, &addresses, &accessors, &live) {
+            Some(super::slots::FrameEscape::CallWriteOnly) => MEMORY_FRAME_DECLINED_WRITE_ONLY,
+            Some(super::slots::FrameEscape::CallReadOnly) => MEMORY_FRAME_DECLINED_READ_ONLY,
+            Some(super::slots::FrameEscape::CallOpaque) => MEMORY_FRAME_DECLINED_OPAQUE,
+            Some(super::slots::FrameEscape::Other) => MEMORY_FRAME_DECLINED_OTHER,
+            // Nothing escaped, so a later gate spoke: overlap, a width
+            // conflict, or a slot nothing writes.
+            None => MEMORY_FRAME_DECLINED_OVERLAP,
+        };
+        result.metrics.increment(key, 1);
+    }
+}
+
+/// The values that legitimately consume a frame address: the loads and
+/// stores themselves. Mirrors the accumulation inside [`discover`].
+fn accessors_of(
+    func: &LiftedFunction,
+    cfg: &CfgFacts,
+    addresses: &HashSet<ValueId>,
+) -> HashSet<ValueId> {
+    let mut accessors = HashSet::new();
+    for (block_id, block) in func.blocks.iter() {
+        if !cfg.is_reachable(block_id) {
+            continue;
+        }
+        for &id in &block.instructions {
+            let Some(value) = func.values.get(id) else {
+                continue;
+            };
+            let LiftedValueDef::Operator { op, args } = &value.def else {
+                continue;
+            };
+            if access_shape(op).is_none() {
+                continue;
+            }
+            if args.first().is_some_and(|a| addresses.contains(a)) {
+                accessors.insert(id);
+            }
+        }
+    }
+    accessors
 }
 
 // ---------------------------------------------------------------------

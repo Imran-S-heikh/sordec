@@ -91,6 +91,10 @@ pub struct CoverageReport {
     /// Binding-level type recovery: how much of the IR is actually typed
     /// (beyond the public ABI signatures) after type propagation.
     pub types: TypeCoverage,
+    /// Shadow-stack recovery: slots promoted out of linear memory, and for
+    /// every frame that was **not** promoted, which pass would have to
+    /// exist to unblock it.
+    pub memory: MemoryCoverage,
     /// Per-pattern recognition counts and ratios (F1–F8 + beyond-kickoff).
     pub recognition: RecognitionCoverage,
     /// The two-number semantic-recovery headline (W7).
@@ -212,6 +216,30 @@ pub struct TypeCoverage {
     /// Fraction carrying a type (`(known + inferred) / total`), or `None`
     /// when there are no bindings.
     pub typed_ratio: Option<f64>,
+}
+
+/// Shadow-stack recovery, and why each unpromoted frame stayed.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryCoverage {
+    /// Shadow-stack slots promoted from linear memory to SSA values.
+    pub slots_promoted: i64,
+    /// Frames declined because an address reached a callee that only
+    /// writes through it — `memory::sret`'s territory.
+    pub declined_write_only: i64,
+    /// Frames declined because an address reached a callee that only reads
+    /// through it — `memory::argpromote`'s territory.
+    pub declined_read_only: i64,
+    /// Frames declined because an address reached a callee that both reads
+    /// and writes, forwards it onward, or could not be resolved.
+    pub declined_opaque: i64,
+    /// Frames declined for a non-call reason: stored as a value, returned,
+    /// or carried by a terminator.
+    pub declined_other: i64,
+    /// Frames declined by a slot-layout gate rather than an escape:
+    /// partial overlap, a width conflict, or a slot nothing writes.
+    pub declined_layout: i64,
+    /// Every declined frame, whatever the reason.
+    pub declined_total: i64,
 }
 
 /// Control-flow structuring coverage (A6/W8).
@@ -787,6 +815,7 @@ pub fn compute_coverage(
         },
         structuring: build_structuring(metric_totals),
         types: build_types(metric_totals),
+        memory: build_memory(metric_totals),
         recognition: build_recognition(metric_totals),
         headline: build_headline(metric_totals, call_to_import),
         diagnostics: build_diagnostic_coverage(recognizer_diagnostics),
@@ -1028,6 +1057,34 @@ fn build_structuring(t: &BTreeMap<&'static str, i64>) -> StructuringCoverage {
 /// Build the type-recovery section from the pipeline's per-pass counters
 /// (emitted by the terminal `type-infer` pass). A census, not an event
 /// sum, so the ratios are exact regardless of fixpoint iteration counts.
+/// Shadow-stack recovery, and the reason each unpromoted frame stayed.
+///
+/// The decline breakdown is the point. `promote` rejects a frame **whole**,
+/// so on its own it can only report a count, and the same census had to be
+/// taken by hand twice before this existed. Bucketing by *which pass owns
+/// the escape* is what makes the next piece of work fall out of the number
+/// rather than out of a judgement.
+fn build_memory(t: &BTreeMap<&'static str, i64>) -> MemoryCoverage {
+    let declined_write_only = metric(t, mc::MEMORY_FRAME_DECLINED_WRITE_ONLY);
+    let declined_read_only = metric(t, mc::MEMORY_FRAME_DECLINED_READ_ONLY);
+    let declined_opaque = metric(t, mc::MEMORY_FRAME_DECLINED_OPAQUE);
+    let declined_other = metric(t, mc::MEMORY_FRAME_DECLINED_OTHER);
+    let declined_layout = metric(t, mc::MEMORY_FRAME_DECLINED_OVERLAP);
+    MemoryCoverage {
+        slots_promoted: metric(t, mc::MEMORY_SLOTS_PROMOTED),
+        declined_write_only,
+        declined_read_only,
+        declined_opaque,
+        declined_other,
+        declined_layout,
+        declined_total: declined_write_only
+            + declined_read_only
+            + declined_opaque
+            + declined_other
+            + declined_layout,
+    }
+}
+
 fn build_types(t: &BTreeMap<&'static str, i64>) -> TypeCoverage {
     let known = metric(t, mc::TYPES_KNOWN);
     let inferred = metric(t, mc::TYPES_INFERRED);

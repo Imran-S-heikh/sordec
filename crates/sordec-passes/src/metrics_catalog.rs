@@ -397,6 +397,32 @@ pub const MEMORY_LOADS_FORWARDED_LOCALLY: &str = "memory_loads_forwarded_locally
 pub const MEMORY_SRET_CONVERTED: &str = "memory_sret_converted";
 /// Shadow-stack slots promoted from linear memory to SSA values.
 pub const MEMORY_SLOTS_PROMOTED: &str = "memory_slots_promoted";
+
+// Why a frame was declined. `promote` rejects a frame **whole** — an
+// address it cannot follow may alias any slot — so knowing which gate
+// spoke is the difference between "the shadow stack is hard" and a
+// specific pass to write next.
+//
+// These exist because the same census was taken by hand twice and went
+// stale both times. A frame's escape kind decides which pass can unblock
+// it: a callee that only *writes* through the pointer is `sret`'s, one
+// that only *reads* is `argpromote`'s, and one that passes it onward is
+// nobody's yet.
+/// Frames declined because an address reached a callee that only writes
+/// through it — `sret`'s territory.
+pub const MEMORY_FRAME_DECLINED_WRITE_ONLY: &str = "memory_frame_declined_write_only";
+/// Frames declined because an address reached a callee that only reads
+/// through it — `argpromote`'s territory.
+pub const MEMORY_FRAME_DECLINED_READ_ONLY: &str = "memory_frame_declined_read_only";
+/// Frames declined because an address reached a callee that forwards it
+/// onward, or that no analysis here can characterise.
+pub const MEMORY_FRAME_DECLINED_OPAQUE: &str = "memory_frame_declined_opaque";
+/// Frames declined for a reason other than a call: a stored-as-value
+/// address, a returned one, or one that is branched on.
+pub const MEMORY_FRAME_DECLINED_OTHER: &str = "memory_frame_declined_other";
+/// Frames declined because two slots partially overlap, so a write to one
+/// is a write to the other.
+pub const MEMORY_FRAME_DECLINED_OVERLAP: &str = "memory_frame_declined_overlap";
 /// Slot loads replaced by the value the slot held.
 pub const MEMORY_LOADS_FORWARDED: &str = "memory_loads_forwarded";
 /// Slot stores retired once their value was forwarded.
@@ -559,6 +585,11 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MEMORY_LOADS_FORWARDED_LOCALLY,
         MEMORY_SRET_CONVERTED,
         MEMORY_SLOTS_PROMOTED,
+        MEMORY_FRAME_DECLINED_WRITE_ONLY,
+        MEMORY_FRAME_DECLINED_READ_ONLY,
+        MEMORY_FRAME_DECLINED_OPAQUE,
+        MEMORY_FRAME_DECLINED_OTHER,
+        MEMORY_FRAME_DECLINED_OVERLAP,
         MEMORY_LOADS_FORWARDED,
         MEMORY_STORES_REMOVED,
     ]

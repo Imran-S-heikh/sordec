@@ -126,6 +126,169 @@ pub(super) fn addresses_only_flow_to(
     })
 }
 
+/// Why a frame declined, when it declined because an address escaped.
+///
+/// `promote` rejects a frame **whole**, so "the shadow stack is hard" is
+/// all the pass itself can say. This says which *other* pass would have to
+/// exist to unblock it, which is the difference between a mood and a work
+/// item.
+///
+/// The classification is per-callee behaviour, because that is what decides
+/// ownership: a callee that only writes through the pointer is
+/// [`super::sret`]'s to convert, one that only reads is
+/// [`super::argpromote`]'s, and one that hands the pointer onward belongs
+/// to neither yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FrameEscape {
+    /// Reached a callee that only stores through the pointer.
+    CallWriteOnly,
+    /// Reached a callee that only loads through it.
+    CallReadOnly,
+    /// Reached a callee that both reads and writes, forwards the pointer
+    /// onward, or that could not be resolved.
+    CallOpaque,
+    /// Left through something other than a call: stored as a value,
+    /// returned, or carried by a terminator.
+    Other,
+}
+
+/// The first escape that would make [`addresses_only_flow_to`] decline,
+/// classified. `None` when nothing escapes.
+///
+/// Reports the *first* rather than all of them: `promote` declines whole,
+/// so one escape is enough to explain the outcome, and attributing a frame
+/// to several buckets would double-count it in the census.
+pub(super) fn first_escape(
+    func: &LiftedFunction,
+    ir: &sordec_ir::LiftedIr,
+    calls: &super::calls::CallIndex,
+    addresses: &HashSet<ValueId>,
+    accessors: &HashSet<ValueId>,
+    live: &HashSet<ValueId>,
+) -> Option<FrameEscape> {
+    for (id, value) in func.values.iter() {
+        if !live.contains(&id) || accessors.contains(&id) || addresses.contains(&id) {
+            continue;
+        }
+        match &value.def {
+            LiftedValueDef::Operator { op, args } => {
+                if !args.iter().any(|a| addresses.contains(a)) || is_global_set(op) {
+                    continue;
+                }
+                // `CallIndex::target` shifts a wasm index into our
+                // `FuncId` space and returns `None` for a host import,
+                // which is the same answer as "not a direct call here".
+                return Some(match calls.target(op) {
+                    Some(target) => classify_callee(ir, target, args, addresses),
+                    None => FrameEscape::Other,
+                });
+            }
+            LiftedValueDef::Alias(from) | LiftedValueDef::PickOutput { from, .. } => {
+                if addresses.contains(from) {
+                    return Some(FrameEscape::Other);
+                }
+            }
+            LiftedValueDef::BlockParam { .. } => {}
+        }
+    }
+    for (_, block) in func.blocks.iter() {
+        let mut escapes = false;
+        for_each_target(&block.terminator, |t| {
+            escapes |= t.args.iter().any(|a| addresses.contains(a));
+        });
+        if let LiftedTerminator::Return { values } = &block.terminator {
+            escapes |= values.iter().any(|v| addresses.contains(v));
+        }
+        if escapes {
+            return Some(FrameEscape::Other);
+        }
+    }
+    None
+}
+
+/// How `target` uses whichever of its parameters received a frame address.
+fn classify_callee(
+    ir: &sordec_ir::LiftedIr,
+    target: sordec_common::FuncId,
+    args: &[ValueId],
+    addresses: &HashSet<ValueId>,
+) -> FrameEscape {
+    let Some(callee) = ir.function(target) else {
+        return FrameEscape::CallOpaque;
+    };
+    // Parameters live on the entry block, not the function.
+    let Some(params) = ir.function(target).and_then(|f| f.blocks.get(f.entry)) else {
+        return FrameEscape::CallOpaque;
+    };
+    let params = &params.params;
+    // Which parameter positions received an address. A call may pass the
+    // frame in more than one, and the buckets only differ if every one of
+    // them agrees, so disagreement is opaque.
+    let positions: Vec<usize> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| addresses.contains(a))
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut saw_read = false;
+    let mut saw_write = false;
+    for position in positions {
+        let Some(param) = params.get(position).copied() else {
+            return FrameEscape::CallOpaque;
+        };
+        match param_usage(callee, param) {
+            Some((r, w)) => {
+                saw_read |= r;
+                saw_write |= w;
+            }
+            // Escapes again inside the callee.
+            None => return FrameEscape::CallOpaque,
+        }
+    }
+    match (saw_read, saw_write) {
+        (false, true) => FrameEscape::CallWriteOnly,
+        (true, false) => FrameEscape::CallReadOnly,
+        _ => FrameEscape::CallOpaque,
+    }
+}
+
+/// Whether `param`'s address closure inside `callee` is only ever loaded
+/// from (`true, false`), only stored through (`false, true`), or both.
+/// `None` when it escapes the callee too.
+fn param_usage(callee: &LiftedFunction, param: ValueId) -> Option<(bool, bool)> {
+    let live: HashSet<ValueId> = callee.values.iter().map(|(id, _)| id).collect();
+    let addresses = address_closure(callee, param, &live);
+    let mut accessors = HashSet::new();
+    let (mut reads, mut writes) = (false, false);
+
+    for (_, block) in callee.blocks.iter() {
+        for &id in &block.instructions {
+            let Some(value) = callee.values.get(id) else {
+                continue;
+            };
+            let LiftedValueDef::Operator { op, args } = &value.def else {
+                continue;
+            };
+            let Some(shape) = access_shape(op) else { continue };
+            let Some(addr) = args.first() else { continue };
+            if !addresses.contains(addr) {
+                continue;
+            }
+            accessors.insert(id);
+            if shape.is_store {
+                writes = true;
+            } else {
+                reads = true;
+            }
+        }
+    }
+    if !addresses_only_flow_to(callee, &addresses, &accessors, &live) {
+        return None;
+    }
+    Some((reads, writes))
+}
+
 fn is_global_set(op: &WasmOp) -> bool {
     matches!(op.0, waffle::Operator::GlobalSet { .. })
 }
