@@ -240,6 +240,21 @@ pub struct MemoryCoverage {
     pub declined_layout: i64,
     /// Every declined frame, whatever the reason.
     pub declined_total: i64,
+    /// `sret` candidates it refused because a payload slot is written only
+    /// under its own tag — the `Result`/`Option` ABI.
+    pub sret_declined_path_dependent: i64,
+    /// `sret` candidates whose parameter was not an out-pointer at all.
+    pub sret_declined_no_stores: i64,
+    /// `sret` candidates refused because the out-pointer reached a
+    /// non-store operator — most often another call.
+    pub sret_declined_non_store_use: i64,
+    /// `sret` candidates refused because the pointer is read as well as
+    /// written: an in-out parameter, not an out-parameter.
+    pub sret_declined_read: i64,
+    /// `sret` candidates refused because two stores hit one offset.
+    pub sret_declined_two_stores: i64,
+    /// `sret` candidates refused by a gate outside the enumerated ones.
+    pub sret_declined_other: i64,
 }
 
 /// Control-flow structuring coverage (A6/W8).
@@ -1082,6 +1097,12 @@ fn build_memory(t: &BTreeMap<&'static str, i64>) -> MemoryCoverage {
             + declined_opaque
             + declined_other
             + declined_layout,
+        sret_declined_path_dependent: metric(t, mc::MEMORY_SRET_DECLINED_PATH_DEPENDENT),
+        sret_declined_no_stores: metric(t, mc::MEMORY_SRET_DECLINED_NO_STORES),
+        sret_declined_non_store_use: metric(t, mc::MEMORY_SRET_DECLINED_NON_STORE_USE),
+        sret_declined_read: metric(t, mc::MEMORY_SRET_DECLINED_READ),
+        sret_declined_two_stores: metric(t, mc::MEMORY_SRET_DECLINED_TWO_STORES),
+        sret_declined_other: metric(t, mc::MEMORY_SRET_DECLINED_OTHER),
     }
 }
 

@@ -147,14 +147,25 @@ impl Pass<LiftedIr> for SretReturnPass {
             return result;
         }
 
+        // Why each candidate declined. Counted rather than discarded so
+        // "sret converts little" is a breakdown instead of an impression.
+        let mut declines: Vec<&'static str> = Vec::new();
         let mut plans: HashMap<FuncId, SretPlan> = ir
             .functions
             .iter()
             // An exported function's signature is the contract ABI, and its
             // internal call sites are not the complete caller set.
             .filter(|f| !calls.is_exported(f.id))
-            .filter_map(|f| convertible(f).map(|plan| (f.id, plan)))
+            .filter_map(|f| {
+                let mut reason = None;
+                let plan = convertible_reporting(f, &mut reason);
+                if let (None, Some(reason)) = (&plan, reason) {
+                    declines.push(reason);
+                }
+                plan.map(|plan| (f.id, plan))
+            })
             .collect();
+        report_declines(&declines, &mut result);
         if plans.is_empty() {
             return result;
         }
@@ -167,6 +178,7 @@ impl Pass<LiftedIr> for SretReturnPass {
         for id in vetoed {
             plans.remove(&id);
         }
+        report_declines(&declines, &mut result);
         if plans.is_empty() {
             return result;
         }
@@ -207,7 +219,24 @@ impl Pass<LiftedIr> for SretReturnPass {
 /// to be out-parameter functions at all: they read through it, or forward
 /// it onward. Recording that because "the pass never looked there" was true
 /// and "so it would convert if it did" did not follow.
+#[cfg(test)]
 fn convertible(func: &LiftedFunction) -> Option<SretPlan> {
+    convertible_reporting(func, &mut None)
+}
+
+/// [`convertible`], additionally reporting *which* gate declined.
+///
+/// The reasons were greppable but discarded, which made "why does sret
+/// convert so little" a code-reading exercise rather than a number. They
+/// are now countable, so the next pass to write falls out of a census
+/// instead of a hunch — the same move `promote`'s frame-decline buckets
+/// make one layer up.
+///
+/// `reason` is only written on decline; a conversion leaves it untouched.
+fn convertible_reporting(
+    func: &LiftedFunction,
+    reason: &mut Option<&'static str>,
+) -> Option<SretPlan> {
     // A function that already returns something is a shape this does not
     // model.
     if func.blocks.iter().any(|(_, b)| {
@@ -246,7 +275,7 @@ fn convertible(func: &LiftedFunction) -> Option<SretPlan> {
     params
         .into_iter()
         .enumerate()
-        .find_map(|(out_index, out_param)| plan_for(func, out_index, out_param, &cfg, &returns))
+        .find_map(|(out_index, out_param)| plan_for(func, out_index, out_param, &cfg, &returns, reason))
 }
 
 /// The plan for treating `out_param` as the out-pointer, or `None` when any
@@ -260,12 +289,14 @@ fn plan_for(
     out_param: ValueId,
     cfg: &CfgFacts,
     returns: &[BlockId],
+    reason: &mut Option<&'static str>,
 ) -> Option<SretPlan> {
     macro_rules! decline {
-        // Named rather than a bare `return None` so each gate is greppable
-        // and the reason is visible at the site that enforces it.
+        // Named rather than a bare `return None` so each gate is greppable,
+        // the reason is visible at the site that enforces it, *and* it
+        // reaches the caller for counting.
         ($why:literal) => {{
-            let _ = $why;
+            *reason = Some($why);
             return None;
         }};
     }
@@ -581,6 +612,35 @@ fn renumber_entry_params(func: &mut LiftedFunction) {
     }
 }
 
+/// Fold the decline reasons into one metric per gate.
+///
+/// Keyed by the gate's own wording so the metric and the code that
+/// enforces it cannot drift apart: adding a `decline!` with new text adds a
+/// bucket rather than silently joining another.
+fn report_declines(declines: &[&'static str], result: &mut PassResult) {
+    for reason in declines {
+        let key = match *reason {
+            "a storing block does not dominate every return" => {
+                crate::metrics_catalog::MEMORY_SRET_DECLINED_PATH_DEPENDENT
+            }
+            "no stores through the out-pointer" => {
+                crate::metrics_catalog::MEMORY_SRET_DECLINED_NO_STORES
+            }
+            "out-pointer consumed by a non-store operator" => {
+                crate::metrics_catalog::MEMORY_SRET_DECLINED_NON_STORE_USE
+            }
+            "out-pointer read outside the stores" => {
+                crate::metrics_catalog::MEMORY_SRET_DECLINED_READ
+            }
+            "two stores to one offset" => {
+                crate::metrics_catalog::MEMORY_SRET_DECLINED_TWO_STORES
+            }
+            _ => crate::metrics_catalog::MEMORY_SRET_DECLINED_OTHER,
+        };
+        result.metrics.increment(key, 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,7 +776,7 @@ mod tests {
             .map(|(id, _)| id)
             .collect();
         let param = *func.blocks.get(func.entry)?.params.get(index)?;
-        plan_for(func, index, param, &cfg, &returns)
+        plan_for(func, index, param, &cfg, &returns, &mut None)
     }
 
     #[test]

@@ -411,6 +411,28 @@ pub const MEMORY_SLOTS_PROMOTED: &str = "memory_slots_promoted";
 /// Frames declined because an address reached a callee that only writes
 /// through it — `sret`'s territory.
 pub const MEMORY_FRAME_DECLINED_WRITE_ONLY: &str = "memory_frame_declined_write_only";
+
+// Why `sret` declined a candidate. The write-only frames above are its
+// territory; these say which of its own gates then refused, which is the
+// difference between "sret is the blocker" and knowing what to change.
+/// `sret` candidates declined because a storing block does not dominate
+/// every return — the `Result`/`Option` ABI, whose payload is written only
+/// under its own tag.
+pub const MEMORY_SRET_DECLINED_PATH_DEPENDENT: &str = "memory_sret_declined_path_dependent";
+/// `sret` candidates with no stores through the out-pointer at all: the
+/// parameter is not an out-pointer.
+pub const MEMORY_SRET_DECLINED_NO_STORES: &str = "memory_sret_declined_no_stores";
+/// `sret` candidates declined because the out-pointer reached an operator
+/// that is not a store — most often another call.
+pub const MEMORY_SRET_DECLINED_NON_STORE_USE: &str = "memory_sret_declined_non_store_use";
+/// `sret` candidates declined because the out-pointer is *read* as well as
+/// written, so it is an in-out parameter rather than an out-parameter.
+pub const MEMORY_SRET_DECLINED_READ: &str = "memory_sret_declined_read";
+/// `sret` candidates declined because two stores hit one offset, making the
+/// slot's value at return ambiguous.
+pub const MEMORY_SRET_DECLINED_TWO_STORES: &str = "memory_sret_declined_two_stores";
+/// `sret` candidates declined by a gate outside the enumerated ones.
+pub const MEMORY_SRET_DECLINED_OTHER: &str = "memory_sret_declined_other";
 /// Frames declined because an address reached a callee that only reads
 /// through it — `argpromote`'s territory.
 pub const MEMORY_FRAME_DECLINED_READ_ONLY: &str = "memory_frame_declined_read_only";
@@ -586,6 +608,12 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MEMORY_SRET_CONVERTED,
         MEMORY_SLOTS_PROMOTED,
         MEMORY_FRAME_DECLINED_WRITE_ONLY,
+        MEMORY_SRET_DECLINED_PATH_DEPENDENT,
+        MEMORY_SRET_DECLINED_NO_STORES,
+        MEMORY_SRET_DECLINED_NON_STORE_USE,
+        MEMORY_SRET_DECLINED_READ,
+        MEMORY_SRET_DECLINED_TWO_STORES,
+        MEMORY_SRET_DECLINED_OTHER,
         MEMORY_FRAME_DECLINED_READ_ONLY,
         MEMORY_FRAME_DECLINED_OPAQUE,
         MEMORY_FRAME_DECLINED_OTHER,
