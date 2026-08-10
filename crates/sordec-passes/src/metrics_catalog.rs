@@ -415,16 +415,47 @@ pub const MEMORY_FRAME_DECLINED_WRITE_ONLY: &str = "memory_frame_declined_write_
 // Why `sret` declined a candidate. The write-only frames above are its
 // territory; these say which of its own gates then refused, which is the
 // difference between "sret is the blocker" and knowing what to change.
+//
+// **A decline counts once per fixpoint iteration; a conversion counts once.**
+// A refused function is re-examined and re-counted on every iteration, while
+// a converted one is gone from the candidate set, so the ratio between
+// `MEMORY_SRET_CONVERTED` and these is *not* a ratio of functions — divide a
+// decline count by the iteration count before comparing them. Corpus-wide the
+// distinct-function figures are 31 converted against 13 refused; the raw
+// counters read 31 against 43.
 /// `sret` candidates declined because a storing block does not dominate
 /// every return — the `Result`/`Option` ABI, whose payload is written only
 /// under its own tag.
 pub const MEMORY_SRET_DECLINED_PATH_DEPENDENT: &str = "memory_sret_declined_path_dependent";
 /// `sret` candidates with no stores through the out-pointer at all: the
 /// parameter is not an out-pointer.
+///
+/// **This is the "not a candidate" bucket, and it is the large one.** It
+/// reported 9 while `NON_STORE_USE` reported 228, because the non-store gate
+/// returned before this one was ever reached; ordering the gates so that
+/// "is there an out-pointer" is answered first moved the 228 here, where the
+/// two of them belong.
 pub const MEMORY_SRET_DECLINED_NO_STORES: &str = "memory_sret_declined_no_stores";
 /// `sret` candidates declined because the out-pointer reached an operator
 /// that is not a store — most often another call.
+///
+/// Counts only candidates that really are out-pointers: something is stored
+/// through this one *and* it escapes. Measured after that fix, corpus-wide:
+/// **zero**. The forwarding cascade this bucket was thought to describe does
+/// not exist on this corpus.
 pub const MEMORY_SRET_DECLINED_NON_STORE_USE: &str = "memory_sret_declined_non_store_use";
+/// `sret` candidates declined because the pointer itself was written to
+/// memory rather than written through.
+///
+/// Enumerated late: the gate existed from the start but had no arm in
+/// `report_declines`, so it spent its life in `OTHER`.
+pub const MEMORY_SRET_DECLINED_STORED_AS_VALUE: &str = "memory_sret_declined_stored_as_value";
+/// `sret` candidates refused by a `?` guard that names no gate — a malformed
+/// or unmodelled operand shape.
+///
+/// Counted because these declines previously appeared in no bucket at all,
+/// so the census's total was smaller than the number of refusals.
+pub const MEMORY_SRET_DECLINED_UNREPORTED: &str = "memory_sret_declined_unreported";
 /// `sret` candidates declined because the out-pointer is *read* as well as
 /// written, so it is an in-out parameter rather than an out-parameter.
 pub const MEMORY_SRET_DECLINED_READ: &str = "memory_sret_declined_read";

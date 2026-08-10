@@ -86,6 +86,48 @@
 //!   take and return `Val`, never an out-pointer), so both are defensive;
 //!   they are here because the failure they prevent is a contract whose ABI
 //!   changed silently. See [`super::calls`] for the shared rule.
+//!
+//! ## Which gate actually refuses — and the census that misread it
+//!
+//! Counted per candidate, corpus-wide, over the six distinct fixtures:
+//!
+//! | | distinct functions |
+//! |---|---|
+//! | converts | 31 |
+//! | refused: a storing block does not dominate every return | 13 |
+//! | refused by any other gate | **0** |
+//!
+//! **One gate refuses every unconverted out-pointer, and it is the
+//! `Result`/`Option` conditional payload.** Nothing is blocked by escape, by
+//! an ambiguous slot, or by an in-out read.
+//!
+//! An earlier census read this as 228 declines for "the out-pointer reached
+//! another call" against 9 for the payload, and concluded the payload was
+//! worth ~4% of the blocked frames. Three faults in the counting produced
+//! that, all now fixed and each with a test:
+//!
+//! 1. **Gate order.** The escape gate ran inside the store-collecting loop,
+//!    so it fired on candidates the loop had not yet found any store for. Of
+//!    those 228, **not one had a single store through it** — every one was an
+//!    ordinary argument. "Is this an out-pointer at all" now decides first.
+//! 2. **Last writer wins.** Every parameter is tried, and each decline
+//!    overwrote the previous, so a real out-pointer at position 0 was filed
+//!    under position 1's reason. That reported dex, timelock and attestation
+//!    as *zero* path-dependent declines against a true 3, 2 and 1.
+//! 3. **Counted twice.** `report_declines` was called before *and* after the
+//!    call-site veto with the same vector.
+//!
+//! Two smaller ones with it: the `stored as a value` gate had no arm in
+//! `report_declines` and so lived in `OTHER`, and the conversions themselves
+//! reached no report at all — the declines had no denominator to be read
+//! against. The i64 filter in `is_address_typed` closes the same hole at
+//! the source: 411 of the 534 candidates tried were too wide to be addresses.
+//!
+//! The consequence for the roadmap is a reprioritisation, not a new design.
+//! `plan/NOTES.md`'s objection to the phi/union sketch stands on its own
+//! reasoning — a placeholder on the `Err` path is a behaviour regression, and
+//! the real recovery is the sum type the source wrote. What changes is its
+//! worth: the whole of `sret`'s remaining reach, not 4% of it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -102,6 +144,27 @@ use crate::pass::{Pass, PassResult};
 
 /// Unique pipeline name of this pass.
 pub const PASS_NAME: &str = "memory-sret-return";
+
+// Why a candidate declined. Constants rather than literals repeated at the
+// gate and again in [`report_declines`]: the wording *is* the key, so a typo
+// in one of two copies would silently open a new bucket. Naming them keeps
+// the original property — the reason reads at the site that enforces it —
+// without the second copy.
+/// Nothing is stored through this parameter, so it is not an out-pointer.
+const DECLINED_NOT_AN_OUT_POINTER: &str = "no stores through the out-pointer";
+/// A real out-pointer that also reaches a non-store operator.
+const DECLINED_NON_STORE_USE: &str = "out-pointer consumed by a non-store operator";
+/// The pointer itself is written to memory — an escape.
+const DECLINED_STORED_AS_VALUE: &str = "out-pointer stored as a value";
+/// Two stores to one offset make that slot's value at return ambiguous.
+const DECLINED_TWO_STORES: &str = "two stores to one offset";
+/// A storing block does not dominate every return: the `Result`/`Option`
+/// conditional payload.
+const DECLINED_PATH_DEPENDENT: &str = "a storing block does not dominate every return";
+/// The pointer is read as well as written — an in-out parameter.
+const DECLINED_READ_OUTSIDE_STORES: &str = "out-pointer read outside the stores";
+/// A `?` guard in [`plan_for`] refused a shape without naming a gate.
+const DECLINED_UNREPORTED: &str = "declined by a guard that names no gate";
 
 /// One slot of a converted function's return value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +228,10 @@ impl Pass<LiftedIr> for SretReturnPass {
                 plan.map(|plan| (f.id, plan))
             })
             .collect();
+        // Once, and before the veto. Every early return below reaches this
+        // point, and the veto discards plans rather than producing declines,
+        // so a second call after it re-counted the same vector — every
+        // decline twice on any run that converted anything.
         report_declines(&declines, &mut result);
         if plans.is_empty() {
             return result;
@@ -178,7 +245,6 @@ impl Pass<LiftedIr> for SretReturnPass {
         for id in vetoed {
             plans.remove(&id);
         }
-        report_declines(&declines, &mut result);
         if plans.is_empty() {
             return result;
         }
@@ -271,11 +337,66 @@ fn convertible_reporting(
     // at the first gate. No corpus function needs the second one, and
     // recovering both would mean a plan carrying several out-indices —
     // worth doing only once something asks for it.
-    let params = func.blocks.get(func.entry)?.params.clone();
-    params
-        .into_iter()
+    let candidates: Vec<(usize, ValueId)> = func
+        .blocks
+        .get(func.entry)?
+        .params
+        .iter()
+        .copied()
         .enumerate()
-        .find_map(|(out_index, out_param)| plan_for(func, out_index, out_param, &cfg, &returns, reason))
+        .filter(|(_, param)| is_address_typed(func, *param))
+        .collect();
+    let tried = candidates.len();
+    let outcome = candidates
+        .into_iter()
+        .find_map(|(out_index, out_param)| plan_for(func, out_index, out_param, &cfg, &returns, reason));
+    if outcome.is_none() && reason.is_none() && tried > 0 {
+        // A `?` inside `plan_for` returns `None` without naming a gate, so
+        // this decline used to be invisible to the census entirely — neither
+        // a bucket nor part of the total.
+        *reason = Some(DECLINED_UNREPORTED);
+    }
+    outcome
+}
+
+/// Whether a parameter is wide enough to be an address at all.
+///
+/// Every Soroban contract is wasm32, where an address is an `i32`. Measured
+/// before this filter existed: of the 534 candidates the pass tried
+/// corpus-wide, **411 were `i64`** — a `Val`, a timestamp, an amount — and
+/// not one could ever have been a pointer. Trying them cost nothing but a
+/// decline, and that decline is exactly what the census then reported as an
+/// escaping out-pointer.
+///
+/// Under a `memory64` module this returns `false` for every parameter, so the
+/// pass converts nothing rather than converting something wrongly. That is
+/// the safe direction, and Soroban has no wasm64 target to make it matter.
+fn is_address_typed(func: &LiftedFunction, param: ValueId) -> bool {
+    matches!(
+        func.values.get(param).and_then(|v| v.types.first()),
+        Some(LiftedType::I32)
+    )
+}
+
+/// Record a decline, keeping the more informative of two reasons.
+///
+/// [`convertible_reporting`] tries every parameter and the **last** writer
+/// used to win, so a function whose out-pointer is parameter 0 was filed
+/// under parameter 1's reason. Measured: that reported dex, timelock and
+/// attestation as **zero** path-dependent declines when they have 3, 2 and 1,
+/// and left the corpus figure at 9 against a true 13.
+///
+/// The rule is one-way and needs no ordering: [`DECLINED_NOT_AN_OUT_POINTER`]
+/// says "this parameter is an ordinary argument", which is a fact about the
+/// *candidate* rather than about the function, so it must never displace what
+/// a genuine out-pointer reported.
+fn record(reason: &mut Option<&'static str>, why: &'static str) {
+    if why == DECLINED_NOT_AN_OUT_POINTER
+        && matches!(*reason, Some(prior) if prior != DECLINED_NOT_AN_OUT_POINTER)
+    {
+        return;
+    }
+    *reason = Some(why);
 }
 
 /// The plan for treating `out_param` as the out-pointer, or `None` when any
@@ -295,12 +416,22 @@ fn plan_for(
         // Named rather than a bare `return None` so each gate is greppable,
         // the reason is visible at the site that enforces it, *and* it
         // reaches the caller for counting.
-        ($why:literal) => {{
-            *reason = Some($why);
+        ($why:expr) => {{
+            record(reason, $why);
             return None;
         }};
     }
 
+    // Deferred rather than returned at the offending instruction. Which gate
+    // to *report* depends on whether this candidate is an out-pointer at all,
+    // and that is not known until every store has been seen — the loop below
+    // may meet a use long before it meets the first store.
+    //
+    // The decline itself is unconditional either way, so what changes is the
+    // reason, not the outcome: `first-wins` keeps the same reason the
+    // early-returning version reported whenever the candidate really is an
+    // out-pointer.
+    let mut escape: Option<&'static str> = None;
     let mut slots: BTreeMap<u32, (Slot, ValueId, ValueId)> = BTreeMap::new();
     for (block_id, block) in func.blocks.iter() {
         if !cfg.is_reachable(block_id) {
@@ -319,7 +450,7 @@ fn plan_for(
                     .iter()
                     .any(|a| canon_addr(func, *a).0 == out_param)
                 {
-                    decline!("out-pointer consumed by a non-store operator");
+                    escape = escape.or(Some(DECLINED_NON_STORE_USE));
                 }
                 continue;
             };
@@ -328,14 +459,14 @@ fn plan_for(
                 // A store elsewhere is fine, unless it stores the pointer
                 // itself — that is an escape.
                 if canon_addr(func, *args.get(1)?).0 == out_param {
-                    decline!("out-pointer stored as a value");
+                    escape = escape.or(Some(DECLINED_STORED_AS_VALUE));
                 }
                 continue;
             }
             // Every storing block must dominate every return, or "the value
             // in this slot at return" is path-dependent.
             if !returns.iter().all(|r| cfg.dominates(block_id, *r)) {
-                decline!("a storing block does not dominate every return");
+                escape = escape.or(Some(DECLINED_PATH_DEPENDENT));
             }
             let stored = *args.get(1)?;
             let slot = Slot {
@@ -345,18 +476,26 @@ fn plan_for(
             };
             // Two stores to one offset make the slot's value ambiguous.
             if slots.insert(slot.offset, (slot, stored, id)).is_some() {
-                decline!("two stores to one offset");
+                escape = escape.or(Some(DECLINED_TWO_STORES));
             }
         }
     }
+    // **First**, because every gate below is about an out-pointer and this one
+    // asks whether there is one. A candidate nothing stores through is an
+    // ordinary argument, and reporting one as an escape is what made 228 of
+    // 237 declines read "the out-pointer reached another call" when not one of
+    // the 228 was a pointer at all.
     if slots.is_empty() {
-        decline!("no stores through the out-pointer");
+        decline!(DECLINED_NOT_AN_OUT_POINTER);
+    }
+    if let Some(why) = escape {
+        decline!(why);
     }
 
     // The entry parameter must not be read anywhere else — including by the
     // terminators, which is how a pointer gets returned or branched on.
     if reads_outside_stores(func, out_param, &slots) {
-        decline!("out-pointer read outside the stores");
+        decline!(DECLINED_READ_OUTSIDE_STORES);
     }
 
     Some(SretPlan {
@@ -614,27 +753,30 @@ fn renumber_entry_params(func: &mut LiftedFunction) {
 
 /// Fold the decline reasons into one metric per gate.
 ///
-/// Keyed by the gate's own wording so the metric and the code that
-/// enforces it cannot drift apart: adding a `decline!` with new text adds a
-/// bucket rather than silently joining another.
+/// Keyed by the gate's own reason constant so the metric and the code that
+/// enforces it cannot drift apart: adding a `decline!` with a new constant
+/// and no arm here lands in `OTHER` rather than silently joining a bucket it
+/// does not belong to. `OTHER` reaching a non-zero count is therefore a
+/// signal that this function is out of date — which is how
+/// [`DECLINED_STORED_AS_VALUE`] was found sitting in it.
 fn report_declines(declines: &[&'static str], result: &mut PassResult) {
     for reason in declines {
         let key = match *reason {
-            "a storing block does not dominate every return" => {
+            DECLINED_PATH_DEPENDENT => {
                 crate::metrics_catalog::MEMORY_SRET_DECLINED_PATH_DEPENDENT
             }
-            "no stores through the out-pointer" => {
+            DECLINED_NOT_AN_OUT_POINTER => {
                 crate::metrics_catalog::MEMORY_SRET_DECLINED_NO_STORES
             }
-            "out-pointer consumed by a non-store operator" => {
+            DECLINED_NON_STORE_USE => {
                 crate::metrics_catalog::MEMORY_SRET_DECLINED_NON_STORE_USE
             }
-            "out-pointer read outside the stores" => {
-                crate::metrics_catalog::MEMORY_SRET_DECLINED_READ
+            DECLINED_READ_OUTSIDE_STORES => crate::metrics_catalog::MEMORY_SRET_DECLINED_READ,
+            DECLINED_TWO_STORES => crate::metrics_catalog::MEMORY_SRET_DECLINED_TWO_STORES,
+            DECLINED_STORED_AS_VALUE => {
+                crate::metrics_catalog::MEMORY_SRET_DECLINED_STORED_AS_VALUE
             }
-            "two stores to one offset" => {
-                crate::metrics_catalog::MEMORY_SRET_DECLINED_TWO_STORES
-            }
+            DECLINED_UNREPORTED => crate::metrics_catalog::MEMORY_SRET_DECLINED_UNREPORTED,
             _ => crate::metrics_catalog::MEMORY_SRET_DECLINED_OTHER,
         };
         result.metrics.increment(key, 1);
@@ -840,6 +982,149 @@ mod tests {
         assert_eq!(plan.out_index, 0);
         // The second stays a pointer: this pass models one wide return.
         assert!(plan_at(&func, 1).is_some(), "it qualified, it was not chosen");
+    }
+
+    /// The reason a function's decline is filed under, as the census sees it.
+    fn decline_reason(func: &LiftedFunction) -> Option<&'static str> {
+        let mut reason = None;
+        assert!(
+            convertible_reporting(func, &mut reason).is_none(),
+            "this fixture is supposed to decline"
+        );
+        reason
+    }
+
+    #[test]
+    fn an_ordinary_argument_is_not_reported_as_an_escaping_pointer() {
+        // The bug this locks: the gate loop met the *use* before it met any
+        // store, so every parameter that is simply an argument was filed as
+        // an out-pointer that escaped. Corpus-wide that was 228 of 237
+        // declines, and not one of the 228 was a pointer.
+        let func = func_with(
+            vec![
+                param(0, 0),                                        // v0 an argument
+                i32_const(7),                                       // v1
+                op(waffle::Operator::I32Add, vec![v(0), v(1)]),      // v2 uses it
+            ],
+            vec![block(
+                0,
+                vec![v(0)],
+                vec![v(1), v(2)],
+                LiftedTerminator::Return { values: vec![] },
+            )],
+        );
+        assert_eq!(decline_reason(&func), Some(DECLINED_NOT_AN_OUT_POINTER));
+    }
+
+    #[test]
+    fn a_real_out_pointers_reason_survives_a_later_argument() {
+        // `find_map` tries every parameter and the last writer used to win,
+        // so parameter 1 being an ordinary argument overwrote what parameter
+        // 0 — the actual out-pointer — reported. Measured: that filed dex,
+        // timelock and attestation as zero path-dependent declines.
+        let func = func_with(
+            vec![
+                param(0, 0),                                   // v0 the out-pointer
+                param(0, 1),                                   // v1 an argument
+                i32_const(7),                                  // v2
+                store(mem(), 0, v(0), v(2)),                   // v3 slot +0
+                store(mem(), 0, v(0), v(2)),                   // v4 again: ambiguous
+                op(waffle::Operator::I32Add, vec![v(1), v(2)]), // v5 uses v1
+            ],
+            vec![block(
+                0,
+                vec![v(0), v(1)],
+                vec![v(2), v(3), v(4), v(5)],
+                LiftedTerminator::Return { values: vec![] },
+            )],
+        );
+        assert_eq!(
+            decline_reason(&func),
+            Some(DECLINED_TWO_STORES),
+            "the pointer's own gate must outrank a later argument's"
+        );
+    }
+
+    #[test]
+    fn a_conditional_store_is_reported_as_path_dependent() {
+        // The `Result`/`Option` payload, and the only gate that refuses a
+        // real out-pointer anywhere on the corpus — previously untested, and
+        // its census figure was masked by the bug above.
+        //
+        //   b0: cond ? b1 : b2      b1: store out+0   b2: (nothing)
+        //                           both -> b3: return
+        let func = func_with(
+            vec![
+                param(0, 0),                 // v0 the out-pointer
+                i32_const(1),                // v1 the condition
+                i32_const(7),                // v2 the payload
+                store(mem(), 0, v(0), v(2)), // v3 written on one path only
+            ],
+            vec![
+                block(
+                    0,
+                    vec![v(0)],
+                    vec![v(1), v(2)],
+                    LiftedTerminator::BranchIf {
+                        cond: v(1),
+                        if_true: crate::test_util::target(1, vec![]),
+                        if_false: crate::test_util::target(2, vec![]),
+                    },
+                ),
+                block(
+                    1,
+                    vec![],
+                    vec![v(3)],
+                    LiftedTerminator::Branch(crate::test_util::target(3, vec![])),
+                ),
+                block(
+                    2,
+                    vec![],
+                    vec![],
+                    LiftedTerminator::Branch(crate::test_util::target(3, vec![])),
+                ),
+                block(
+                    3,
+                    vec![],
+                    vec![],
+                    LiftedTerminator::Return { values: vec![] },
+                ),
+            ],
+        );
+        assert_eq!(decline_reason(&func), Some(DECLINED_PATH_DEPENDENT));
+    }
+
+    #[test]
+    fn a_parameter_too_wide_to_be_an_address_is_never_a_candidate() {
+        // Every Soroban contract is wasm32, so an address is an `i32`.
+        // Measured: 411 of the 534 candidates the pass used to try were
+        // `i64`, and each one produced a decline the census then read as an
+        // escaping out-pointer.
+        let mut func = func_with(
+            vec![
+                param(0, 0),                 // v0 the only parameter
+                i32_const(7),                // v1
+                i32_const(9),                // v2
+                store(mem(), 0, v(0), v(1)), // v3
+                store(mem(), 8, v(0), v(2)), // v4
+            ],
+            vec![block(
+                0,
+                vec![v(0)],
+                vec![v(1), v(2), v(3), v(4)],
+                LiftedTerminator::Return { values: vec![] },
+            )],
+        );
+        // Widening the parameter is the only difference between these two
+        // assertions, so the filter is demonstrably what decides it.
+        assert!(convertible(&func).is_some(), "convertible while i32");
+        func.values.get_mut(v(0)).unwrap().types = vec![LiftedType::I64];
+        let mut reason = None;
+        assert!(convertible_reporting(&func, &mut reason).is_none());
+        assert_eq!(
+            reason, None,
+            "not a candidate at all, so not a decline to explain"
+        );
     }
 
     #[test]

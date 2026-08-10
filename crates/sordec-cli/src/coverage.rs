@@ -240,10 +240,20 @@ pub struct MemoryCoverage {
     pub declined_layout: i64,
     /// Every declined frame, whatever the reason.
     pub declined_total: i64,
+    /// Functions whose `sret` out-parameter became a real multi-value return.
+    ///
+    /// The denominator every `sret_declined_*` below should be read against,
+    /// and absent from this report until the declines were first trusted
+    /// without it.
+    pub sret_converted: i64,
     /// `sret` candidates it refused because a payload slot is written only
     /// under its own tag — the `Result`/`Option` ABI.
+    ///
+    /// **The only gate that refuses a real out-pointer on this corpus.**
     pub sret_declined_path_dependent: i64,
-    /// `sret` candidates whose parameter was not an out-pointer at all.
+    /// `sret` candidates whose parameter was not an out-pointer at all —
+    /// nothing is stored through it. Much the largest bucket, and not a
+    /// blocker: most parameters of most functions are ordinary arguments.
     pub sret_declined_no_stores: i64,
     /// `sret` candidates refused because the out-pointer reached a
     /// non-store operator — most often another call.
@@ -253,7 +263,13 @@ pub struct MemoryCoverage {
     pub sret_declined_read: i64,
     /// `sret` candidates refused because two stores hit one offset.
     pub sret_declined_two_stores: i64,
+    /// `sret` candidates refused because the pointer itself was stored.
+    pub sret_declined_stored_as_value: i64,
+    /// `sret` candidates refused by a `?` guard naming no gate.
+    pub sret_declined_unreported: i64,
     /// `sret` candidates refused by a gate outside the enumerated ones.
+    ///
+    /// Non-zero means `report_declines` has a gate it does not enumerate.
     pub sret_declined_other: i64,
 }
 
@@ -1097,11 +1113,14 @@ fn build_memory(t: &BTreeMap<&'static str, i64>) -> MemoryCoverage {
             + declined_opaque
             + declined_other
             + declined_layout,
+        sret_converted: metric(t, mc::MEMORY_SRET_CONVERTED),
         sret_declined_path_dependent: metric(t, mc::MEMORY_SRET_DECLINED_PATH_DEPENDENT),
         sret_declined_no_stores: metric(t, mc::MEMORY_SRET_DECLINED_NO_STORES),
         sret_declined_non_store_use: metric(t, mc::MEMORY_SRET_DECLINED_NON_STORE_USE),
         sret_declined_read: metric(t, mc::MEMORY_SRET_DECLINED_READ),
         sret_declined_two_stores: metric(t, mc::MEMORY_SRET_DECLINED_TWO_STORES),
+        sret_declined_stored_as_value: metric(t, mc::MEMORY_SRET_DECLINED_STORED_AS_VALUE),
+        sret_declined_unreported: metric(t, mc::MEMORY_SRET_DECLINED_UNREPORTED),
         sret_declined_other: metric(t, mc::MEMORY_SRET_DECLINED_OTHER),
     }
 }
