@@ -94,3 +94,30 @@ pub enum KnownType {
     /// [`crate::TypeRegistry`].
     UserDefined(TypeId),
 }
+
+impl KnownType {
+    /// Whether this is an integer type that may carry the result of a raw
+    /// arithmetic or bitwise operation.
+    ///
+    /// Only the integer primitives qualify. A logical Soroban type
+    /// (`Address`, `Bytes`, `Val`, …) never does: masking or shifting such a
+    /// value (e.g. `address & 0xFF`) extracts a tag/integer, not the logical
+    /// type, so type propagation must not carry the logical type onto an
+    /// arithmetic result. `Timepoint`/`Duration`/`Bool` are excluded on the
+    /// same reasoning — a masked or arithmetically-combined value is honestly
+    /// an integer, not the carrier it came from.
+    #[must_use]
+    pub fn is_numeric(&self) -> bool {
+        matches!(
+            self,
+            KnownType::U32
+                | KnownType::I32
+                | KnownType::U64
+                | KnownType::I64
+                | KnownType::U128
+                | KnownType::I128
+                | KnownType::U256
+                | KnownType::I256
+        )
+    }
+}
