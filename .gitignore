@@ -7,9 +7,21 @@ Cargo.lock.bak
 # Legacy (old AI-generated code kept as reference only)
 /_legacy/
 
-# Internal docs and planning (not for public repo)
-/docs/
+# Internal planning — working notes, closeouts, unreleased design docs.
 /plan/
+
+# `docs/` ships. `docs/scoring_metric.md` *is* Tranche 3 Deliverable 4, and a
+# metric nobody can read is not a metric; the benchmark report is D4.2. Two
+# files are held back rather than published stale:
+#
+#   - the PDF documents `parser.rs` / `lifted_ir.rs`, i.e. the _legacy
+#     architecture this workspace replaced. It describes a system that no
+#     longer exists.
+#   - gap_analysis.md's status block still says score-2.0.0 milestones M5–M7
+#     "are not" built (they are, all of them) and links into private `plan/`.
+#     It is a real deliverable and should ship — after a refresh, not before.
+/docs/soroban_decompiler_docs.pdf
+/docs/benchmarks/gap_analysis.md
 
 # Personal sandbox — kept locally for reference but not pushed.
 # Test-relevant fixtures live in `samples/contracts/` instead.

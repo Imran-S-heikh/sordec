@@ -2,21 +2,71 @@
 
 A WebAssembly decompiler specialized for [Soroban](https://stellar.org/soroban) smart contracts.
 
-> **Status: Phase 3 of 4 complete (SCF Tranche 2) — Phase 4 (Rust emit) next**
+> **Status: `v0.1.0-alpha.1`** — the pipeline is complete and runs end to end
+> on every contract in the reference corpus. The quality of the Rust it emits
+> is not there yet, and [Where it actually stands](#where-it-actually-stands)
+> gives the numbers rather than an adjective.
 >
-> Phases 1–3 ship a decompiler that parses a Soroban `.wasm`, lifts it to a
-> typed CFG/SSA IR, recovers the multi-instruction Soroban SDK idioms,
-> reconstructs control flow (`if`/`while`/`match`), and emits Soroban-annotated
-> WAT. An accuracy scorer (`sordec score`) was built ahead of schedule so the
-> Phase-4 Rust emitter is measurable from day one. Phase 4 adds compilable
-> Rust source. See [PHASE_1.md](PHASE_1.md), [PHASE_2.md](PHASE_2.md), and
-> [PHASE_3.md](PHASE_3.md) for the per-phase deliverable summaries,
-> verification recipes, and acceptance evidence.
+> sordec parses a Soroban `.wasm`, lifts it to a typed CFG/SSA IR, recovers the
+> multi-instruction SDK idioms, reconstructs control flow (`if`/`while`/`match`),
+> and emits both Soroban-annotated WAT and reconstructed Rust. An accuracy
+> scorer (`sordec score`) grades the result against a published, versioned
+> metric — and never inspects the WASM or the decompiler's internals, so it
+> cannot flatter the pipeline it measures.
+>
+> Per-phase deliverable summaries, verification recipes and acceptance evidence:
+> [PHASE_1.md](PHASE_1.md), [PHASE_2.md](PHASE_2.md), [PHASE_3.md](PHASE_3.md),
+> [PHASE_4.md](PHASE_4.md).
+
+## Install
+
+Not on crates.io yet — the crate boundaries are still moving, and claiming ten
+public names at alpha quality is not a decision worth making early.
+
+```bash
+cargo install --git https://github.com/Imran-S-heikh/sordec sordec-cli --tag v0.1.0-alpha.1
+```
+
+Requires Rust **1.87** or newer. To build from a checkout instead, see
+[Quick start](#quick-start).
+
+## Where it actually stands
+
+A decompiler that overstates itself is worse than useless: you cannot audit a
+contract against a reconstruction you can't calibrate. So, measured on the
+seven-contract reference corpus with [our own published metric](docs/scoring_metric.md):
+
+| Category | Score | |
+|---|---|---|
+| Interface — entrypoints, types | **0.92** | essentially done |
+| Semantic — storage, auth, events, panics | **0.71** | high precision, partial recall |
+| Structure — control-flow shape | **0.14** | this is the whole gap |
+| Behaviour — differential execution | **1.00** | wherever it can be measured, on narrow coverage |
+| **Overall** | **0.61** | against a 0.90 target |
+
+And the things a bare score won't tell you:
+
+- **2 of 7 reference contracts currently recompile.** The others emit Rust that
+  does not yet type-check.
+- **Output runs 12–25× longer than the source it came from.** Control-flow
+  *recall* is 1.0000 on four of five real contracts — every branch, loop and
+  guard in the original is present in the output — but `rustc` inlines the SDK
+  into every function and sordec currently reproduces all of it. What remains is
+  deletion, not discovery.
+- **Unprovable values become `todo!()` holes, never guesses.** A gap you can see
+  is the design. A plausible wrong value that compiles is treated as a bug class,
+  because that is the failure mode that gets someone hurt.
+- **Behaviour coverage is narrow.** Only entrypoints whose parameters are all
+  scalars can be driven today, so most `Address`-taking entrypoints are skipped
+  and the event, auth and storage channels are not yet exercised. Every rate
+  reported travels with the fraction of the contract it was measured over.
+- **Local variable names are gone.** `rustc` deletes them; no decompiler
+  recovers them. Bindings get synthesised names.
 
 ## What it does today
 
-Seven CLI subcommands. The inspection commands are read-only (stdout only);
-`decompile` writes WAT files under `--out-dir`, and `score` compares two Rust
+Eight CLI subcommands. The inspection commands are read-only (stdout only);
+`decompile` writes a crate under `--out-dir`, and `score` compares two Rust
 sources.
 
 | Subcommand | Output | Use case |
@@ -25,15 +75,22 @@ sources.
 | `sordec dump-ir <wasm>`     | Text | Waffle-style CFG/SSA IR with **named host calls** (e.g. `host:l:put_contract_data`) |
 | `sordec dump-hir <wasm>`    | Text | Structured HighIR: recovered control flow (`if`/`while`/`match`, named match arms, typed panics) plus the Phase-2 semantic operations |
 | `sordec dump-wat <wasm>`    | Text | Soroban-**annotated WAT**: flat disassembly with a per-function header block listing the recovered operations (storage tier/key, auth, client calls, typed panics) and each host `call` labeled inline with its friendly name |
-| `sordec decompile <wasm> --out-dir <dir>` | Files | Run the full pipeline and write `<dir>/<name>/<name>.wat` (compilable Rust joins it in Phase 4). The path is echoed on stdout; pipeline diagnostics go to stderr |
+| `sordec dump-rust <wasm>`   | Text | Reconstructed Rust (`src/lib.rs`) on stdout — the debug view of the emitter. `decompile` is what writes it to disk |
+| `sordec decompile <wasm> --out-dir <dir>` | Files | Run the full pipeline and write a buildable crate: `<dir>/<name>/{Cargo.toml, src/lib.rs}` alongside `<name>.wat`. The path is echoed on stdout; pipeline diagnostics go to stderr |
 | `sordec coverage <wasm>`    | Text or `--json` | How much of the contract our pipeline understands: control-flow **structuring** coverage (functions structured, loop shapes, labeled-exit tax), per-pattern recognition (storage tiers, enum keys, TTL, client calls, …), a two-number semantic-recovery headline, host-call recognition %, and recogniser-miss diagnostics |
-| `sordec score <reconstructed> <original>` | Text or `--json` | Accuracy of a reconstructed Rust source (file or directory) against the original: four independently-reported categories (interface / structure / semantic / behavior), an overall weighted score, and a pass/fail verdict. `--check-compile` evaluates the compilation *gate* — a real `cargo check`, reported separately: it earns no share of the score but a reconstruction that does not build fails regardless. `--behavior <ORIGINAL_WASM>` measures the behavior category by differential execution against the deployed contract's own wasm; it reports a match rate that always travels with its coverage fraction, and until argument generation lands it reports the stage it could not get past instead of a number. The measuring instrument for the Phase-4 Rust emitter |
+| `sordec score <reconstructed> <original>` | Text or `--json` | Accuracy of a reconstructed Rust source (file or directory) against the original: four independently-reported categories (interface / structure / semantic / behavior), an overall weighted score, and a pass/fail verdict. `--check-compile` evaluates the compilation *gate* — a real `cargo check`, reported separately: it earns no share of the score but a reconstruction that does not build fails regardless. `--behavior <ORIGINAL_WASM>` measures the behavior category by differential execution against the deployed contract's own wasm; it reports a match rate that always travels with its coverage fraction. Entrypoints whose parameters are not all scalars cannot be driven yet; those are reported as skipped, with the reason, rather than silently dropped from the denominator. The measuring instrument for the Rust emitter |
 
 What's coming next:
 
-- **Phase 4** — the compilable Rust source emitter, the `≥90%` reconstruction report scored by `sordec score`, `for`/iterator-loop recovery, and a multi-version protocol catalog
-
-Each phase ships when it's ready and verified end-to-end (see `PHASE_N.md` per phase). Phase 4 is the current deliverable.
+- **Closing the structure gap** — recognising and eliding the inlined SDK
+  marshalling that makes the output 12–25× longer than its source. This is the
+  single lever between 0.61 and the 0.90 target, and it is deletion work: the
+  logic is already recovered.
+- **Widening behaviour coverage** — constructing `Address`, `Bytes`, `Symbol`,
+  `Vec` and user-defined argument values against a live host, so entrypoints
+  beyond the scalar-only slice can be driven and the event, auth and storage
+  channels start reporting.
+- **`for`/iterator-loop recovery** and a multi-version protocol catalog.
 
 ## Quick start
 
@@ -49,7 +106,7 @@ cargo build --release
 # Text: Soroban-annotated WAT
 ./target/release/sordec dump-wat samples/contracts/token-v23/token-v23.wasm | head -40
 
-# Files: decompile to a directory (writes out/token-v23/token-v23.wat)
+# Files: decompile to a directory (writes out/token-v23/{token-v23.wat, Cargo.toml, src/lib.rs})
 ./target/release/sordec decompile samples/contracts/token-v23/token-v23.wasm --out-dir out/
 
 # Coverage report — the headline metric
@@ -100,9 +157,9 @@ coverage report — token-v23.wasm
     val boilerplate: 28 sites collapsed   (object ×5, tag ×5, enc_small ×2, enc_u32 ×14, dec_small ×2, cmp ×0)
   semantic recovery:
     host interactions:  35 / 35 recognized       (100.0%)
-    deep facts:         15 / 20 resolved         (75.0%)
-    note: structural accuracy vs source (>=90% AST node-count, D4.1) is a Phase-4 metric built on the Phase-3 Rust emitter — not yet computable
-  diagnostics:     42 total (recogniser misses)
+    deep facts:         20 / 25 resolved         (80.0%)
+    note: these are recognition ratios, not reconstruction accuracy — for the scored AST comparison against source, use `sordec score`
+  diagnostics:     76 total (recogniser misses)
                      lift::panic_without_error_code (×37)
                      lift::non_constant_durability_arg (×2)
                      lift::unrecognised_storage_pattern (×2)
@@ -119,8 +176,8 @@ carrying a located diagnostic (a polymorphic helper site, an
 indirect-call-blocked amount), never a guess. A ratio is shown only
 where a pass emits a real miss counter; the other rows are counts with a
 note on where their misses would surface. Neither number is the RFP's
-contractual accuracy score — that is structural AST-diff against source,
-a Phase-4 artifact over the Phase-3 Rust emitter.
+contractual accuracy score — that is the structural AST-diff against source,
+which `sordec score` computes over the Rust emitter's output.
 
 **Reading the structuring section.** *Functions structured* is 100%
 across all seven fixtures (the Phase-3 K3 lock: reducible rustc output
@@ -156,7 +213,7 @@ WASM bytes
 └───────────────────┘
     │
     ▼
-Annotated WAT (Phase 3) + compilable Rust (Phase 4)
+Annotated WAT + reconstructed Rust
 ```
 
 Each transformation between layers is a `Pass` in a `Pipeline`, with
@@ -172,7 +229,7 @@ crates/
 ├── sordec-ir/        — Three typed IR layers (WasmFacts, LiftedIr, HighIr)
 ├── sordec-frontend/  — WASM parsing + Soroban metadata (contractspecv0 etc.)
 ├── sordec-passes/    — Lifter + analysis passes + Soroban host-call catalog
-├── sordec-backend/   — Annotated-WAT emitter (Rust emitter lands in Phase 4)
+├── sordec-backend/   — Annotated-WAT emitter + Rust source emitter
 ├── sordec-driver/    — Pipeline orchestration + corpus integration tests
 ├── sordec-score/     — Source-to-source accuracy scorer (`sordec score`)
 └── sordec-cli/       — `sordec` binary (dump-facts, dump-ir, dump-hir, dump-wat, decompile, coverage, score)
@@ -235,11 +292,14 @@ catches warnings the dev-profile clippy run cannot see.
 
 ## Phase status
 
-See [PHASE_1.md](PHASE_1.md), [PHASE_2.md](PHASE_2.md), and
-[PHASE_3.md](PHASE_3.md) for the per-phase scope, the verification recipe
-(≤ 5 min from a clean clone), and the acceptance evidence. Phase 3
-(control-flow structuring + annotated WAT) is complete on `main`; Phase 4
-(compilable Rust) is next.
+See [PHASE_1.md](PHASE_1.md), [PHASE_2.md](PHASE_2.md), [PHASE_3.md](PHASE_3.md)
+and [PHASE_4.md](PHASE_4.md) for the per-phase scope, the verification recipe
+(≤ 5 min from a clean clone), and the acceptance evidence.
+
+All four phases are complete on `main` and ship as `v0.1.0-alpha.1`. What
+remains is not a missing phase but output quality — see
+[Where it actually stands](#where-it-actually-stands) and
+[CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

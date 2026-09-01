@@ -887,9 +887,13 @@ fn build_headline(t: &BTreeMap<&'static str, i64>, host_call_sites: usize) -> He
             attempted,
             ratio: ratio(resolved, attempted),
         },
-        note: "structural accuracy vs source (>=90% AST node-count, D4.1) \
-               is a Phase-4 metric built on the Phase-3 Rust emitter — \
-               not yet computable",
+        // These two ratios describe *recognition* — how much of the contract
+        // the pipeline understood. They are not the accuracy score, and saying
+        // so here stops the larger number being quoted as the smaller one's
+        // answer. The accuracy score is a source-to-source AST comparison and
+        // has its own command.
+        note: "these are recognition ratios, not reconstruction accuracy — \
+               for the scored AST comparison against source, use `sordec score`",
     }
 }
 

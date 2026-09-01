@@ -1,0 +1,102 @@
+# CI mirrors `tools/gate.sh`, which is the local gate contributors run before
+# pushing. The two must not drift: if a step is added here it belongs there too,
+# and vice versa. The gate script is the source of truth; this file exists so
+# the same six steps run on a machine nobody has configured by hand.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on any warning everywhere, not just where the gate sets it explicitly.
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  gate:
+    name: gate (stable)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # `rust-toolchain.toml` pins the channel; this action honours it, so the
+      # version here is deliberately unstated rather than duplicated.
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Runs the same script contributors run, so a green CI means a green
+      # local gate and there is exactly one definition of "passing".
+      - name: tools/gate.sh
+        run: bash tools/gate.sh
+
+  msrv:
+    name: msrv (rust-version from Cargo.toml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # The declared MSRV is a promise to anyone building this. Reading it from
+      # the manifest rather than hard-coding it here means the promise cannot
+      # drift from the thing that states it.
+      - name: Read declared MSRV
+        id: msrv
+        run: |
+          v=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "declared MSRV: $v"
+
+      - name: Install declared MSRV
+        run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Build only — the test suite is the stable job's business. This job
+      # answers one question: does the version we advertise actually compile it?
+      - name: cargo check on MSRV
+        run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-targets
+
+  publish-readiness:
+    name: publish readiness (dry run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+
+      # Catches the class of manifest defect that blocked publishing for the
+      # whole of Phase 4 — internal deps carrying a `path` but no `version`,
+      # which a registry rejects outright and a normal build never notices.
+      #
+      # Only the crates with no internal dependencies can be fully dry-run
+      # before anything is published; the rest necessarily fail on
+      # "no matching package named …" until their dependencies are live. That
+      # is cargo's publish-the-leaves-first ordering, not a defect, so they are
+      # checked for manifest validity alone.
+      - name: Leaf crates package cleanly
+        run: |
+          for c in sordec-common sordec-sigs sordec-score sordec-diffexec; do
+            echo "::group::$c"
+            cargo publish -p "$c" --dry-run --allow-dirty
+            echo "::endgroup::"
+          done
+
+      - name: Dependent crates have no manifest defects
+        run: |
+          for c in sordec-ir sordec-frontend sordec-passes sordec-backend sordec-driver sordec-cli; do
+            out=$(cargo publish -p "$c" --dry-run --allow-dirty --no-verify 2>&1 || true)
+            if grep -q "version requirement specified" <<<"$out"; then
+              echo "::error::$c has a path dependency with no version requirement"
+              exit 1
+            fi
+            echo "$c: ok"
+          done

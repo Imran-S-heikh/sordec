@@ -251,9 +251,13 @@ fn coverage_on_token_v23_renders_recognition_and_headline_sections() {
         .stdout(predicate::str::contains("semantic recovery:"))
         .stdout(predicate::str::contains("host interactions:"))
         .stdout(predicate::str::contains("deep facts:"))
-        // The Phase-3/4 accuracy caveat must be present so the headline
-        // is never mistaken for the RFP accuracy score.
-        .stdout(predicate::str::contains("Phase-4"))
+        // The caveat must be present so the headline ratios are never
+        // mistaken for the RFP accuracy score. Asserted on what the note
+        // *means*, not on a phase number — the previous spelling checked for
+        // "Phase-4" and so broke the moment the phase shipped, which tested
+        // the calendar rather than the disclaimer.
+        .stdout(predicate::str::contains("not reconstruction accuracy"))
+        .stdout(predicate::str::contains("sordec score"))
         .stdout(predicate::str::contains("NaN").not())
         .stdout(predicate::str::contains("inf%").not())
         .stderr(predicate::str::is_empty());
@@ -286,16 +290,18 @@ fn coverage_json_exposes_recognition_and_headline_on_token_v23() {
 
     // Headline: host interactions are the stable 100% recognition claim;
     // deep facts are a finite fraction (exact value pinned in the driver
-    // matrix). The note carries the Phase-4 caveat.
+    // matrix). The note carries the accuracy caveat.
     let host = &v["headline"]["host_interactions"];
     assert_eq!(host["ratio"].as_f64(), Some(1.0), "host interactions 100%");
     let deep = v["headline"]["deep_facts"]["ratio"]
         .as_f64()
         .expect("deep-facts ratio is a number on token-v23");
     assert!((0.0..=1.0).contains(&deep), "deep facts in [0,1], got {deep}");
+    let note = v["headline"]["note"].as_str().unwrap();
     assert!(
-        v["headline"]["note"].as_str().unwrap().contains("Phase-4"),
-        "headline note must state the Phase-4 accuracy caveat"
+        note.contains("not reconstruction accuracy") && note.contains("sordec score"),
+        "headline note must disclaim the accuracy score and point at the command \
+         that computes it, got: {note}"
     );
 }
 
