@@ -37,7 +37,7 @@
 //! Within one function, a `has` is a probe when a `get` in that same
 //! function reads the **same key value** at the **same resolved tier**.
 //! Key identity is by `ValueId` after the shared
-//! [`chase_value`](crate::recognizers::wrappers::chase_value) walk, so it
+//! [`chase_value`] walk, so it
 //! is the literal same SSA value feeding both calls — not two keys that
 //! merely name the same variant. That is what makes the pairing a fact
 //! about this code rather than an inference from the vocabulary.

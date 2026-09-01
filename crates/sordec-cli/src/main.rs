@@ -210,7 +210,7 @@ struct ScoreArgs {
     /// Honest about its current reach: driving an entrypoint requires constructing
     /// arguments for it, which is not built yet, so today this reports *why* behaviour
     /// could not be measured rather than a number. Those reasons are the useful part —
-    /// "reconstruction does not build (4 diagnostics): error[E0369]…" is the sharpest
+    /// "reconstruction does not build (4 diagnostics): error\[E0369\]…" is the sharpest
     /// emitter-progress signal we have.
     #[arg(long, value_name = "ORIGINAL_WASM")]
     behavior: Option<PathBuf>,

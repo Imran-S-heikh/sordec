@@ -3,9 +3,13 @@ name = "sordec-diffexec"
 description = "Differential execution harness: original wasm vs recompiled reconstruction"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 # Host-side execution of contract wasm. A real dependency, not a dev one: running

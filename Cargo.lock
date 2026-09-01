@@ -1848,7 +1848,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "sordec-backend"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "prettyplease",
  "proc-macro2",
@@ -1867,7 +1867,7 @@ dependencies = [
 
 [[package]]
 name = "sordec-cli"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "assert_cmd",
  "clap 4.6.1",
@@ -1887,7 +1887,7 @@ dependencies = [
 
 [[package]]
 name = "sordec-common"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -1895,7 +1895,7 @@ dependencies = [
 
 [[package]]
 name = "sordec-diffexec"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde_json",
  "soroban-sdk",
@@ -1903,7 +1903,7 @@ dependencies = [
 
 [[package]]
 name = "sordec-driver"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "sordec-backend",
  "sordec-common",
@@ -1915,7 +1915,7 @@ dependencies = [
 
 [[package]]
 name = "sordec-frontend"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "sordec-common",
@@ -1930,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "sordec-ir"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1940,7 +1940,7 @@ dependencies = [
 
 [[package]]
 name = "sordec-passes"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1955,7 +1955,7 @@ dependencies = [
 
 [[package]]
 name = "sordec-score"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "quote",
  "serde",
@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "sordec-sigs"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "thiserror 2.0.18",
  "wasmparser 0.240.0",

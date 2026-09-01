@@ -3,9 +3,13 @@ name = "sordec-passes"
 description = "Analysis and transformation passes over the IR"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 sordec-common.workspace = true

@@ -24,7 +24,7 @@
 //! in a labelled build, then look up the unlabelled bodies of a contract we
 //! have never seen.
 //!
-//! [`fingerprint`] is the key; [`catalogue`] is the lookup.
+//! [`mod@fingerprint`] is the key; [`catalogue`] is the lookup.
 //!
 //! # What it delivers, measured
 //!
@@ -50,7 +50,7 @@
 //!
 //! # Layout
 //!
-//! - [`fingerprint`] — the normalisation rules and the hash, shared
+//! - [`mod@fingerprint`] — the normalisation rules and the hash, shared
 //!   verbatim between catalogue generation and lookup so the two cannot
 //!   drift.
 //! - [`catalogue`] — the generated table and its lookup.

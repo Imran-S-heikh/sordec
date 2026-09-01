@@ -62,7 +62,11 @@ step "4/6 clippy (all features, all targets, warnings-as-errors)"
 cargo clippy --workspace --all-features --all-targets -- -D warnings
 
 step "5/6 doc (no deps, must be warning-free)"
-cargo doc --workspace --no-deps
+# The step said "must be warning-free" for months while enforcing nothing —
+# `cargo doc` exits 0 on broken intra-doc links, so the gate passed while
+# emitting 26 warnings. A gate that reports clean while it is not will not
+# catch the one warning that matters.
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
 step "6/6 fixtures"
 bash "${SCRIPT_DIR}/verify-fixtures.sh"

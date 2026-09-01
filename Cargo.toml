@@ -21,24 +21,44 @@ members = [
 exclude = ["samples"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
+# The real floor, not the edition's. Edition 2024 needs 1.85, but the code uses
+# `u64::is_multiple_of` (`passes/src/ledger.rs`), stable since 1.87 — declaring
+# 1.85 made `clippy::incompatible_msrv` fail the gate the first time this field
+# existed, which is precisely what it is for. Raise this when a newer API is
+# adopted; do not lower it without checking clippy still passes.
+rust-version = "1.87"
 license = "Apache-2.0"
 authors = ["Imran Shaikh"]
 repository = "https://github.com/Imran-S-heikh/sordec"
+readme = "README.md"
 description = "Soroban WASM-to-Rust decompiler"
+keywords = ["soroban", "stellar", "decompiler", "wasm", "webassembly"]
+categories = ["development-tools", "compilers", "wasm"]
 
 [workspace.dependencies]
-# Internal crates — referenced by path within the workspace
-sordec-common   = { path = "crates/sordec-common" }
-sordec-ir       = { path = "crates/sordec-ir" }
-sordec-sigs     = { path = "crates/sordec-sigs" }
-sordec-frontend = { path = "crates/sordec-frontend" }
-sordec-passes   = { path = "crates/sordec-passes" }
-sordec-backend  = { path = "crates/sordec-backend" }
-sordec-driver   = { path = "crates/sordec-driver" }
-sordec-score    = { path = "crates/sordec-score" }
-sordec-diffexec = { path = "crates/sordec-diffexec" }
+# Internal crates.
+#
+# Both `path` and `version` are required. `path` is what the workspace builds
+# against; `version` is what a published dependent would resolve, and a registry
+# refuses a manifest without one:
+#
+#     error: all dependencies must have a version requirement specified when publishing
+#
+# Exact-pinned (`=`) because these move in lockstep with `workspace.package.version`
+# and because prerelease matching is strict — a plain `0.1.0-alpha.1` requirement
+# would not accept a later `0.1.0-alpha.2`, so the pin states the real constraint
+# rather than implying a range we do not support.
+sordec-common   = { path = "crates/sordec-common",   version = "=0.1.0-alpha.1" }
+sordec-ir       = { path = "crates/sordec-ir",       version = "=0.1.0-alpha.1" }
+sordec-sigs     = { path = "crates/sordec-sigs",     version = "=0.1.0-alpha.1" }
+sordec-frontend = { path = "crates/sordec-frontend", version = "=0.1.0-alpha.1" }
+sordec-passes   = { path = "crates/sordec-passes",   version = "=0.1.0-alpha.1" }
+sordec-backend  = { path = "crates/sordec-backend",  version = "=0.1.0-alpha.1" }
+sordec-driver   = { path = "crates/sordec-driver",   version = "=0.1.0-alpha.1" }
+sordec-score    = { path = "crates/sordec-score",    version = "=0.1.0-alpha.1" }
+sordec-diffexec = { path = "crates/sordec-diffexec", version = "=0.1.0-alpha.1" }
 
 # External crates — pinned to exact versions we've validated
 wasmparser    = "0.240"

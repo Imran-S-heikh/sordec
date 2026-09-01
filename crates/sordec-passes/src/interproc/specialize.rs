@@ -26,7 +26,7 @@
 //! - **Pin.** Inside each copy, a parameter whose call-site argument is
 //!   a literal is deleted and its binding rewritten to that literal.
 //!   This is what recovers dex's discriminants and durability tiers,
-//!   which [`trace_int`](crate::dataflow::trace_int) reads
+//!   which [`trace_int`] reads
 //!   intra-procedurally and so could never see through a parameter.
 //!
 //! ## Why pinning must *remove* the parameter
@@ -52,10 +52,11 @@
 //! - **Exported functions are never specialized**, and never treated as
 //!   a caller worth splitting. They are host-invocable, so their
 //!   internal call sites are not the complete caller set — the same rule
-//!   [`Resolver`] states.
+//!   [`crate::dataflow::Resolver`] states.
 //! - **Any indirect call in the module disables the pass**, module-wide.
 //!   Table-called functions have invisible callers, so no caller set can
-//!   be trusted. Again [`Resolver`]'s rule, reused rather than restated.
+//!   be trusted. Again [`crate::dataflow::Resolver`]'s rule, reused rather
+//!   than restated.
 //! - **Self-recursive functions are skipped.** Cloning one is sound but
 //!   pointless (the copy still calls the original), and skipping keeps
 //!   the round structure below easy to reason about.

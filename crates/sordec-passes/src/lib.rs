@@ -27,6 +27,23 @@
 //! auth chain, cross-contract clients) land in this crate during
 //! Phase 2 as separate modules.
 
+// This crate's module docs are the design record for the pass pipeline, and
+// they are written for the people maintaining it. They routinely link to the
+// private helpers a pass is built from — `sret`, `pin_target_block`,
+// `MAX_ROUNDS` and friends — because naming the actual item is what makes the
+// prose checkable against the code.
+//
+// `rustdoc::private_intra_doc_links` fires on all 22 of those. Suppressed
+// deliberately and crate-wide rather than by rewriting each link into a plain
+// code span, which would cost the reader the one thing the link is for. On
+// docs.rs such a link renders as ordinary text, so nothing breaks for a public
+// reader either.
+//
+// The lints that catch real mistakes stay hard errors under the gate's
+// `RUSTDOCFLAGS="-D warnings"`: a link to an item that does not exist is a
+// broken link, not a private one, and still fails the build.
+#![allow(rustdoc::private_intra_doc_links)]
+
 pub mod attribution;
 pub mod dataflow;
 pub mod declutter;
