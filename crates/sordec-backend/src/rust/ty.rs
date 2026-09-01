@@ -69,12 +69,51 @@ fn result_error(e: &TypeRef, reg: &TypeRegistry, policy: &dyn HolePolicy) -> syn
     type_ref(e, reg, policy)
 }
 
-/// Build an identifier from a recovered name, falling back to a raw
-/// identifier (`r#name`) if it collides with a Rust keyword. Names come
-/// from `contractspecv0`, i.e. originally-valid Rust source, so the
-/// fallback is defensive rather than expected.
+/// Build an identifier from a recovered name.
+///
+/// Three cases, in order:
+///
+/// 1. Already a valid identifier — used as-is.
+/// 2. A Rust keyword — becomes a raw identifier (`r#type`).
+/// 3. Anything else — prefixed with `_`.
+///
+/// Case 3 exists because the original premise here was **wrong**. This function
+/// used to claim that names "come from `contractspecv0`, i.e. originally-valid
+/// Rust source, so the fallback is defensive rather than expected" — and then
+/// called [`Ident::new_raw`], which *panics* on a numeric name. `contractspecv0`
+/// records a tuple struct's fields under the names `"0"`, `"1"`, … , so
+/// `#[contracttype] struct UdtTuple(u32, Vec<i64>)` crashed the emitter outright
+/// (SDK `test_udt` fixture; the spec reads `UdtTuple -> ['0', '1']`).
+///
+/// Tuple structs are now emitted as tuple structs — see `contract_type::struct_item`
+/// — so case 3 should be unreachable for them. It stays because a panic is the
+/// wrong failure mode for a tool whose input is arbitrary on-chain bytes: a
+/// mangled-but-visible `_0` is recoverable, an abort is not.
 pub(crate) fn ident(name: &str) -> Ident {
-    syn::parse_str::<Ident>(name).unwrap_or_else(|_| Ident::new_raw(name, Span::call_site()))
+    if let Ok(id) = syn::parse_str::<Ident>(name) {
+        return id;
+    }
+    // `new_raw` panics on anything that is not keyword-shaped, so only reach for
+    // it once the name is known to be a plain identifier that syn rejected —
+    // which, having parsed cleanly above failed, means a keyword.
+    if syn::parse_str::<Ident>(&format!("r#{name}")).is_ok() {
+        return Ident::new_raw(name, Span::call_site());
+    }
+    Ident::new(&format!("_{name}"), Span::call_site())
+}
+
+/// Whether a struct's fields are positional, i.e. it was a tuple struct.
+///
+/// `contractspecv0` has no tuple-struct flag; it records the fields under the
+/// names `"0"`, `"1"`, … in declaration order. Requiring the full `0..n`
+/// sequence (rather than just "all numeric") keeps a genuine named struct whose
+/// author happened to use a numeric-looking name from being silently reshaped.
+pub(crate) fn is_tuple_struct(fields: &[sordec_ir::StructField]) -> bool {
+    !fields.is_empty()
+        && fields
+            .iter()
+            .enumerate()
+            .all(|(i, f)| f.name.parse::<usize>() == Ok(i))
 }
 
 fn primitive(p: PrimitiveType) -> syn::Type {

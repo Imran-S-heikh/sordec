@@ -14,7 +14,7 @@ use syn::parse_quote;
 use sordec_ir::{EnumDef, EventDef, StructDef, TypeRegistry, UnionDef};
 
 use crate::rust::hole::HolePolicy;
-use crate::rust::ty::{ident, type_ref};
+use crate::rust::ty::{ident, is_tuple_struct, type_ref};
 
 /// All user-defined types as top-level items, in registry order: structs,
 /// payload enums, C-style enums, error enums, then events.
@@ -30,6 +30,20 @@ pub(crate) fn contract_types(reg: &TypeRegistry, policy: &dyn HolePolicy) -> Vec
 
 fn struct_item(def: &StructDef, reg: &TypeRegistry, policy: &dyn HolePolicy) -> syn::Item {
     let name = ident(&def.name);
+
+    // A tuple struct reaches us as fields named "0", "1", … — the only trace
+    // `contractspecv0` keeps of the distinction. Emitting those as named fields
+    // is not merely wrong shape: `0` is not an identifier, and the attempt used
+    // to abort the emitter.
+    if is_tuple_struct(&def.fields) {
+        let tys = def.fields.iter().map(|f| type_ref(&f.ty, reg, policy));
+        return parse_quote! {
+            #[contracttype]
+            #[derive(Clone)]
+            pub struct #name(#(pub #tys,)*);
+        };
+    }
+
     let fields = def.fields.iter().map(|f| {
         let fname = ident(&f.name);
         let fty = type_ref(&f.ty, reg, policy);
@@ -152,6 +166,48 @@ mod tests {
         assert!(out.contains("# [contracttype]"), "{out}");
         assert!(out.contains("pub struct AllowanceDataKey"), "{out}");
         assert!(out.contains("pub from : soroban_sdk :: Address"), "{out}");
+    }
+
+    #[test]
+    fn positional_fields_reconstruct_as_a_tuple_struct() {
+        // `contractspecv0` keeps no tuple-struct flag: it records the fields as
+        // "0", "1", … in declaration order. Emitting those as *named* fields
+        // used to abort the emitter, because `0` is not an identifier — the SDK
+        // `test_udt` fixture (`UdtTuple -> ['0', '1']`) crashed `dump-rust`.
+        let reg = TypeRegistry {
+            structs: vec![StructDef {
+                id: TypeId::new(0),
+                name: "UdtTuple".to_string(),
+                fields: vec![
+                    StructField { name: "0".to_string(), ty: TypeRef::Primitive(PrimitiveType::I64) },
+                    StructField { name: "1".to_string(), ty: TypeRef::Primitive(PrimitiveType::U32) },
+                ],
+            }],
+            ..Default::default()
+        };
+        let out = render(&contract_types(&reg, &StrictNoGuess)[0]);
+        assert!(out.contains("pub struct UdtTuple (pub i64 , pub u32 ,)"), "{out}");
+        assert!(!out.contains('{'), "must not emit a braced struct body: {out}");
+    }
+
+    #[test]
+    fn numeric_names_out_of_sequence_stay_a_named_struct() {
+        // Only a full 0..n run means "tuple struct". A lone numeric-looking name
+        // is some other contract's business and must not be silently reshaped —
+        // it falls back to the `_`-prefixed identifier rather than panicking.
+        let reg = TypeRegistry {
+            structs: vec![StructDef {
+                id: TypeId::new(0),
+                name: "Odd".to_string(),
+                fields: vec![
+                    StructField { name: "7".to_string(), ty: TypeRef::Primitive(PrimitiveType::I64) },
+                ],
+            }],
+            ..Default::default()
+        };
+        let out = render(&contract_types(&reg, &StrictNoGuess)[0]);
+        assert!(out.contains("pub struct Odd {"), "{out}");
+        assert!(out.contains("pub _7 : i64"), "{out}");
     }
 
     #[test]
