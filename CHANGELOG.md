@@ -37,7 +37,9 @@ yet where it needs to be, and the numbers below say exactly where.
   comparator reporting four independent categories (interface / structure /
   semantic / behavior) against a documented, versioned metric. It never
   inspects the WASM or the decompiler's internals, so it cannot flatter the
-  pipeline it grades. Definition: [`docs/scoring_metric.md`](docs/scoring_metric.md).
+  pipeline it grades. The metric is versioned and its full definition —
+  categories, weights, source basis, and stated limits — travels with the
+  scorer; every report stamps the triple that reproduces it.
 - **Differential-execution harness** (`sordec-diffexec`) — registers the
   original wasm and a recompiled reconstruction in an in-process Soroban host,
   drives both identically, and compares return values, event streams, auth

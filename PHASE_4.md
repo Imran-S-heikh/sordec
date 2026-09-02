@@ -78,8 +78,9 @@ decompiler's internals, so it cannot flatter the pipeline it grades.
 - **Behaviour** is a real injected category guarded by a typed `BSide`, so
   only a measurement of *our own reconstruction* can score.
 
-The full definition, including its limits and how to read a score, is
-[`docs/scoring_metric.md`](docs/scoring_metric.md).
+The full definition — categories, weights, per-category source basis, limits,
+and how to read a score — is maintained as the metric's specification document
+and versioned alongside it (`score-2.0.0`).
 
 **Differential execution** (`sordec-diffexec`) registers the original wasm and
 the recompiled reconstruction in an in-process Soroban host, drives both
@@ -90,9 +91,10 @@ failure is bucketed separately instead of counted as agreement.
 
 ### D4.2 — per-fixture accuracy report
 
-`docs/benchmarks/report.{md,json}` is regenerated from the corpus by the
-benchmark harness, with a committed accuracy band per fixture so that a silent
-regression *or* an unearned jump fails CI.
+The benchmark harness regenerates a per-fixture report (`report.{md,json}`)
+from the corpus on demand, and each fixture carries a committed accuracy band
+in the harness itself, so that a silent regression *or* an unearned jump fails
+CI.
 
 ### D4.4 — pattern extensions
 

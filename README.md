@@ -34,7 +34,9 @@ Requires Rust **1.87** or newer. To build from a checkout instead, see
 
 A decompiler that overstates itself is worse than useless: you cannot audit a
 contract against a reconstruction you can't calibrate. So, measured on the
-seven-contract reference corpus with [our own published metric](docs/scoring_metric.md):
+seven-contract reference corpus, scored by our own versioned metric
+(`score-2.0.0` — four independent categories, fixed weights, stamped into every
+report):
 
 | Category | Score | |
 |---|---|---|
