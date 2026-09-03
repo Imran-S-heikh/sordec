@@ -17,7 +17,9 @@
 
 use std::path::{Path, PathBuf};
 
-use sordec_score::{score_paths, ScoreOptions, ScoreReport};
+use sordec_score::{
+    score_paths, BehaviorInput, CategoryScore, ScoreOptions, ScoreReport,
+};
 
 /// The corpus fixtures with vendored source, in report order.
 const FIXTURES: &[&str] = &[
@@ -30,9 +32,31 @@ const FIXTURES: &[&str] = &[
     "attestation",
 ];
 
+/// The repo root, normalised.
+///
+/// Normalised because these paths reach `docs/benchmarks/report.{md,json}`,
+/// which ships as Deliverable 4.2: a diagnostic quoting a fixture path has to
+/// render the same on every machine, and `CARGO_MANIFEST_DIR/../..` left
+/// unresolved would embed `…/crates/sordec-cli/../../samples/…` verbatim.
+fn repo_root() -> PathBuf {
+    let manifest_relative = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    std::fs::canonicalize(&manifest_relative).unwrap_or(manifest_relative)
+}
+
 /// `samples/contracts/` under the repo root.
 fn samples_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../samples/contracts")
+    repo_root().join("samples/contracts")
+}
+
+/// A report note with this machine's repo path removed.
+///
+/// The scorer and the behaviour harness quote real paths in their reasons,
+/// which is right for a terminal and wrong for `docs/benchmarks/report.md`:
+/// a published artifact must not carry the author's home directory, and two
+/// people regenerating it must produce the same bytes.
+fn relative_to_repo(note: &str) -> String {
+    let root = format!("{}/", repo_root().display());
+    note.replace(&root, "")
 }
 
 /// One fixture's measurement, or `None` when it could not be decompiled or
@@ -42,27 +66,68 @@ struct Measured {
     report: ScoreReport,
 }
 
+/// The scoring configuration every measurement here uses, with `behavior`
+/// injected by the caller.
+///
+/// One definition, because the report also has to re-run the aggregator to
+/// derive its AST-only figure ([`ast_only_overall`]) and a second copy of the
+/// weights or basis would let the two disagree silently.
+fn score_options(behavior: BehaviorInput) -> ScoreOptions {
+    ScoreOptions { threshold: 0.9, check_compile: false, behavior, ..Default::default() }
+}
+
 /// Decompile a fixture in-memory and score the reconstruction against its
 /// vendored source directory.
-fn measure(name: &'static str) -> Result<Measured, String> {
+///
+/// `want_behavior` is the *only* difference between what the accuracy guard
+/// measures and what the report measures. It is off for the guard because
+/// differential execution needs a wasm toolchain that CI does not install, and
+/// a band that means one thing on a provisioned machine and another on a bare
+/// one is not a guard.
+fn measure_inner(name: &'static str, want_behavior: bool) -> Result<Measured, String> {
     let base = samples_dir().join(name);
-    let wasm = std::fs::read(base.join(format!("{name}.wasm")))
-        .map_err(|e| format!("read wasm: {e}"))?;
+    let wasm_path = base.join(format!("{name}.wasm"));
+    let wasm = std::fs::read(&wasm_path).map_err(|e| format!("read wasm: {e}"))?;
     let output = sordec_driver::Driver::standard()
         .run(&wasm)
         .map_err(|e| format!("decompile: {e}"))?;
 
-    // The reconstruction is one `lib.rs`; write it to a temp source dir so
-    // `score_paths` treats both sides as directories.
+    // Lay the reconstruction out as the crate we actually ship: the manifest at
+    // the root, the source under `src/`. `decompile --out-dir` writes exactly
+    // this, and behaviour needs the manifest because `recompile::build` builds
+    // the manifest it is handed and never writes one.
+    //
+    // The *scored* path stays `<tmp>/src`, not `<tmp>`. Handing the crate root
+    // to `score_paths` would silently change every number: the expansion
+    // harness copies a source directory verbatim into its scratch crate's
+    // `src/`, so a crate root lands as `scratch/src/src/lib.rs`, leaving no lib
+    // target for `cargo expand --lib` to find and dropping the whole run back
+    // to the pre-expansion basis.
     let tmp = std::env::temp_dir().join(format!("sordec-bench-{name}-{}", std::process::id()));
     let src = tmp.join("src");
     std::fs::create_dir_all(&src).map_err(|e| format!("scratch dir: {e}"))?;
     std::fs::write(src.join("lib.rs"), &output.rust).map_err(|e| format!("write recon: {e}"))?;
+    std::fs::write(tmp.join("Cargo.toml"), &output.cargo_toml)
+        .map_err(|e| format!("write manifest: {e}"))?;
 
-    let opts = ScoreOptions { threshold: 0.9, check_compile: false, ..Default::default() };
-    let report = score_paths(&src, &base.join("source/src"), &opts).map_err(|e| format!("score: {e}"));
+    // Before the scratch directory goes away, and against the original wasm
+    // rather than its source: the deployed contract is the oracle.
+    let behavior = if want_behavior {
+        sordec_cli::behavior::measure(&tmp, &wasm_path)
+    } else {
+        BehaviorInput::NotRequested
+    };
+
+    let opts = score_options(behavior);
+    let report =
+        score_paths(&src, &base.join("source/src"), &opts).map_err(|e| format!("score: {e}"));
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(Measured { name, report: report? })
+}
+
+/// Score a fixture on the three AST categories, as the accuracy guard does.
+fn measure(name: &'static str) -> Result<Measured, String> {
+    measure_inner(name, false)
 }
 
 /// Measure every fixture, panicking with the fixture name on any failure so
@@ -72,6 +137,49 @@ fn measure_all() -> Vec<Measured> {
         .iter()
         .map(|&name| measure(name).unwrap_or_else(|e| panic!("{name}: {e}")))
         .collect()
+}
+
+/// Measure every fixture with differential execution as well.
+///
+/// Panics up front if the wasm toolchain is missing, rather than producing a
+/// report that quietly lost a category. The same rule the accuracy bands
+/// follow: a run that measured something other than what it says it measured
+/// has to fail loudly.
+fn measure_all_with_behavior() -> Vec<Measured> {
+    if let Err(reason) = sordec_cli::behavior::toolchain_ready() {
+        panic!(
+            "the benchmark report includes the behavior category and this machine \
+             cannot measure it: {reason}\n\nProvision it with `tools/setup-toolchains.sh`, \
+             or the report would silently be a three-category document."
+        );
+    }
+    FIXTURES
+        .iter()
+        .map(|&name| measure_inner(name, true).unwrap_or_else(|e| panic!("{name}: {e}")))
+        .collect()
+}
+
+/// A report's overall score with `behavior` excluded.
+///
+/// Re-runs the scorer's own aggregator rather than reimplementing the weighted
+/// mean here, so the AST-only figure cannot drift from the four-category one it
+/// sits beside. Both are reported because they answer different questions: the
+/// AST-only number is comparable with every measurement in this file's history
+/// and with the committed bands, and the other is what the metric says today.
+fn ast_only_overall(report: &ScoreReport) -> f64 {
+    let opts = score_options(BehaviorInput::NotRequested);
+    ScoreReport::aggregate(
+        sordec_score::Categories {
+            behavior: CategoryScore::unchecked("excluded from the AST-only aggregate"),
+            ..report.categories.clone()
+        },
+        report.compilation_gate.clone(),
+        None,
+        &opts.weights,
+        &opts.basis,
+        opts.threshold,
+    )
+    .overall
 }
 
 /// The expected overall-score band for a fixture: `(low, high)`. Set from the
@@ -337,19 +445,31 @@ fn structure_degrades_gracefully_without_the_abi() {
 #[ignore = "regenerates docs/benchmarks/report.{md,json}; run explicitly"]
 #[allow(clippy::print_stdout)]
 fn generate_report() {
-    let measured = measure_all();
+    let measured = measure_all_with_behavior();
+    let agg = Aggregates::of(&measured);
 
     // Always print, so a --nocapture run shows the numbers even without write.
-    println!("\n{:<20} {:>8} {:>8} {:>8} {:>8}", "fixture", "overall", "iface", "struct", "seman");
+    println!(
+        "\n{:<20} {:>8} {:>8} {:>8} {:>8} {:>10}",
+        "fixture", "overall", "iface", "struct", "seman", "behavior"
+    );
     for m in &measured {
         let c = &m.report.categories;
         println!(
-            "{:<20} {:>8.4} {:>8.4} {:>8.4} {:>8.4}",
-            m.name, m.report.overall, c.interface.score, c.structure.score, c.semantic.score
+            "{:<20} {:>8.4} {:>8.4} {:>8.4} {:>8.4} {:>10}",
+            m.name,
+            ast_only_overall(&m.report),
+            c.interface.score,
+            c.structure.score,
+            c.semantic.score,
+            behavior_cell(&m.report),
         );
     }
-    let mean = measured.iter().map(|m| m.report.overall).sum::<f64>() / measured.len() as f64;
-    println!("{:<20} {:>8.4}  (aggregate mean)\n", "ALL", mean);
+    println!("{:<20} {:>8.4}  (aggregate mean, AST only)", "ALL", agg.ast_only);
+    println!(
+        "{:<20} {:>8.4}  (aggregate mean, incl. behaviour on {} of {} fixtures)\n",
+        "ALL", agg.with_behavior, agg.behavior_measured, agg.fixtures
+    );
 
     if std::env::var("SORDEC_BENCH_WRITE").is_err() {
         println!("(set SORDEC_BENCH_WRITE=1 to write docs/benchmarks/report.{{md,json}})");
@@ -358,35 +478,98 @@ fn generate_report() {
 
     let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/benchmarks");
     std::fs::create_dir_all(&out).expect("benchmarks dir");
-    std::fs::write(out.join("report.md"), render_markdown(&measured, mean)).expect("write md");
-    std::fs::write(out.join("report.json"), render_json(&measured, mean)).expect("write json");
+    std::fs::write(out.join("report.md"), render_markdown(&measured, &agg)).expect("write md");
+    std::fs::write(out.join("report.json"), render_json(&measured, &agg)).expect("write json");
     println!("wrote {}/report.{{md,json}}", out.display());
+}
+
+/// The corpus means, both of them.
+struct Aggregates {
+    /// Mean of the three AST categories — comparable with the committed bands
+    /// and with every earlier measurement. The headline.
+    ast_only: f64,
+    /// Mean including `behavior` wherever it was measured.
+    with_behavior: f64,
+    /// How many fixtures contributed a behaviour score. Reported with the mean
+    /// for the same reason [`sordec_score::Behavior`] refuses to exist without
+    /// its denominator: a rate without its coverage is not a result.
+    behavior_measured: usize,
+    fixtures: usize,
+}
+
+impl Aggregates {
+    fn of(measured: &[Measured]) -> Self {
+        #[allow(clippy::cast_precision_loss)]
+        let n = measured.len() as f64;
+        Self {
+            ast_only: measured.iter().map(|m| ast_only_overall(&m.report)).sum::<f64>() / n,
+            with_behavior: measured.iter().map(|m| m.report.overall).sum::<f64>() / n,
+            behavior_measured: measured.iter().filter(|m| m.report.behavior.is_some()).count(),
+            fixtures: measured.len(),
+        }
+    }
+}
+
+/// A fixture's behaviour score, or `n/a` when the category is unchecked.
+///
+/// Never `0.0000`: a zero is a verdict on the reconstruction, and an
+/// unavailable measurement is the absence of one.
+fn behavior_cell(report: &ScoreReport) -> String {
+    report
+        .behavior
+        .as_ref()
+        .filter(|_| report.categories.behavior.checked)
+        .map_or_else(|| "n/a".to_owned(), |b| format!("{:.4}", b.score))
 }
 
 /// The human-readable report: a score table + a per-fixture details block
 /// carrying the precision/recall/count notes that make the gaps legible.
-fn render_markdown(measured: &[Measured], mean: f64) -> String {
+fn render_markdown(measured: &[Measured], agg: &Aggregates) -> String {
     let mut s = String::new();
     s.push_str("# Reconstruction accuracy report\n\n");
     s.push_str(&format!(
         "Scorer `{}`, threshold 0.90. Reconstruction (`sordec decompile`) scored \
          directory-vs-directory against each fixture's vendored source. \
-         Compilation is a gate and is not evaluated here; behavior is unchecked \
-         until the emitter produces a crate that compiles, so these are AST-diff \
-         numbers over three categories. Regenerate with \
+         Compilation is a gate and is not evaluated here. Regenerate with \
          `SORDEC_BENCH_WRITE=1 cargo test -p sordec-cli --test benchmark -- --ignored`.\n\n",
         sordec_score::SCORER_VERSION
     ));
-    s.push_str("| fixture | overall | interface | structure | semantic |\n");
-    s.push_str("|---|---|---|---|---|\n");
+    s.push_str(&format!(
+        "**Two aggregates, and they answer different questions.** The AST-only mean \
+         covers interface, structure and semantic; it is the figure comparable with \
+         the committed accuracy bands and with every earlier measurement, so it stays \
+         the headline. The second adds `behavior` — differential execution of the \
+         recompiled reconstruction against the original wasm — which is measurable on \
+         {} of {} fixtures today, because the other {} do not yet compile. An \
+         unmeasurable category is reported `n/a` and renormalises out of that \
+         fixture's mean; it is never a zero, since \"does not build\" and \"does the \
+         wrong thing\" are different findings.\n\n",
+        agg.behavior_measured,
+        agg.fixtures,
+        agg.fixtures - agg.behavior_measured,
+    ));
+    s.push_str("| fixture | overall (AST) | interface | structure | semantic | behavior |\n");
+    s.push_str("|---|---|---|---|---|---|\n");
     for m in measured {
         let c = &m.report.categories;
         s.push_str(&format!(
-            "| {} | {:.4} | {:.4} | {:.4} | {:.4} |\n",
-            m.name, m.report.overall, c.interface.score, c.structure.score, c.semantic.score
+            "| {} | {:.4} | {:.4} | {:.4} | {:.4} | {} |\n",
+            m.name,
+            ast_only_overall(&m.report),
+            c.interface.score,
+            c.structure.score,
+            c.semantic.score,
+            behavior_cell(&m.report),
         ));
     }
-    s.push_str(&format!("| **aggregate (mean)** | **{mean:.4}** | | | |\n\n"));
+    s.push_str(&format!(
+        "| **aggregate (mean, AST)** | **{:.4}** | | | | |\n",
+        agg.ast_only
+    ));
+    s.push_str(&format!(
+        "| **aggregate (mean, incl. behaviour)** | **{:.4}** | | | | |\n\n",
+        agg.with_behavior
+    ));
     s.push_str("## Per-fixture detail\n\n");
     for m in measured {
         s.push_str(&format!("### {}\n\n", m.name));
@@ -397,26 +580,77 @@ fn render_markdown(measured: &[Measured], mean: f64) -> String {
         ] {
             s.push_str(&format!("- **{cat}** {:.4}", cs.score));
             for note in &cs.notes {
-                s.push_str(&format!(" — {note}"));
+                s.push_str(&format!(" — {}", relative_to_repo(note)));
             }
             s.push('\n');
         }
+        s.push_str(&render_behavior_detail(&m.report));
         s.push('\n');
     }
     s
 }
 
-/// Machine-readable report: the `ScoreReport`s keyed by fixture, plus the
-/// aggregate mean, for CI diffing / trend tracking.
-fn render_json(measured: &[Measured], mean: f64) -> String {
+/// The `behavior` bullet: a rate with its coverage and per-tuple breakdown, or
+/// the reason there is no rate.
+///
+/// The reason is not filler. "reconstruction does not build (4 diagnostics):
+/// error[E0369]…" is the sharpest emitter-progress signal the corpus produces,
+/// and it is the whole content of this category for the fixtures that do not
+/// compile yet.
+fn render_behavior_detail(report: &ScoreReport) -> String {
+    let Some(behavior) = report.behavior.as_ref() else {
+        let reason = report
+            .categories
+            .behavior
+            .notes
+            .first()
+            .map_or("not requested", String::as_str);
+        return format!("- **behavior** n/a — {}\n", relative_to_repo(reason));
+    };
+
+    let mut s = format!(
+        "- **behavior** {:.4} — {} of {} entrypoints driven",
+        behavior.score, behavior.entrypoints_driven, behavior.entrypoints_total
+    );
+    let exercised: Vec<String> = behavior
+        .tuples
+        .iter()
+        .filter(|t| t.exercised > 0)
+        .map(|t| format!("{} {}/{}", t.name, t.matched, t.exercised))
+        .collect();
+    if !exercised.is_empty() {
+        s.push_str(&format!("; {}", exercised.join(", ")));
+    }
+    if behavior.trivial_agreements > 0 {
+        s.push_str(&format!(
+            "; {} trivial agreement(s) excluded",
+            behavior.trivial_agreements
+        ));
+    }
+    s.push('\n');
+    s
+}
+
+/// Machine-readable report: the `ScoreReport`s keyed by fixture, plus both
+/// aggregate means, for CI diffing / trend tracking.
+fn render_json(measured: &[Measured], agg: &Aggregates) -> String {
     let fixtures: serde_json::Map<String, serde_json::Value> = measured
         .iter()
         .map(|m| (m.name.to_string(), serde_json::to_value(&m.report).expect("serialize")))
         .collect();
     let doc = serde_json::json!({
         "scorer_version": sordec_score::SCORER_VERSION,
-        "aggregate_overall": mean,
+        // Kept under its original key so existing consumers and trend series
+        // do not silently switch basis: this is still the AST-only mean.
+        "aggregate_overall": agg.ast_only,
+        "aggregate_overall_with_behavior": agg.with_behavior,
+        "behavior_measured_fixtures": agg.behavior_measured,
         "fixtures": fixtures,
     });
-    format!("{}\n", serde_json::to_string_pretty(&doc).expect("serialize"))
+    // Applied to the rendered document rather than to individual notes: this
+    // serializes whole `ScoreReport`s, so any field may carry a quoted path and
+    // enumerating them would be a list that goes stale. Safe as a plain string
+    // substitution because a repo path contains nothing JSON escapes.
+    let rendered = serde_json::to_string_pretty(&doc).expect("serialize");
+    format!("{}\n", relative_to_repo(&rendered))
 }

@@ -5,6 +5,8 @@
 //! and error handling — not the (not-yet-real) category numbers. The
 //! calibration battery that pins real behaviour lives in `sordec-score`.
 
+use std::path::Path;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 
@@ -16,6 +18,11 @@ const HELLO_ADD_SRC: &str = concat!(
 const HELLO_ADD_WASM: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../samples/contracts/hello-add/hello-add.wasm"
+);
+
+const ATTESTATION_WASM: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../samples/contracts/attestation/attestation.wasm"
 );
 
 /// A contract with one entrypoint, for renderer assertions that need a report but not
@@ -406,37 +413,8 @@ fn a_behavior_rate_never_renders_without_its_coverage() {
 #[test]
 #[ignore = "decompiles, recompiles to wasm and runs both modules (slow, toolchain-dependent)"]
 fn behavior_on_the_reconstruction_of_hello_add_matches_the_original() {
-    let out = std::env::temp_dir().join(format!("sordec-behavior-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&out);
+    let behavior = measured_behavior("hello-add", HELLO_ADD_WASM);
 
-    Command::cargo_bin("sordec")
-        .expect("sordec binary builds")
-        .args(["decompile", HELLO_ADD_WASM, "--out-dir"])
-        .arg(&out)
-        .assert()
-        .success();
-
-    let stdout = Command::cargo_bin("sordec")
-        .expect("sordec binary builds")
-        .args(["score", "--json", "--behavior", HELLO_ADD_WASM])
-        .arg(out.join("hello-add"))
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../samples/contracts/hello-add/source/src"
-        ))
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let _ = std::fs::remove_dir_all(&out);
-
-    let v: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
-    let behavior = &v["behavior"];
-    assert!(
-        !behavior.is_null(),
-        "behaviour must be measured, not unavailable: {v}"
-    );
     // Only our own reconstruction counts toward the category.
     assert_eq!(behavior["b_side"]["kind"], "reconstruction", "{behavior}");
     assert_eq!(behavior["score"], 1.0, "{behavior}");
@@ -445,6 +423,84 @@ fn behavior_on_the_reconstruction_of_hello_add_matches_the_original() {
     // Something was actually compared — a rate over zero checks is not a
     // pass, and the trivial agreements (both sides trapping on overflow)
     // are excluded from it rather than counted as matches.
+    assert_return_tuple_is_perfect(&behavior, 5);
+}
+
+/// The same net over the second fixture that compiles, and a wider one.
+///
+/// attestation exercises what hello-add cannot: it has six declared
+/// entrypoints rather than one, so the coverage fraction is a real fraction
+/// and the `2 of 6` has to keep travelling with the `1.0000`. It is also the
+/// fixture the crypto/prng lowerings landed on, and the only one whose
+/// `semantic` reached 1.0000 — precisely the situation where a structure-only
+/// view would be blind to a regression that changed what the contract does.
+///
+/// Its number was published in `PHASE_4.md` from a hand-run CLI invocation and
+/// asserted nowhere, which is the gap this closes. The other four entrypoints
+/// need `Bytes` argument construction, not emitter work, so `2 of 6` is the
+/// harness's reach and not a reconstruction failure — assert it exactly, so
+/// that widening the driver is a deliberate change to this test.
+#[test]
+#[ignore = "decompiles, recompiles to wasm and runs both modules (slow, toolchain-dependent)"]
+fn behavior_on_the_reconstruction_of_attestation_matches_the_original() {
+    let behavior = measured_behavior("attestation", ATTESTATION_WASM);
+
+    assert_eq!(behavior["b_side"]["kind"], "reconstruction", "{behavior}");
+    assert_eq!(behavior["score"], 1.0, "{behavior}");
+    assert_eq!(behavior["entrypoints_driven"], 2, "{behavior}");
+    assert_eq!(behavior["entrypoints_total"], 6, "{behavior}");
+    assert_return_tuple_is_perfect(&behavior, 20);
+}
+
+/// Decompile `fixture` to a crate, score it against its vendored source with
+/// `--behavior`, and return the `behavior` object from the JSON report.
+///
+/// Goes through the installed binary rather than the library so this exercises
+/// the path a user actually runs — `decompile --out-dir` producing a buildable
+/// crate, then `score --behavior` recompiling it. Panics if the category came
+/// back unavailable, because a test asserting a *rate* must not quietly pass
+/// on a machine that measured nothing.
+fn measured_behavior(fixture: &str, wasm: &str) -> serde_json::Value {
+    let out = std::env::temp_dir().join(format!("sordec-behavior-{fixture}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["decompile", wasm, "--out-dir"])
+        .arg(&out)
+        .assert()
+        .success();
+
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../samples/contracts")
+        .join(fixture)
+        .join("source/src");
+    let stdout = Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["score", "--json", "--behavior", wasm])
+        .arg(out.join(fixture))
+        .arg(&source)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let _ = std::fs::remove_dir_all(&out);
+
+    let v: serde_json::Value = serde_json::from_slice(&stdout).expect("valid JSON");
+    assert!(
+        !v["behavior"].is_null(),
+        "{fixture}: behaviour must be measured, not unavailable: {v}"
+    );
+    v["behavior"].clone()
+}
+
+/// Every return-tuple check agreed, over at least `min_checks` of them.
+///
+/// The floor is the point: a 1.0000 over two calls is not evidence, and a
+/// match rate detached from its denominator is the failure this project
+/// called out in a competitor's harness.
+fn assert_return_tuple_is_perfect(behavior: &serde_json::Value, min_checks: u64) {
     let returns = behavior["tuples"]
         .as_array()
         .expect("tuples")
@@ -452,8 +508,8 @@ fn behavior_on_the_reconstruction_of_hello_add_matches_the_original() {
         .find(|t| t["name"] == "return")
         .expect("return tuple");
     assert!(
-        returns["exercised"].as_u64().unwrap_or(0) >= 5,
-        "too few checks to mean anything: {returns}"
+        returns["exercised"].as_u64().unwrap_or(0) >= min_checks,
+        "too few checks to mean anything (want >= {min_checks}): {returns}"
     );
     assert_eq!(returns["matched"], returns["exercised"], "{returns}");
 }

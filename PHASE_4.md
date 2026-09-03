@@ -213,7 +213,17 @@ regression fixture rather than as an acceptance vector.
 | hello-add | 1.0000 | 1 of 1 entrypoints | 9 / 9 return |
 | attestation | 1.0000 | 2 of 6 entrypoints | 20 / 20 return |
 
-Both on the `reconstruction` B-side — the only one that scores.
+Both on the `reconstruction` B-side — the only one that scores. The other five
+fixtures report *unavailable* with the reason, never a zero: they do not
+compile yet, which is a statement about the emitter and not about what the
+reconstruction does.
+
+Including behaviour where it was measured moves the corpus mean to **0.6156**.
+Both figures are in `docs/benchmarks/report.md`, and the AST-only **0.6108**
+stays the headline: it is the one comparable with the committed accuracy bands
+and with every earlier measurement. The gap is small because only attestation
+moves — hello-add is already 1.0000 — and it will grow as the compile rate
+does.
 
 ---
 
