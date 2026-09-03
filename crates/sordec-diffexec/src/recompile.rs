@@ -86,9 +86,14 @@ impl BuildFailure {
         match self {
             Self::Unavailable(unavailable) => unavailable.reason.clone(),
             Self::Failed { diagnostics } => {
-                let count = diagnostics.len();
+                // No count. The old message said "(N diagnostics)" where N was the
+                // number of *kept lines* — capped at MAX_DIAGNOSTIC_LINES, so it read
+                // "12 diagnostics" for a crate with 12 errors and for one with 300.
+                // A saturated number that looks like a measurement is worse than no
+                // number; the real error count is the compilation gate's job
+                // (`sordec-score::compile`), which counts the whole build.
                 let first = diagnostics.first().map_or("no diagnostics", String::as_str);
-                format!("crate does not build ({count} diagnostics): {first}")
+                format!("crate does not build: {first}")
             }
         }
     }
@@ -260,14 +265,25 @@ fn is_environment_problem(stderr: &str) -> bool {
     MARKERS.iter().any(|marker| stderr.contains(marker))
 }
 
-/// The leading diagnostic lines from cargo's stderr, capped.
+/// The leading diagnostic lines from cargo's stderr, errors first, capped.
+///
+/// The ordering is the whole point, and it is not cosmetic. This list explains a
+/// build *failure*, but rustc prints every warning before the first error, and our
+/// reconstructions emit warnings in bulk — so a straight `take` of the first
+/// [`MAX_DIAGNOSTIC_LINES`] lines yielded twelve warnings and location arrows, no
+/// cause. Five of the seven corpus fixtures reported "crate does not build:
+/// warning: unreachable statement", naming a warning as the reason a crate did not
+/// compile. Errors are hoisted so the cap can never spend itself on noise.
 fn first_diagnostics(stderr: &str) -> Vec<String> {
+    let is_error = |line: &&str| line.trim_start().starts_with("error");
+    let is_context = |line: &&str| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("warning:") || trimmed.starts_with("-->")
+    };
     stderr
         .lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("error") || trimmed.starts_with("warning:") || trimmed.starts_with("-->")
-        })
+        .filter(is_error)
+        .chain(stderr.lines().filter(is_context))
         .take(MAX_DIAGNOSTIC_LINES)
         .map(|line| line.trim().to_owned())
         .collect()
@@ -311,6 +327,33 @@ mod tests {
         assert!(!diagnostics.iter().any(|l| l.contains("= note")));
     }
 
+    /// The cap must not be spent on warnings before the first error is reached.
+    ///
+    /// This is the shape rustc actually emits — every warning, then the errors —
+    /// and it is what made five of seven corpus fixtures report "crate does not
+    /// build: warning: unreachable statement" in the published benchmark.
+    #[test]
+    fn errors_outrank_warnings_however_late_they_appear() {
+        let mut stderr = String::new();
+        for i in 0..MAX_DIAGNOSTIC_LINES * 2 {
+            stderr.push_str(&format!("warning: unreachable statement {i}\n"));
+        }
+        stderr.push_str("error[E0369]: cannot add `i32` to `Val`\n");
+
+        let diagnostics = first_diagnostics(&stderr);
+        assert_eq!(
+            diagnostics[0], "error[E0369]: cannot add `i32` to `Val`",
+            "a build failure must be explained by an error, not by the first warning"
+        );
+        assert_eq!(diagnostics.len(), MAX_DIAGNOSTIC_LINES);
+
+        let failed = BuildFailure::Failed { diagnostics };
+        assert_eq!(
+            failed.reason(),
+            "crate does not build: error[E0369]: cannot add `i32` to `Val`"
+        );
+    }
+
     #[test]
     fn a_failure_names_which_kind_it_is() {
         let unavailable = BuildFailure::Unavailable(Unavailable {
@@ -323,7 +366,12 @@ mod tests {
             diagnostics: vec!["error[E0308]: mismatched types".to_owned()],
         };
         assert!(failed.is_crate_fault());
-        assert!(failed.reason().contains("does not build (1 diagnostics)"));
+        // The reason names the error, and deliberately carries no count: the
+        // list is capped, so any number here saturates and misreports.
+        assert_eq!(
+            failed.reason(),
+            "crate does not build: error[E0308]: mismatched types"
+        );
     }
 
     #[test]
