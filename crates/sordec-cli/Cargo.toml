@@ -11,6 +11,15 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+# A library beside the binary, holding one module: the `sordec-diffexec` ->
+# `sordec-score` behaviour mapping. It is here because this is the only package
+# entitled to depend on both, and it is a *library* because `tests/benchmark.rs`
+# has to call it in-process — a `ScoreReport` cannot be deserialized back out of
+# the CLI's JSON. See `src/lib.rs`.
+[lib]
+name = "sordec_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sordec"
 path = "src/main.rs"
