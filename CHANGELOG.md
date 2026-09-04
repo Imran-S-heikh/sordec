@@ -8,7 +8,7 @@ follow [Semantic Versioning][semver].
 
 ## [Unreleased]
 
-## [0.1.0-alpha.1] — 2026-09-01
+## [0.1.0-alpha.1] — 2026-09-04
 
 First public release. **Alpha**: the pipeline is complete and runs end to end on
 every contract in the reference corpus; the quality of the Rust it emits is not
@@ -47,6 +47,32 @@ yet where it needs to be, and the numbers below say exactly where.
   agreement.
 - **CLI** — `dump-facts`, `dump-ir`, `dump-hir`, `dump-wat`, `dump-rust`,
   `decompile`, `coverage`, `score`.
+- **Corpus accuracy report** (`docs/benchmarks/report.{md,json}`) covering all
+  four categories. Behaviour is reported per fixture with its coverage, and
+  where it cannot be measured the report gives the reason instead of a zero —
+  "does not build" and "does the wrong thing" are different findings. Two
+  aggregates are published: **0.6108** over the three AST categories, the
+  figure comparable with the committed regression bands, and **0.6156**
+  including behaviour where it was measurable.
+- **`tools/setup-toolchains.sh`** provisions both harnesses that shell out to
+  cargo — `cargo-expand` for the macro-expanded scoring basis, and rustc 1.89 +
+  `wasm32v1-none` for differential execution — plus the corpus prefetch that
+  lets both build offline. `--scoring-only` provisions just what the gate
+  needs. Without `cargo-expand`, scoring silently falls back to a different
+  basis and three of seven fixtures breach their bands, so this is a
+  precondition for reproducing any published number.
+
+### Fixed
+
+- A failed reconstruction build reported the *first diagnostic line* as its
+  reason. `rustc` prints every warning before the first error, so this
+  routinely read "crate does not build: warning: unreachable statement" —
+  naming a warning as the cause of a compile failure. Errors now come first.
+  The accompanying count is gone; it counted kept lines against a cap, so it
+  read the same for twelve errors and three hundred.
+- The generated accuracy report embedded absolute paths from the machine that
+  produced it. Paths are now repo-relative, so two people regenerating it get
+  the same bytes.
 
 ### Known limitations
 
@@ -68,7 +94,10 @@ Stated plainly because the alternative is a tool that looks better than it is.
 - **Behaviour coverage is narrow.** Only entrypoints whose parameters are all
   scalars can be driven today, so `Address`-taking entrypoints — most real ones
   — are skipped, and the event, auth and storage channels have not yet been
-  exercised. Where it *can* be measured it scores 1.0000.
+  exercised. It is measurable on 2 of the 7 reference contracts, gated by the
+  same compile rate above, and scores 1.0000 on both: hello-add over 1 of 1
+  entrypoints, attestation over 2 of 6. Read those denominators — a match rate
+  without its coverage is not a result.
 - **Local variable names are not recovered**, because `rustc` deletes them.
   Bindings are emitted with synthesised names.
 
