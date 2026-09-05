@@ -27,7 +27,7 @@ public names at alpha quality is not a decision worth making early.
 cargo install --git https://github.com/Imran-S-heikh/sordec sordec-cli --tag v0.1.0-alpha.1
 ```
 
-Requires Rust **1.87** or newer. To build from a checkout instead, see
+Requires Rust **1.91** or newer. To build from a checkout instead, see
 [Quick start](#quick-start).
 
 ## Where it actually stands

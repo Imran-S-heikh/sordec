@@ -23,12 +23,29 @@ exclude = ["samples"]
 [workspace.package]
 version = "0.1.0-alpha.1"
 edition = "2024"
-# The real floor, not the edition's. Edition 2024 needs 1.85, but the code uses
-# `u64::is_multiple_of` (`passes/src/ledger.rs`), stable since 1.87 — declaring
-# 1.85 made `clippy::incompatible_msrv` fail the gate the first time this field
-# existed, which is precisely what it is for. Raise this when a newer API is
-# adopted; do not lower it without checking clippy still passes.
-rust-version = "1.87"
+# The real floor, and it is set by our dependencies rather than by our code.
+#
+# Three floors stack here, and only the highest is declarable:
+#   1.85  edition 2024
+#   1.87  `u64::is_multiple_of` (`passes/src/ledger.rs`) — our own code's floor.
+#         Declaring 1.85 made `clippy::incompatible_msrv` fail the gate the
+#         first time this field existed, which is precisely what it is for.
+#   1.91  `soroban-spec` / `soroban-meta` 25.3.x, which declare it themselves.
+#
+# So 1.87 was a promise we could not keep: `cargo +1.87 check --workspace`
+# fails during *resolution*, before compiling anything, with "rustc 1.87.0 is
+# not supported by the following packages". The CI `msrv` job is what catches
+# that, and it caught it the first time it ran.
+#
+# Not to be confused with `sordec-diffexec`'s `RECONSTRUCTION_CHANNEL` (1.89),
+# which is the toolchain we *recompile decompiled contracts with*. That one is
+# pinned to match the SDK the corpus was built against and is unrelated to what
+# builds sordec itself.
+#
+# Raise this when a newer API is adopted or a dependency raises its own floor;
+# do not lower it without running `cargo +<version> check --workspace
+# --all-targets`, which is the only check that sees the dependency floor.
+rust-version = "1.91"
 license = "Apache-2.0"
 authors = ["Imran Shaikh"]
 repository = "https://github.com/Imran-S-heikh/sordec"

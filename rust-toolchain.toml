@@ -2,8 +2,8 @@
 #
 # `stable` keeps every contributor and CI on the same *kind* of toolchain
 # without freezing a number that then rots. The floor that actually matters is
-# `rust-version` in Cargo.toml (1.87, set by `u64::is_multiple_of` in
-# `sordec-passes/src/ledger.rs`), and CI checks that separately — so this file
+# `rust-version` in Cargo.toml (1.91, set by `soroban-spec`/`soroban-meta`
+# 25.3.x; our own code only needs 1.87), and CI checks that separately — so this file
 # governs "what we develop on" while the manifest governs "what we support".
 #
 # Both components are load-bearing for `tools/gate.sh`: step 4 is clippy and

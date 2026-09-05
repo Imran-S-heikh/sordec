@@ -104,7 +104,8 @@ Stated plainly because the alternative is a tool that looks better than it is.
 ### Notes
 
 - Not published to crates.io. Install from git; see the README.
-- Minimum supported Rust version: **1.87**.
+- Minimum supported Rust version: **1.91**, set by `soroban-spec` /
+  `soroban-meta` 25.3.x rather than by our own code, whose floor is 1.87.
 
 [Unreleased]: https://github.com/Imran-S-heikh/sordec/compare/v0.1.0-alpha.1...HEAD
 [0.1.0-alpha.1]: https://github.com/Imran-S-heikh/sordec/releases/tag/v0.1.0-alpha.1
