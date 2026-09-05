@@ -174,7 +174,12 @@ fn decode_dispatch_table(
     }
     let table = memory.read(base, count.checked_mul(8)?)?;
     let mut cases = Vec::with_capacity(count as usize);
-    for entry in table.chunks_exact(8) {
+    // `read` returned exactly `count * 8` bytes, so the remainder is empty by
+    // construction and every chunk is a whole `(pos, len)` entry. `as_chunks`
+    // rather than `chunks_exact` because the size is a constant: it yields
+    // `&[u8; 8]`, so the bounds below are checked once at compile time.
+    let (entries, _remainder) = table.as_chunks::<8>();
+    for entry in entries {
         let pos = u32::from_le_bytes(entry[0..4].try_into().ok()?);
         let slen = u32::from_le_bytes(entry[4..8].try_into().ok()?);
         cases.push(valid_symbol_text(memory.read(pos, slen)?)?);
