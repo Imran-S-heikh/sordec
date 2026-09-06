@@ -8,6 +8,26 @@ follow [Semantic Versioning][semver].
 
 ## [Unreleased]
 
+### Changed
+
+- **The CLI package is now `sordec`, not `sordec-cli`.** The binary was always
+  `sordec`; only the package carried the suffix, so `cargo install sordec-cli`
+  was a name nobody would guess. Install with
+  `cargo install --git https://github.com/Imran-S-heikh/sordec sordec`. The
+  `v0.1.0-alpha.1` tag is unchanged and still publishes `sordec-cli` — install
+  that revision with `--tag v0.1.0-alpha.1 sordec-cli`. Done now because
+  nothing is on crates.io yet, where a name is permanent.
+
+### Added
+
+- **`sordec` is usable as a library**, not only as a binary:
+  `sordec::Driver::standard().run(&wasm)` returns the reconstructed Rust and the
+  manifest that builds it, and `sordec::score_paths` grades a reconstruction.
+  Both are re-exports of `sordec-driver` and `sordec-score`, which remain
+  available directly; the facade exists so the entry point is findable without
+  reading the workspace. Re-exporting the scorer adds no dependency edge and
+  does not compromise its independence from the pipeline it grades.
+
 ## [0.1.0-alpha.1] — 2026-09-04
 
 First public release. **Alpha**: the pipeline is complete and runs end to end on

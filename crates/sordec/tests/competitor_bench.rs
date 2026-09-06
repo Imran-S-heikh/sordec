@@ -16,7 +16,7 @@
 //!
 //! ```bash
 //! SORDEC_EXT_DIR=/path/to/theirs \
-//!   cargo test -p sordec-cli --test competitor_bench -- --ignored --nocapture
+//!   cargo test -p sordec --test competitor_bench -- --ignored --nocapture
 //! ```
 //!
 //! **Read the structure column with care.** Structure is a dice similarity over

@@ -164,7 +164,7 @@ bash tools/gate.sh
   samples/contracts/token-v23/source/src samples/contracts/token-v23/source/src
 
 # 7. The corpus report (needs `cargo install cargo-expand` + per-fixture `cargo fetch`)
-cargo test -p sordec-cli --test benchmark -- --ignored --nocapture generate_report
+cargo test -p sordec --test benchmark -- --ignored --nocapture generate_report
 ```
 
 ---

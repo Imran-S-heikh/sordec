@@ -7,7 +7,7 @@
 //! Each recognizer pass declares its counter keys as private `M_*`
 //! `&'static str` consts next to the code that emits them (e.g.
 //! `recognizers::storage::M_TIER_RESOLVED = "storage_tier_resolved"`).
-//! The coverage reporter in `sordec-cli` must read those same counters
+//! The coverage reporter in `sordec` must read those same counters
 //! out of [`PipelineReport::metric_totals`](crate::PipelineReport::metric_totals)
 //! by key — but it lives in a different crate and must **not** re-type
 //! the key strings as literals scattered far from their owners. This

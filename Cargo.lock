@@ -1847,26 +1847,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
-name = "sordec-backend"
-version = "0.1.0-alpha.1"
-dependencies = [
- "prettyplease",
- "proc-macro2",
- "quote",
- "sordec-common",
- "sordec-frontend",
- "sordec-ir",
- "sordec-passes",
- "syn 2.0.117",
- "thiserror 2.0.18",
- "toml",
- "wasmparser 0.240.0",
- "wasmprinter",
- "wat",
-]
-
-[[package]]
-name = "sordec-cli"
+name = "sordec"
 version = "0.1.0-alpha.1"
 dependencies = [
  "assert_cmd",
@@ -1883,6 +1864,25 @@ dependencies = [
  "sordec-passes",
  "sordec-score",
  "waffle",
+]
+
+[[package]]
+name = "sordec-backend"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "sordec-common",
+ "sordec-frontend",
+ "sordec-ir",
+ "sordec-passes",
+ "syn 2.0.117",
+ "thiserror 2.0.18",
+ "toml",
+ "wasmparser 0.240.0",
+ "wasmprinter",
+ "wat",
 ]
 
 [[package]]

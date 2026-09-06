@@ -172,13 +172,13 @@ if ((WANT_BEHAVIOR)); then
     echo "cargo-expand: ok, toolchain: ${CHANNEL}, target: ${TARGET}, prefetched: ${prefetched}, skipped: ${skipped}"
     echo
     echo "Verify with:"
-    echo "  cargo test -p sordec-cli --test benchmark accuracy_regression"
+    echo "  cargo test -p sordec --test benchmark accuracy_regression"
     echo "  cargo test -p sordec-diffexec --test probe -- --ignored --nocapture"
 else
     echo "cargo-expand: ok, prefetched: ${prefetched}, skipped: ${skipped} (scoring only)"
     echo
     echo "Verify with:"
-    echo "  cargo test -p sordec-cli --test benchmark accuracy_regression"
+    echo "  cargo test -p sordec --test benchmark accuracy_regression"
 fi
 
 exit 0

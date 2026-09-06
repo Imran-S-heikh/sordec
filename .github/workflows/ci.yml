@@ -124,7 +124,7 @@ jobs:
 
       - name: Dependent crates have no manifest defects
         run: |
-          for c in sordec-ir sordec-frontend sordec-passes sordec-backend sordec-driver sordec-cli; do
+          for c in sordec-ir sordec-frontend sordec-passes sordec-backend sordec-driver sordec; do
             out=$(cargo publish -p "$c" --dry-run --allow-dirty --no-verify 2>&1 || true)
             if grep -q "version requirement specified" <<<"$out"; then
               echo "::error::$c has a path dependency with no version requirement"

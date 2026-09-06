@@ -1,6 +1,6 @@
 [package]
-name = "sordec-cli"
-description = "Command-line interface for sordec"
+name = "sordec"
+description = "Decompiler for Soroban smart contracts: WASM in, annotated WAT and Rust out"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,13 +11,14 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-# A library beside the binary, holding one module: the `sordec-diffexec` ->
-# `sordec-score` behaviour mapping. It is here because this is the only package
-# entitled to depend on both, and it is a *library* because `tests/benchmark.rs`
-# has to call it in-process — a `ScoreReport` cannot be deserialized back out of
-# the CLI's JSON. See `src/lib.rs`.
+# The package is named for the binary, because `cargo install sordec` is what
+# someone reaching for a decompiler will type. The library beside it is the
+# embedding entry point — `sordec::Driver` — and the home of the one mapping
+# only this package may hold. See `src/lib.rs`.
+#
+# `[lib]` carries no `name`: it defaults to the package, so the crate is
+# `sordec` and callers write `use sordec::Driver`.
 [lib]
-name = "sordec_cli"
 path = "src/lib.rs"
 
 [[bin]]

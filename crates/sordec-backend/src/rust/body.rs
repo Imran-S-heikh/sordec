@@ -1,7 +1,7 @@
 //! Function-body emission: the `Region` tree → a `syn::Block`.
 //!
 //! The compilable counterpart of `pretty_hir`'s `render_region`
-//! (`sordec-cli`): the same recursion over [`Region`], but it builds a
+//! (`sordec`): the same recursion over [`Region`], but it builds a
 //! `syn::Block` of real statements rather than debug text. Two things make
 //! it *compilable* rather than a debug view:
 //!

@@ -46,7 +46,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use sordec_cli::behavior;
+use sordec::behavior;
 use sordec_passes::LoweringStep;
 
 mod coverage;

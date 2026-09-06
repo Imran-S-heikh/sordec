@@ -37,7 +37,7 @@ const FIXTURES: &[&str] = &[
 /// Normalised because these paths reach `docs/benchmarks/report.{md,json}`,
 /// which ships as Deliverable 4.2: a diagnostic quoting a fixture path has to
 /// render the same on every machine, and `CARGO_MANIFEST_DIR/../..` left
-/// unresolved would embed `…/crates/sordec-cli/../../samples/…` verbatim.
+/// unresolved would embed `…/crates/sordec/../../samples/…` verbatim.
 fn repo_root() -> PathBuf {
     let manifest_relative = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     std::fs::canonicalize(&manifest_relative).unwrap_or(manifest_relative)
@@ -113,7 +113,7 @@ fn measure_inner(name: &'static str, want_behavior: bool) -> Result<Measured, St
     // Before the scratch directory goes away, and against the original wasm
     // rather than its source: the deployed contract is the oracle.
     let behavior = if want_behavior {
-        sordec_cli::behavior::measure(&tmp, &wasm_path)
+        sordec::behavior::measure(&tmp, &wasm_path)
     } else {
         BehaviorInput::NotRequested
     };
@@ -146,7 +146,7 @@ fn measure_all() -> Vec<Measured> {
 /// follow: a run that measured something other than what it says it measured
 /// has to fail loudly.
 fn measure_all_with_behavior() -> Vec<Measured> {
-    if let Err(reason) = sordec_cli::behavior::toolchain_ready() {
+    if let Err(reason) = sordec::behavior::toolchain_ready() {
         panic!(
             "the benchmark report includes the behavior category and this machine \
              cannot measure it: {reason}\n\nProvision it with `tools/setup-toolchains.sh`, \
@@ -440,7 +440,7 @@ fn structure_degrades_gracefully_without_the_abi() {
 
 /// Regenerate `docs/benchmarks/report.{md,json}`. `#[ignore]`d so the fast
 /// suite stays filesystem-light; run explicitly to refresh the deliverable:
-///   SORDEC_BENCH_WRITE=1 cargo test -p sordec-cli --test benchmark -- --ignored --nocapture
+///   SORDEC_BENCH_WRITE=1 cargo test -p sordec --test benchmark -- --ignored --nocapture
 #[test]
 #[ignore = "regenerates docs/benchmarks/report.{md,json}; run explicitly"]
 #[allow(clippy::print_stdout)]
@@ -531,7 +531,7 @@ fn render_markdown(measured: &[Measured], agg: &Aggregates) -> String {
         "Scorer `{}`, threshold 0.90. Reconstruction (`sordec decompile`) scored \
          directory-vs-directory against each fixture's vendored source. \
          Compilation is a gate and is not evaluated here. Regenerate with \
-         `SORDEC_BENCH_WRITE=1 cargo test -p sordec-cli --test benchmark -- --ignored`.\n\n",
+         `SORDEC_BENCH_WRITE=1 cargo test -p sordec --test benchmark -- --ignored`.\n\n",
         sordec_score::SCORER_VERSION
     ));
     s.push_str(&format!(

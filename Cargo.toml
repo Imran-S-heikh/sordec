@@ -10,7 +10,7 @@ members = [
     "crates/sordec-driver",
     "crates/sordec-score",
     "crates/sordec-diffexec",
-    "crates/sordec-cli",
+    "crates/sordec",
 ]
 # Vendored fixture sources under `samples/contracts/<name>/source/` are
 # self-contained crates pinned to specific soroban-sdk + rustc versions for
@@ -96,7 +96,7 @@ toml          = "0.8"
 clap          = { version = "4.5", features = ["derive"] }
 
 # CLI integration testing — used only as a dev-dependency from
-# `crates/sordec-cli/tests/`. Pulled into the workspace so the version
+# `crates/sordec/tests/`. Pulled into the workspace so the version
 # pin lives in one place.
 assert_cmd    = "2.0"
 predicates    = "3.1"

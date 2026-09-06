@@ -115,7 +115,7 @@ fn score_flattens_and_passes_a_multi_file_source_directory() {
 #[ignore = "shells out to cargo check against soroban-sdk (slow)"]
 fn score_check_compile_passes_the_gate_on_a_valid_contract() {
     // A minimal soroban-sdk-only contract compiled against the cached SDK.
-    // Run with: cargo test -p sordec-cli --test score -- --ignored
+    // Run with: cargo test -p sordec --test score -- --ignored
     let dir = std::env::temp_dir().join(format!("sordec_score_compile_e2e_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let src = dir.join("lib.rs");
@@ -162,7 +162,7 @@ impl C {
 /// dragging the mean down slightly, which is exactly the behaviour the gate
 /// replaces.
 ///
-/// Run with: cargo test -p sordec-cli --test score -- --ignored
+/// Run with: cargo test -p sordec --test score -- --ignored
 #[test]
 #[ignore = "shells out to cargo check against soroban-sdk (slow)"]
 fn a_failed_gate_vetoes_a_perfect_score() {
@@ -409,7 +409,7 @@ fn a_behavior_rate_never_renders_without_its_coverage() {
 /// `#[ignore]`d: it decompiles, recompiles to wasm, and executes both
 /// modules. Run with:
 ///
-///   cargo test -p sordec-cli --test score -- --ignored --nocapture behavior_on_the_reconstruction
+///   cargo test -p sordec --test score -- --ignored --nocapture behavior_on_the_reconstruction
 #[test]
 #[ignore = "decompiles, recompiles to wasm and runs both modules (slow, toolchain-dependent)"]
 fn behavior_on_the_reconstruction_of_hello_add_matches_the_original() {

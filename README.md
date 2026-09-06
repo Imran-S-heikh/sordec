@@ -24,11 +24,30 @@ Not on crates.io yet — the crate boundaries are still moving, and claiming ten
 public names at alpha quality is not a decision worth making early.
 
 ```bash
-cargo install --git https://github.com/Imran-S-heikh/sordec sordec-cli --tag v0.1.0-alpha.1
+cargo install --git https://github.com/Imran-S-heikh/sordec sordec
 ```
 
 Requires Rust **1.91** or newer. To build from a checkout instead, see
 [Quick start](#quick-start).
+
+> The package was called `sordec-cli` up to and including the
+> `v0.1.0-alpha.1` tag; install that revision with
+> `--tag v0.1.0-alpha.1 sordec-cli`.
+
+### As a library
+
+The same pipeline the binary runs, in one call:
+
+```rust
+let wasm = std::fs::read("contract.wasm")?;
+let output = sordec::Driver::standard().run(&wasm)?;
+println!("{}", output.rust);       // reconstructed Rust
+println!("{}", output.cargo_toml); // the manifest that builds it
+```
+
+`sordec::score_paths` grades a reconstruction against the original source.
+Individual stages are available as their own crates if you need one in
+isolation — see [Workspace layout](#workspace-layout).
 
 ## Where it actually stands
 
@@ -232,9 +251,11 @@ crates/
 ├── sordec-frontend/  — WASM parsing + Soroban metadata (contractspecv0 etc.)
 ├── sordec-passes/    — Lifter + analysis passes + Soroban host-call catalog
 ├── sordec-backend/   — Annotated-WAT emitter + Rust source emitter
+├── sordec-sigs/      — Masked-fingerprint catalogue for inlined SDK functions
 ├── sordec-driver/    — Pipeline orchestration + corpus integration tests
 ├── sordec-score/     — Source-to-source accuracy scorer (`sordec score`)
-└── sordec-cli/       — `sordec` binary (dump-facts, dump-ir, dump-hir, dump-wat, decompile, coverage, score)
+├── sordec-diffexec/  — Differential execution of both wasms in a Soroban host
+└── sordec/           — `sordec` binary + the `sordec::Driver` facade the other nine sit behind
 ```
 
 Per-crate rustdoc:

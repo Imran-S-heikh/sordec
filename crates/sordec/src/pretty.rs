@@ -21,7 +21,7 @@
 //! snapshot-test it. Phase 2 polish replaces the fallback with a real
 //! Display catalog of common opcodes.
 //!
-//! # Why this lives in `sordec-cli`
+//! # Why this lives in `sordec`
 //!
 //! Only the CLI consumes it today, and the format will evolve as
 //! semantic recovery layers in (sub-task #3 changes value rendering to

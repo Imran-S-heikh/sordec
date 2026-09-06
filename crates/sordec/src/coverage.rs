@@ -38,7 +38,7 @@
 //!   *append-only* across releases: future Phase 4 dashboards may add
 //!   fields, but no field already in the schema is removed or renamed.
 //!
-//! ## Why this lives in `sordec-cli`, not in `sordec-passes`
+//! ## Why this lives in `sordec`, not in `sordec-passes`
 //!
 //! Coverage is a read-only inspection, not a transformation. There is no
 //! `Pass<LiftedIr>` here, no IR mutation. The CLI is the only consumer
