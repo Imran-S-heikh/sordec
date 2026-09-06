@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # `rust-toolchain.toml` pins the channel; this action honours it, so the
       # version here is deliberately unstated rather than duplicated.
@@ -73,7 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The declared MSRV is a promise to anyone building this. Reading it from
       # the manifest rather than hard-coding it here means the promise cannot
@@ -100,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -132,3 +132,15 @@ jobs:
             fi
             echo "$c: ok"
           done
+
+      # `cargo publish --dry-run` builds each crate under `target/package/`, and
+      # the verification build creates and removes scratch directories inside it
+      # (`tests/trybuild`, `tests/target`). `Swatinem/rust-cache`'s post step then
+      # walks `target/` and reports every path that vanished underneath it as
+      # `ENOENT: … opendir`. Nine such annotations on a green job, all of them
+      # noise — but noise on a public release page invites questions that have no
+      # answer. The tree is disposable once the checks above have passed, so it
+      # goes before anything walks it.
+      - name: Discard the dry-run package tree
+        if: always()
+        run: rm -rf target/package
