@@ -9,7 +9,9 @@
 //! 3. [`HighIr`] — structured control flow (if/loop/match), recovered
 //!    semantic operations, refined types. Input to `sordec-backend`.
 //!
-//! See `docs/architecture.md` for the design rationale.
+//! See [the architecture document] for the design rationale.
+//!
+//! [the architecture document]: https://github.com/Imran-S-heikh/sordec/blob/main/docs/architecture.md
 //!
 //! ## Feature flags
 //!

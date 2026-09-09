@@ -8,6 +8,19 @@ follow [Semantic Versioning][semver].
 
 ## [Unreleased]
 
+### Added
+
+- **`docs/` is now published**, and holds the documents the code has been
+  citing all along: [`architecture.md`](docs/architecture.md) (the IR type
+  system, pass infrastructure and pipeline design) and
+  [`scoring_metric.md`](docs/scoring_metric.md) (the metric definition, in
+  full), alongside the generated corpus report. Eleven rustdoc comments cited
+  these files while the directory was gitignored, so every one of those
+  pointers was dead. They now resolve — as absolute links, so they work from
+  `docs.rs` too, where a package contains only its own crate directory.
+- **All ten crates ship the Apache-2.0 licence text.** Each declared
+  `license = "Apache-2.0"` and packaged no `LICENSE` file.
+
 ### Changed
 
 - **The CLI package is now `sordec`, not `sordec-cli`.** The binary was always
@@ -57,9 +70,9 @@ yet where it needs to be, and the numbers below say exactly where.
   comparator reporting four independent categories (interface / structure /
   semantic / behavior) against a documented, versioned metric. It never
   inspects the WASM or the decompiler's internals, so it cannot flatter the
-  pipeline it grades. The metric is versioned and its full definition —
-  categories, weights, source basis, and stated limits — travels with the
-  scorer; every report stamps the triple that reproduces it.
+  pipeline it grades. The metric is versioned and every report stamps the
+  triple that reproduces it; the full definition — categories, weights, source
+  basis, and stated limits — is [`docs/scoring_metric.md`](docs/scoring_metric.md).
 - **Differential-execution harness** (`sordec-diffexec`) — registers the
   original wasm and a recompiled reconstruction in an in-process Soroban host,
   drives both identically, and compares return values, event streams, auth

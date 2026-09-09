@@ -11,7 +11,9 @@
 //! manifest, not declared on the trait. This is the same pattern
 //! `rustc_mir_transform`, Cranelift, Ghidra, and angr converged on
 //! after experience with string-keyed dependency graphs (see
-//! `docs/architecture.md` §11 for the rejected alternatives).
+//! [architecture §11] for the rejected alternatives).
+//!
+//! [architecture §11]: https://github.com/Imran-S-heikh/sordec/blob/main/docs/architecture.md#11-what-we-explicitly-rejected
 
 use std::collections::HashMap;
 

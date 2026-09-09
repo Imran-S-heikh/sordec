@@ -3,7 +3,7 @@
 //! Every IR binding carries a `Vec<Provenance>` recording which pass set
 //! or refined it, what kind of evidence it used, and a free-form note for
 //! human readers. This is the *only* mechanism by which we explain "why
-//! did the decompiler emit this?" — see `docs/architecture.md` §4.
+//! did the decompiler emit this?" — see [architecture §4].
 //!
 //! ## Why a vector, not a single value
 //!
@@ -21,7 +21,10 @@
 //! Production decompilers (Ghidra, Hex-Rays, Binary Ninja) all reject
 //! numeric confidence in favour of categorical provenance. "Came from
 //! `contractspecv0`" is actionable; "0.73 confidence" is not. See
-//! `docs/architecture.md` §11 for the rejected alternatives.
+//! [architecture §11] for the rejected alternatives.
+//!
+//! [architecture §4]: https://github.com/Imran-S-heikh/sordec/blob/main/docs/architecture.md#4-provenance-append-only-audit-trail
+//! [architecture §11]: https://github.com/Imran-S-heikh/sordec/blob/main/docs/architecture.md#11-what-we-explicitly-rejected
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};

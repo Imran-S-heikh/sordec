@@ -7,17 +7,29 @@ Cargo.lock.bak
 # Legacy (old AI-generated code kept as reference only)
 /_legacy/
 
-# Internal planning — working notes, closeouts, unreleased design docs.
+# Internal planning — working notes, closeouts, unreleased design docs, and
+# anything held back from `docs/` for being stale. The private half of the pair
+# below.
 /plan/
 
-# Internal docs — Imran's working area. NOT published.
+# `docs/` is NOT ignored, and that is deliberate — read this before "fixing" it.
 #
-# Reversed 2026-09-03: these were briefly tracked so that
-# `docs/scoring_metric.md` (Tranche 3 Deliverable 4) would exist in a remote.
-# Wrong mechanism — it published the whole folder, working notes and stale
-# drafts included. Anything the public repo genuinely needs gets **migrated**
-# to a tracked path deliberately, not exposed by un-ignoring this directory.
-/docs/
+# `c67aef5` un-ignored `docs/` and `413d22b` reverted it, for a reason that was
+# right: it published the entire working directory, stale drafts included, and
+# two files had to be excluded by hand. That commit set the condition for doing
+# it properly — anything the public repo needs gets *migrated* deliberately and
+# "curated at that point."
+#
+# 2026-09-09 is that migration. The uncurated files moved to `plan/` first (the
+# April PDF, and `gap_analysis.md`, which claimed score-2.0.0 M5–M7 were unbuilt
+# after all of M1–M7 had landed). What remains is published documentation:
+# `architecture.md` and `scoring_metric.md` — the latter being Tranche 3
+# Deliverable 4 — plus the generated corpus report the README and PHASE_4 cite.
+#
+# So the invariant is one rule per directory, which is why there is no entry
+# here: `docs/` is published and curated, `plan/` is the working area. A file
+# that is not ready to be read by a stranger belongs in `plan/`, not behind a
+# new ignore rule.
 
 # Personal sandbox — kept locally for reference but not pushed.
 # Test-relevant fixtures live in `samples/contracts/` instead.

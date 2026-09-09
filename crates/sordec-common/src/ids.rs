@@ -2,7 +2,7 @@
 //!
 //! All references between IR objects use [`u32`]-backed newtype identifiers
 //! rather than strings or pointers. This is a non-negotiable architectural
-//! commitment (see `docs/architecture.md` §1):
+//! commitment (see [architecture §1]):
 //!
 //! - **Compile-time type safety.** The compiler refuses to mix a [`FuncId`]
 //!   with a [`BlockId`]; one whole class of bug becomes unrepresentable.
@@ -37,6 +37,8 @@
 //! Identifiers deliberately do **not** derive [`Default`]: a default `0` value
 //! would silently masquerade as "no function" or "no block," which is exactly
 //! the failure mode we want to forbid. Use [`Option<FuncId>`] for absence.
+//!
+//! [architecture §1]: https://github.com/Imran-S-heikh/sordec/blob/main/docs/architecture.md#1-stable-identifiers
 
 use core::fmt;
 
@@ -133,7 +135,9 @@ define_id! {
     ///
     /// In SSA form, the result of an instruction *is* its identifier; we
     /// deliberately do not have a separate `InstructionId` (see
-    /// `docs/architecture.md` §11).
+    /// [architecture §11]).
+    ///
+    /// [architecture §11]: https://github.com/Imran-S-heikh/sordec/blob/main/docs/architecture.md#11-what-we-explicitly-rejected
     ///
     /// **Per-function scope** — see [`BlockId`].
     ValueId, "v"

@@ -4,7 +4,9 @@
 //! Certainty is encoded structurally in the variants
 //! ([`Known`](IrType::Known) / [`Inferred`](IrType::Inferred) /
 //! [`Unknown`](IrType::Unknown)), not as a separate field. See
-//! `docs/architecture.md` §1.
+//! [architecture §1].
+//!
+//! [architecture §1]: https://github.com/Imran-S-heikh/sordec/blob/main/docs/architecture.md#1-stable-identifiers
 
 use sordec_common::{TypeId, UnknownReason};
 

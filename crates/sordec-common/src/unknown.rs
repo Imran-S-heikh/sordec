@@ -2,7 +2,7 @@
 //!
 //! Every `Unknown` variant in the IR carries an [`UnknownReason`]. This is
 //! the architectural commitment that no information is silently lost or
-//! defaulted — see `docs/architecture.md` §3 and §11.
+//! defaulted — see [architecture §3] and [architecture §11].
 //!
 //! ## How to construct
 //!
@@ -22,6 +22,9 @@
 //! // pass call site, not behind an indirection.
 //! # let _ = reason;
 //! ```
+//!
+//! [architecture §3]: https://github.com/Imran-S-heikh/sordec/blob/main/docs/architecture.md#3-unknownreason-forces-explicit-failure-modes
+//! [architecture §11]: https://github.com/Imran-S-heikh/sordec/blob/main/docs/architecture.md#11-what-we-explicitly-rejected
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};

@@ -53,9 +53,9 @@ isolation — see [Workspace layout](#workspace-layout).
 
 A decompiler that overstates itself is worse than useless: you cannot audit a
 contract against a reconstruction you can't calibrate. So, measured on the
-seven-contract reference corpus, scored by our own versioned metric
-(`score-2.0.0` — four independent categories, fixed weights, stamped into every
-report):
+seven-contract reference corpus, scored by [our own published
+metric](docs/scoring_metric.md) (`score-2.0.0` — four independent categories,
+fixed weights, stamped into every report):
 
 | Category | Score | |
 |---|---|---|

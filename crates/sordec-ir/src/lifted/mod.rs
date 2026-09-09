@@ -86,8 +86,10 @@ impl LiftedIr {
 ///
 /// All [`BlockId`] and [`ValueId`] values appearing inside `blocks` and
 /// `values` are scoped to *this* `LiftedFunction`; they are not portable
-/// to another function. See `docs/architecture.md` §1 on identifier
+/// to another function. See [architecture §1] on identifier
 /// scoping.
+///
+/// [architecture §1]: https://github.com/Imran-S-heikh/sordec/blob/main/docs/architecture.md#1-stable-identifiers
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct LiftedFunction {
