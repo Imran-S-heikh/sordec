@@ -284,9 +284,24 @@ fn empty_input_is_typed_error_not_silent_success() {
 }
 
 #[test]
-fn garbage_bytes_surface_invalid_wasm() {
+fn garbage_bytes_are_reported_as_not_wasm() {
     let garbage: &[u8] = b"this is definitely not WASM";
     let err = parse(garbage).unwrap_err();
+    assert!(
+        matches!(err, FrontendError::NotWasm { .. }),
+        "expected NotWasm; got {err:?}"
+    );
+}
+
+/// `InvalidWasm` keeps the case it is for: the magic number is right, so this
+/// *is* a WASM module, and it is malformed. Distinguishing the two is the
+/// point — "you passed the wrong file" and "this module is corrupt" send a
+/// user to different places.
+#[test]
+fn a_real_header_with_a_broken_body_surfaces_invalid_wasm() {
+    // `\0asm` + version 1, then a section id no WASM version defines.
+    let malformed: &[u8] = b"\0asm\x01\0\0\0\xff\x01\x00";
+    let err = parse(malformed).unwrap_err();
     assert!(
         matches!(err, FrontendError::InvalidWasm(_)),
         "expected InvalidWasm; got {err:?}"

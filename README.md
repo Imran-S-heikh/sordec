@@ -90,14 +90,18 @@ Eight CLI subcommands. The inspection commands are read-only (stdout only);
 `decompile` writes a crate under `--out-dir`, and `score` compares two Rust
 sources.
 
+Any subcommand taking a module accepts `-` for stdin, so sordec composes in a
+pipeline. `--quiet` silences the pipeline's warnings without hiding errors, and
+`sordec completions <shell>` prints a completion script.
+
 | Subcommand | Output | Use case |
 |---|---|---|
 | `sordec dump-facts <wasm>`  | JSON | What we extracted: imports, exports, decoded Soroban metadata, contract spec, custom sections |
-| `sordec dump-ir <wasm>`     | Text | Waffle-style CFG/SSA IR with **named host calls** (e.g. `host:l:put_contract_data`) |
-| `sordec dump-hir <wasm>`    | Text | Structured HighIR: recovered control flow (`if`/`while`/`match`, named match arms, typed panics) plus the Phase-2 semantic operations |
+| `sordec dump-ir <wasm>`     | Text or `--json` | Waffle-style CFG/SSA IR with **named host calls** (e.g. `host:l:put_contract_data`) |
+| `sordec dump-hir <wasm>`    | Text or `--json` | Structured HighIR: recovered control flow (`if`/`while`/`match`, named match arms, typed panics) plus the Phase-2 semantic operations |
 | `sordec dump-wat <wasm>`    | Text | Soroban-**annotated WAT**: flat disassembly with a per-function header block listing the recovered operations (storage tier/key, auth, client calls, typed panics) and each host `call` labeled inline with its friendly name |
 | `sordec dump-rust <wasm>`   | Text | Reconstructed Rust (`src/lib.rs`) on stdout — the debug view of the emitter. `decompile` is what writes it to disk |
-| `sordec decompile <wasm> --out-dir <dir>` | Files | Run the full pipeline and write a buildable crate: `<dir>/<name>/{Cargo.toml, src/lib.rs}` alongside `<name>.wat`. The path is echoed on stdout; pipeline diagnostics go to stderr |
+| `sordec decompile <wasm> --out-dir <dir>` | Files | Run the full pipeline and write a buildable crate: `<dir>/<name>/{Cargo.toml, src/lib.rs}` alongside `<name>.wat`. Refuses to overwrite existing artifacts without `--force`, because the emitted crate is meant to be edited. The path is echoed on stdout; pipeline diagnostics go to stderr |
 | `sordec coverage <wasm>`    | Text or `--json` | How much of the contract our pipeline understands: control-flow **structuring** coverage (functions structured, loop shapes, labeled-exit tax), per-pattern recognition (storage tiers, enum keys, TTL, client calls, …), a two-number semantic-recovery headline, host-call recognition %, and recogniser-miss diagnostics |
 | `sordec score <reconstructed> <original>` | Text or `--json` | Accuracy of a reconstructed Rust source (file or directory) against the original: four independently-reported categories (interface / structure / semantic / behavior), an overall weighted score, and a pass/fail verdict. `--check-compile` evaluates the compilation *gate* — a real `cargo check`, reported separately: it earns no share of the score but a reconstruction that does not build fails regardless. `--behavior <ORIGINAL_WASM>` measures the behavior category by differential execution against the deployed contract's own wasm; it reports a match rate that always travels with its coverage fraction. Entrypoints whose parameters are not all scalars cannot be driven yet; those are reported as skipped, with the reason, rather than silently dropped from the denominator. The measuring instrument for the Rust emitter |
 

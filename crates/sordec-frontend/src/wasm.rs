@@ -18,6 +18,27 @@ use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
 
 use crate::error::{FrontendError, FrontendResult};
 
+/// The four bytes every WASM module starts with: `\0asm`.
+const WASM_MAGIC: &[u8] = b"\0asm";
+
+/// Render the first four bytes for a "this is not WASM" message.
+///
+/// Printable ASCII comes out as a quoted string, because the mistake is
+/// usually recognisable at a glance — `"#!/u"` is a script, `"<htm"` is an
+/// error page, `"\x7fELF"` is a native binary. Anything else falls back to hex.
+fn describe_leading_bytes(wasm: &[u8]) -> String {
+    let head = &wasm[..wasm.len().min(WASM_MAGIC.len())];
+    if head.len() < WASM_MAGIC.len() {
+        return format!("only {} byte(s)", head.len());
+    }
+    if head.iter().all(|b| b.is_ascii_graphic() || *b == b' ') {
+        format!("{:?}", String::from_utf8_lossy(head))
+    } else {
+        let hex: Vec<String> = head.iter().map(|b| format!("{b:#04x}")).collect();
+        format!("[{}]", hex.join(" "))
+    }
+}
+
 /// Walk the WASM module and extract the raw fields of [`WasmFacts`].
 ///
 /// On success, `metadata` is `None`. The metadata decoder fills it in
@@ -25,6 +46,11 @@ use crate::error::{FrontendError, FrontendResult};
 pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
     if wasm.is_empty() {
         return Err(FrontendError::Empty);
+    }
+    if !wasm.starts_with(WASM_MAGIC) {
+        return Err(FrontendError::NotWasm {
+            found: describe_leading_bytes(wasm),
+        });
     }
 
     let mut imports = Vec::<Import>::new();
@@ -180,6 +206,53 @@ fn export_kind_from_external_kind(kind: ExternalKind) -> ExportKind {
         ExternalKind::Memory => ExportKind::Memory,
         ExternalKind::Global => ExportKind::Global,
         ExternalKind::Tag => ExportKind::Tag,
+    }
+}
+
+#[cfg(test)]
+mod magic_tests {
+    use super::*;
+
+    /// The wrong file is the commonest mistake, and the message has to be
+    /// readable. `wasmparser` reports this by pretty-printing two byte arrays
+    /// across ten lines; we say it in one, and name what we found so the user
+    /// recognises their own mistake.
+    #[test]
+    fn a_non_wasm_input_is_named_as_such_in_one_line() {
+        let err = parse_module(b"not wasm at all").expect_err("must reject");
+        let msg = err.to_string();
+
+        assert!(matches!(err, FrontendError::NotWasm { .. }), "{err:?}");
+        assert_eq!(msg.lines().count(), 1, "must stay one line: {msg}");
+        assert!(msg.contains("not a WASM file"), "{msg}");
+        assert!(msg.contains(r#""not ""#), "should quote what it found: {msg}");
+    }
+
+    /// Non-printable leading bytes fall back to hex rather than mojibake.
+    #[test]
+    fn unprintable_leading_bytes_render_as_hex() {
+        let err = parse_module(&[0x7f, 0x45, 0x4c, 0x00]).expect_err("must reject");
+        let msg = err.to_string();
+        assert!(msg.contains("0x7f"), "{msg}");
+        assert_eq!(msg.lines().count(), 1, "{msg}");
+    }
+
+    /// Shorter than the magic number is its own case: there is nothing to
+    /// compare, and "found 2 bytes" is more use than a truncated quote.
+    #[test]
+    fn a_truncated_input_says_how_short_it_was() {
+        let err = parse_module(b"\0a").expect_err("must reject");
+        assert!(err.to_string().contains("only 2 byte(s)"), "{err}");
+    }
+
+    /// The guard must not reject real modules — the magic number is the only
+    /// thing it looks at, and the corpus starts with it.
+    #[test]
+    fn a_real_module_passes_the_guard() {
+        let wasm = std::fs::read("../../samples/contracts/hello-add/hello-add.wasm")
+            .expect("fixture present");
+        assert!(wasm.starts_with(WASM_MAGIC));
+        parse_module(&wasm).expect("the guard must not reject a real module");
     }
 }
 

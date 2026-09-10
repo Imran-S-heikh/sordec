@@ -15,8 +15,8 @@
 //!   reconstructed Rust (`src/lib.rs`) on stdout. Debug view of the Rust
 //!   emitter; `decompile` writes it to disk.
 //! - `sordec decompile <wasm> --out-dir <dir>` — run the full pipeline
-//!   via the [`sordec_driver::Driver`] and write `<dir>/<name>/<name>.wat`
-//!   (compilable Rust joins it in Phase 4).
+//!   via the [`sordec_driver::Driver`] and write a buildable crate
+//!   (`Cargo.toml`, `src/lib.rs`) beside `<name>.wat`.
 //! - `sordec coverage <wasm>` — parse + lift, then emit a coverage
 //!   report (host-call recognition %, lift completeness, parse +
 //!   metadata health) as text or `--json`.
@@ -28,10 +28,26 @@
 //!
 //! Output convention (Unix-standard):
 //!
-//! - **stdout**: primary output (JSON for `dump-facts`, text for
-//!   `dump-ir`). Pipe-friendly.
+//! - **stdout**: primary output. Pipe-friendly.
 //! - **stderr**: non-fatal diagnostics from the pipeline, plus error
-//!   messages on failure.
+//!   messages on failure. Silence the diagnostics with `--quiet`; errors
+//!   always print.
+//!
+//! Any subcommand taking a module accepts `-` in place of a path and reads
+//! stdin, so the tool composes in a pipeline.
+//!
+//! # Which subcommands emit JSON, and why not all of them
+//!
+//! The rule is what the subcommand *has*, not a preference:
+//!
+//! - `dump-facts` is JSON only. The facts are structured data; a text
+//!   rendering would be a worse view of the same thing.
+//! - `dump-ir`, `dump-hir`, `coverage` and `score` are text by default with
+//!   `--json` opt-in. Each has a reading view worth defaulting to and an
+//!   underlying structure worth serialising.
+//! - `dump-wat` and `dump-rust` have no `--json`. They emit WAT and Rust —
+//!   source text, where the only JSON form is a one-field envelope around a
+//!   string, which tells a consumer nothing the text did not.
 //!
 //! Exit codes:
 //!
@@ -41,8 +57,8 @@
 //! - **2** — usage error (clap's default for argv-parse failure)
 //! - **3** — I/O error (couldn't read input file)
 
-use std::io::{self, Write};
-use std::path::PathBuf;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -71,6 +87,13 @@ const EXIT_IO_ERR: u8 = 3;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Suppress non-fatal diagnostics on stderr.
+    ///
+    /// Errors still print and the exit code is unchanged — this silences the
+    /// pipeline's warnings, not its failures. Accepted after any subcommand.
+    #[arg(long, short = 'q', global = true)]
+    quiet: bool,
 }
 
 #[derive(Subcommand)]
@@ -86,8 +109,8 @@ enum Command {
     /// Run the full pipeline and emit reconstructed Rust (`src/lib.rs`) on
     /// stdout. Debug view of the emitter; `decompile` writes it to disk.
     DumpRust(DumpRustArgs),
-    /// Decompile a WASM module, writing artifacts under `--out-dir`
-    /// (annotated WAT now; compilable Rust in Phase 4).
+    /// Decompile a WASM module, writing a buildable crate and the
+    /// annotated WAT under `--out-dir`.
     Decompile(DecompileArgs),
     /// Report how much of a contract this pipeline currently understands:
     /// per-pattern recognition (storage tiers, enum keys, TTL, client
@@ -100,17 +123,33 @@ enum Command {
     /// categories (interface / structure / semantic / behavior), plus a
     /// pass/fail compilation gate.
     Score(ScoreArgs),
+    /// Print a shell completion script on stdout.
+    ///
+    /// Eight subcommands and six flags on `score` make this worth wiring up:
+    ///
+    ///   sordec completions zsh  > ~/.zfunc/_sordec
+    ///   sordec completions bash > /etc/bash_completion.d/sordec
+    Completions(CompletionsArgs),
+    /// Print a roff man page on stdout, for a packager to install.
+    #[command(hide = true)]
+    Man,
+}
+
+#[derive(clap::Args)]
+struct CompletionsArgs {
+    /// Shell to generate for.
+    shell: clap_complete::Shell,
 }
 
 #[derive(clap::Args)]
 struct DumpFactsArgs {
-    /// Path to the WASM module to inspect.
+    /// Path to the WASM module to inspect, or `-` for stdin.
     wasm: PathBuf,
 }
 
 #[derive(clap::Args)]
 struct DumpIrArgs {
-    /// Path to the WASM module to inspect.
+    /// Path to the WASM module to inspect, or `-` for stdin.
     wasm: PathBuf,
 
     /// Prepend a module-info header (imports/exports counts, metadata
@@ -124,11 +163,20 @@ struct DumpIrArgs {
     /// lift and the de-cluttering passes themselves.
     #[arg(long)]
     raw: bool,
+
+    /// Emit the IR as JSON instead of the text rendering.
+    ///
+    /// The text form is shaped for reading; this is the same IR shaped for a
+    /// program. `--with-header` and `--raw`'s presentation choices do not
+    /// apply, since JSON has no presentation — though `--raw` still selects
+    /// *which* IR is emitted, pristine or de-cluttered.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
 struct DumpHirArgs {
-    /// Path to the WASM module to inspect.
+    /// Path to the WASM module to inspect, or `-` for stdin.
     wasm: PathBuf,
 
     /// Skip every pipeline — de-cluttering AND pattern recovery — and
@@ -137,35 +185,54 @@ struct DumpHirArgs {
     /// Useful for debugging the lowering itself.
     #[arg(long)]
     raw: bool,
+
+    /// Emit the IR as JSON instead of the text rendering.
+    ///
+    /// The text form is shaped for reading; this is the same IR shaped for a
+    /// program. Ignores `--raw`'s presentation choices, since JSON has no
+    /// presentation.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
 struct DumpWatArgs {
-    /// Path to the WASM module to decompile.
+    /// Path to the WASM module to decompile, or `-` for stdin.
     wasm: PathBuf,
 }
 
 #[derive(clap::Args)]
 struct DumpRustArgs {
-    /// Path to the WASM module to decompile.
+    /// Path to the WASM module to decompile, or `-` for stdin.
     wasm: PathBuf,
 }
 
 #[derive(clap::Args)]
 struct DecompileArgs {
-    /// Path to the WASM module to decompile.
+    /// Path to the WASM module to decompile, or `-` for stdin.
+    ///
+    /// The output directory is named after the input's file stem. A pipe
+    /// carries no filename, so `-` writes to `<out-dir>/contract/`.
     wasm: PathBuf,
 
     /// Directory to write decompilation artifacts into. A per-contract
-    /// subdirectory `<name>/` is created inside it holding `<name>.wat`
-    /// (and, in Phase 4, `<name>.rs`).
+    /// subdirectory `<name>/` is created inside it holding `<name>.wat`,
+    /// `Cargo.toml` and `src/lib.rs` — a crate you can `cargo build`.
     #[arg(long)]
     out_dir: PathBuf,
+
+    /// Overwrite existing artifacts.
+    ///
+    /// Without this, `decompile` refuses to write over any of the three files
+    /// it produces. The emitted crate is meant to be edited, and silently
+    /// replacing an edited `src/lib.rs` loses work.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(clap::Args)]
 struct CoverageArgs {
-    /// Path to the WASM module to inspect.
+    /// Path to the WASM module to inspect, or `-` for stdin.
     wasm: PathBuf,
 
     /// Emit machine-readable JSON instead of the human-readable text
@@ -271,6 +338,7 @@ impl From<BasisArg> for sordec_score::BasisProfile {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    diagnostics::set_quiet(cli.quiet);
     let exit = match cli.command {
         Command::DumpFacts(args) => run_dump_facts(&args),
         Command::DumpIr(args) => run_dump_ir(&args),
@@ -280,8 +348,73 @@ fn main() -> ExitCode {
         Command::Decompile(args) => run_decompile(&args),
         Command::Coverage(args) => run_coverage(&args),
         Command::Score(args) => run_score(&args),
+        Command::Completions(args) => run_completions(args.shell),
+        Command::Man => run_man(),
     };
     ExitCode::from(exit)
+}
+
+// ---------------------------------------------------------------------
+// Shared input handling
+// ---------------------------------------------------------------------
+
+/// The conventional stand-in for standard input.
+const STDIN_ARG: &str = "-";
+
+/// Read a WASM input: a filesystem path, or `-` for standard input.
+///
+/// Every subcommand that takes a module reads it through here, so the error
+/// wording and the exit code are decided once. `Err` carries the exit code to
+/// return, which is always [`EXIT_IO_ERR`] — a path we cannot read is an
+/// environment problem, not a pipeline failure, and conflating the two would
+/// make a typo look like a decompiler bug.
+fn read_wasm(path: &Path) -> Result<Vec<u8>, u8> {
+    if path.as_os_str() == STDIN_ARG {
+        let mut bytes = Vec::new();
+        return match std::io::stdin().lock().read_to_end(&mut bytes) {
+            Ok(_) => Ok(bytes),
+            Err(e) => {
+                let _ = writeln!(std::io::stderr(), "sordec: could not read stdin: {e}");
+                Err(EXIT_IO_ERR)
+            }
+        };
+    }
+    std::fs::read(path).map_err(|e| {
+        let _ = writeln!(
+            std::io::stderr(),
+            "sordec: could not read {}: {e}",
+            path.display()
+        );
+        EXIT_IO_ERR
+    })
+}
+
+// ---------------------------------------------------------------------
+// Generated shell integration
+// ---------------------------------------------------------------------
+
+/// Write a completion script for `shell` to stdout.
+///
+/// Generated from the `Parser` derive, so it cannot describe a flag the binary
+/// does not have — which is the whole reason not to hand-write these.
+fn run_completions(shell: clap_complete::Shell) -> u8 {
+    let mut cmd = <Cli as clap::CommandFactory>::command();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    clap_complete::generate(shell, &mut cmd, "sordec", &mut out);
+    EXIT_OK
+}
+
+/// Write a roff man page to stdout.
+fn run_man() -> u8 {
+    let cmd = <Cli as clap::CommandFactory>::command();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if let Err(e) = clap_mangen::Man::new(cmd).render(&mut out) {
+        let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
+        return EXIT_IO_ERR;
+    }
+    EXIT_OK
 }
 
 // ---------------------------------------------------------------------
@@ -291,16 +424,9 @@ fn main() -> ExitCode {
 fn run_dump_facts(args: &DumpFactsArgs) -> u8 {
     // 1. Read the input file. I/O errors get a dedicated exit code so
     //    they don't conflate with pipeline failures.
-    let bytes = match std::fs::read(&args.wasm) {
+    let bytes = match read_wasm(&args.wasm) {
         Ok(b) => b,
-        Err(e) => {
-            let _ = writeln!(
-                std::io::stderr(),
-                "sordec: could not read {}: {e}",
-                args.wasm.display()
-            );
-            return EXIT_IO_ERR;
-        }
+        Err(code) => return code,
     };
 
     // 2. Run the frontend.
@@ -334,16 +460,9 @@ fn run_dump_facts(args: &DumpFactsArgs) -> u8 {
 
 fn run_dump_ir(args: &DumpIrArgs) -> u8 {
     // 1. Read the input file.
-    let bytes = match std::fs::read(&args.wasm) {
+    let bytes = match read_wasm(&args.wasm) {
         Ok(b) => b,
-        Err(e) => {
-            let _ = writeln!(
-                std::io::stderr(),
-                "sordec: could not read {}: {e}",
-                args.wasm.display()
-            );
-            return EXIT_IO_ERR;
-        }
+        Err(code) => return code,
     };
 
     // 2. Parse.
@@ -379,11 +498,18 @@ fn run_dump_ir(args: &DumpIrArgs) -> u8 {
     // 4. Render to stdout.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let options = pretty::RenderOptions {
-        with_header: args.with_header,
-        skip_unreachable: !args.raw,
+    let render_result = if args.json {
+        serde_json::to_writer_pretty(&mut out, &lift_output.lifted)
+            .map_err(io::Error::other)
+            .and_then(|()| writeln!(out))
+    } else {
+        let options = pretty::RenderOptions {
+            with_header: args.with_header,
+            skip_unreachable: !args.raw,
+        };
+        pretty::render_lifted_ir(&mut out, &lift_output.lifted, &options)
     };
-    if let Err(e) = pretty::render_lifted_ir(&mut out, &lift_output.lifted, &options) {
+    if let Err(e) = render_result {
         let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
         return EXIT_IO_ERR;
     }
@@ -401,16 +527,9 @@ fn run_dump_ir(args: &DumpIrArgs) -> u8 {
 
 fn run_dump_hir(args: &DumpHirArgs) -> u8 {
     // 1. Read the input file.
-    let bytes = match std::fs::read(&args.wasm) {
+    let bytes = match read_wasm(&args.wasm) {
         Ok(b) => b,
-        Err(e) => {
-            let _ = writeln!(
-                std::io::stderr(),
-                "sordec: could not read {}: {e}",
-                args.wasm.display()
-            );
-            return EXIT_IO_ERR;
-        }
+        Err(code) => return code,
     };
 
     // 2. Parse.
@@ -464,12 +583,19 @@ fn run_dump_hir(args: &DumpHirArgs) -> u8 {
     // 5. Render to stdout.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let mode = if args.raw {
-        pretty_hir::RenderMode::Raw
+    let render_result = if args.json {
+        serde_json::to_writer_pretty(&mut out, &high)
+            .map_err(io::Error::other)
+            .and_then(|()| writeln!(out))
     } else {
-        pretty_hir::RenderMode::Structured
+        let mode = if args.raw {
+            pretty_hir::RenderMode::Raw
+        } else {
+            pretty_hir::RenderMode::Structured
+        };
+        pretty_hir::render_high_ir(&mut out, &high, mode)
     };
-    if let Err(e) = pretty_hir::render_high_ir(&mut out, &high, mode) {
+    if let Err(e) = render_result {
         let _ = writeln!(std::io::stderr(), "sordec: write failed: {e}");
         return EXIT_IO_ERR;
     }
@@ -486,16 +612,9 @@ fn run_dump_hir(args: &DumpHirArgs) -> u8 {
 
 fn run_dump_wat(args: &DumpWatArgs) -> u8 {
     // 1. Read the input file.
-    let bytes = match std::fs::read(&args.wasm) {
+    let bytes = match read_wasm(&args.wasm) {
         Ok(b) => b,
-        Err(e) => {
-            let _ = writeln!(
-                std::io::stderr(),
-                "sordec: could not read {}: {e}",
-                args.wasm.display()
-            );
-            return EXIT_IO_ERR;
-        }
+        Err(code) => return code,
     };
 
     // 2. Parse.
@@ -560,16 +679,9 @@ fn run_dump_wat(args: &DumpWatArgs) -> u8 {
 
 fn run_dump_rust(args: &DumpRustArgs) -> u8 {
     // 1. Read the input file.
-    let bytes = match std::fs::read(&args.wasm) {
+    let bytes = match read_wasm(&args.wasm) {
         Ok(b) => b,
-        Err(e) => {
-            let _ = writeln!(
-                std::io::stderr(),
-                "sordec: could not read {}: {e}",
-                args.wasm.display()
-            );
-            return EXIT_IO_ERR;
-        }
+        Err(code) => return code,
     };
 
     // 2. Parse.
@@ -634,16 +746,9 @@ fn run_dump_rust(args: &DumpRustArgs) -> u8 {
 
 fn run_decompile(args: &DecompileArgs) -> u8 {
     // 1. Read the input file.
-    let bytes = match std::fs::read(&args.wasm) {
+    let bytes = match read_wasm(&args.wasm) {
         Ok(b) => b,
-        Err(e) => {
-            let _ = writeln!(
-                std::io::stderr(),
-                "sordec: could not read {}: {e}",
-                args.wasm.display()
-            );
-            return EXIT_IO_ERR;
-        }
+        Err(code) => return code,
     };
 
     // 2. Run the whole pipeline through the driver.
@@ -656,12 +761,16 @@ fn run_decompile(args: &DecompileArgs) -> u8 {
     };
 
     // 3. Write artifacts to `<out-dir>/<name>/`. `<name>` is the WASM
-    //    file stem; fall back to "contract" for a stemless path.
-    let name = args
-        .wasm
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("contract");
+    //    file stem; fall back to "contract" when there is no usable stem,
+    //    which is also the stdin case — a pipe carries no filename.
+    let name = if args.wasm.as_os_str() == STDIN_ARG {
+        "contract"
+    } else {
+        args.wasm
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("contract")
+    };
     let contract_dir = args.out_dir.join(name);
     if let Err(e) = std::fs::create_dir_all(&contract_dir) {
         let _ = writeln!(
@@ -687,6 +796,24 @@ fn run_decompile(args: &DecompileArgs) -> u8 {
         (contract_dir.join("Cargo.toml"), &output.cargo_toml),
         (src_dir.join("lib.rs"), &output.rust),
     ];
+
+    // Refuse to clobber. The emitted crate is something people edit — filling
+    // in a `todo!()` hole, adding a test — and a second `decompile` used to
+    // overwrite that work with no warning at all. Naming the file that blocked
+    // it matters more than naming the flag: the user needs to know what they
+    // nearly lost.
+    if !args.force
+        && let Some((path, _)) = artifacts.iter().find(|(path, _)| path.exists())
+    {
+        let _ = writeln!(
+            std::io::stderr(),
+            "sordec: {} already exists; refusing to overwrite it.\n\
+             sordec: pass --force to overwrite, or choose a different --out-dir.",
+            path.display()
+        );
+        return EXIT_IO_ERR;
+    }
+
     for (path, contents) in &artifacts {
         if let Err(e) = std::fs::write(path, contents.as_bytes()) {
             let _ = writeln!(
@@ -716,16 +843,9 @@ fn run_decompile(args: &DecompileArgs) -> u8 {
 
 fn run_coverage(args: &CoverageArgs) -> u8 {
     // 1. Read the input file.
-    let bytes = match std::fs::read(&args.wasm) {
+    let bytes = match read_wasm(&args.wasm) {
         Ok(b) => b,
-        Err(e) => {
-            let _ = writeln!(
-                std::io::stderr(),
-                "sordec: could not read {}: {e}",
-                args.wasm.display()
-            );
-            return EXIT_IO_ERR;
-        }
+        Err(code) => return code,
     };
 
     // 2. Parse.

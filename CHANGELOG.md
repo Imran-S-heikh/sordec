@@ -10,6 +10,29 @@ follow [Semantic Versioning][semver].
 
 ### Added
 
+- **`decompile --force`.** Without it, `decompile` now refuses to write over
+  any of the three files it produces. The emitted crate is meant to be edited,
+  and a second run used to replace an edited `src/lib.rs` silently. **Breaking
+  CLI change**: a script that decompiles repeatedly into a fixed directory
+  needs `--force` added.
+- **`-` reads stdin** on every subcommand that takes a module, so sordec
+  composes in a pipeline. `decompile -` writes to `<out-dir>/contract/`, since
+  a pipe carries no filename to name the output after.
+- **`sordec completions <shell>`** prints a completion script, and a hidden
+  `sordec man` prints a roff man page. Both are generated from the argument
+  definitions, so neither can drift from `--help`.
+- **`--quiet` / `-q`** silences the pipeline's non-fatal diagnostics. Errors
+  still print and the exit code is unchanged.
+- **`--json` on `dump-ir` and `dump-hir`.** The rule is now stated in the CLI
+  docs: structured output can be JSON, source-text output (`dump-wat`,
+  `dump-rust`) cannot.
+- **`sordec` is usable as a library**, not only as a binary:
+  `sordec::Driver::standard().run(&wasm)` returns the reconstructed Rust and the
+  manifest that builds it, and `sordec::score_paths` grades a reconstruction.
+  Both are re-exports of `sordec-driver` and `sordec-score`, which remain
+  available directly; the facade exists so the entry point is findable without
+  reading the workspace. Re-exporting the scorer adds no dependency edge and
+  does not compromise its independence from the pipeline it grades.
 - **`docs/` is now published**, and holds the documents the code has been
   citing all along: [`architecture.md`](docs/architecture.md) (the IR type
   system, pass infrastructure and pipeline design) and
@@ -31,15 +54,13 @@ follow [Semantic Versioning][semver].
   that revision with `--tag v0.1.0-alpha.1 sordec-cli`. Done now because
   nothing is on crates.io yet, where a name is permanent.
 
-### Added
+### Fixed
 
-- **`sordec` is usable as a library**, not only as a binary:
-  `sordec::Driver::standard().run(&wasm)` returns the reconstructed Rust and the
-  manifest that builds it, and `sordec::score_paths` grades a reconstruction.
-  Both are re-exports of `sordec-driver` and `sordec-score`, which remain
-  available directly; the facade exists so the entry point is findable without
-  reading the workspace. Re-exporting the scorer adds no dependency edge and
-  does not compromise its independence from the pipeline it grades.
+- **A non-WASM input printed ten lines of bytes.** `wasmparser` reports a
+  magic-number mismatch by pretty-printing both byte arrays, and the frontend
+  passed it straight through. It now checks the magic number itself and says
+  what it found. A shell script now reports as
+  `not a WASM file: expected the magic number \0asm, found "#!/b"`.
 
 ## [0.1.0-alpha.1] — 2026-09-04
 

@@ -120,9 +120,11 @@ pub struct ParseOutput {
 /// # Errors
 ///
 /// See [`FrontendError`] for the catalogue. The most common failures are
-/// [`FrontendError::Empty`] for an empty slice, [`FrontendError::InvalidWasm`]
-/// when `wasmparser` rejects the bytes, and [`FrontendError::MalformedSpec`]
-/// when a `contractspecv0` section is present but cannot be decoded.
+/// [`FrontendError::Empty`] for an empty slice, [`FrontendError::NotWasm`] when
+/// the bytes do not start with `\0asm` (usually the wrong file),
+/// [`FrontendError::InvalidWasm`] when the input *is* WASM and `wasmparser`
+/// rejects it, and [`FrontendError::MalformedSpec`] when a `contractspecv0`
+/// section is present but cannot be decoded.
 ///
 /// Conditions that previously errored but can now degrade with a Warning
 /// diagnostic — `UnresolvedTypeReference`, `DuplicateTypeName`,

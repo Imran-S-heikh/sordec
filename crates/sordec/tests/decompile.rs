@@ -90,3 +90,96 @@ fn decompile_with_garbage_input_exits_one() {
 
     let _ = std::fs::remove_file(&tmp);
 }
+
+/// A second `decompile` into the same directory must refuse, not clobber.
+///
+/// The emitted crate is meant to be edited — filling in a `todo!()` hole,
+/// adding a test — and this used to overwrite that work silently. The test
+/// asserts the edit survives, which is the property that matters; the exit
+/// code and the message only explain it.
+#[test]
+fn decompile_refuses_to_overwrite_without_force() {
+    let out = scratch("no-clobber");
+
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["decompile", TOKEN_V23, "--out-dir"])
+        .arg(&out)
+        .assert()
+        .success();
+
+    let lib = out.join("token-v23/src/lib.rs");
+    let edited = format!("{}\n// hand-edited\n", std::fs::read_to_string(&lib).expect("read"));
+    std::fs::write(&lib, &edited).expect("write");
+
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["decompile", TOKEN_V23, "--out-dir"])
+        .arg(&out)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("already exists"))
+        .stderr(predicate::str::contains("--force"));
+
+    assert_eq!(
+        std::fs::read_to_string(&lib).expect("read"),
+        edited,
+        "the refusal must leave the edited file untouched"
+    );
+
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `--force` is the way through, and it really does overwrite.
+#[test]
+fn decompile_with_force_overwrites() {
+    let out = scratch("force");
+
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["decompile", TOKEN_V23, "--out-dir"])
+        .arg(&out)
+        .assert()
+        .success();
+
+    let lib = out.join("token-v23/src/lib.rs");
+    let pristine = std::fs::read_to_string(&lib).expect("read");
+    std::fs::write(&lib, "// replaced\n").expect("write");
+
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["decompile", TOKEN_V23, "--out-dir"])
+        .arg(&out)
+        .arg("--force")
+        .assert()
+        .success();
+
+    assert_eq!(
+        std::fs::read_to_string(&lib).expect("read"),
+        pristine,
+        "--force must restore the emitted output"
+    );
+
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// A module arriving on stdin has no filename, so the output is named
+/// `contract/`. Stated in `--help`; asserted here so it stays true.
+#[test]
+fn decompile_from_stdin_writes_to_contract_dir() {
+    let out = scratch("stdin");
+    let wasm = std::fs::read(TOKEN_V23).expect("fixture present");
+
+    Command::cargo_bin("sordec")
+        .expect("sordec binary builds")
+        .args(["decompile", "-", "--out-dir"])
+        .arg(&out)
+        .write_stdin(wasm)
+        .assert()
+        .success();
+
+    assert!(out.join("contract/src/lib.rs").is_file());
+    assert!(out.join("contract/contract.wat").is_file());
+
+    let _ = std::fs::remove_dir_all(&out);
+}

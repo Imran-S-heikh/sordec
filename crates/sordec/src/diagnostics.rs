@@ -13,6 +13,7 @@
 //! by code) can layer on top without changing the helper's signature.
 
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sordec_common::Diagnostic;
 
@@ -29,13 +30,36 @@ pub fn write_diagnostics<W: Write>(out: &mut W, diags: &[Diagnostic]) -> std::io
     Ok(())
 }
 
-/// Print every diagnostic in `diags` to `stderr`, one per line.
+/// Whether `--quiet` was given.
+///
+/// Process-global rather than threaded through every subcommand handler, which
+/// is the one shape of global state a CLI is entitled to: it is written once
+/// from `main` before any work starts, read by the seven handlers that print
+/// diagnostics, and never written again. Passing a `bool` down eight function
+/// signatures to reach a single call in each would be more code describing the
+/// same fact.
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+/// Record `--quiet`. Call once, from `main`, before dispatching.
+pub fn set_quiet(quiet: bool) {
+    QUIET.store(quiet, Ordering::Relaxed);
+}
+
+/// Print every diagnostic in `diags` to `stderr`, one per line — unless
+/// `--quiet` was given, in which case print nothing.
+///
+/// Only the non-fatal stream is suppressed. Errors still print and the exit
+/// code is unaffected: `--quiet` means "spare me the warnings", never "hide
+/// the failure".
 ///
 /// Errors from the underlying `stderr` write are silently ignored —
 /// stderr being un-writable is a deeper problem the CLI has no way to
 /// recover from, and surfacing it here would only obscure whatever
 /// caused the inability to write in the first place.
 pub fn print_diagnostics(diags: &[Diagnostic]) {
+    if QUIET.load(Ordering::Relaxed) {
+        return;
+    }
     let stderr = std::io::stderr();
     let mut handle = stderr.lock();
     let _ = write_diagnostics(&mut handle, diags);

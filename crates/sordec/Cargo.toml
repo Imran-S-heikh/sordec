@@ -38,6 +38,8 @@ sordec-frontend = { workspace = true, features = ["serde"] }
 sordec-ir = { workspace = true, features = ["serde"] }
 sordec-passes.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
+clap_mangen.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 # `waffle` is needed by the pretty-printer to pattern-match

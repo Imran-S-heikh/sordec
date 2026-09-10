@@ -23,6 +23,23 @@ pub enum FrontendError {
     #[error("input WASM is empty")]
     Empty,
 
+    /// The input does not begin with the WASM magic number, so it is not a
+    /// WASM module at all.
+    ///
+    /// Checked here rather than left to `wasmparser` for the sake of the
+    /// message. `wasmparser` reports a magic mismatch by pretty-printing both
+    /// byte arrays, which renders as ten lines of `0x…` for the commonest
+    /// mistake a user makes — passing the wrong file. This variant says the
+    /// one thing that helps. Genuinely malformed WASM still goes to
+    /// [`InvalidWasm`](Self::InvalidWasm), where the parser's message is short
+    /// and names the offending section.
+    #[error("not a WASM file: expected the magic number `\\0asm`, found {found}")]
+    NotWasm {
+        /// The first four bytes, rendered readably, or a note that there were
+        /// fewer than four.
+        found: String,
+    },
+
     /// `wasmparser` rejected the byte slice.
     #[error("invalid WASM: {0}")]
     InvalidWasm(#[from] wasmparser::BinaryReaderError),
