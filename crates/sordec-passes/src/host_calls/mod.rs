@@ -284,6 +284,35 @@ mod tests {
         assert!(CATALOG_VERSION.contains("26."));
     }
 
+    /// `docs/compatibility.md` states which catalog it was written against, and
+    /// derives a per-protocol availability table from `env.json`. Re-vendoring
+    /// per the `VENDORED_FROM` procedure changes both and would leave the
+    /// document quietly claiming the old version.
+    ///
+    /// This is the cheap half of that problem — the version string. The
+    /// availability numbers move in the same commit, so catching the version
+    /// catches the moment to recheck them. Worth having because the
+    /// `architecture.md` sweep found six statements that had drifted in a
+    /// document nobody thought to re-read.
+    #[test]
+    fn the_compatibility_document_names_this_catalog() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/compatibility.md");
+        let doc = std::fs::read_to_string(path).expect("docs/compatibility.md is tracked");
+
+        // The document cites the bare version, not the whole constant.
+        let version = CATALOG_VERSION
+            .rsplit(' ')
+            .next()
+            .expect("CATALOG_VERSION ends in a version");
+
+        assert!(
+            doc.contains(version),
+            "docs/compatibility.md does not mention catalog version {version}. \
+             The catalog was re-vendored — update the document's protocol table too, \
+             not just this string."
+        );
+    }
+
     #[test]
     fn all_len_equals_catalog_size_and_contains_known_entry() {
         assert_eq!(all().len(), catalog_size());

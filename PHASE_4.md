@@ -102,6 +102,21 @@ unearned jump fails CI.
 reconstruction with the error type resolved to the contract's sole error enum,
 and `#[contractevent]` definitions.
 
+### Final docs — limits, confidence interpretation, compatibility matrix
+
+The tranche's documentation deliverable, in three parts:
+
+- **Limits** — [`docs/scoring_metric.md`](docs/scoring_metric.md) §6, "Limits,
+  and how to read a score".
+- **Confidence interpretation** — [`docs/architecture.md`](docs/architecture.md)
+  §2–§4: certainty encoded in type variants rather than a score, every `Unknown`
+  carrying a reason, and provenance as an append-only audit trail.
+- **Compatibility matrix** — [`docs/compatibility.md`](docs/compatibility.md):
+  protocol coverage read out of the vendored catalog (named through p26, corpus
+  exercises p21–p23), the three-rung SDK recovery ladder, the two Rust
+  toolchains and why they differ, what a stripped contract costs, and what is
+  not supported.
+
 ---
 
 ## What did not reach target
@@ -181,6 +196,7 @@ cargo test -p sordec --test benchmark -- --ignored --nocapture generate_report
 | D4.2 — per-fixture report + gap analysis | ✅ |
 | D4.4 — `#[contracterror]` / `Result` / `#[contractevent]` | ✅ |
 | D4.5–D4.7 — docs, CI, tagged release | ✅ |
+| Final docs — limits · confidence · compatibility matrix | ✅ |
 | **≥90% reconstruction score** | ❌ **0.6108** — see *What did not reach target* |
 
 ### Test suite — 1,413 tests passing (0 failures)

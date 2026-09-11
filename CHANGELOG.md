@@ -10,6 +10,15 @@ follow [Semantic Versioning][semver].
 
 ### Added
 
+- **[`docs/compatibility.md`](docs/compatibility.md)** — which Soroban protocol
+  and SDK versions sordec handles, and where the edges are. The host-call
+  catalog names protocols through 26 (read out of its own per-function gating
+  data, not estimated); the corpus exercises 21 through 23, and the document
+  says which is which rather than implying support from a version number. Also
+  covers the three-rung SDK recovery ladder, the two Rust toolchains and why
+  they are different numbers, what a stripped `contractspecv0` costs, and what
+  is not supported at all.
+
 - **`decompile --force`.** Without it, `decompile` now refuses to write over
   any of the three files it produces. The emitted crate is meant to be edited,
   and a second run used to replace an edited `src/lib.rs` silently. **Breaking

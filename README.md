@@ -84,6 +84,10 @@ And the things a bare score won't tell you:
 - **Local variable names are gone.** `rustc` deletes them; no decompiler
   recovers them. Bindings get synthesised names.
 
+Which contracts this actually handles — protocol and SDK coverage, what a
+stripped contract costs you, and what is untested — is
+[`docs/compatibility.md`](docs/compatibility.md).
+
 ## What it does today
 
 Eight CLI subcommands. The inspection commands are read-only (stdout only);
