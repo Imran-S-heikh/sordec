@@ -369,6 +369,50 @@ pub const MARSHALLING_DISPATCH_FOLDED: &str = "marshalling_dispatch_folded";
 /// `MarshallingGuardElided` diagnostic, because deleting a trap is a
 /// behavioural claim and should be reviewable without diffing outputs.
 pub const MARSHALLING_GUARDS_ELIDED: &str = "marshalling_guards_elided";
+
+// Why each `Region::If` the guard pass looked at was *not* elided. The pass
+// could previously only report the guards it removed, so "it leaves ~150
+// behind" was an impression rather than a work list — the same blind spot
+// `memory::promote` and `memory::sret` had before their censuses, and in both
+// of those cases the census overturned the standing assumption about where
+// the work was. Every `Region::If` in the module lands in exactly one of
+// these or in `MARSHALLING_GUARDS_ELIDED`, so the buckets and the removals
+// sum to the total; a mismatch means a gate gained an arm here and lost one
+// there.
+/// The `If` has an else arm, so it is a two-way branch, not a guard.
+pub const MARSHALLING_GUARD_DECLINED_HAS_ELSE: &str = "marshalling_guard_declined_has_else";
+/// The taken arm does real work rather than trapping — includes the
+/// `if ok { body } … panic!()` polarity, which is the guard inverted.
+pub const MARSHALLING_GUARD_DECLINED_ARM_NOT_TRAP: &str =
+    "marshalling_guard_declined_arm_not_trap";
+/// A tag check whose trap arm is the *match*, not the mismatch.
+pub const MARSHALLING_GUARD_DECLINED_TAG_NOT_NEGATED: &str =
+    "marshalling_guard_declined_tag_not_negated";
+/// A tag check on a value that is not one of this entrypoint's declared
+/// parameters — a helper's check has no dispatch wrapper to move to.
+pub const MARSHALLING_GUARD_DECLINED_TAG_NOT_PARAM: &str =
+    "marshalling_guard_declined_tag_not_param";
+/// The tested tag does not carry the parameter's declared type.
+pub const MARSHALLING_GUARD_DECLINED_TAG_MISMATCH: &str =
+    "marshalling_guard_declined_tag_mismatch";
+/// An `Eq`/`Ne` whose operands do not both trace to constants — typically
+/// because the trace ends in an unrecovered value.
+pub const MARSHALLING_GUARD_DECLINED_COMPARE_OPAQUE: &str =
+    "marshalling_guard_declined_compare_opaque";
+/// A constant comparison whose trap arm *is* taken: a real failure path,
+/// correctly kept.
+pub const MARSHALLING_GUARD_DECLINED_COMPARE_TAKEN: &str =
+    "marshalling_guard_declined_compare_taken";
+/// Looked like a length check but is not `bytes_len(p) != N` on a parameter
+/// declared `BytesN<N>`.
+pub const MARSHALLING_GUARD_DECLINED_LENGTH_UNMATCHED: &str =
+    "marshalling_guard_declined_length_unmatched";
+/// The condition is none of the three recognised shapes.
+pub const MARSHALLING_GUARD_DECLINED_SHAPE: &str = "marshalling_guard_declined_shape";
+/// A gate declined without naming a bucket. Non-zero means this list is
+/// stale, not that a new failure mode exists.
+pub const MARSHALLING_GUARD_DECLINED_OTHER: &str = "marshalling_guard_declined_other";
+
 /// Balanced shadow-stack prologue/epilogue brackets removed.
 pub const MARSHALLING_FRAMES_ELIDED: &str = "marshalling_frames_elided";
 /// Functions whose out-parameter was reconstructed as a real return
@@ -630,6 +674,16 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_ENCODE_COLLAPSED,
         MARSHALLING_DISPATCH_FOLDED,
         MARSHALLING_GUARDS_ELIDED,
+        MARSHALLING_GUARD_DECLINED_HAS_ELSE,
+        MARSHALLING_GUARD_DECLINED_ARM_NOT_TRAP,
+        MARSHALLING_GUARD_DECLINED_TAG_NOT_NEGATED,
+        MARSHALLING_GUARD_DECLINED_TAG_NOT_PARAM,
+        MARSHALLING_GUARD_DECLINED_TAG_MISMATCH,
+        MARSHALLING_GUARD_DECLINED_COMPARE_OPAQUE,
+        MARSHALLING_GUARD_DECLINED_COMPARE_TAKEN,
+        MARSHALLING_GUARD_DECLINED_LENGTH_UNMATCHED,
+        MARSHALLING_GUARD_DECLINED_SHAPE,
+        MARSHALLING_GUARD_DECLINED_OTHER,
         MARSHALLING_FRAMES_ELIDED,
         MARSHALLING_WIDE_RETURNS_RECOVERED,
         MARSHALLING_WIDE_LOADS_REBOUND,

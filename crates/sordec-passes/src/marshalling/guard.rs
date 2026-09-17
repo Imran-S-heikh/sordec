@@ -96,6 +96,31 @@ use crate::val_abi;
 /// Unique pipeline name of this pass.
 pub const PASS_NAME: &str = "marshalling-arg-guard";
 
+// Why one `Region::If` was not elided. Constants rather than literals
+// repeated at the gate and again in [`report_declines`]: the wording *is*
+// the key, so a typo in one of two copies would silently open a new bucket.
+// Naming them keeps the original property — the reason reads at the site
+// that enforces it — without the second copy. Same shape as
+// [`crate::memory::sret`]'s decline constants, for the same reason.
+/// The `If` has an else arm, so it is a two-way branch, not a guard.
+const DECLINED_HAS_ELSE: &str = "the guard has an else arm";
+/// The taken arm does real work rather than trapping.
+const DECLINED_ARM_NOT_TRAP: &str = "the taken arm is not a bare trap";
+/// A tag check whose trap arm is the match rather than the mismatch.
+const DECLINED_TAG_NOT_NEGATED: &str = "tag check traps on the match, not the mismatch";
+/// A tag check on something that is not a declared entrypoint parameter.
+const DECLINED_TAG_NOT_PARAM: &str = "tag check on a value that is not an entrypoint parameter";
+/// The tested tag does not carry the parameter's declared type.
+const DECLINED_TAG_MISMATCH: &str = "tag does not carry the parameter's declared type";
+/// An `Eq`/`Ne` whose operands do not both trace to constants.
+const DECLINED_COMPARE_OPAQUE: &str = "comparison operands do not both trace to constants";
+/// A constant comparison whose trap arm is genuinely taken.
+const DECLINED_COMPARE_TAKEN: &str = "constant comparison whose trap arm is taken";
+/// Not `bytes_len(p) != N` on a parameter declared `BytesN<N>`.
+const DECLINED_LENGTH_UNMATCHED: &str = "not a length check on a BytesN parameter";
+/// The condition is none of the three recognised shapes.
+const DECLINED_SHAPE: &str = "condition is none of the three recognised shapes";
+
 /// Removes ABI argument type-checks.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ArgGuardElisionPass;
@@ -108,9 +133,14 @@ impl crate::pass::Pass<HighIr> for ArgGuardElisionPass {
     fn run(&self, ir: &mut HighIr) -> crate::pass::PassResult {
         let mut result = crate::pass::PassResult::default();
         let mut elided: i64 = 0;
+        // Why each `Region::If` this pass looked at was left alone. Counted
+        // rather than discarded so "it leaves ~150 behind" is a breakdown
+        // instead of an impression — the move `memory::sret`'s census makes
+        // one layer down.
+        let mut declines: Vec<&'static str> = Vec::new();
         for func in &mut ir.functions {
             let empty = empty_blocks(func);
-            let guards = collect(func, &empty);
+            let guards = collect(func, &empty, &mut declines);
             if guards.is_empty() {
                 continue;
             }
@@ -130,6 +160,21 @@ impl crate::pass::Pass<HighIr> for ArgGuardElisionPass {
             result.metrics.increment(metrics::GUARDS_ELIDED, elided);
             result.changed = true;
         }
+        // Only from a settled invocation. This pass sits in a fixpoint
+        // group and [`crate::pipeline::PipelineReport::metric_totals`]
+        // *accumulates* a repeated pass's counters across every invocation,
+        // so reporting unconditionally would count each surviving `If` once
+        // per round — and, worse, weight it by how many rounds it happened
+        // to survive. Reporting only when this round removed nothing gives
+        // the steady-state picture, in which every bucket is multiplied by
+        // the same number of settled rounds and the proportions are exact.
+        //
+        // A settled round always happens: the group terminates only when no
+        // pass in it reports `changed`, so this pass is always run at least
+        // once more after its last removal.
+        if elided == 0 {
+            report_declines(&declines, &mut result);
+        }
         debug_validate(ir, PASS_NAME);
         result
     }
@@ -137,7 +182,11 @@ impl crate::pass::Pass<HighIr> for ArgGuardElisionPass {
 
 /// Every condition value in `func` that is an elidable argument guard,
 /// mapped to the note explaining why.
-fn collect(func: &HighFunction, empty: &HashSet<BlockId>) -> HashMap<ValueId, String> {
+fn collect(
+    func: &HighFunction,
+    empty: &HashSet<BlockId>,
+    declines: &mut Vec<&'static str>,
+) -> HashMap<ValueId, String> {
     let mut guards = HashMap::new();
     func.region.for_each_node(|node| {
         let Region::If {
@@ -148,15 +197,53 @@ fn collect(func: &HighFunction, empty: &HashSet<BlockId>) -> HashMap<ValueId, St
         else {
             return;
         };
-        // Only a guard: the taken arm traps and there is no else.
-        if else_region.is_some() || !is_trap(then_region, empty) {
+        // Only a guard: the taken arm traps and there is no else. Both
+        // reasons are recorded rather than returned silently — a real
+        // two-way `if` the author wrote lands here too, which is what makes
+        // the census a description of *every* branch rather than of the
+        // guards alone.
+        if else_region.is_some() {
+            declines.push(DECLINED_HAS_ELSE);
             return;
         }
-        if let Some(note) = classify_condition(func, *cond) {
-            guards.insert(*cond, note);
+        if !is_trap(then_region, empty) {
+            declines.push(DECLINED_ARM_NOT_TRAP);
+            return;
+        }
+        match classify_condition(func, *cond) {
+            Ok(note) => {
+                guards.insert(*cond, note);
+            }
+            Err(why) => declines.push(why),
         }
     });
     guards
+}
+
+/// Fold the decline reasons into one metric per gate.
+///
+/// Keyed by the gate's own reason constant so the metric and the code that
+/// enforces it cannot drift apart: adding a decline with a new constant and
+/// no arm here lands in `OTHER` rather than silently joining a bucket it
+/// does not belong to. `OTHER` reaching a non-zero count is therefore a
+/// signal that this function is out of date.
+fn report_declines(declines: &[&'static str], result: &mut crate::pass::PassResult) {
+    use crate::metrics_catalog as mc;
+    for reason in declines {
+        let key = match *reason {
+            DECLINED_HAS_ELSE => mc::MARSHALLING_GUARD_DECLINED_HAS_ELSE,
+            DECLINED_ARM_NOT_TRAP => mc::MARSHALLING_GUARD_DECLINED_ARM_NOT_TRAP,
+            DECLINED_TAG_NOT_NEGATED => mc::MARSHALLING_GUARD_DECLINED_TAG_NOT_NEGATED,
+            DECLINED_TAG_NOT_PARAM => mc::MARSHALLING_GUARD_DECLINED_TAG_NOT_PARAM,
+            DECLINED_TAG_MISMATCH => mc::MARSHALLING_GUARD_DECLINED_TAG_MISMATCH,
+            DECLINED_COMPARE_OPAQUE => mc::MARSHALLING_GUARD_DECLINED_COMPARE_OPAQUE,
+            DECLINED_COMPARE_TAKEN => mc::MARSHALLING_GUARD_DECLINED_COMPARE_TAKEN,
+            DECLINED_LENGTH_UNMATCHED => mc::MARSHALLING_GUARD_DECLINED_LENGTH_UNMATCHED,
+            DECLINED_SHAPE => mc::MARSHALLING_GUARD_DECLINED_SHAPE,
+            _ => mc::MARSHALLING_GUARD_DECLINED_OTHER,
+        };
+        result.metrics.increment(key, 1);
+    }
 }
 
 /// The blocks of `func` that schedule no bindings.
@@ -204,63 +291,98 @@ pub(super) fn is_trap(region: &Region, empty: &HashSet<BlockId>) -> bool {
     }
 }
 
-/// Why `cond` is an elidable argument check, or `None`.
-fn classify_condition(func: &HighFunction, cond: ValueId) -> Option<String> {
+/// Why `cond` is an elidable argument check, or which gate refused it.
+///
+/// Dispatching on the expression shape *first* is what lets each refusal
+/// name a gate. The previous `or_else` chain tried all three shapes in turn
+/// and could only report "none matched", which is the one answer that is
+/// never actionable. Acceptance is unchanged: a `ValTagCheck` could only
+/// ever match shape 2 and an `Expr::Binary` only shapes 1 and 3, so the
+/// dispatch admits exactly the conditions the chain did.
+///
+/// Shapes 1 and 3 both key on `Expr::Binary`, so both are still tried. When
+/// both refuse, the reason reported is the one that describes what the
+/// condition *is*: a `bytes_len` operand means it was a length check that
+/// did not line up, anything else means it was a comparison.
+fn classify_condition(func: &HighFunction, cond: ValueId) -> Result<String, &'static str> {
     let id = resolve_use(func, cond);
-    let expr = &func.bindings.get(id)?.expr;
-    // Each shape is its own fallible function rather than an arm of one
-    // `match`: shapes 1 and 3 both key on `Expr::Binary`, and a `?` inside
-    // a match arm returns from the *whole* classifier, so an arm that
-    // declines would silently prevent every later shape from being tried.
-    classify_constant_discriminant(func, expr)
-        .or_else(|| classify_tag_check(func, expr))
-        .or_else(|| classify_length_check(func, expr))
+    let expr = &func.bindings.get(id).ok_or(DECLINED_SHAPE)?.expr;
+    match expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { .. })) => {
+            classify_tag_check(func, expr)
+        }
+        Expr::Binary {
+            op: BinaryOp::Eq | BinaryOp::Ne,
+            lhs,
+            rhs,
+        } => classify_constant_discriminant(func, expr).or_else(|compare_why| {
+            classify_length_check(func, expr).map_err(|length_why| {
+                let looks_like_a_length = bytes_len_of(func, *lhs).is_some()
+                    || bytes_len_of(func, *rhs).is_some();
+                if looks_like_a_length {
+                    length_why
+                } else {
+                    compare_why
+                }
+            })
+        }),
+        _ => Err(DECLINED_SHAPE),
+    }
 }
 
 /// Shape 1 — the decode-result guard, now comparing the Ok constant
 /// against the Err discriminant, so the branch is provably not taken.
-fn classify_constant_discriminant(func: &HighFunction, expr: &Expr) -> Option<String> {
+fn classify_constant_discriminant(
+    func: &HighFunction,
+    expr: &Expr,
+) -> Result<String, &'static str> {
     let Expr::Binary {
         op: op @ (BinaryOp::Eq | BinaryOp::Ne),
         lhs,
         rhs,
     } = expr
     else {
-        return None;
+        return Err(DECLINED_SHAPE);
     };
-    let (l, r) = (trace_int(func, *lhs)?, trace_int(func, *rhs)?);
+    let (Some(l), Some(r)) = (trace_int(func, *lhs), trace_int(func, *rhs)) else {
+        return Err(DECLINED_COMPARE_OPAQUE);
+    };
     let taken = if *op == BinaryOp::Eq { l == r } else { l != r };
-    (!taken)
-        .then(|| "decode-failure guard on a constant-Ok discriminant: provably not taken".to_string())
+    if taken {
+        return Err(DECLINED_COMPARE_TAKEN);
+    }
+    Ok("decode-failure guard on a constant-Ok discriminant: provably not taken".to_string())
 }
 
 /// Shape 2 — a direct tag check on an entry parameter.
-fn classify_tag_check(func: &HighFunction, expr: &Expr) -> Option<String> {
+fn classify_tag_check(func: &HighFunction, expr: &Expr) -> Result<String, &'static str> {
     let Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
         value,
         tag,
         negated,
     })) = expr
     else {
-        return None;
+        return Err(DECLINED_SHAPE);
     };
     // The trap arm must be the *mismatch* arm. `has_tag` guards trap when
     // the tag is absent, i.e. on the negated form.
     if !negated {
-        return None;
+        return Err(DECLINED_TAG_NOT_NEGATED);
     }
-    let declared = declared_param_type(func, resolve_use(func, *value))?;
+    let declared =
+        declared_param_type(func, resolve_use(func, *value)).ok_or(DECLINED_TAG_NOT_PARAM)?;
     // `tag_carries`, not `==`: a `BytesN<N>` parameter rides in a plain
     // `BytesObject`, so the tag denotes `Bytes` while the declaration says
     // `BytesN(N)` and an equality test would report a disagreement that
     // does not exist.
-    val_abi::tag_carries(*tag, &declared).then(|| {
-        format!(
-            "argument tag check ({}) on a parameter contractspecv0 declares as {declared:?}: \
-             `#[contractimpl]` regenerates it in the dispatch wrapper",
-            val_abi::tag_name(*tag).unwrap_or("?")
-        )
-    })
+    if !val_abi::tag_carries(*tag, &declared) {
+        return Err(DECLINED_TAG_MISMATCH);
+    }
+    Ok(format!(
+        "argument tag check ({}) on a parameter contractspecv0 declares as {declared:?}: \
+         `#[contractimpl]` regenerates it in the dispatch wrapper",
+        val_abi::tag_name(*tag).unwrap_or("?")
+    ))
 }
 
 /// Shape 3 — `bytes_len(p) != N` on a parameter declared `BytesN<N>`.
@@ -278,14 +400,14 @@ fn classify_tag_check(func: &HighFunction, expr: &Expr) -> Option<String> {
 ///
 /// A length that disagrees with `N` is **kept**: it means our picture of
 /// the parameter is wrong, and the check is the evidence.
-fn classify_length_check(func: &HighFunction, expr: &Expr) -> Option<String> {
+fn classify_length_check(func: &HighFunction, expr: &Expr) -> Result<String, &'static str> {
     let Expr::Binary {
         op: BinaryOp::Ne,
         lhs,
         rhs,
     } = expr
     else {
-        return None;
+        return Err(DECLINED_LENGTH_UNMATCHED);
     };
     // Either operand may hold the length; the other must be the constant.
     for (len_side, const_side) in [(*lhs, *rhs), (*rhs, *lhs)] {
@@ -301,12 +423,12 @@ fn classify_length_check(func: &HighFunction, expr: &Expr) -> Option<String> {
         if tested != i128::from(width) {
             continue;
         }
-        return Some(format!(
+        return Ok(format!(
             "argument length check (== {width}) on a parameter contractspecv0 declares as \
              BytesN<{width}>: `#[contractimpl]` regenerates it in the dispatch wrapper"
         ));
     }
-    None
+    Err(DECLINED_LENGTH_UNMATCHED)
 }
 
 /// The value whose length `value` is, when `value` is a `bytes_len` of an
@@ -457,7 +579,36 @@ mod tests {
     /// `collect` against the function's own empty-block set — what the
     /// pass does, without the caller having to recompute it.
     fn collect_guards(func: &HighFunction) -> HashMap<ValueId, String> {
-        collect(func, &empty_blocks(func))
+        collect(func, &empty_blocks(func), &mut Vec::new())
+    }
+
+    /// The reasons `collect` recorded, in discovery order.
+    fn collect_declines(func: &HighFunction) -> Vec<&'static str> {
+        let mut declines = Vec::new();
+        collect(func, &empty_blocks(func), &mut declines);
+        declines
+    }
+
+    /// Every `Region::If` lands in exactly one bucket: elided, or one
+    /// named decline. This is the invariant that makes the census readable
+    /// as a breakdown rather than a pile of counters — and it is the one
+    /// `memory::sret`'s first census failed, reporting 228-vs-9 when the
+    /// truth was 0-vs-13 because a candidate could be counted twice.
+    fn assert_every_if_is_accounted_for(func: &HighFunction) {
+        let mut ifs = 0;
+        func.region.for_each_node(|node| {
+            if matches!(node, Region::If { .. }) {
+                ifs += 1;
+            }
+        });
+        let accepted = collect_guards(func).len();
+        let declined = collect_declines(func).len();
+        assert_eq!(
+            ifs,
+            accepted + declined,
+            "every `If` must be either elided or declined exactly once \
+             ({ifs} ifs, {accepted} accepted, {declined} declined)"
+        );
     }
 
     #[test]
@@ -496,6 +647,65 @@ mod tests {
         );
         guarded(&mut func, v(1));
         assert_eq!(collect_guards(&func).len(), 1);
+    }
+
+    #[test]
+    fn the_census_names_the_gate_that_refused() {
+        // A tag check declared `u64` while the tag says Address: the
+        // mismatch gate, not a generic "did not match".
+        let mut func = entry(
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                    value: v(0),
+                    tag: val_abi::TAG_ADDRESS_OBJECT,
+                    negated: true,
+                })),
+            ],
+            vec![v(0)],
+            PrimitiveType::U64,
+        );
+        guarded(&mut func, v(1));
+        assert_eq!(collect_declines(&func), vec![DECLINED_TAG_MISMATCH]);
+        assert_every_if_is_accounted_for(&func);
+    }
+
+    #[test]
+    fn a_guard_whose_trap_arm_is_taken_is_not_a_dead_branch() {
+        // `1 == 1` with a trap arm is a real failure path, and must be
+        // filed as such rather than as an unrecognised shape — the two
+        // call for opposite follow-up work.
+        let mut func = entry(
+            vec![
+                Expr::Literal(Literal::I32(1)),
+                Expr::Literal(Literal::I32(1)),
+                Expr::Binary { op: BinaryOp::Eq, lhs: v(0), rhs: v(1) },
+            ],
+            vec![],
+            PrimitiveType::U64,
+        );
+        guarded(&mut func, v(2));
+        assert!(collect_guards(&func).is_empty());
+        assert_eq!(collect_declines(&func), vec![DECLINED_COMPARE_TAKEN]);
+        assert_every_if_is_accounted_for(&func);
+    }
+
+    #[test]
+    fn an_elided_guard_is_not_also_counted_as_a_decline() {
+        // The double-count that made `sret`'s first census unreadable.
+        let mut func = entry(
+            vec![
+                Expr::Literal(Literal::I32(0)),
+                Expr::Literal(Literal::I32(1)),
+                Expr::Binary { op: BinaryOp::Eq, lhs: v(0), rhs: v(1) },
+            ],
+            vec![],
+            PrimitiveType::U64,
+        );
+        guarded(&mut func, v(2));
+        assert_eq!(collect_guards(&func).len(), 1);
+        assert!(collect_declines(&func).is_empty());
+        assert_every_if_is_accounted_for(&func);
     }
 
     #[test]

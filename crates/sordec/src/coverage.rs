@@ -95,6 +95,9 @@ pub struct CoverageReport {
     /// every frame that was **not** promoted, which pass would have to
     /// exist to unblock it.
     pub memory: MemoryCoverage,
+    /// SDK argument-guard elision, and for every `if` left standing, which
+    /// gate refused it.
+    pub guards: GuardCoverage,
     /// Per-pattern recognition counts and ratios (F1–F8 + beyond-kickoff).
     pub recognition: RecognitionCoverage,
     /// The two-number semantic-recovery headline (W7).
@@ -216,6 +219,52 @@ pub struct TypeCoverage {
     /// Fraction carrying a type (`(known + inferred) / total`), or `None`
     /// when there are no bindings.
     pub typed_ratio: Option<f64>,
+}
+
+/// SDK argument-guard elision, and why each surviving `if` stayed.
+///
+/// `structure` is bounded by how much surplus control flow we emit, and the
+/// argument guard is the single largest family of it. `ArgGuardElisionPass`
+/// could previously only report the guards it removed, which made "it leaves
+/// most of them behind" an impression rather than a work list — exactly the
+/// blind spot [`MemoryCoverage`] exists to close one layer down.
+///
+/// Every `Region::If` the pass visited lands in exactly one field, so
+/// `elided` plus the declines is the total number of branches in the module.
+#[derive(Debug, Clone, Serialize)]
+pub struct GuardCoverage {
+    /// Guards removed, each also carrying a `MarshallingGuardElided`
+    /// diagnostic.
+    pub elided: i64,
+    /// Two-way branches: an `if` with an else arm is not a guard.
+    pub declined_has_else: i64,
+    /// The taken arm does real work instead of trapping — this is where an
+    /// `if ok { body } … panic!()` lands, the guard written inside out.
+    pub declined_arm_not_trap: i64,
+    /// A tag check that traps on the match rather than the mismatch.
+    pub declined_tag_not_negated: i64,
+    /// A tag check on a value that is not an entrypoint parameter; a
+    /// helper's check has no regenerated dispatch wrapper to move to.
+    pub declined_tag_not_param: i64,
+    /// The tested tag does not carry the parameter's declared type — a
+    /// disagreement means our picture is wrong, so the check stays.
+    pub declined_tag_mismatch: i64,
+    /// A comparison whose operands do not both trace to constants,
+    /// typically because the trace ended in an unrecovered value.
+    pub declined_compare_opaque: i64,
+    /// A constant comparison whose trap arm really is taken: a genuine
+    /// failure path, correctly kept.
+    pub declined_compare_taken: i64,
+    /// Looked like a length check but is not `bytes_len(p) != N` on a
+    /// parameter declared `BytesN<N>`.
+    pub declined_length_unmatched: i64,
+    /// The condition is none of the three recognised shapes.
+    pub declined_shape: i64,
+    /// A gate declined without naming a bucket. Non-zero means the
+    /// reporting is stale, not that a new failure mode exists.
+    pub declined_other: i64,
+    /// Every decline, summed.
+    pub declined_total: i64,
 }
 
 /// Shadow-stack recovery, and why each unpromoted frame stayed.
@@ -847,6 +896,7 @@ pub fn compute_coverage(
         structuring: build_structuring(metric_totals),
         types: build_types(metric_totals),
         memory: build_memory(metric_totals),
+        guards: build_guards(metric_totals),
         recognition: build_recognition(metric_totals),
         headline: build_headline(metric_totals, call_to_import),
         diagnostics: build_diagnostic_coverage(recognizer_diagnostics),
@@ -1099,6 +1149,47 @@ fn build_structuring(t: &BTreeMap<&'static str, i64>) -> StructuringCoverage {
 /// taken by hand twice before this existed. Bucketing by *which pass owns
 /// the escape* is what makes the next piece of work fall out of the number
 /// rather than out of a judgement.
+/// Argument-guard elision, and the gate that refused each survivor.
+///
+/// The decline breakdown is the point, for the same reason it is in
+/// [`build_memory`]: a pass that can only report its successes cannot tell
+/// you what to build next.
+fn build_guards(t: &BTreeMap<&'static str, i64>) -> GuardCoverage {
+    let declined_has_else = metric(t, mc::MARSHALLING_GUARD_DECLINED_HAS_ELSE);
+    let declined_arm_not_trap = metric(t, mc::MARSHALLING_GUARD_DECLINED_ARM_NOT_TRAP);
+    let declined_tag_not_negated = metric(t, mc::MARSHALLING_GUARD_DECLINED_TAG_NOT_NEGATED);
+    let declined_tag_not_param = metric(t, mc::MARSHALLING_GUARD_DECLINED_TAG_NOT_PARAM);
+    let declined_tag_mismatch = metric(t, mc::MARSHALLING_GUARD_DECLINED_TAG_MISMATCH);
+    let declined_compare_opaque = metric(t, mc::MARSHALLING_GUARD_DECLINED_COMPARE_OPAQUE);
+    let declined_compare_taken = metric(t, mc::MARSHALLING_GUARD_DECLINED_COMPARE_TAKEN);
+    let declined_length_unmatched = metric(t, mc::MARSHALLING_GUARD_DECLINED_LENGTH_UNMATCHED);
+    let declined_shape = metric(t, mc::MARSHALLING_GUARD_DECLINED_SHAPE);
+    let declined_other = metric(t, mc::MARSHALLING_GUARD_DECLINED_OTHER);
+    GuardCoverage {
+        elided: metric(t, mc::MARSHALLING_GUARDS_ELIDED),
+        declined_has_else,
+        declined_arm_not_trap,
+        declined_tag_not_negated,
+        declined_tag_not_param,
+        declined_tag_mismatch,
+        declined_compare_opaque,
+        declined_compare_taken,
+        declined_length_unmatched,
+        declined_shape,
+        declined_other,
+        declined_total: declined_has_else
+            + declined_arm_not_trap
+            + declined_tag_not_negated
+            + declined_tag_not_param
+            + declined_tag_mismatch
+            + declined_compare_opaque
+            + declined_compare_taken
+            + declined_length_unmatched
+            + declined_shape
+            + declined_other,
+    }
+}
+
 fn build_memory(t: &BTreeMap<&'static str, i64>) -> MemoryCoverage {
     let declined_write_only = metric(t, mc::MEMORY_FRAME_DECLINED_WRITE_ONLY);
     let declined_read_only = metric(t, mc::MEMORY_FRAME_DECLINED_READ_ONLY);
