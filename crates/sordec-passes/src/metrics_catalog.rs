@@ -409,6 +409,11 @@ pub const MARSHALLING_GUARD_DECLINED_LENGTH_UNMATCHED: &str =
     "marshalling_guard_declined_length_unmatched";
 /// The condition is none of the three recognised shapes.
 pub const MARSHALLING_GUARD_DECLINED_SHAPE: &str = "marshalling_guard_declined_shape";
+/// The same SDK guard written inside out — `if ok { work; return }` with the
+/// trap as the successor. Passes every content gate; only the rewrite that
+/// removes it is missing. This is the recoverable share of
+/// `MARSHALLING_GUARD_DECLINED_ARM_NOT_TRAP`.
+pub const MARSHALLING_GUARD_DECLINED_INVERTED: &str = "marshalling_guard_declined_inverted";
 /// A gate declined without naming a bucket. Non-zero means this list is
 /// stale, not that a new failure mode exists.
 pub const MARSHALLING_GUARD_DECLINED_OTHER: &str = "marshalling_guard_declined_other";
@@ -683,6 +688,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_GUARD_DECLINED_COMPARE_TAKEN,
         MARSHALLING_GUARD_DECLINED_LENGTH_UNMATCHED,
         MARSHALLING_GUARD_DECLINED_SHAPE,
+        MARSHALLING_GUARD_DECLINED_INVERTED,
         MARSHALLING_GUARD_DECLINED_OTHER,
         MARSHALLING_FRAMES_ELIDED,
         MARSHALLING_WIDE_RETURNS_RECOVERED,

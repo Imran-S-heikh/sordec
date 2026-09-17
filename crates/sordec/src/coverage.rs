@@ -260,6 +260,11 @@ pub struct GuardCoverage {
     pub declined_length_unmatched: i64,
     /// The condition is none of the three recognised shapes.
     pub declined_shape: i64,
+    /// The same SDK guard written inside out: `if ok { work; return }` with
+    /// the trap as the successor. Passes every content gate — only the
+    /// rewrite that removes it is missing, so this is the directly
+    /// recoverable share of `declined_arm_not_trap`.
+    pub declined_inverted: i64,
     /// A gate declined without naming a bucket. Non-zero means the
     /// reporting is stale, not that a new failure mode exists.
     pub declined_other: i64,
@@ -1164,6 +1169,7 @@ fn build_guards(t: &BTreeMap<&'static str, i64>) -> GuardCoverage {
     let declined_compare_taken = metric(t, mc::MARSHALLING_GUARD_DECLINED_COMPARE_TAKEN);
     let declined_length_unmatched = metric(t, mc::MARSHALLING_GUARD_DECLINED_LENGTH_UNMATCHED);
     let declined_shape = metric(t, mc::MARSHALLING_GUARD_DECLINED_SHAPE);
+    let declined_inverted = metric(t, mc::MARSHALLING_GUARD_DECLINED_INVERTED);
     let declined_other = metric(t, mc::MARSHALLING_GUARD_DECLINED_OTHER);
     GuardCoverage {
         elided: metric(t, mc::MARSHALLING_GUARDS_ELIDED),
@@ -1176,6 +1182,7 @@ fn build_guards(t: &BTreeMap<&'static str, i64>) -> GuardCoverage {
         declined_compare_taken,
         declined_length_unmatched,
         declined_shape,
+        declined_inverted,
         declined_other,
         declined_total: declined_has_else
             + declined_arm_not_trap
@@ -1186,6 +1193,7 @@ fn build_guards(t: &BTreeMap<&'static str, i64>) -> GuardCoverage {
             + declined_compare_taken
             + declined_length_unmatched
             + declined_shape
+            + declined_inverted
             + declined_other,
     }
 }

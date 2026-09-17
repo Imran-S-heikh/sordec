@@ -120,6 +120,31 @@ const DECLINED_COMPARE_TAKEN: &str = "constant comparison whose trap arm is take
 const DECLINED_LENGTH_UNMATCHED: &str = "not a length check on a BytesN parameter";
 /// The condition is none of the three recognised shapes.
 const DECLINED_SHAPE: &str = "condition is none of the three recognised shapes";
+/// The same guard, written inside out — elidable, but by a rewrite this
+/// pass does not yet perform.
+const DECLINED_INVERTED_GUARD: &str = "elidable guard written inside out (trap is the successor)";
+
+/// Which way round a guard is written.
+///
+/// The SDK's check reaches us in two shapes that mean the same thing, and
+/// the second is 74% of what this pass declines:
+///
+/// ```text
+/// if !ok { panic!() }          TrapIfTrue  — the trap is the taken arm
+/// if ok { work; return }       TrapIfFalse — the trap is the successor
+/// panic!()
+/// ```
+///
+/// Every polarity test below reads this rather than assuming the first,
+/// because reading the condition without knowing which arm traps is how a
+/// guard gets deleted backwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sense {
+    /// The trap runs when the condition holds.
+    TrapIfTrue,
+    /// The trap runs when it does not.
+    TrapIfFalse,
+}
 
 /// Removes ABI argument type-checks.
 #[derive(Debug, Default, Clone, Copy)]
@@ -188,36 +213,118 @@ fn collect(
     declines: &mut Vec<&'static str>,
 ) -> HashMap<ValueId, String> {
     let mut guards = HashMap::new();
-    func.region.for_each_node(|node| {
-        let Region::If {
-            cond,
+    census(&func.region, func, empty, &mut guards, declines);
+    guards
+}
+
+/// Walk the region tree, classifying every `If`.
+///
+/// Sibling-aware rather than [`Region::for_each_node`], because one of the
+/// two guard senses is only visible from the enclosing `Sequence`: the trap
+/// of an inverted guard is the `If`'s *successor*, not its arm.
+fn census(
+    region: &Region,
+    func: &HighFunction,
+    empty: &HashSet<BlockId>,
+    guards: &mut HashMap<ValueId, String>,
+    declines: &mut Vec<&'static str>,
+) {
+    if let Region::Sequence(items) = region {
+        for (i, item) in items.iter().enumerate() {
+            if let Region::If { cond, then_region, else_region } = item
+                && else_region.is_none()
+                && !is_trap(then_region, empty)
+                && diverges(then_region)
+                && is_trap(&Region::Sequence(items[i + 1..].to_vec()), empty)
+            {
+                // `if ok { work; return } trap` — the same guard as
+                // `if !ok { trap }`, written inside out.
+                classify_if(func, *cond, Sense::TrapIfFalse, guards, declines);
+                census(then_region, func, empty, guards, declines);
+                continue;
+            }
+            census(item, func, empty, guards, declines);
+        }
+        return;
+    }
+    if let Region::If { cond, then_region, else_region } = region {
+        if let Some(else_region) = else_region {
+            declines.push(DECLINED_HAS_ELSE);
+            census(then_region, func, empty, guards, declines);
+            census(else_region, func, empty, guards, declines);
+            return;
+        }
+        if is_trap(then_region, empty) {
+            classify_if(func, *cond, Sense::TrapIfTrue, guards, declines);
+            return;
+        }
+        // A real two-way branch the author wrote lands here, which is what
+        // makes the census a description of *every* branch rather than of
+        // the guards alone.
+        declines.push(DECLINED_ARM_NOT_TRAP);
+        census(then_region, func, empty, guards, declines);
+        return;
+    }
+    let mut nested = |r: &Region| census(r, func, empty, guards, declines);
+    match region {
+        Region::Scope { body, .. } | Region::Loop { body, .. } => nested(body),
+        Region::Switch { arms, default, .. } => {
+            for arm in arms {
+                nested(&arm.body);
+            }
+            nested(default);
+        }
+        _ => {}
+    }
+}
+
+/// Classify one guard-shaped `If`, recording the note or the refusal.
+fn classify_if(
+    func: &HighFunction,
+    cond: ValueId,
+    sense: Sense,
+    guards: &mut HashMap<ValueId, String>,
+    declines: &mut Vec<&'static str>,
+) {
+    match classify_condition(func, cond, sense) {
+        // Measurement only for now: an inverted guard that *would* be
+        // elidable is counted, not removed. Removing it is a different
+        // rewrite — the trap is the `If`'s successor, so deleting the check
+        // means splicing the arm into its parent rather than replacing the
+        // node — and that lands as its own change.
+        Ok(note) => match sense {
+            Sense::TrapIfTrue => {
+                guards.insert(cond, note);
+            }
+            Sense::TrapIfFalse => declines.push(DECLINED_INVERTED_GUARD),
+        },
+        Err(why) => declines.push(match sense {
+            Sense::TrapIfTrue => why,
+            // An inverted guard that fails the *content* gates is not
+            // "inverted" in any interesting sense; report what refused it.
+            Sense::TrapIfFalse => why,
+        }),
+    }
+}
+
+/// Whether `region` never falls through to its successor.
+///
+/// Conservative: `Break`, `Continue` and `Transfer` also leave, but they
+/// leave to somewhere inside this function, so treating them as
+/// fall-through keeps the inverted-guard shape to the case where the
+/// successor is genuinely unreachable.
+fn diverges(region: &Region) -> bool {
+    match region {
+        Region::Return { .. } | Region::Unreachable | Region::Panic { .. } => true,
+        Region::Sequence(items) => items.last().is_some_and(diverges),
+        Region::Scope { body, .. } => diverges(body),
+        Region::If {
             then_region,
             else_region,
-        } = node
-        else {
-            return;
-        };
-        // Only a guard: the taken arm traps and there is no else. Both
-        // reasons are recorded rather than returned silently — a real
-        // two-way `if` the author wrote lands here too, which is what makes
-        // the census a description of *every* branch rather than of the
-        // guards alone.
-        if else_region.is_some() {
-            declines.push(DECLINED_HAS_ELSE);
-            return;
-        }
-        if !is_trap(then_region, empty) {
-            declines.push(DECLINED_ARM_NOT_TRAP);
-            return;
-        }
-        match classify_condition(func, *cond) {
-            Ok(note) => {
-                guards.insert(*cond, note);
-            }
-            Err(why) => declines.push(why),
-        }
-    });
-    guards
+            ..
+        } => else_region.as_ref().is_some_and(|e| diverges(e)) && diverges(then_region),
+        _ => false,
+    }
 }
 
 /// Fold the decline reasons into one metric per gate.
@@ -240,6 +347,7 @@ fn report_declines(declines: &[&'static str], result: &mut crate::pass::PassResu
             DECLINED_COMPARE_TAKEN => mc::MARSHALLING_GUARD_DECLINED_COMPARE_TAKEN,
             DECLINED_LENGTH_UNMATCHED => mc::MARSHALLING_GUARD_DECLINED_LENGTH_UNMATCHED,
             DECLINED_SHAPE => mc::MARSHALLING_GUARD_DECLINED_SHAPE,
+            DECLINED_INVERTED_GUARD => mc::MARSHALLING_GUARD_DECLINED_INVERTED,
             _ => mc::MARSHALLING_GUARD_DECLINED_OTHER,
         };
         result.metrics.increment(key, 1);
@@ -304,19 +412,23 @@ pub(super) fn is_trap(region: &Region, empty: &HashSet<BlockId>) -> bool {
 /// both refuse, the reason reported is the one that describes what the
 /// condition *is*: a `bytes_len` operand means it was a length check that
 /// did not line up, anything else means it was a comparison.
-fn classify_condition(func: &HighFunction, cond: ValueId) -> Result<String, &'static str> {
+fn classify_condition(
+    func: &HighFunction,
+    cond: ValueId,
+    sense: Sense,
+) -> Result<String, &'static str> {
     let id = resolve_use(func, cond);
     let expr = &func.bindings.get(id).ok_or(DECLINED_SHAPE)?.expr;
     match expr {
         Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { .. })) => {
-            classify_tag_check(func, expr)
+            classify_tag_check(func, expr, sense)
         }
         Expr::Binary {
             op: BinaryOp::Eq | BinaryOp::Ne,
             lhs,
             rhs,
-        } => classify_constant_discriminant(func, expr).or_else(|compare_why| {
-            classify_length_check(func, expr).map_err(|length_why| {
+        } => classify_constant_discriminant(func, expr, sense).or_else(|compare_why| {
+            classify_length_check(func, expr, sense).map_err(|length_why| {
                 let looks_like_a_length = bytes_len_of(func, *lhs).is_some()
                     || bytes_len_of(func, *rhs).is_some();
                 if looks_like_a_length {
@@ -335,6 +447,7 @@ fn classify_condition(func: &HighFunction, cond: ValueId) -> Result<String, &'st
 fn classify_constant_discriminant(
     func: &HighFunction,
     expr: &Expr,
+    sense: Sense,
 ) -> Result<String, &'static str> {
     let Expr::Binary {
         op: op @ (BinaryOp::Eq | BinaryOp::Ne),
@@ -347,7 +460,11 @@ fn classify_constant_discriminant(
     let (Some(l), Some(r)) = (trace_int(func, *lhs), trace_int(func, *rhs)) else {
         return Err(DECLINED_COMPARE_OPAQUE);
     };
-    let taken = if *op == BinaryOp::Eq { l == r } else { l != r };
+    let holds = if *op == BinaryOp::Eq { l == r } else { l != r };
+    // The trap is dead when the condition disagrees with the sense that
+    // reaches it: `if c { trap }` needs `c` false, `if c { … } trap` needs
+    // `c` true.
+    let taken = holds == (sense == Sense::TrapIfTrue);
     if taken {
         return Err(DECLINED_COMPARE_TAKEN);
     }
@@ -355,7 +472,11 @@ fn classify_constant_discriminant(
 }
 
 /// Shape 2 — a direct tag check on an entry parameter.
-fn classify_tag_check(func: &HighFunction, expr: &Expr) -> Result<String, &'static str> {
+fn classify_tag_check(
+    func: &HighFunction,
+    expr: &Expr,
+    sense: Sense,
+) -> Result<String, &'static str> {
     let Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
         value,
         tag,
@@ -364,9 +485,10 @@ fn classify_tag_check(func: &HighFunction, expr: &Expr) -> Result<String, &'stat
     else {
         return Err(DECLINED_SHAPE);
     };
-    // The trap arm must be the *mismatch* arm. `has_tag` guards trap when
-    // the tag is absent, i.e. on the negated form.
-    if !negated {
+    // The trap must be the *mismatch* path. `if !has_tag { trap }` and
+    // `if has_tag { … } trap` both say that; `if has_tag { trap }` says the
+    // opposite and is somebody else's check.
+    if *negated != (sense == Sense::TrapIfTrue) {
         return Err(DECLINED_TAG_NOT_NEGATED);
     }
     let declared =
@@ -400,15 +522,23 @@ fn classify_tag_check(func: &HighFunction, expr: &Expr) -> Result<String, &'stat
 ///
 /// A length that disagrees with `N` is **kept**: it means our picture of
 /// the parameter is wrong, and the check is the evidence.
-fn classify_length_check(func: &HighFunction, expr: &Expr) -> Result<String, &'static str> {
-    let Expr::Binary {
-        op: BinaryOp::Ne,
-        lhs,
-        rhs,
-    } = expr
-    else {
+fn classify_length_check(
+    func: &HighFunction,
+    expr: &Expr,
+    sense: Sense,
+) -> Result<String, &'static str> {
+    // `if len != N { trap }` and `if len == N { … } trap` are the same
+    // check; anything else is not this shape.
+    let wanted = match sense {
+        Sense::TrapIfTrue => BinaryOp::Ne,
+        Sense::TrapIfFalse => BinaryOp::Eq,
+    };
+    let Expr::Binary { op, lhs, rhs } = expr else {
         return Err(DECLINED_LENGTH_UNMATCHED);
     };
+    if *op != wanted {
+        return Err(DECLINED_LENGTH_UNMATCHED);
+    }
     // Either operand may hold the length; the other must be the constant.
     for (len_side, const_side) in [(*lhs, *rhs), (*rhs, *lhs)] {
         let Some(param) = bytes_len_of(func, len_side) else {
