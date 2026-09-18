@@ -180,7 +180,13 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
     };
 
     let scheduled = emission_order(func);
-    if scheduled.is_empty() || scheduled.len() > MAX_BODY {
+    // Judged by what the body still computes. Every elision leaves pure
+    // values nothing reads — a struct encode collapsed to its literal
+    // leaves the `Val` encodes, their shifts and the frame arithmetic
+    // behind — and counting those against the size limit keeps a helper
+    // out of line for work it no longer does.
+    let live = scheduled.len() - crate::dataflow::dead_residue(func, &scheduled).len();
+    if scheduled.is_empty() || live > MAX_BODY {
         return None;
     }
     let params: HashSet<ValueId> = func.params.iter().copied().collect();
@@ -320,6 +326,7 @@ fn copyable(expr: &Expr, this: FuncId) -> bool {
         | Expr::Binary { .. }
         | Expr::WideJoin { .. }
         | Expr::Field { .. }
+        | Expr::Struct { .. }
         | Expr::Semantic(_) => true,
         Expr::Call { target, .. } => *target != this,
         // A width conversion or a select is a pure operator the lowering

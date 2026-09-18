@@ -147,6 +147,13 @@ impl<'a> FnCtx<'a> {
             fold,
         };
         ctx.liveness = ctx.settle_liveness();
+        // The escape set was taken before liveness settled. A value whose
+        // only reader is dropped along the way is read by nothing, and a
+        // hoisted declaration exists solely to keep a value in scope for a
+        // reader in a sibling scope — with no reader there is nothing to
+        // keep it in scope for, and the declaration would never be
+        // assigned.
+        ctx.escaping.retain(|v| !ctx.liveness.is_unused(*v));
         ctx
     }
 
@@ -648,7 +655,7 @@ impl EscapeAnalysis {
                     let Some(binding) = func.bindings.get(vid) else {
                         continue;
                     };
-                    binding.expr.for_each_value_use(|u| self.uses.push((u, scope)));
+                    liveness::rendered_reads(func, binding, |u| self.uses.push((u, scope)));
                     if !matches!(binding.expr, Expr::Phi { .. }) {
                         self.def_scope.insert(vid, scope);
                     }

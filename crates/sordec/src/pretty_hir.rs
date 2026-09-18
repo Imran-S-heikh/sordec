@@ -732,6 +732,11 @@ fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Resu
             write!(out, "wide({}, {})", ctx.operand(*lo), ctx.operand(*hi))
         }
         Expr::Field { base, field } => write!(out, "{}.{field}", ctx.operand(*base)),
+        Expr::Struct { fields } => {
+            let items: Vec<String> =
+                fields.iter().map(|(f, v)| format!("{f}: {}", ctx.operand(*v))).collect();
+            write!(out, "struct {{ {} }}", items.join(", "))
+        }
         Expr::Unary { op, value } => {
             write!(out, "{}({})", unary_str(*op), ctx.operand(*value))
         }

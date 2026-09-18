@@ -109,21 +109,7 @@ impl Liveness {
                     let Some(binding) = func.bindings.get(vid) else {
                         continue;
                     };
-                    // A lowering that renders none of its operands reads
-                    // none of them, however many the IR records; one that
-                    // renders some reads exactly those.
-                    if let Expr::Semantic(SemanticOp::Known(op)) = &binding.expr {
-                        if idiom::ignores_operands(op) {
-                            continue;
-                        }
-                        if let Some(reads) = idiom::rendered_operands(func, op) {
-                            for u in reads {
-                                count(u);
-                            }
-                            continue;
-                        }
-                    }
-                    binding.expr.for_each_value_use(&mut count);
+                    rendered_reads(func, binding, &mut count);
                 }
             }
         });
@@ -167,6 +153,33 @@ pub(crate) fn survives_unused(expr: &Expr, rendered_as_hole: bool) -> bool {
     effects.writes_host || effects.writes_memory || effects.writes_globals
 }
 
+/// The operands a binding reads *as the renderer prints it*.
+///
+/// A lowering that renders none of its operands reads none of them,
+/// however many the IR records; one that renders some reads exactly
+/// those. Every analysis that asks "who reads this value?" on behalf of
+/// the emitter has to agree on the answer — liveness and the escape test
+/// disagreeing means a value hoisted to the body top and then never
+/// assigned.
+pub(crate) fn rendered_reads(
+    func: &HighFunction,
+    binding: &sordec_ir::Binding,
+    mut f: impl FnMut(ValueId),
+) {
+    if let Expr::Semantic(SemanticOp::Known(op)) = &binding.expr {
+        if idiom::ignores_operands(op) {
+            return;
+        }
+        if let Some(reads) = idiom::rendered_operands(func, op) {
+            for u in reads {
+                f(u);
+            }
+            return;
+        }
+    }
+    binding.expr.for_each_value_use(f);
+}
+
 /// Whether an expression carries an observable effect that must survive
 /// even when its result is unused.
 ///
@@ -194,7 +207,8 @@ fn is_effectful(expr: &Expr) -> bool {
         | Expr::Phi { .. }
         | Expr::Project { .. }
         | Expr::WideJoin { .. }
-        | Expr::Field { .. } => false,
+        | Expr::Field { .. }
+        | Expr::Struct { .. } => false,
     }
 }
 

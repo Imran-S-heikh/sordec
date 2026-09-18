@@ -435,7 +435,7 @@ fn unpack_operands(func: &HighFunction, args: &[ValueId]) -> Option<(ValueId, u3
 }
 
 /// The frame address behind a `U32Val`-encoded, width-converted pointer.
-fn raw_address(func: &HighFunction, v: ValueId) -> ValueId {
+pub(crate) fn raw_address(func: &HighFunction, v: ValueId) -> ValueId {
     let mut cur = resolve_use(func, v);
     for _ in 0..4 {
         match func.bindings.get(cur).map(|b| &b.expr) {
@@ -454,7 +454,7 @@ fn raw_address(func: &HighFunction, v: ValueId) -> ValueId {
 
 /// The key table: `len` entries of `(u32 pointer, u32 length)` naming the
 /// fields, read as UTF-8 identifiers.
-fn read_keys(memory: &sordec_ir::MemoryImage, pos: u32, len: u32) -> Option<Vec<String>> {
+pub(crate) fn read_keys(memory: &sordec_ir::MemoryImage, pos: u32, len: u32) -> Option<Vec<String>> {
     let table = memory.read(pos, len.checked_mul(8)?)?;
     let mut keys = Vec::with_capacity(len as usize);
     for entry in table.as_chunks::<8>().0 {
@@ -470,7 +470,7 @@ fn read_keys(memory: &sordec_ir::MemoryImage, pos: u32, len: u32) -> Option<Vec<
 }
 
 /// The one declared struct whose field names are exactly `keys`.
-fn struct_for<'a>(structs: &'a [StructDef], keys: &[String]) -> Option<&'a StructDef> {
+pub(crate) fn struct_for<'a>(structs: &'a [StructDef], keys: &[String]) -> Option<&'a StructDef> {
     let mut want: Vec<&str> = keys.iter().map(String::as_str).collect();
     want.sort_unstable();
     let mut hits = structs.iter().filter(|s| {

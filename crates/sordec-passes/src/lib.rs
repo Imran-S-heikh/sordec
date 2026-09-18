@@ -93,7 +93,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    BoolCodecPass, OptionDefaultPass, OptionProbePass, OptionSretPass, OptionUnwrapPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    BoolCodecPass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -430,6 +430,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // reason; before the wide codec's next iteration, whose
             // evidence rule accepts a field of a recovered struct.
             Box::new(UdtDecodePass),
+            // The same derive in the other direction: the slot stores and
+            // key table a struct literal is built from. After the decode,
+            // whose recovered fields it may be spelled from.
+            Box::new(UdtEncodePass),
             // `get(&k).unwrap()`: the proven Option probe, its trapping
             // None branch and the read, collapsed to an unwrap of the
             // read. After the inliner, which is what brings the wrapped
@@ -498,7 +502,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..57],
+        vec![1..7, 31..58],
     )
 }
 
@@ -565,6 +569,7 @@ mod tests {
                 marshalling::option_sret::PASS_NAME,
                 marshalling::option_default::PASS_NAME,
                 marshalling::udt_decode::PASS_NAME,
+                marshalling::udt_encode::PASS_NAME,
                 marshalling::option_unwrap::PASS_NAME,
                 marshalling::key_construction::PASS_NAME,
                 marshalling::dead_store::PASS_NAME,

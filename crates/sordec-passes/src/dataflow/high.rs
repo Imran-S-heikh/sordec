@@ -77,17 +77,19 @@ pub fn dead_residue(func: &HighFunction, order: &[ValueId]) -> HashSet<ValueId> 
     let mut dead: HashSet<ValueId> = HashSet::new();
     loop {
         let mut reads: HashSet<ValueId> = HashSet::new();
-        for id in order {
-            if dead.contains(id) {
+        // Every live binding, not only the scheduled ones: a block
+        // parameter is unscheduled and still reads its incoming values.
+        for (id, b) in func.bindings.iter() {
+            if dead.contains(&id) {
                 continue;
             }
-            if let Some(b) = func.bindings.get(*id) {
-                b.expr.for_each_value_use(|u| {
-                    reads.insert(resolve_use(func, u));
-                });
-            }
+            b.expr.for_each_value_use(|u| {
+                reads.insert(u);
+                reads.insert(resolve_use(func, u));
+            });
         }
         func.region.for_each_value_use(|u| {
+            reads.insert(u);
             reads.insert(resolve_use(func, u));
         });
         let mut grew = false;

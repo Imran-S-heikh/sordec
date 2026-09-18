@@ -767,7 +767,8 @@ pub fn expr_effects(expr: &Expr) -> Effects {
         | Expr::Phi { .. }
         | Expr::Project { .. }
         | Expr::WideJoin { .. }
-        | Expr::Field { .. } => Effects::PURE,
+        | Expr::Field { .. }
+        | Expr::Struct { .. } => Effects::PURE,
         // All lowered unary operators are total (the trapping float→int
         // truncations never lower to `Unary`; they stay
         // `Unknown{Conversion}`) — pinned by test.

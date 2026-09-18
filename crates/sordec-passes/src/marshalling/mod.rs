@@ -68,6 +68,7 @@ pub mod forward;
 pub(crate) mod sret;
 pub mod typed_read;
 pub mod udt_decode;
+pub mod udt_encode;
 pub mod wide_codec;
 pub mod wide_return;
 
@@ -79,6 +80,7 @@ pub use folded_encode::FoldedEncodePass;
 pub use forward::FrameForwardPass;
 pub use typed_read::TypedReadPass;
 pub use udt_decode::UdtDecodePass;
+pub use udt_encode::UdtEncodePass;
 pub use wide_codec::WideCodecPass;
 pub use frame::FrameElisionPass;
 pub use guard::ArgGuardElisionPass;

@@ -70,6 +70,32 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             let field = ty::ident(field);
             parse_quote!(#base.#field)
         }
+        // The construction side: `Name { field: value, .. }`. The struct is
+        // named by the binding's type, so a value whose type the registry
+        // cannot name has no literal to print.
+        Expr::Struct { fields } => {
+            let name = match &binding.ty {
+                IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => {
+                    ctx.reg.name_of(*id)
+                }
+                _ => None,
+            };
+            match name {
+                Some(name) => {
+                    let path = ty::ident(name);
+                    let items: Vec<syn::FieldValue> = fields
+                        .iter()
+                        .map(|(field, value)| {
+                            let field = ty::ident(field);
+                            let value = ctx.value_ref(*value);
+                            parse_quote!(#field: #value)
+                        })
+                        .collect();
+                    parse_quote!(#path { #(#items),* })
+                }
+                None => ctx.policy.unknown_expr("struct literal of an unnamed type"),
+            }
+        }
         Expr::Load { .. } => ctx.policy.unknown_expr("memory load"),
         Expr::Store { .. } => ctx.policy.unknown_expr("memory store"),
         Expr::GlobalGet { index } => ctx.policy.unknown_expr(&format!("global.get {index}")),

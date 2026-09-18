@@ -89,6 +89,15 @@ pub enum Expr {
         field: String,
     },
 
+    /// A `#[contracttype]` struct built field by field — the construction
+    /// side of [`Expr::Field`]. The struct itself is named by the
+    /// binding's type, so only the field values live here.
+    Struct {
+        /// Field values in declaration order, by field name.
+        // JUSTIFY: field names come from the contract's own spec.
+        fields: Vec<(String, ValueId)>,
+    },
+
     /// Direct call to a local function (not a host call).
     Call {
         /// Target function in the same module.
@@ -236,6 +245,11 @@ impl Expr {
                 f(*hi);
             }
             Expr::Field { base, field: _ } => f(*base),
+            Expr::Struct { fields } => {
+                for (_, value) in fields {
+                    f(*value);
+                }
+            }
             Expr::IndirectCall {
                 table: _,
                 sig: _,
@@ -301,6 +315,11 @@ impl Expr {
             }
             Expr::Literal(_) => {}
             Expr::Use(value) => f(value),
+            Expr::Struct { fields } => {
+                for (_, value) in fields {
+                    f(value);
+                }
+            }
             Expr::Unary { op: _, value } => f(value),
             Expr::Binary { op: _, lhs, rhs } => {
                 f(lhs);
