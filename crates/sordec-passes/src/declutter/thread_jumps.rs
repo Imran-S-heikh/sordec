@@ -27,6 +27,15 @@
 //! exists, every path into `P` extends to a path into `B` and must
 //! therefore already contain the definition — so the value dominates
 //! `P`'s terminator too, and referencing it there is well-formed SSA.
+//!
+//! That argument covers what `B` passes on, not `B`'s own parameters: they
+//! are defined *at* `B`, so an edge that skips `B` leaves them undefined.
+//! A forward skip substitutes them into the arguments it carries, which is
+//! all it can fix. So a forwarder is only skipped when its parameters are
+//! read by nothing but its own terminator. Merge pruning routinely makes
+//! the forwarder's target read them directly — `bb2(p): branch bb1()`,
+//! `bb1: return p` — and threading past `bb2` there returned an undefined
+//! value (soroban-examples `pause`, found 2026-09-18).
 
 use std::collections::{HashMap, HashSet};
 
@@ -106,11 +115,20 @@ fn thread_function(func: &mut LiftedFunction) -> ThreadStats {
         Trap,
     }
     let mut empty: HashMap<BlockId, (Vec<ValueId>, EmptyExit)> = HashMap::new();
+    let uses = crate::dataflow::DefUseIndex::build(func);
     for (block_id, block) in func.blocks.iter() {
         if !block.instructions.is_empty() {
             continue;
         }
+        // A forwarder's parameters must not be read anywhere but its own
+        // terminator; see the module docs.
+        let private = block.params.iter().all(|p| {
+            uses.uses_of(*p)
+                .iter()
+                .all(|site| matches!(site, crate::dataflow::UseSite::Terminator { block } if *block == block_id))
+        });
         let exit = match &block.terminator {
+            LiftedTerminator::Branch(_) if !private => continue,
             LiftedTerminator::Branch(target) => EmptyExit::Forward(target.clone()),
             LiftedTerminator::Return { values } => EmptyExit::Return(values.clone()),
             LiftedTerminator::Unreachable => EmptyExit::Trap,
@@ -271,6 +289,29 @@ mod tests {
             panic!("bb0 stays a branch");
         };
         assert_eq!(t.block, bb(3), "threaded through both hops");
+    }
+
+    /// The `pause` shape: merge pruning left `bb1` returning `bb2`'s
+    /// parameter directly. Skipping `bb2` would leave that parameter
+    /// undefined on the new edge, so `bb2` is not a forwarder.
+    #[test]
+    fn a_forwarder_whose_parameter_is_read_elsewhere_is_not_skipped() {
+        let mut func = func_with(
+            vec![i32_const(7), param(2, 0)],
+            vec![
+                block(0, vec![], vec![v(0)], LiftedTerminator::Branch(target(2, vec![v(0)]))),
+                block(1, vec![], vec![], LiftedTerminator::Return { values: vec![v(1)] }),
+                block(2, vec![v(1)], vec![], LiftedTerminator::Branch(target(1, vec![]))),
+            ],
+        );
+        thread_function(&mut func);
+        match &func.blocks.get(bb(0)).unwrap().terminator {
+            LiftedTerminator::Branch(t) => assert_eq!(t.block, bb(2), "bb0 still enters through bb2"),
+            LiftedTerminator::Return { values } => {
+                assert_eq!(values, &vec![v(0)], "an inlined return must name the argument, not bb2's parameter");
+            }
+            other => panic!("unexpected terminator {other:?}"),
+        }
     }
 
     #[test]

@@ -198,6 +198,51 @@ fn assert_still_reducible(name: &str, func: &LiftedFunction) {
     );
 }
 
+/// Every value a live instruction or terminator reads is defined by a
+/// block parameter or a scheduled instruction.
+///
+/// The reference-integrity validator only checks ids are in range, and a
+/// value can be in range and defined nowhere: jump threading once routed
+/// edges past a block whose parameter its target still read, and the
+/// function returned that parameter with nothing defining it (found on
+/// soroban-examples `pause`, 2026-09-18).
+fn assert_every_read_is_defined(name: &str, func: &LiftedFunction) {
+    let mut defined = std::collections::HashSet::new();
+    for (_, block) in func.blocks.iter() {
+        defined.extend(block.params.iter().copied());
+        defined.extend(block.instructions.iter().copied());
+    }
+    let check = |read: ValueId, block: BlockId| {
+        assert!(
+            defined.contains(&read),
+            "[{name}] fn{} bb{}: reads v{} which no block defines",
+            func.id.index(),
+            block.index(),
+            read.index()
+        );
+    };
+    for (block_id, block) in func.blocks.iter() {
+        for &inst in &block.instructions {
+            let Some(value) = func.values.get(inst) else {
+                continue;
+            };
+            match &value.def {
+                LiftedValueDef::Operator { args, .. } => args.iter().for_each(|a| check(*a, block_id)),
+                LiftedValueDef::Alias(t) => check(*t, block_id),
+                LiftedValueDef::PickOutput { from, .. } => check(*from, block_id),
+                LiftedValueDef::BlockParam { .. } => {}
+            }
+        }
+        for_each_target(&block.terminator, |t| t.args.iter().for_each(|a| check(*a, block_id)));
+        match &block.terminator {
+            sordec_ir::LiftedTerminator::BranchIf { cond, .. } => check(*cond, block_id),
+            sordec_ir::LiftedTerminator::Switch { index, .. } => check(*index, block_id),
+            sordec_ir::LiftedTerminator::Return { values } => values.iter().for_each(|v| check(*v, block_id)),
+            _ => {}
+        }
+    }
+}
+
 #[test]
 fn corpus_reaches_declutter_normal_form() {
     for (name, wasm) in FIXTURES {
@@ -209,6 +254,7 @@ fn corpus_reaches_declutter_normal_form() {
             assert_no_threadable_or_mergeable_shapes(name, func);
             assert_dead_swept(name, func);
             assert_still_reducible(name, func);
+            assert_every_read_is_defined(name, func);
         }
     }
 }
