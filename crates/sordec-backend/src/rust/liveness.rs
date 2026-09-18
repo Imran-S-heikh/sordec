@@ -176,7 +176,8 @@ fn is_effectful(expr: &Expr) -> bool {
         | Expr::Unary { .. }
         | Expr::Binary { .. }
         | Expr::Phi { .. }
-        | Expr::Project { .. } => false,
+        | Expr::Project { .. }
+        | Expr::WideJoin { .. } => false,
     }
 }
 

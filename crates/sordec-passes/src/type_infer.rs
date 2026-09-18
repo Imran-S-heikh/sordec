@@ -428,6 +428,10 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
         Expr::Unary { op, value } => unary_result(*op, types.get(value)),
         Expr::Binary { op, lhs, rhs } => binary_result(*op, types.get(lhs), types.get(rhs)),
         Expr::Phi { incoming } => phi_join(incoming, types),
+        // Two limbs read as one integer. `i128` is the guess only because
+        // it is what Soroban contracts overwhelmingly use; a recognizer
+        // that knows the value is a `u128` plants `Known` and wins.
+        Expr::WideJoin { .. } => Some(IrType::Inferred(KnownType::I128)),
         // Semantic ops are typed by the recognizers (host ABI); leave them.
         // Load/Store/GlobalGet/IndirectCall/Unknown stay for later waves.
         _ => None,
@@ -471,6 +475,9 @@ fn unary_result(op: UnaryOp, operand: Option<&IrType>) -> Option<IrType> {
         UnaryOp::Eqz => Some(IrType::Inferred(KnownType::Bool)),
         // Float ops don't occur in Soroban; leave untyped.
         UnaryOp::Sqrt | UnaryOp::Floor | UnaryOp::Ceil | UnaryOp::Trunc => None,
+        // A limb of a 128-bit value is the raw 64-bit word the wasm
+        // carried; its signedness is not the wide value's.
+        UnaryOp::WideLo | UnaryOp::WideHi => Some(IrType::Inferred(KnownType::I64)),
     }
 }
 
@@ -545,7 +552,7 @@ fn is_arithmetic(op: BinaryOp) -> bool {
 
 fn is_comparison(op: BinaryOp) -> bool {
     use BinaryOp as B;
-    matches!(op, B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge)
+    matches!(op, B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge | B::MulOverflows)
 }
 
 /// The concrete Soroban type of an integer/bool/unit literal, or `None` for

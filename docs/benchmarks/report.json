@@ -1,51 +1,17 @@
 {
-  "aggregate_overall": 0.6108487095236913,
-  "aggregate_overall_with_behavior": 0.6155756002799938,
-  "behavior_measured_fixtures": 2,
+  "aggregate_overall": 0.6122829828815014,
+  "aggregate_overall_with_behavior": 0.6122829828815014,
+  "behavior_measured_fixtures": 0,
   "fixtures": {
     "attestation": {
       "basis_profile": "rfp-default",
-      "behavior": {
-        "b_side": {
-          "kind": "reconstruction"
-        },
-        "entrypoints_driven": 2,
-        "entrypoints_total": 6,
-        "notes": [
-          "2 of 6 entrypoints drivable (skipped — attest: parameter `signer` is a Bytes value, which needs a value constructed against a live host; check: parameter `message` is a Bytes value, which needs a value constructed against a live host; digest: parameter `message` is a Bytes value, which needs a value constructed against a live host; digest_keccak: parameter `message` is a Bytes value, which needs a value constructed against a live host)"
-        ],
-        "score": 1.0,
-        "trivial_agreements": 4,
-        "tuples": [
-          {
-            "exercised": 20,
-            "matched": 20,
-            "name": "return"
-          },
-          {
-            "exercised": 0,
-            "matched": 0,
-            "name": "events"
-          },
-          {
-            "exercised": 0,
-            "matched": 0,
-            "name": "auth"
-          },
-          {
-            "exercised": 0,
-            "matched": 0,
-            "name": "storage"
-          }
-        ]
-      },
       "categories": {
         "behavior": {
-          "checked": true,
+          "checked": false,
           "notes": [
-            "differential execution over 2 of 6 entrypoints"
+            "behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`"
           ],
-          "score": 1.0,
+          "score": 0.0,
           "weight": 0.15
         },
         "interface": {
@@ -84,7 +50,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 6 entrypoints, 1 types recovered"
       ],
-      "overall": 0.8125,
+      "overall": 0.7794117647058822,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
@@ -96,7 +62,7 @@
         "behavior": {
           "checked": false,
           "notes": [
-            "behavior unavailable: crate does not build: error[E0308]: mismatched types"
+            "behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`"
           ],
           "score": 0.0,
           "weight": 0.15
@@ -124,10 +90,10 @@
           "notes": [
             "6 entrypoints (0 unreconstructed, 0 without control flow)",
             "ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.0428 recall=1.0000 (23 original tokens, 537 reconstructed) — bloat 23.3x, dice ceiling ~0.0821",
-            "low-similarity: __constructor(0.07), balance_shares(0.06), deposit(0.11), get_rsrvs(0.00), swap(0.14), withdraw(0.07)"
+            "control flow: precision=0.0618 recall=1.0000 (23 original tokens, 372 reconstructed) — bloat 16.2x, dice ceiling ~0.1165",
+            "low-similarity: __constructor(0.07), balance_shares(0.06), deposit(0.15), get_rsrvs(0.00), swap(0.23), withdraw(0.12)"
           ],
-          "score": 0.07229877754198814,
+          "score": 0.10408710453662362,
           "weight": 0.25
         }
       },
@@ -138,7 +104,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 6 entrypoints, 1 types recovered"
       ],
-      "overall": 0.5689316891350674,
+      "overall": 0.5782811970746661,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
@@ -146,47 +112,13 @@
     },
     "hello-add": {
       "basis_profile": "rfp-default",
-      "behavior": {
-        "b_side": {
-          "kind": "reconstruction"
-        },
-        "entrypoints_driven": 1,
-        "entrypoints_total": 1,
-        "notes": [
-          "1 of 1 entrypoints drivable"
-        ],
-        "score": 1.0,
-        "trivial_agreements": 3,
-        "tuples": [
-          {
-            "exercised": 9,
-            "matched": 9,
-            "name": "return"
-          },
-          {
-            "exercised": 0,
-            "matched": 0,
-            "name": "events"
-          },
-          {
-            "exercised": 0,
-            "matched": 0,
-            "name": "auth"
-          },
-          {
-            "exercised": 0,
-            "matched": 0,
-            "name": "storage"
-          }
-        ]
-      },
       "categories": {
         "behavior": {
-          "checked": true,
+          "checked": false,
           "notes": [
-            "differential execution over 1 of 1 entrypoints"
+            "behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`"
           ],
-          "score": 1.0,
+          "score": 0.0,
           "weight": 0.15
         },
         "interface": {
@@ -233,7 +165,7 @@
         "behavior": {
           "checked": false,
           "notes": [
-            "behavior unavailable: crate does not build: error[E0308]: mismatched types"
+            "behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`"
           ],
           "score": 0.0,
           "weight": 0.15
@@ -287,7 +219,7 @@
         "behavior": {
           "checked": false,
           "notes": [
-            "behavior unavailable: crate does not build: error[E0308]: mismatched types"
+            "behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`"
           ],
           "score": 0.0,
           "weight": 0.15
@@ -316,10 +248,10 @@
           "notes": [
             "13 entrypoints (0 unreconstructed, 0 without control flow)",
             "ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.0648 recall=1.0000 (33 original tokens, 509 reconstructed) — bloat 15.4x, dice ceiling ~0.1218",
+            "control flow: precision=0.0652 recall=1.0000 (33 original tokens, 506 reconstructed) — bloat 15.3x, dice ceiling ~0.1224",
             "low-similarity: __constructor(0.54), allowance(0.09), approve(0.13), balance(0.06), burn(0.13), burn_from(0.26), decimals(0.00), mint(0.09), … (+5)"
           ],
-          "score": 0.1292254418716601,
+          "score": 0.1298777457865035,
           "weight": 0.25
         }
       },
@@ -330,7 +262,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 3 types recovered"
       ],
-      "overall": 0.5829331454761508,
+      "overall": 0.5831249995687517,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
@@ -342,7 +274,7 @@
         "behavior": {
           "checked": false,
           "notes": [
-            "behavior unavailable: crate does not build: error[E0308]: mismatched types"
+            "behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`"
           ],
           "score": 0.0,
           "weight": 0.15
@@ -372,10 +304,10 @@
           "notes": [
             "13 entrypoints (0 unreconstructed, 0 without control flow)",
             "ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.0827 recall=1.0000 (33 original tokens, 399 reconstructed) — bloat 12.1x, dice ceiling ~0.1528",
+            "control flow: precision=0.0833 recall=1.0000 (33 original tokens, 396 reconstructed) — bloat 12.0x, dice ceiling ~0.1538",
             "low-similarity: __constructor(0.54), allowance(0.11), approve(0.17), balance(0.09), burn(0.18), burn_from(0.31), decimals(0.00), mint(0.12), … (+5)"
           ],
-          "score": 0.14845390335324593,
+          "score": 0.1493311536288431,
           "weight": 0.25
         }
       },
@@ -386,7 +318,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.5035045417102306,
+      "overall": 0.5037625564971709,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
@@ -428,10 +360,10 @@
           "notes": [
             "13 entrypoints (0 unreconstructed, 0 without control flow)",
             "ambiguous names (2 original, 0 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.0776 recall=1.0000 (33 original tokens, 425 reconstructed) — bloat 12.9x, dice ceiling ~0.1441",
-            "low-similarity: __constructor(0.13), allowance(0.10), approve(0.16), balance(0.09), burn(0.17), burn_from(0.30), decimals(0.00), mint(0.11), … (+5)"
+            "control flow: precision=0.0782 recall=1.0000 (33 original tokens, 422 reconstructed) — bloat 12.8x, dice ceiling ~0.1451",
+            "low-similarity: __constructor(0.13), allowance(0.10), approve(0.16), balance(0.09), burn(0.17), burn_from(0.30), decimals(0.00), mint(0.12), … (+5)"
           ],
-          "score": 0.11228145334074827,
+          "score": 0.11309927807155606,
           "weight": 0.25
         }
       },
@@ -442,7 +374,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.18506015595994857,
+      "overall": 0.18530069264548027,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,

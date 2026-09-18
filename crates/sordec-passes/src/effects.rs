@@ -760,9 +760,13 @@ pub fn expr_effects(expr: &Expr) -> Effects {
         // A projection selects a component of a value that has already
         // been produced; the producer's effects are the call's, and they
         // are accounted where the call is.
-        Expr::Literal(_) | Expr::Use(_) | Expr::Phi { .. } | Expr::Project { .. } => {
-            Effects::PURE
-        }
+        // A wide join is two limbs read as one integer — no computation,
+        // no trap.
+        Expr::Literal(_)
+        | Expr::Use(_)
+        | Expr::Phi { .. }
+        | Expr::Project { .. }
+        | Expr::WideJoin { .. } => Effects::PURE,
         // All lowered unary operators are total (the trapping float→int
         // truncations never lower to `Unary`; they stay
         // `Unknown{Conversion}`) — pinned by test.
@@ -788,7 +792,8 @@ pub fn expr_effects(expr: &Expr) -> Effects {
             | sordec_ir::BinaryOp::Lt
             | sordec_ir::BinaryOp::Le
             | sordec_ir::BinaryOp::Gt
-            | sordec_ir::BinaryOp::Ge => Effects::PURE,
+            | sordec_ir::BinaryOp::Ge
+            | sordec_ir::BinaryOp::MulOverflows => Effects::PURE,
         },
         // Intra-module callee summaries are future work — fail closed.
         Expr::Call { .. } | Expr::IndirectCall { .. } => Effects::WORST,

@@ -51,6 +51,17 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             let field = syn::Index::from(*index as usize);
             parse_quote!(#base.#field)
         }
+        // Two limbs read as one 128-bit integer. This spelling is the
+        // fallback for a join the fold pass could not cancel against its
+        // own limbs; the sign of the high limb is what the shift-and-or
+        // preserves, and the low limb is masked through `u64` so its sign
+        // bit does not smear into the high half.
+        Expr::WideJoin { lo, hi } => {
+            let lo = ctx.value_ref(*lo);
+            let hi = ctx.value_ref(*hi);
+            let wide = wide_type(&binding.ty);
+            parse_quote!((((#hi as #wide) << 64) | (#lo as u64 as #wide)))
+        }
         Expr::Load { .. } => ctx.policy.unknown_expr("memory load"),
         Expr::Store { .. } => ctx.policy.unknown_expr("memory store"),
         Expr::GlobalGet { index } => ctx.policy.unknown_expr(&format!("global.get {index}")),
@@ -135,9 +146,19 @@ fn int_literal(n: i128, ty: &IrType) -> Option<syn::Expr> {
             let v = n as i64;
             parse_quote!(#v)
         }
+        // A constant compared against or combined with a recovered wide
+        // value: the wasm carried one limb, the source wrote the whole
+        // number, and a small constant's other limb is its sign extension.
+        KnownType::I128 => {
+            parse_quote!(#n)
+        }
+        KnownType::U128 => {
+            let v = n as u128;
+            parse_quote!(#v)
+        }
         // Everything else is either not an integer or not something a raw
-        // WASM constant can stand in for (`i128` arrives as two limbs,
-        // `Address` as a handle). Fall back to the encoded form.
+        // WASM constant can stand in for (`Address` is a handle). Fall
+        // back to the encoded form.
         _ => return None,
     })
 }
@@ -224,6 +245,20 @@ fn unary_expr(op: UnaryOp, v: syn::Expr, operand_is_bool: bool) -> syn::Expr {
         UnaryOp::Floor => parse_quote!(#v.floor()),
         UnaryOp::Ceil => parse_quote!(#v.ceil()),
         UnaryOp::Trunc => parse_quote!(#v.trunc()),
+        // Limbs of a 128-bit value: `as i64` truncates to the low word,
+        // and the arithmetic shift brings the high word down with its sign.
+        UnaryOp::WideLo => parse_quote!((#v as i64)),
+        UnaryOp::WideHi => parse_quote!(((#v >> 64) as i64)),
+    }
+}
+
+/// The Rust spelling of a wide binding's type: `u128` when the pipeline
+/// proved or inferred it, `i128` otherwise — Soroban's amounts are signed,
+/// so that is the default the join is typed with too.
+fn wide_type(ty: &IrType) -> syn::Type {
+    match ty {
+        IrType::Known(KnownType::U128) | IrType::Inferred(KnownType::U128) => parse_quote!(u128),
+        _ => parse_quote!(i128),
     }
 }
 
@@ -247,6 +282,7 @@ fn binary_expr(op: BinaryOp, l: syn::Expr, r: syn::Expr) -> syn::Expr {
         BinaryOp::Le => parse_quote!(#l <= #r),
         BinaryOp::Gt => parse_quote!(#l > #r),
         BinaryOp::Ge => parse_quote!(#l >= #r),
+        BinaryOp::MulOverflows => parse_quote!(#l.checked_mul(#r).is_none()),
     }
 }
 

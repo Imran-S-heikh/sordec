@@ -52,6 +52,27 @@ pub enum Expr {
         rhs: ValueId,
     },
 
+    /// A 128-bit integer assembled from its two 64-bit limbs.
+    ///
+    /// WASM has no 128-bit value type, so rustc carries every `i128` as a
+    /// pair of `i64`s: two parameters, two return slots, two stores. The
+    /// source wrote one value. This node is that value — the point where
+    /// the pipeline stops reasoning about limbs and starts reasoning about
+    /// the integer the contract's author named.
+    ///
+    /// Its inverse is [`UnaryOp::WideLo`] / [`UnaryOp::WideHi`], and the
+    /// two cancel: a join of the limbs of `x` *is* `x`, which is the
+    /// identity that lets a decoded `amount` flow through arithmetic and
+    /// back into an encode without a single limb surviving to the output.
+    /// The type on the binding says whether it is `i128` or `u128`; the
+    /// limbs are the same bits either way.
+    WideJoin {
+        /// Low 64 bits.
+        lo: ValueId,
+        /// High 64 bits.
+        hi: ValueId,
+    },
+
     /// Direct call to a local function (not a host call).
     Call {
         /// Target function in the same module.
@@ -194,6 +215,10 @@ impl Expr {
                 }
             }
             Expr::Project { value, index: _ } => f(*value),
+            Expr::WideJoin { lo, hi } => {
+                f(*lo);
+                f(*hi);
+            }
             Expr::IndirectCall {
                 table: _,
                 sig: _,
@@ -347,6 +372,15 @@ pub enum UnaryOp {
     Ceil,
     /// Truncation toward zero.
     Trunc,
+    /// Low 64 bits of a 128-bit value, as an `i64`.
+    ///
+    /// The inverse of [`Expr::WideJoin`]; see there for why the pipeline
+    /// wants both directions. Renders as `x as i64`, which truncates.
+    WideLo,
+    /// High 64 bits of a 128-bit value, as an `i64`.
+    ///
+    /// Renders as `(x >> 64) as i64`.
+    WideHi,
 }
 
 /// Binary operations after recovery.
@@ -393,4 +427,18 @@ pub enum BinaryOp {
     Gt,
     /// Greater-than-or-equal.
     Ge,
+    /// Whether `lhs * rhs` overflows the operands' type — the boolean
+    /// rustc tests under `overflow-checks = true` before it lets a
+    /// product through.
+    ///
+    /// For a 128-bit multiply that test is not a comparison the caller
+    /// can spell: rustc outlines it into the `__muloti4` runtime helper,
+    /// which hands the flag back through a pointer. Recovering the helper
+    /// as a plain [`Mul`](Self::Mul) leaves that flag needing a
+    /// producer, and this is it. Renders as `lhs.checked_mul(rhs).is_none()`,
+    /// which is what the guard around it means; the overflow-guard
+    /// elision then removes the guard on the same relocation argument it
+    /// uses for the 64-bit carry test, because the re-emitted `*`
+    /// regenerates the check.
+    MulOverflows,
 }

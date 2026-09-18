@@ -178,6 +178,14 @@ pub const VAL_ENCODE_U32: &str = "val_encode_u32";
 pub const VAL_DECODE_SMALL: &str = "val_decode_small";
 /// `Val` comparison host calls collapsed.
 pub const VAL_COMPARE: &str = "val_compare";
+/// `compiler_builtins` 128-bit runtime helpers identified by body shape
+/// (`__multi3`, `__muloti4`, `__udivmodti4`, `__divti3`, the shifts).
+pub const I128_BUILTINS_IDENTIFIED: &str = "i128_builtins_identified";
+/// Calls into those helpers rewritten as 128-bit arithmetic.
+pub const I128_BUILTIN_CALLS_REWRITTEN: &str = "i128_builtin_calls_rewritten";
+/// Wide joins cancelled against their own limbs (and limbs against their
+/// join) — the identities that let an `i128` flow through as one value.
+pub const WIDE_FOLDED: &str = "wide_folded";
 /// Packed `U32Val` comparisons rewritten to payload comparisons via the
 /// major-field mask, or against a tagged constant — the exact shapes,
 /// resting on no premise beyond the producer's ABI return type.
@@ -621,6 +629,9 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         VAL_PACKED_COMPARE_MASKED,
         VAL_PACKED_COMPARE_ORDERED,
         VAL_PACKED_COMPARE_BOOL,
+        I128_BUILTINS_IDENTIFIED,
+        I128_BUILTIN_CALLS_REWRITTEN,
+        WIDE_FOLDED,
         UNRECOGNISED_HOST_CALL,
         // Structuring section — de-cluttering (W3).
         DECLUTTER_ALIASES_RESOLVED,

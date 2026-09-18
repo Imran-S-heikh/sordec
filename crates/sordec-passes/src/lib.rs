@@ -44,6 +44,7 @@
 // broken link, not a private one, and still fails the build.
 #![allow(rustdoc::private_intra_doc_links)]
 
+pub mod arith;
 pub mod attribution;
 pub mod dataflow;
 pub mod declutter;
@@ -81,6 +82,7 @@ pub use declutter::{
 };
 pub use error::{LiftError, LiftResult};
 pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATALOG_VERSION};
+pub use arith::{I128BuiltinPass, WideFoldPass};
 pub use attribution::SdkAttributionPass;
 pub use recognizers::symbol_encoder::SymbolEncoderPass;
 pub use interproc::SpecializePass;
@@ -259,6 +261,13 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // body *is* rather than infer it from shape. Diagnostics-only
             // today; the passes that act on its answers come later.
             Box::new(SdkAttributionPass),
+            // The `compiler_builtins` 128-bit runtime, recovered as
+            // arithmetic over wide joins. Reads only body shape, so it
+            // depends on nothing; it goes first so every pass below sees
+            // `a * b` where the wasm had a helper call and two limb
+            // projections, and so the overflow flag it plants is a
+            // condition the panic classifier can name.
+            Box::new(I128BuiltinPass),
             Box::new(ValEncodingPass),
             Box::new(SpecializePass),
             Box::new(StoragePass),
@@ -322,6 +331,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // dead, which is what `FrameElisionPass` below then collects.
             Box::new(KeyConstructionElisionPass),
             Box::new(FrameElisionPass),
+            // Cancels a wide join against its own limbs. In the group
+            // because the decode collapse is what plants the limb
+            // extractors it cancels, and each cancellation may expose the
+            // next; it strictly reduces the count of wide nodes.
+            Box::new(WideFoldPass),
             // Compiler-inserted control flow the source never wrote, in the
             // order one exposes the next: dropping the overflow guard can
             // leave its merge scope with a single tail `Break`, which is then
@@ -363,7 +377,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // `scope_exit_group_covers_exactly_its_pair` pin those ranges by
         // pass name, so inserting a pass above one fails a test instead of
         // silently shifting the window.
-        vec![1..7, 30..35, 36..38],
+        vec![1..7, 31..37, 38..40],
     )
 }
 
@@ -417,6 +431,7 @@ mod tests {
                 marshalling::guard::PASS_NAME,
                 marshalling::key_construction::PASS_NAME,
                 marshalling::frame::PASS_NAME,
+                arith::wide_fold::PASS_NAME,
             ],
         );
     }

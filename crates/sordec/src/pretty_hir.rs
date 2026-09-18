@@ -728,6 +728,9 @@ fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Resu
         Expr::Project { value, index } => {
             write!(out, "{}.{index}", ctx.operand(*value))
         }
+        Expr::WideJoin { lo, hi } => {
+            write!(out, "wide({}, {})", ctx.operand(*lo), ctx.operand(*hi))
+        }
         Expr::Unary { op, value } => {
             write!(out, "{}({})", unary_str(*op), ctx.operand(*value))
         }
@@ -1441,6 +1444,7 @@ fn binary_str(op: BinaryOp) -> &'static str {
         BinaryOp::Le => "le",
         BinaryOp::Gt => "gt",
         BinaryOp::Ge => "ge",
+        BinaryOp::MulOverflows => "mul_overflows",
     }
 }
 
@@ -1458,6 +1462,8 @@ fn unary_str(op: UnaryOp) -> &'static str {
         UnaryOp::Floor => "floor",
         UnaryOp::Ceil => "ceil",
         UnaryOp::Trunc => "trunc",
+        UnaryOp::WideLo => "wide_lo",
+        UnaryOp::WideHi => "wide_hi",
     }
 }
 

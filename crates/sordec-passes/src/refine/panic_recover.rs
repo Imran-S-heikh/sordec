@@ -43,7 +43,7 @@ use sordec_ir::{
 };
 
 use super::debug_validate;
-use crate::dataflow::resolve_use;
+use crate::dataflow::{resolve_use, trace_int};
 use crate::pass::{Pass, PassResult};
 
 /// Unique pipeline name of this pass.
@@ -281,11 +281,19 @@ fn typed_panic(
 /// unwrap; a carry/borrow test on one arithmetic binding marks it as
 /// rustc's overflow check; anything else is a bare panic.
 fn classify(cond: ValueId, func: &HighFunction) -> PanicKind {
+    // Through any `Use` chain: an elision that replaced a load with the
+    // value it read leaves the guard's condition one alias away from the
+    // expression that classifies it.
+    let cond = resolve_use(func, cond);
     let Some(binding) = func.bindings.get(cond) else {
         return PanicKind::Bare;
     };
     match &binding.expr {
         Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { .. })) => PanicKind::Unwrap,
+        // The 128-bit multiply's overflow flag, recovered from the
+        // `__muloti4` out-pointer. It is rustc's own check by
+        // construction — nothing else produces this expression.
+        Expr::Binary { op: BinaryOp::MulOverflows, .. } => PanicKind::ArithOverflow,
         // The raw shape the tag-check recognizer leaves on i64-typed
         // paths: `(x & 0xFF) ==/!= tag`.
         Expr::Binary {
@@ -324,6 +332,14 @@ fn classify(cond: ValueId, func: &HighFunction) -> PanicKind {
 /// against 122 comparison guards it declines.
 fn is_overflow_test(func: &HighFunction, x: ValueId, y: ValueId) -> bool {
     let (x, y) = (resolve_use(func, x), resolve_use(func, y));
+    // signed overflow — a sign-mask test against zero. The mask is built
+    // from one addition or subtraction's own operands, so derivation is
+    // still the discriminator.
+    if (trace_int(func, y) == Some(0) && is_signed_overflow_mask(func, x))
+        || (trace_int(func, x) == Some(0) && is_signed_overflow_mask(func, y))
+    {
+        return true;
+    }
     // add carry — one side is the sum, the other is one of its addends.
     let carries = |sum: ValueId, addend: ValueId| {
         matches!(
@@ -342,6 +358,109 @@ fn is_overflow_test(func: &HighFunction, x: ValueId, y: ValueId) -> bool {
                 if resolve_use(func, *lhs) == x && resolve_use(func, *rhs) == y
         )
     })
+}
+
+/// Whether `mask` is rustc's signed-overflow sign mask for one `+`/`-`.
+///
+/// For signed integers the carry test does not work, and rustc emits the
+/// textbook sign test instead, on the high limb of an `i128` as much as on
+/// an `i64`:
+///
+/// ```text
+/// s = a + b;  if ((s ^ a) & (s ^ b)) < 0 { trap }   <- both operands' signs
+///                                                     differ from the sum's
+/// s = a - b;  if ((a ^ b) & (a ^ s)) < 0 { trap }   <- operands' signs differ
+///                                                     and the result's flipped
+/// ```
+///
+/// Same rule as the unsigned shapes: the two xors must be built from *one*
+/// arithmetic binding and its own operands. Any other and-of-xors is the
+/// contract's arithmetic.
+fn is_signed_overflow_mask(func: &HighFunction, mask: ValueId) -> bool {
+    let Some(Expr::Binary { op: BinaryOp::BitAnd, lhs, rhs }) =
+        func.bindings.get(mask).map(|b| &b.expr)
+    else {
+        return false;
+    };
+    let (Some(p), Some(q)) = (xor_pair(func, *lhs), xor_pair(func, *rhs)) else {
+        return false;
+    };
+    let same = |x: (ValueId, ValueId), u: ValueId, w: ValueId| {
+        (x.0 == u && x.1 == w) || (x.0 == w && x.1 == u)
+    };
+    // Every add/sub in the function whose operands and result account for
+    // all four xor operands, in the shapes above (operand order free).
+    func.bindings.iter().any(|(sum, binding)| {
+        let Some((op, a, b)) = chain_operands(func, sum, &binding.expr) else {
+            return false;
+        };
+        match (op, p.negated, q.negated) {
+            // (s ^ a) & (s ^ b)
+            (BinaryOp::Add, false, false) => {
+                (same(p.pair, sum, a) && same(q.pair, sum, b))
+                    || (same(p.pair, sum, b) && same(q.pair, sum, a))
+            }
+            // !(a ^ b) & (a ^ s) — the same test with the operand-sign
+            // agreement written as a negation.
+            (BinaryOp::Add, true, false) => {
+                same(p.pair, a, b) && (same(q.pair, a, sum) || same(q.pair, b, sum))
+            }
+            (BinaryOp::Add, false, true) => {
+                same(q.pair, a, b) && (same(p.pair, a, sum) || same(p.pair, b, sum))
+            }
+            // (a ^ b) & (a ^ s)
+            (BinaryOp::Sub, false, false) => {
+                (same(p.pair, a, b) && same(q.pair, a, sum))
+                    || (same(q.pair, a, b) && same(p.pair, a, sum))
+            }
+            _ => false,
+        }
+    })
+}
+
+/// One side of the sign mask: an xor of two values, possibly complemented
+/// (`xor x, -1`), which is how rustc spells "the signs agree".
+struct XorPair {
+    pair: (ValueId, ValueId),
+    negated: bool,
+}
+
+fn xor_pair(func: &HighFunction, v: ValueId) -> Option<XorPair> {
+    let Expr::Binary { op: BinaryOp::BitXor, lhs, rhs } =
+        &func.bindings.get(resolve_use(func, v))?.expr
+    else {
+        return None;
+    };
+    if trace_int(func, *rhs) == Some(-1) {
+        let inner = xor_pair(func, *lhs)?;
+        return Some(XorPair { pair: inner.pair, negated: !inner.negated });
+    }
+    Some(XorPair {
+        pair: (resolve_use(func, *lhs), resolve_use(func, *rhs)),
+        negated: false,
+    })
+}
+
+/// The operator and the two original operands of an add/sub, seeing
+/// through the carry or borrow link rustc appends for the high limb of a
+/// wide value: `(a + b) + carry` and `(a - b) - borrow` are the add and
+/// the sub of `a` and `b`, and the overflow test is written against the
+/// outer result.
+fn chain_operands(
+    func: &HighFunction,
+    _sum: ValueId,
+    expr: &Expr,
+) -> Option<(BinaryOp, ValueId, ValueId)> {
+    let Expr::Binary { op: op @ (BinaryOp::Add | BinaryOp::Sub), lhs, rhs } = expr else {
+        return None;
+    };
+    let (x, y) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
+    if let Some(Expr::Binary { op: inner, lhs: a, rhs: b }) = func.bindings.get(x).map(|b| &b.expr)
+        && inner == op
+    {
+        return Some((*op, resolve_use(func, *a), resolve_use(func, *b)));
+    }
+    Some((*op, x, y))
 }
 
 /// `value`'s arithmetic operator and its two resolved operands, when it is
