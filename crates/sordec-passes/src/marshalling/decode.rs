@@ -424,7 +424,17 @@ fn arms(
     payload: ValueId,
 ) -> Option<Vec<(ValueId, ValueId)>> {
     let disc_expr = &func.bindings.get(resolve_use(func, disc))?.expr;
-    let payload_expr = &func.bindings.get(resolve_use(func, payload))?.expr;
+    let payload_id = resolve_use(func, payload);
+    let payload_expr = &func.bindings.get(payload_id)?.expr;
+    // A parameter is one value on every path, though this layer spells it
+    // as a phi with no incoming edges. `BytesN<N>::try_from_val` validates
+    // its argument and passes it through unchanged, so its payload slot
+    // holds exactly that.
+    if func.params.contains(&payload_id)
+        && let Expr::Phi { incoming: d } = disc_expr
+    {
+        return Some(d.iter().map(|(_, dv)| (*dv, payload_id)).collect());
+    }
     match (disc_expr, payload_expr) {
         (Expr::Phi { incoming: d }, Expr::Phi { incoming: p }) => {
             let by_block: HashMap<_, _> = p.iter().map(|(b, v)| (*b, *v)).collect();
