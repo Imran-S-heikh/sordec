@@ -344,6 +344,25 @@ pub fn tag_carries(tag: u8, declared: &KnownType) -> bool {
     )
 }
 
+/// Whether a value of type `declared` may legitimately carry `tag` — the
+/// looser question a *field* check asks. A field declared `Vec<Address>`
+/// arrives as a `VecObject` whatever its element type, a struct or map
+/// field as a `MapObject`, and a `#[contracttype]` unit enum as a
+/// one-element `VecObject`; [`tag_carries`] compares payload types
+/// exactly and has no opinion on those.
+#[must_use]
+pub fn tag_admits(tag: u8, declared: &KnownType) -> bool {
+    tag_carries(tag, declared)
+        || matches!(
+            (tag, declared),
+            (TAG_VEC_OBJECT, KnownType::Vec(_) | KnownType::UserDefined(_))
+                | (TAG_MAP_OBJECT, KnownType::Map(..) | KnownType::UserDefined(_))
+                | (TAG_ADDRESS_OBJECT, KnownType::Address)
+                | (TAG_BYTES_OBJECT, KnownType::Bytes)
+                | (TAG_STRING_OBJECT, KnownType::String)
+        )
+}
+
 /// `ScErrorType::Contract` — the error type carried by a user
 /// `#[contracterror]` value (the first `ScErrorType` variant in
 /// `stellar-xdr`). Only `Contract`-type errors map to a user error enum;

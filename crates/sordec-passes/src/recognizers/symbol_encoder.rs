@@ -261,7 +261,7 @@ fn projections_of(func: &HighFunction, call: ValueId) -> Vec<(ValueId, u32)> {
 /// Deliberately *not* a structural match on the loop. The loop's shape
 /// varies with inlining and optimisation; the constants are what the
 /// algorithm is.
-fn is_symbol_encoder(func: &HighFunction) -> bool {
+pub(crate) fn is_symbol_encoder(func: &HighFunction) -> bool {
     let mut offsets_seen = [false; CLASS_OFFSETS.len()];
     let mut underscore = false;
     let mut tag = false;

@@ -73,6 +73,22 @@ pub enum Expr {
         hi: ValueId,
     },
 
+    /// One named field of a recovered `#[contracttype]` struct value,
+    /// rendered `base.field`.
+    ///
+    /// The derived `TryFromVal` unpacks a struct into frame slots and
+    /// reads each back; once the struct is named, a slot read *is* the
+    /// field. The base carries the struct type on its binding, and the
+    /// field's own type comes from the declaration, so no further
+    /// inference is needed for either.
+    Field {
+        /// The struct value.
+        base: ValueId,
+        /// Field name as declared.
+        // JUSTIFY: field names come from the contract's own spec.
+        field: String,
+    },
+
     /// Direct call to a local function (not a host call).
     Call {
         /// Target function in the same module.
@@ -219,6 +235,7 @@ impl Expr {
                 f(*lo);
                 f(*hi);
             }
+            Expr::Field { base, field: _ } => f(*base),
             Expr::IndirectCall {
                 table: _,
                 sig: _,
@@ -258,6 +275,87 @@ impl Expr {
                 reason: _,
             } => {
                 for &value in args {
+                    f(value);
+                }
+            }
+        }
+    }
+}
+
+impl Expr {
+    /// Visit every [`ValueId`] this expression reads, mutably — the same
+    /// walk as [`Self::for_each_value_use`], for renaming operands when a
+    /// binding is copied from one function into another.
+    pub fn for_each_value_use_mut<F: FnMut(&mut ValueId)>(&mut self, mut f: F) {
+        match self {
+            Expr::Semantic(SemanticOp::Known(op)) => op.for_each_value_use_mut(f),
+            Expr::Semantic(SemanticOp::Unknown {
+                host_module: _,
+                host_fn: _,
+                reason: _,
+                args,
+            }) => {
+                for value in args {
+                    f(value);
+                }
+            }
+            Expr::Literal(_) => {}
+            Expr::Use(value) => f(value),
+            Expr::Unary { op: _, value } => f(value),
+            Expr::Binary { op: _, lhs, rhs } => {
+                f(lhs);
+                f(rhs);
+            }
+            Expr::Call { target: _, args } => {
+                for value in args {
+                    f(value);
+                }
+            }
+            Expr::Project { value, index: _ } => f(value),
+            Expr::WideJoin { lo, hi } => {
+                f(lo);
+                f(hi);
+            }
+            Expr::Field { base, field: _ } => f(base),
+            Expr::IndirectCall {
+                table: _,
+                sig: _,
+                callee,
+                args,
+            } => {
+                f(callee);
+                for value in args {
+                    f(value);
+                }
+            }
+            Expr::Phi { incoming } => {
+                for (_block, value) in incoming {
+                    f(value);
+                }
+            }
+            Expr::GlobalGet { index: _ } => {}
+            Expr::Load {
+                addr,
+                offset: _,
+                width: _,
+                signed: _,
+                ty: _,
+            } => f(addr),
+            Expr::Store {
+                addr,
+                value,
+                offset: _,
+                width: _,
+            } => {
+                f(addr);
+                f(value);
+            }
+            Expr::Unknown {
+                op_kind: _,
+                args,
+                reason: _,
+            } => {
+                for value in args {
                     f(value);
                 }
             }

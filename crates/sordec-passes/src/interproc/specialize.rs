@@ -117,6 +117,13 @@ const OPERAND_DEPTH: u32 = 3;
 /// infrastructure rather than a folded source family.
 const MAX_CALLSITE_FANOUT: usize = 8;
 
+/// Largest body (emitted bindings, literals included) a helper may have
+/// for a guard on its own parameters to make it a candidate. The SDK's
+/// slice constructors are around twenty — three `U32Val` encodes and the
+/// constructor call; a real function that happens to compare two
+/// parameters is not what this rule is for.
+const GUARD_HELPER_MAX_BODY: usize = 40;
+
 /// Outermost-layer rounds before giving up. The corpus settles in two.
 const MAX_ROUNDS: u32 = 8;
 
@@ -263,6 +270,85 @@ fn blocked_params(ir: &HighIr, calls: &CallIndex) -> HashMap<FuncId, BTreeSet<us
             let mut positions = BTreeSet::new();
             param_positions(ir, func, key, OPERAND_DEPTH, &mut positions);
             param_positions(ir, func, durability, OPERAND_DEPTH, &mut positions);
+            for idx in positions {
+                if blocked.entry(func.id).or_default().insert(idx) {
+                    work.push((func.id, idx));
+                }
+            }
+        }
+    }
+
+    // The inlined symbol encoder folds only a call site whose `(pointer,
+    // length)` are literals. token-v22 wraps it: `Symbol::try_from_val`
+    // is a helper that forwards its own parameters into the encoder, and
+    // the literals sit one caller up. Those parameters are blocked in the
+    // same sense as a storage key — the fact is there, one frame away —
+    // so de-sharing and pinning the wrapper is what lets the fold fire.
+    let encoders: HashSet<FuncId> = ir
+        .functions
+        .iter()
+        .filter(|f| crate::recognizers::symbol_encoder::is_symbol_encoder(f))
+        .map(|f| f.id)
+        .collect();
+    if !encoders.is_empty() {
+        for func in &ir.functions {
+            for (_, binding) in func.bindings.iter() {
+                let Expr::Call { target, args } = &binding.expr else {
+                    continue;
+                };
+                if !encoders.contains(target) || args.len() != 2 {
+                    continue;
+                }
+                let mut positions = BTreeSet::new();
+                param_positions(ir, func, args[0], OPERAND_DEPTH, &mut positions);
+                param_positions(ir, func, args[1], OPERAND_DEPTH, &mut positions);
+                for idx in positions {
+                    if blocked.entry(func.id).or_default().insert(idx) {
+                        work.push((func.id, idx));
+                    }
+                }
+            }
+        }
+    }
+
+    // A small helper that branches on nothing but its own parameters —
+    // `map_new_from_slices` asserting `keys.len() == vals.len()` — has a
+    // guard every caller decides at compile time. Pinning the parameters
+    // makes the condition a constant, the fold takes the branch, and a
+    // straight-line body is what the wrapper inliner can paste. Kept to
+    // small bodies so this stays demand-driven rather than a general
+    // cloning policy.
+    for func in &ir.functions {
+        if func.name.is_some() || crate::marshalling::sret::emission_order(func).len() > GUARD_HELPER_MAX_BODY {
+            continue;
+        }
+        let mut conds: Vec<ValueId> = Vec::new();
+        func.region.for_each_node(|node| {
+            if let sordec_ir::Region::If { cond, .. } = node {
+                conds.push(*cond);
+            }
+        });
+        for cond in conds {
+            let id = crate::dataflow::resolve_use(func, cond);
+            let Some(Expr::Binary { lhs, rhs, .. }) = func.bindings.get(id).map(|b| &b.expr) else {
+                continue;
+            };
+            let mut positions = BTreeSet::new();
+            param_positions(ir, func, *lhs, 0, &mut positions);
+            param_positions(ir, func, *rhs, 0, &mut positions);
+            // Only a guard that reads parameters alone: one side may be a
+            // literal, but a side that is neither is runtime state.
+            let literal = |v: ValueId| trace_int(func, v).is_some();
+            let param_or_lit = |v: ValueId| {
+                literal(v) || {
+                    let mut p = BTreeSet::new();
+                    param_positions(ir, func, v, 0, &mut p);
+                    !p.is_empty()
+                }
+            };
+            if positions.is_empty() || !param_or_lit(*lhs) || !param_or_lit(*rhs) {
+                continue;
+            }
             for idx in positions {
                 if blocked.entry(func.id).or_default().insert(idx) {
                     work.push((func.id, idx));

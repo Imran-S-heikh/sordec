@@ -38,6 +38,9 @@ pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> Categ
     if let Some(note) = missing_note(&orig, &recon) {
         score = score.with_note(note);
     }
+    if let Some(note) = extra_note(&orig, &recon) {
+        score = score.with_note(note);
+    }
     score
 }
 
@@ -66,6 +69,27 @@ fn missing_note(orig: &Multiset, recon: &Multiset) -> Option<String> {
         list.push_str(&format!(", … (+{})", missing.len() - CAP));
     }
     Some(format!("under-recovered: {list}"))
+}
+
+/// The mirror note: reconstruction facts the original never wrote
+/// (precision misses). Without it a precision below 1.0 names nothing.
+fn extra_note(orig: &Multiset, recon: &Multiset) -> Option<String> {
+    let mut extra: Vec<String> = recon
+        .iter()
+        .filter(|(key, count)| orig.get(*key).unwrap_or(&0) < *count)
+        .map(|(key, _)| key.clone())
+        .collect();
+    if extra.is_empty() {
+        return None;
+    }
+    extra.sort();
+    const CAP: usize = 8;
+    let shown = extra.len().min(CAP);
+    let mut list = extra[..shown].join(", ");
+    if extra.len() > CAP {
+        list.push_str(&format!(", … (+{})", extra.len() - CAP));
+    }
+    Some(format!("over-recovered: {list}"))
 }
 
 #[cfg(test)]

@@ -731,6 +731,7 @@ fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Resu
         Expr::WideJoin { lo, hi } => {
             write!(out, "wide({}, {})", ctx.operand(*lo), ctx.operand(*hi))
         }
+        Expr::Field { base, field } => write!(out, "{}.{field}", ctx.operand(*base)),
         Expr::Unary { op, value } => {
             write!(out, "{}({})", unary_str(*op), ctx.operand(*value))
         }

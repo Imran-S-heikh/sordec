@@ -642,10 +642,12 @@ fn dump_hir_types_cross_contract_client_calls() {
         .stdout(predicate::str::contains(
             "sep41 balance(id) (callee+arity match, structural)",
         ))
-        // Copy-loop tier (transfer/3).
+        // transfer/3: the argument copy loop is unrolled before
+        // structuring, so its elements are now recovered in-block like
+        // balance's rather than traced through a loop.
         .stdout(predicate::str::contains("\"transfer\", [v1, v2, v9]"))
         .stdout(predicate::str::contains(
-            "elements traced through the copy loop (structural)",
+            "client-call 3 args, elements recovered",
         ))
         .stdout(predicate::str::contains(
             "sep41 transfer(from, to, amount)",
@@ -658,7 +660,7 @@ fn dump_hir_types_cross_contract_client_calls() {
         .success()
         .stdout(predicate::str::contains("\"transfer\", [v1, v2, v16]"))
         .stdout(predicate::str::contains(
-            "elements traced through the copy loop (structural)",
+            "client-call 3 args, elements recovered",
         ))
         .stdout(predicate::str::contains(
             "sep41 transfer(from, to, amount)",
@@ -755,11 +757,11 @@ fn dump_hir_names_enum_storage_keys_by_value_on_timelock_and_dex() {
         .stdout(predicate::str::contains(": DataKey::ReserveA"))
         .stdout(predicate::str::contains(": DataKey::ReserveB"))
         .stdout(predicate::str::contains(": DataKey::TotalShares"))
-        // Still honestly unnamed: `Shares(Address)` is a payload variant
-        // reached by value, and the by-value channel carries no payload,
-        // so the enum-key footprint gate declines it. De-sharing does not
-        // manufacture evidence it never had.
-        .stdout(predicate::str::contains(": DataKey::Shares").not());
+        // `Shares(Address)` is a payload variant reached by value: the
+        // constructor is handed the discriminant and the address, and the
+        // by-value channel now takes the variant's declared number of
+        // non-discriminant arguments as its payload.
+        .stdout(predicate::str::contains(": DataKey::Shares(v"));
 }
 
 #[test]
@@ -1054,8 +1056,11 @@ fn dump_hir_flattens_timelock_claim_guard_cascade() {
         .stdout(predicate::str::contains(
             "panic!()  ;; unwrap: tag-checked trap",
         ))
+        // The `amount` field's i128 discriminant check is collapsed with
+        // the struct decode now; the `TimeBound.kind` discriminant check
+        // is the bare-panic guard that survives.
         .stdout(predicate::str::contains(
-            "if (eq v51, 1i32) {\n    panic!()  ;; no error code",
+            "if (eq v67, 2i32) {\n    panic!()  ;; no error code",
         ));
 }
 
@@ -1087,7 +1092,9 @@ fn dump_hir_renders_dex_loops_with_labeled_continue() {
         .args(["dump-hir", DEX])
         .assert()
         .success()
-        .stdout(predicate::str::contains("'bb3: while (ne v14, 24i32) {"))
+        // The argument copy loop is unrolled before structuring now (it
+        // was `'bb3: while (ne v14, 24i32)`), so the `while` witness is
+        // the Newton bisection alone.
         .stdout(predicate::str::contains("while (gt v79, v80) {"))
         .stdout(predicate::str::contains(": loop {"))
         .stdout(predicate::str::contains("continue 'bb"));

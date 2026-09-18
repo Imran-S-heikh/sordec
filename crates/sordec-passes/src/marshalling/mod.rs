@@ -58,12 +58,18 @@ pub mod frame;
 pub mod guard;
 pub mod key_construction;
 pub mod option_probe;
+pub mod dead_store;
+pub mod forward;
 pub(crate) mod sret;
+pub mod udt_decode;
 pub mod wide_codec;
 pub mod wide_return;
 
+pub use dead_store::DeadFrameStorePass;
 pub use decode::ValDecodeCollapsePass;
 pub use encode::ValEncodeCollapsePass;
+pub use forward::FrameForwardPass;
+pub use udt_decode::UdtDecodePass;
 pub use wide_codec::WideCodecPass;
 pub use frame::FrameElisionPass;
 pub use guard::ArgGuardElisionPass;
@@ -125,12 +131,16 @@ pub(crate) fn apply_elisions(
 /// `sordec coverage` reads and what the catalog-completeness test checks.
 pub(crate) mod metrics {
     pub(crate) use crate::metrics_catalog::{
+        MARSHALLING_DEAD_FRAME_STORES as DEAD_FRAME_STORES,
         MARSHALLING_DECODE_CALLS_ELIDED as DECODE_CALLS_ELIDED,
         MARSHALLING_DECODE_COLLAPSED as DECODE_COLLAPSED,
         MARSHALLING_DISPATCH_FOLDED as DISPATCH_FOLDED,
         MARSHALLING_ENCODE_COLLAPSED as ENCODE_COLLAPSED,
+        MARSHALLING_FRAME_LOADS_FORWARDED as FRAME_LOADS_FORWARDED,
         MARSHALLING_FRAMES_ELIDED as FRAMES_ELIDED,
         MARSHALLING_GUARDS_ELIDED as GUARDS_ELIDED,
+        MARSHALLING_UDT_DECODES_COLLAPSED as UDT_DECODES_COLLAPSED,
+        MARSHALLING_UDT_FIELDS_RECOVERED as UDT_FIELDS_RECOVERED,
         MARSHALLING_WIDE_CODEC_CALLS_ELIDED as WIDE_CODEC_CALLS_ELIDED,
         MARSHALLING_WIDE_DECODE_COLLAPSED as WIDE_DECODE_COLLAPSED,
         MARSHALLING_WIDE_ENCODE_COLLAPSED as WIDE_ENCODE_COLLAPSED,

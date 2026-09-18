@@ -34,6 +34,7 @@
 //!   not three passes later.
 
 mod and_merge;
+mod const_branch;
 mod dispatch_link;
 mod guard_clause;
 mod loop_classify;
@@ -47,6 +48,7 @@ mod trap_call;
 mod trap_inline;
 
 pub use and_merge::AndMergePass;
+pub use const_branch::ConstBranchFoldPass;
 pub use dispatch_link::DispatchLinkPass;
 pub use guard_clause::GuardClausePass;
 pub use loop_classify::LoopClassifyPass;
@@ -60,6 +62,8 @@ pub use scope_if_else::ScopeIfElsePass;
 // `crate`-scoped so the submodules stay private — only their identities
 // leak — and `cfg(test)` because the manifest itself names the passes by
 // their types, not their strings.
+#[cfg(test)]
+pub(crate) use const_branch::PASS_NAME as CONST_BRANCH_PASS_NAME;
 #[cfg(test)]
 pub(crate) use guard_clause::PASS_NAME as GUARD_CLAUSE_PASS_NAME;
 #[cfg(test)]

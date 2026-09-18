@@ -79,9 +79,23 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             let x = ctx.value_ref(*extend_to);
             Some(parse_quote!(#e.storage().#tier().extend_ttl(&#k, #t, #x)))
         }
-        KnownOp::ExtendCurrentContractInstanceAndCodeTtl { threshold, extend_to, .. } => {
-            let t = ctx.value_ref(*threshold);
-            let x = ctx.value_ref(*extend_to);
+        KnownOp::ExtendCurrentContractInstanceAndCodeTtl {
+            threshold,
+            extend_to,
+            resolved_threshold,
+            resolved_extend_to,
+        } => {
+            // The ledger counts the TTL recognizer witnessed, when it did:
+            // the operands are `U32Val`s, and rendering those raw prints
+            // the tagged encoding rather than the number the source wrote.
+            let t: syn::Expr = match resolved_threshold {
+                Some(n) => parse_quote!(#n),
+                None => ctx.value_ref(*threshold),
+            };
+            let x: syn::Expr = match resolved_extend_to {
+                Some(n) => parse_quote!(#n),
+                None => ctx.value_ref(*extend_to),
+            };
             // Instance TTL extension takes no key (matches the scorer's
             // `instance().extend_ttl(threshold, amount)` special case).
             Some(parse_quote!(#e.storage().instance().extend_ttl(#t, #x)))

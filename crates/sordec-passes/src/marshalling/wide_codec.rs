@@ -614,8 +614,16 @@ fn value_evidence(func: &HighFunction, val: ValueId, ty: &KnownType, tags: &[u8]
         }
         return None;
     }
-    match &func.bindings.get(val)?.expr {
-        Expr::Semantic(SemanticOp::Known(_)) => Some(IrType::Known(ty.clone())),
+    let binding = func.bindings.get(val)?;
+    // Already proven wide by another elision — a field of a recovered
+    // struct, or a helper parameter its caller typed.
+    if let IrType::Known(known) = &binding.ty
+        && known == ty
+    {
+        return Some(IrType::Known(ty.clone()));
+    }
+    match &binding.expr {
+        Expr::Semantic(SemanticOp::Known(_)) | Expr::Field { .. } => Some(IrType::Known(ty.clone())),
         _ => None,
     }
 }

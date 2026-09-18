@@ -105,19 +105,22 @@ fn refinement_recovers_the_measured_guard_shape() {
         // W7 D3, measured 2026-07-19: 26 of 32 loops proven WhileTop
         // (the SDK tuple->vec copy loops in every fixture family); the
         // 6 with per-iteration effectful headers honestly stay
-        // Unclassified.
-        ("refine_loops_classified", 20),
+        // Unclassified. Re-measured 2026-09-18: those 24 fill/copy loops
+        // are unrolled at the lifted layer now, so the classifier sees
+        // only dex's Newton bisection and string parse.
+        ("refine_loops_classified", 2),
         // W7 D2-ext, measured 2026-07-19: 60 break sites duplicated
         // out of the binding-carrying shared trap blocks.
         ("refine_traps_duplicated", 40),
         // W7 D9, measured 2026-07-20: both multi-arg transfer sites
-        // (dex + timelock) recover elements through the copy loop —
-        // every corpus invoke now carries its full element list.
-        ("client_args_via_copy_loop", 2),
+        // (dex + timelock) recover elements through the copy loop.
+        // Since 2026-09-18 the copy loop is unrolled before the
+        // recognizer runs, so both sites take the in-block tier and this
+        // tier is honestly unexercised by the corpus.
+        ("client_args_via_copy_loop", 0),
         // W8 A6, measured 2026-07-20: the census counts 26 WhileTop
-        // loops corpus-wide (same 26 the D3 classifier proves); floor
-        // matches the `refine_loops_classified` floor above.
-        ("structuring_loops_while_top", 20),
+        // loops corpus-wide; 2026-09-18: 2, for the reason above.
+        ("structuring_loops_while_top", 2),
     ];
     for (key, floor) in floors {
         let got = totals.get(key).copied().unwrap_or(0);
@@ -319,10 +322,15 @@ fn skeleton_matches_original_wasm_nesting() {
                 Region::Switch { .. } => switches += 1,
                 _ => {}
             });
-            assert_eq!(
-                loops, original.loops,
-                "[{name}] {}: derived Loop regions vs original `loop` opcodes",
+            // At most: the lifted unroller turns the SDK's fixed-count
+            // `[Val::VOID; N]` fill and copy loops into straight-line
+            // stores before structuring, so a function may derive fewer
+            // loops than its binary has `loop` opcodes — never more.
+            assert!(
+                loops <= original.loops,
+                "[{name}] {}: derived Loop regions ({loops}) vs original `loop` opcodes ({})",
                 high_func.id,
+                original.loops,
             );
             assert_eq!(
                 switches, original.br_tables,

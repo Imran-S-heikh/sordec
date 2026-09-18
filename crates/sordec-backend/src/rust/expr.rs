@@ -62,6 +62,11 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             let wide = wide_type(&binding.ty);
             parse_quote!((((#hi as #wide) << 64) | (#lo as u64 as #wide)))
         }
+        Expr::Field { base, field } => {
+            let base = ctx.value_ref(*base);
+            let field = ty::ident(field);
+            parse_quote!(#base.#field)
+        }
         Expr::Load { .. } => ctx.policy.unknown_expr("memory load"),
         Expr::Store { .. } => ctx.policy.unknown_expr("memory store"),
         Expr::GlobalGet { index } => ctx.policy.unknown_expr(&format!("global.get {index}")),

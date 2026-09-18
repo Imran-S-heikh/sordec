@@ -472,6 +472,19 @@ fn classify_constant_discriminant(
 }
 
 /// Shape 2 — a direct tag check on an entry parameter.
+/// The declared type of a value that is a field access on a recovered
+/// struct, as the struct decode planted it.
+fn recovered_field_type(func: &HighFunction, value: ValueId) -> Option<sordec_ir::KnownType> {
+    let binding = func.bindings.get(value)?;
+    if !matches!(binding.expr, Expr::Field { .. }) {
+        return None;
+    }
+    match &binding.ty {
+        sordec_ir::IrType::Known(t) => Some(t.clone()),
+        _ => None,
+    }
+}
+
 fn classify_tag_check(
     func: &HighFunction,
     expr: &Expr,
@@ -491,8 +504,22 @@ fn classify_tag_check(
     if *negated != (sense == Sense::TrapIfTrue) {
         return Err(DECLINED_TAG_NOT_NEGATED);
     }
-    let declared =
-        declared_param_type(func, resolve_use(func, *value)).ok_or(DECLINED_TAG_NOT_PARAM)?;
+    let value = resolve_use(func, *value);
+    // A field of a recovered `#[contracttype]` struct carries the same
+    // licence as an entrypoint parameter: the re-emitted struct derives
+    // `TryFromVal`, which regenerates this exact check on this exact
+    // field, so the trap is relocated into derived code.
+    if let Some(field_ty) = recovered_field_type(func, value) {
+        if !val_abi::tag_admits(*tag, &field_ty) {
+            return Err(DECLINED_TAG_MISMATCH);
+        }
+        return Ok(format!(
+            "tag check ({}) on a field the struct decode typed as {field_ty:?}: the derived \
+             `TryFromVal` regenerates it",
+            val_abi::tag_name(*tag).unwrap_or("?")
+        ));
+    }
+    let declared = declared_param_type(func, value).ok_or(DECLINED_TAG_NOT_PARAM)?;
     // `tag_carries`, not `==`: a `BytesN<N>` parameter rides in a plain
     // `BytesObject`, so the tag denotes `Bytes` while the declaration says
     // `BytesN(N)` and an equality test would report a disagreement that

@@ -372,6 +372,20 @@ pub const MARSHALLING_WIDE_DECODE_COLLAPSED: &str = "marshalling_wide_decode_col
 pub const MARSHALLING_WIDE_ENCODE_COLLAPSED: &str = "marshalling_wide_encode_collapsed";
 /// 128-bit decode helper calls elided with their results.
 pub const MARSHALLING_WIDE_CODEC_CALLS_ELIDED: &str = "marshalling_wide_codec_calls_elided";
+/// Block-local frame loads forwarded from the store that reaches them,
+/// on the high IR after the marshalling elisions.
+pub const MARSHALLING_FRAME_LOADS_FORWARDED: &str = "marshalling_frame_loads_forwarded";
+/// Calls to straight-line SDK wrapper helpers replaced by the inlined body.
+pub const INLINE_WRAPPER_CALLS: &str = "inline_wrapper_calls";
+/// Stores into a private shadow-stack frame that no load reads back.
+pub const MARSHALLING_DEAD_FRAME_STORES: &str = "marshalling_dead_frame_stores";
+/// Branches on a constant condition replaced by the arm they take.
+pub const REFINE_CONST_BRANCHES_FOLDED: &str = "refine_const_branches_folded";
+/// `#[contracttype]` struct unpacks recognised from their key table and
+/// elided, the map value typed as the struct.
+pub const MARSHALLING_UDT_DECODES_COLLAPSED: &str = "marshalling_udt_decodes_collapsed";
+/// Frame-slot loads of an unpacked struct rewritten to field accesses.
+pub const MARSHALLING_UDT_FIELDS_RECOVERED: &str = "marshalling_udt_fields_recovered";
 /// Calls to an argument-decode helper neutralised once their results
 /// were rebound.
 pub const MARSHALLING_DECODE_CALLS_ELIDED: &str = "marshalling_decode_calls_elided";
@@ -456,6 +470,9 @@ pub const MEMORY_LOADS_HOISTED: &str = "memory_loads_hoisted";
 /// escape analysis. Distinct from `MEMORY_LOADS_FORWARDED`, which counts
 /// the ones `promote` retires as part of promoting a whole slot.
 pub const MEMORY_LOADS_FORWARDED_LOCALLY: &str = "memory_loads_forwarded_locally";
+/// Fixed-count frame-slot loops (the `[Val::VOID; N]` fill and the
+/// element copy behind `vec![…]`) unrolled into straight-line stores.
+pub const MEMORY_FILL_LOOPS_UNROLLED: &str = "memory_fill_loops_unrolled";
 
 /// Functions whose `sret` out-parameter became a real multi-value return.
 pub const MEMORY_SRET_CONVERTED: &str = "memory_sret_converted";
@@ -696,6 +713,12 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_WIDE_DECODE_COLLAPSED,
         MARSHALLING_WIDE_ENCODE_COLLAPSED,
         MARSHALLING_WIDE_CODEC_CALLS_ELIDED,
+        MARSHALLING_FRAME_LOADS_FORWARDED,
+        INLINE_WRAPPER_CALLS,
+        MARSHALLING_DEAD_FRAME_STORES,
+        REFINE_CONST_BRANCHES_FOLDED,
+        MARSHALLING_UDT_DECODES_COLLAPSED,
+        MARSHALLING_UDT_FIELDS_RECOVERED,
         MARSHALLING_DECODE_CALLS_ELIDED,
         MARSHALLING_ENCODE_COLLAPSED,
         MARSHALLING_DISPATCH_FOLDED,
@@ -717,6 +740,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MEMORY_ARGS_PROMOTED,
         MEMORY_LOADS_HOISTED,
         MEMORY_LOADS_FORWARDED_LOCALLY,
+        MEMORY_FILL_LOOPS_UNROLLED,
         MEMORY_SRET_CONVERTED,
         MEMORY_SLOTS_PROMOTED,
         MEMORY_FRAME_DECLINED_WRITE_ONLY,

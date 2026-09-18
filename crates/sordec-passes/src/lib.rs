@@ -85,13 +85,16 @@ pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATAL
 pub use arith::{I128BuiltinPass, WideFoldPass};
 pub use attribution::SdkAttributionPass;
 pub use recognizers::symbol_encoder::SymbolEncoderPass;
-pub use interproc::SpecializePass;
+pub use interproc::{SpecializePass, WrapperInlinePass};
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
-pub use memory::{ArgPromotionPass, SlotPromotionPass, SretReturnPass, StoreForwardPass};
+pub use memory::{
+    ArgPromotionPass, SlotPromotionPass, SretReturnPass, StoreForwardPass, UnrollFillLoopsPass,
+};
 pub use marshalling::{
-    ArgGuardElisionPass, FrameElisionPass, KeyConstructionElisionPass, OptionProbePass, ValDecodeCollapsePass,
-    ValEncodeCollapsePass, WideCodecPass, WideReturnPass,
+    ArgGuardElisionPass, DeadFrameStorePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
+    OptionProbePass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass, WideCodecPass,
+    WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
@@ -101,7 +104,7 @@ pub use recognizers::{
     StoragePass, TtlPass, UnrecognizedScanPass, ValEncodingPass, ValPackedComparePass,
 };
 pub use refine::{
-    AndMergePass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
+    AndMergePass, ConstBranchFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
     OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass,
     SwitchDedupPass,
     TrapCallInlinePass, TrapInlinePass,
@@ -173,12 +176,17 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
             Box::new(ThreadTrivialJumpsPass),
             Box::new(MergeBlockChainsPass),
             Box::new(SweepDeadPass),
+            // The `[Val::VOID; N]` fill and copy loops, unrolled before the
+            // memory passes: a loop-carried slot address is what makes the
+            // whole frame decline promotion, and the dead body it leaves is
+            // the sweep's to collect on the next round.
+            Box::new(UnrollFillLoopsPass),
             Box::new(ArgPromotionPass),
             Box::new(SretReturnPass),
             Box::new(StoreForwardPass),
             Box::new(SlotPromotionPass),
         ],
-        vec![0..10],
+        vec![0..11],
     )
 }
 
@@ -326,16 +334,39 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the guard elision so the constant discriminant it plants is
             // what that pass then folds.
             Box::new(WideCodecPass),
+            // Forwards the frame stores the collapses above leave behind
+            // to the loads that read them back, so a constant discriminant
+            // reaches its guard and a stored join reaches its consumer.
+            Box::new(FrameForwardPass),
+            // A forwarded discriminant leaves its guard testing `0 != 1`;
+            // the fold replaces the branch with the arm it always took.
+            Box::new(ConstBranchFoldPass),
             // `WideReturnPass` belongs here, strictly after the decode
             // collapse. It is not registered yet: it needs a dominance
             // gate first, and switching it on without one measured +14
             // `cargo check` errors across the corpus. See its module docs.
             Box::new(ArgGuardElisionPass),
+            // Straight-line SDK wrappers pasted into their callers, with
+            // every recognized fact attached. Before the key-construction
+            // elision because a wrapped `Storage::has` is the call that
+            // pass cannot see through; inside the group because inlining
+            // a wrapper exposes its frame and guards to the passes above.
+            Box::new(WrapperInlinePass),
+            // The derived `#[contracttype]` struct decode: once the unpack
+            // wrapper is inlined, the key table names the struct and the
+            // slot loads become its fields. After the inliner for that
+            // reason; before the wide codec's next iteration, whose
+            // evidence rule accepts a field of a recovered struct.
+            Box::new(UdtDecodePass),
             // The derived `#[contracttype]` enum-to-`Val` converter behind
             // a storage key the recognizers already resolved. Inside this
             // group because eliding the converter can leave its frame slot
             // dead, which is what `FrameElisionPass` below then collects.
             Box::new(KeyConstructionElisionPass),
+            // A store into a private frame that nothing loads back is the
+            // last reader of a frame pointer the bracket elision below
+            // needs unread.
+            Box::new(DeadFrameStorePass),
             Box::new(FrameElisionPass),
             // Cancels a wide join against its own limbs. In the group
             // because the decode collapse is what plants the limb
@@ -383,7 +414,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // `scope_exit_group_covers_exactly_its_pair` pin those ranges by
         // pass name, so inserting a pass above one fails a test instead of
         // silently shifting the window.
-        vec![1..7, 31..38, 39..41],
+        vec![1..7, 31..43, 44..46],
     )
 }
 
@@ -435,8 +466,13 @@ mod tests {
                 marshalling::decode::PASS_NAME,
                 marshalling::encode::PASS_NAME,
                 marshalling::wide_codec::PASS_NAME,
+                marshalling::forward::PASS_NAME,
+                refine::CONST_BRANCH_PASS_NAME,
                 marshalling::guard::PASS_NAME,
+                interproc::inline::PASS_NAME,
+                marshalling::udt_decode::PASS_NAME,
                 marshalling::key_construction::PASS_NAME,
+                marshalling::dead_store::PASS_NAME,
                 marshalling::frame::PASS_NAME,
                 arith::wide_fold::PASS_NAME,
             ],

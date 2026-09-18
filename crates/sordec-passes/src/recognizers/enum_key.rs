@@ -432,7 +432,17 @@ fn try_name_key_at(
             let (Some(d), None) = (iter.next(), iter.next()) else {
                 return Naming::Unresolved;
             };
-            (d, vec![], "by value")
+            // Whatever else the constructor was handed is the variant's
+            // payload, positionally: dex's `func_5(5, address)` builds
+            // `DataKey::Shares(address)`. A unit variant is handed the
+            // same slots and ignores them, so the footprint is cut to
+            // the variant's declared fields below, once the case is known.
+            let others: Vec<ValueId> = args
+                .iter()
+                .copied()
+                .filter(|arg| resolver.resolve_int(func.id, *arg) != Some(d))
+                .collect();
+            (d, others, "by value")
         }
     };
     let Ok(d) = usize::try_from(d) else {
@@ -442,9 +452,21 @@ fn try_name_key_at(
         return Naming::Unresolved;
     };
 
-    // Gate 4: payload footprint must agree with the variant's fields.
-    // (The by-value channel carries no payload, so only unit variants
-    // can pass here — exactly the all-unit-union case.)
+    // Gate 4: payload footprint must agree with the variant's fields. The
+    // by-value channel hands every non-discriminant argument over and the
+    // variant takes its declared count of them, in order — exactly that
+    // many must be there. The pointer channel's footprint is a slot list
+    // whose shape is the frame's, not the declaration's, so it keeps the
+    // original presence test.
+    let payload: Vec<ValueId> = match &summary.disc {
+        DiscChannel::ByValue => {
+            if payload.len() < case.fields.len() {
+                return Naming::Unresolved;
+            }
+            payload.into_iter().take(case.fields.len()).collect()
+        }
+        _ => payload,
+    };
     if case.fields.is_empty() != payload.is_empty() {
         return Naming::Unresolved;
     }
@@ -652,6 +674,13 @@ fn summarize_ctor(ir: &HighIr, target: FuncId) -> Option<CtorSummary> {
             Expr::Call { target: g, args } => {
                 let Some((pos_param, len_param)) = wrapper_symbol_params(ir, *g, WRAPPER_DEPTH)
                 else {
+                    // A wrapper the specializer has already pinned: its
+                    // `(pos, len)` are literals inside the copy, so the
+                    // symbol is a constant of the callee, not of this
+                    // call site.
+                    if let Some(text) = wrapper_constant_symbol(ir, *g, WRAPPER_DEPTH) {
+                        texts.insert(text);
+                    }
                     continue;
                 };
                 let (Some(pos_arg), Some(len_arg)) = (args.get(pos_param), args.get(len_param))
@@ -710,6 +739,44 @@ fn wrapper_symbol_params(ir: &HighIr, target: FuncId, depth: u32) -> Option<(usi
     })?;
     match params[..] {
         [pos, len] => Some((pos, len)),
+        _ => None,
+    }
+}
+
+/// The one symbol a helper constructs from constants of its own, within
+/// `depth` nested calls — the shape a de-shared, pinned symbol wrapper
+/// takes once the encoder has folded inside it. `None` when the helper
+/// builds no symbol, or more than one (then no single text is *the*
+/// variant this call constructs).
+fn wrapper_constant_symbol(ir: &HighIr, target: FuncId, depth: u32) -> Option<String> {
+    if depth == 0 {
+        return None;
+    }
+    let callee = ir.function(target)?;
+    if callee.name.is_some() {
+        return None;
+    }
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    for (_, binding) in callee.bindings.iter() {
+        match &binding.expr {
+            Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { lm_pos, len, resolved })) => {
+                if let Some(text) = resolved
+                    .clone()
+                    .or_else(|| read_symbol_text(ir, callee, *lm_pos, *len))
+                {
+                    found.insert(text);
+                }
+            }
+            Expr::Call { target: inner, .. } => {
+                if let Some(text) = wrapper_constant_symbol(ir, *inner, depth - 1) {
+                    found.insert(text);
+                }
+            }
+            _ => {}
+        }
+    }
+    match found.len() {
+        1 => found.into_iter().next(),
         _ => None,
     }
 }

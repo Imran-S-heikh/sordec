@@ -54,11 +54,11 @@
 //! renders its operands, so eliding the converter must not take the values
 //! it consumed with it — they are the emitted key's arguments.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use sordec_common::{Diagnostic, LiftDiagnosticCode, Location, Provenance, ProvenanceSource};
 use sordec_common::ValueId;
-use sordec_ir::{Expr, HighFunction, HighIr, KnownOp, Literal, SemanticOp, UnaryOp};
+use sordec_ir::{EnumKey, Expr, HighFunction, HighIr, KnownOp, Literal, SemanticOp, UnaryOp};
 
 use crate::dataflow::resolve_use;
 use crate::pass::{Pass, PassResult};
@@ -99,6 +99,32 @@ impl Pass<HighIr> for KeyConstructionElisionPass {
             let Some(func) = ir.functions.get_mut(index) else {
                 continue;
             };
+
+            // Every storage op on an elided key value spells that key by
+            // name from here on. The ones that resolved it license the
+            // elision; the ones that did not — an inlined `Option` probe
+            // whose helper the enum-key recognizer never reached — are on
+            // the literal same SSA value, so the name is theirs too.
+            // Without this they would read a `()`.
+            for value in &plan.calls {
+                let Some(key) = plan.keys.get(value).cloned() else {
+                    continue;
+                };
+                for (_, b) in func.bindings.iter_mut() {
+                    let Expr::Semantic(SemanticOp::Known(op)) = &mut b.expr else {
+                        continue;
+                    };
+                    if let KnownOp::StorageGet { key: k, resolved_key: r @ None, .. }
+                    | KnownOp::StorageSet { key: k, resolved_key: r @ None, .. }
+                    | KnownOp::StorageHas { key: k, resolved_key: r @ None, .. }
+                    | KnownOp::StorageRemove { key: k, resolved_key: r @ None, .. }
+                    | KnownOp::StorageExtendTtl { key: k, resolved_key: r @ None, .. } = op
+                        && *k == *value
+                    {
+                        *r = Some(key.clone());
+                    }
+                }
+            }
 
             // Drop the guards first: `strip` rewrites the region tree, and
             // doing it before the bindings change keeps the two steps
@@ -156,21 +182,24 @@ struct Plan {
     calls: Vec<ValueId>,
     /// Guard conditions whose trap-only `if` may go, in `strip`'s shape.
     guards: HashMap<ValueId, String>,
+    /// The named variant each elided key value was resolved to, so the
+    /// storage ops still spelling it from the value can take the name.
+    keys: HashMap<ValueId, EnumKey>,
 }
 
 fn plan_for(func: &HighFunction, all: &[HighFunction]) -> Option<Plan> {
     // Every key value a storage op resolved to a named variant. Only these
     // license anything: an unresolved key still needs its converter.
-    let resolved: HashSet<ValueId> = func
+    let resolved: HashMap<ValueId, EnumKey> = func
         .bindings
         .iter()
         .filter_map(|(_, b)| match &b.expr {
             Expr::Semantic(SemanticOp::Known(
-                KnownOp::StorageGet { key, resolved_key: Some(_), .. }
-                | KnownOp::StorageSet { key, resolved_key: Some(_), .. }
-                | KnownOp::StorageHas { key, resolved_key: Some(_), .. }
-                | KnownOp::StorageExtendTtl { key, resolved_key: Some(_), .. },
-            )) => Some(resolve_use(func, *key)),
+                KnownOp::StorageGet { key, resolved_key: Some(k), .. }
+                | KnownOp::StorageSet { key, resolved_key: Some(k), .. }
+                | KnownOp::StorageHas { key, resolved_key: Some(k), .. }
+                | KnownOp::StorageExtendTtl { key, resolved_key: Some(k), .. },
+            )) => Some((resolve_use(func, *key), k.clone())),
             _ => None,
         })
         .collect();
@@ -183,7 +212,7 @@ fn plan_for(func: &HighFunction, all: &[HighFunction]) -> Option<Plan> {
     let mut guards = HashMap::new();
 
     for (id, binding) in func.bindings.iter() {
-        if !resolved.contains(&id) {
+        if !resolved.contains_key(&id) {
             continue;
         }
         // The producer must be a call — the derived converter. A key
@@ -254,7 +283,11 @@ fn plan_for(func: &HighFunction, all: &[HighFunction]) -> Option<Plan> {
     if calls.is_empty() {
         return None;
     }
-    Some(Plan { calls, guards })
+    let keys = calls
+        .iter()
+        .filter_map(|c| resolved.get(c).map(|k| (*c, k.clone())))
+        .collect();
+    Some(Plan { calls, guards, keys })
 }
 
 /// Whether a callee reads or writes mutable host state.

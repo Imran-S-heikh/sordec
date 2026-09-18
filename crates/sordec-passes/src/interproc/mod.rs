@@ -15,6 +15,8 @@
 //! [`SpecializePass`] undoes the merging direction. Inlining (the
 //! outlining direction) and dead-argument elimination belong here next.
 
+pub mod inline;
 pub mod specialize;
 
+pub use inline::WrapperInlinePass;
 pub use specialize::SpecializePass;

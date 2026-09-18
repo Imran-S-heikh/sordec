@@ -75,11 +75,13 @@ pub(crate) mod frame;
 pub mod promote;
 pub(crate) mod slots;
 pub mod sret;
+pub mod unroll;
 
 pub use argpromote::ArgPromotionPass;
 pub use forward::StoreForwardPass;
 pub use promote::SlotPromotionPass;
 pub use sret::SretReturnPass;
+pub use unroll::UnrollFillLoopsPass;
 
 #[cfg(test)]
 pub(crate) mod census {

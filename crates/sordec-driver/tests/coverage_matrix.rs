@@ -260,12 +260,17 @@ fn coverage_matrix_prints_and_holds_invariants() {
     // storage op, not the control flow.
     let structuring: &[(&str, i64, i64, i64, i64, i64, i64)] = &[
         // fixture,           f_total, f_struct, while_top, unclass, switches, dispatch_linked
+        // Re-derived 2026-09-18: the specializer now de-shares the symbol
+        // encoder's wrapper and parameter-guarded slice constructors
+        // (more functions), and the lifted unroller removes every
+        // `[Val::VOID; N]` fill/copy loop (the `while` counts). dex's two
+        // remaining `while`s are its Newton bisection and string parse.
         ("hello-add", 5, 5, 0, 0, 0, 0),
-        ("token-v22", 51, 51, 6, 1, 1, 0),
-        ("token-v23", 49, 49, 6, 1, 2, 0),
-        ("token-v23-stripped", 49, 49, 6, 1, 2, 0),
-        ("timelock", 22, 22, 4, 1, 1, 1),
-        ("dex-liquidity-pool", 67, 67, 4, 2, 1, 0),
+        ("token-v22", 59, 59, 0, 1, 1, 0),
+        ("token-v23", 53, 53, 0, 1, 2, 0),
+        ("token-v23-stripped", 53, 53, 0, 1, 2, 0),
+        ("timelock", 26, 26, 0, 1, 1, 1),
+        ("dex-liquidity-pool", 67, 67, 2, 2, 1, 0),
         ("attestation", 8, 8, 0, 0, 0, 0),
     ];
     for &(fx, f_total, f_struct, while_top, unclass, switches, dispatch_linked) in structuring {
@@ -315,9 +320,12 @@ fn coverage_matrix_prints_and_holds_invariants() {
         assert_eq!(count(fx, mc::REFINE_DISPATCH_LINKED), dispatch_linked, "{fx} dispatch_linked");
     }
 
-    // Corpus loop totals: 32 loops = 26 WhileTop + 6 Unclassified.
+    // Corpus loop totals: 8 loops = 2 WhileTop + 6 Unclassified. The other
+    // 24 were the SDK's `[Val::VOID; N]` fill and copy loops, which the
+    // lifted unroller now turns into straight-line stores before
+    // structuring sees them.
     let corpus = |key| structuring.iter().map(|s| count(s.0, key)).sum::<i64>();
-    assert_eq!(corpus(mc::STRUCTURING_LOOPS_WHILE_TOP), 26, "corpus while loops");
+    assert_eq!(corpus(mc::STRUCTURING_LOOPS_WHILE_TOP), 2, "corpus while loops");
     assert_eq!(corpus(mc::STRUCTURING_LOOPS_UNCLASSIFIED), 6, "corpus unclassified loops");
     assert_eq!(corpus(mc::STRUCTURING_SWITCHES), 7, "corpus recovered switches");
 
