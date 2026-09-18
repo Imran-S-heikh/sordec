@@ -93,7 +93,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    OptionDefaultPass, OptionProbePass, OptionSretPass, OptionUnwrapPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    OptionDefaultPass, OptionProbePass, OptionSretPass, OptionUnwrapPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -398,6 +398,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // carries them to the loads, and the constant-branch fold drops
             // the flag test. After the re-run refiners, which resolve the
             // key and tier the helper's read needs.
+            // A storage read followed by the SDK's payload conversion — a
+            // tag check that traps and an unpack — is a typed read. Before
+            // the Option passes, whose gates then see the payload rather
+            // than a `Val` and its checks.
+            Box::new(TypedReadPass),
             Box::new(OptionSretPass),
             // `get(&k).unwrap_or(d)`: the probe's branch whose other arm
             // only merges constants. The read takes the default and the
@@ -474,7 +479,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..52],
+        vec![1..7, 31..53],
     )
 }
 
@@ -533,6 +538,7 @@ mod tests {
                 CONST_PROP_AFTER_INLINE,
                 TTL_AFTER_INLINE,
                 ENUM_KEY_AFTER_INLINE,
+                marshalling::typed_read::PASS_NAME,
                 marshalling::option_sret::PASS_NAME,
                 marshalling::option_default::PASS_NAME,
                 marshalling::udt_decode::PASS_NAME,

@@ -398,6 +398,8 @@ pub const MARSHALLING_OPTION_HELPERS_COLLAPSED: &str = "marshalling_option_helpe
 /// Storage reads whose SDK `Option` branch folded into
 /// `.unwrap_or(default)`.
 pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defaults_recovered";
+/// Storage reads whose SDK payload conversion folded into the read's type.
+pub const MARSHALLING_TYPED_READS: &str = "marshalling_typed_reads";
 /// Calls to an argument-decode helper neutralised once their results
 /// were rebound.
 pub const MARSHALLING_DECODE_CALLS_ELIDED: &str = "marshalling_decode_calls_elided";
@@ -735,6 +737,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_OPTIONS_UNWRAPPED,
         MARSHALLING_OPTION_HELPERS_COLLAPSED,
         MARSHALLING_OPTION_DEFAULTS_RECOVERED,
+        MARSHALLING_TYPED_READS,
         MARSHALLING_DECODE_CALLS_ELIDED,
         MARSHALLING_ENCODE_COLLAPSED,
         MARSHALLING_DISPATCH_FOLDED,

@@ -33,6 +33,12 @@
 //! once. The read's arm may compute nothing else with an effect, since it
 //! now runs on `None` too; the other arm may compute nothing at all.
 //!
+//! The read's arm may hold trap checks — the compiler hoists the overflow
+//! check of `count += 1` into it, since on `None` the count is a constant
+//! that cannot overflow. Each is evaluated with the read standing for the
+//! default and must come out not taken: then on `None` the check runs and
+//! passes, as the original's `None` arm never ran it at all.
+//!
 //! A branch whose `None` side traps is `.unwrap()`, and
 //! [`super::option_unwrap`] and [`super::option_sret`] own it.
 
@@ -141,7 +147,8 @@ fn plan(
     some_arm: &Region,
     none_arm: Option<&Region>,
 ) -> Option<Plan> {
-    if !straight(some_arm) || none_arm.is_some_and(|n| !straight(n)) {
+    let mut checks = Vec::new();
+    if !arm_fits(func, some_arm, &mut checks) || none_arm.is_some_and(|n| !straight(n)) {
         return None;
     }
     // The probe decides this branch and nothing else.
@@ -220,6 +227,12 @@ fn plan(
     // The default is spelled as a literal of the read's type; it has to fit
     // the literal the IR carries.
     i64::try_from(default).ok()?;
+    // Every check on the read's arm passes when the read is the default.
+    for check in checks {
+        if eval(func, check, get, default, 0)? != 0 {
+            return None;
+        }
+    }
     let ty = func.bindings.get(get)?.ty.clone();
     Some(Plan { probe, get, default, ty })
 }
@@ -257,6 +270,59 @@ fn int_literal(func: &HighFunction, value: ValueId) -> Option<i128> {
         Expr::Literal(Literal::I64(n)) => Some(i128::from(*n)),
         Expr::Literal(Literal::U32(n)) => Some(i128::from(*n)),
         Expr::Literal(Literal::U64(n)) => Some(i128::from(*n)),
+        _ => None,
+    }
+}
+
+/// The read's arm: blocks, sequences, renames, and else-less branches to a
+/// bare trap, whose conditions are collected into `checks`.
+fn arm_fits(func: &HighFunction, region: &Region, checks: &mut Vec<ValueId>) -> bool {
+    match region {
+        Region::Basic(_) | Region::Transfer { .. } => true,
+        Region::Sequence(items) => items.iter().all(|i| arm_fits(func, i, checks)),
+        Region::If { cond, then_region, else_region: None }
+            if super::guard::is_trap(then_region, &super::guard::empty_blocks(func)) =>
+        {
+            checks.push(*cond);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The integer `value` computes when the read `get` yields `default`, for
+/// the comparisons and bit operations a check is made of. Width is not
+/// modelled, so only operations whose result does not depend on it are
+/// evaluated: comparisons and bit operations on non-negative operands,
+/// equality on any.
+fn eval(func: &HighFunction, value: ValueId, get: ValueId, default: i128, depth: u32) -> Option<i128> {
+    let value = resolve_use(func, value);
+    if value == get {
+        return Some(default);
+    }
+    if depth > 8 {
+        return None;
+    }
+    let next = |v: ValueId| eval(func, v, get, default, depth + 1);
+    match &func.bindings.get(value)?.expr {
+        Expr::Literal(Literal::Bool(b)) => Some(i128::from(*b)),
+        Expr::Literal(_) => int_literal(func, value),
+        Expr::Unary { op: UnaryOp::Eqz | UnaryOp::Not, value } => next(*value).map(|n| i128::from(n == 0)),
+        Expr::Binary { op, lhs, rhs } => {
+            let (a, b) = (next(*lhs)?, next(*rhs)?);
+            let non_negative = a >= 0 && b >= 0;
+            Some(match op {
+                sordec_ir::BinaryOp::Eq => i128::from(a == b),
+                sordec_ir::BinaryOp::Ne => i128::from(a != b),
+                sordec_ir::BinaryOp::Lt if non_negative => i128::from(a < b),
+                sordec_ir::BinaryOp::Le if non_negative => i128::from(a <= b),
+                sordec_ir::BinaryOp::Gt if non_negative => i128::from(a > b),
+                sordec_ir::BinaryOp::Ge if non_negative => i128::from(a >= b),
+                sordec_ir::BinaryOp::BitAnd if non_negative => a & b,
+                sordec_ir::BinaryOp::BitOr if non_negative => a | b,
+                _ => return None,
+            })
+        }
         _ => None,
     }
 }
