@@ -43,6 +43,7 @@ mod polarity;
 mod scope_fallthrough;
 mod scope_if_else;
 mod switch_dedup;
+mod trap_call;
 mod trap_inline;
 
 pub use and_merge::AndMergePass;
@@ -66,6 +67,7 @@ pub(crate) use scope_fallthrough::PASS_NAME as SCOPE_FALLTHROUGH_PASS_NAME;
 #[cfg(test)]
 pub(crate) use scope_if_else::PASS_NAME as SCOPE_IF_ELSE_PASS_NAME;
 pub use switch_dedup::SwitchDedupPass;
+pub use trap_call::TrapCallInlinePass;
 pub use trap_inline::TrapInlinePass;
 
 use sordec_ir::{HighIr, Region};

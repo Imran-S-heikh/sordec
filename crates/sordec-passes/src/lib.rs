@@ -102,7 +102,7 @@ pub use refine::{
     AndMergePass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
     OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass,
     SwitchDedupPass,
-    TrapInlinePass,
+    TrapCallInlinePass, TrapInlinePass,
 };
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringCensusPass, StructuringStatsPass};
@@ -244,6 +244,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(PolarityPass),
             Box::new(GuardClausePass),
             Box::new(TrapInlinePass),
+            Box::new(TrapCallInlinePass),
             Box::new(SwitchDedupPass),
             Box::new(AndMergePass),
             // Loop classification: a single tag-only pass once the
@@ -362,7 +363,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // `scope_exit_group_covers_exactly_its_pair` pin those ranges by
         // pass name, so inserting a pass above one fails a test instead of
         // silently shifting the window.
-        vec![1..6, 29..34, 35..37],
+        vec![1..7, 30..35, 36..38],
     )
 }
 
