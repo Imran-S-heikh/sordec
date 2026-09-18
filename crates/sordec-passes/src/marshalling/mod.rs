@@ -54,6 +54,7 @@
 
 pub mod bool_codec;
 pub mod decode;
+pub mod field_type;
 pub mod encode;
 pub mod frame;
 pub mod guard;
@@ -75,6 +76,7 @@ pub mod wide_return;
 pub use bool_codec::BoolCodecPass;
 pub use dead_store::DeadFrameStorePass;
 pub use decode::ValDecodeCollapsePass;
+pub use field_type::FieldTypePass;
 pub use encode::ValEncodeCollapsePass;
 pub use folded_encode::FoldedEncodePass;
 pub use forward::FrameForwardPass;

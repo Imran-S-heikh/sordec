@@ -45,7 +45,7 @@
 use sordec_common::{BlockId, IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
     Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownTier, KnownType, Literal, Missing,
-    Region, SemanticOp, UnaryOp,
+    Region, SemanticOp, StructDef, UnaryOp,
 };
 
 use super::option_probe::proven_tier;
@@ -54,6 +54,7 @@ use crate::dataflow::{block_containing, resolve_use};
 use crate::effects::expr_effects;
 use crate::metrics_catalog::MARSHALLING_OPTION_DEFAULTS_RECOVERED as M_DEFAULTS;
 use crate::pass::{Pass, PassResult};
+use crate::type_infer::known_of_type_ref;
 use crate::recognizers::wrappers::chase_value;
 
 /// Pass name — also the provenance `pass` field for every rewrite.
@@ -71,8 +72,10 @@ impl Pass<HighIr> for OptionDefaultPass {
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
+        let structs: Vec<StructDef> =
+            ir.soroban_facts.as_ref().map(|f| f.types.structs.clone()).unwrap_or_default();
         for func in &mut ir.functions {
-            for plan in plans(func) {
+            for plan in plans(func, &structs) {
                 apply(func, &plan);
                 result.metrics.increment(M_DEFAULTS, 1);
                 result.changed = true;
@@ -86,19 +89,30 @@ impl Pass<HighIr> for OptionDefaultPass {
 struct Plan {
     probe: ValueId,
     get: ValueId,
-    default: i128,
+    default: Default,
     ty: IrType,
 }
 
+/// The value the source's `unwrap_or` names.
+enum Default {
+    /// One integer — the read itself, or both of its limbs.
+    Int(i128),
+    /// A `#[contracttype]` struct, field by field: the merges name the
+    /// fields of the read separately, so the default does too.
+    Struct(Vec<(String, i128, KnownType)>),
+}
+
 /// How a merged value is computed from the read on its arm.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Part {
     Whole,
     Lo,
     Hi,
+    /// A field of the read, once the struct decode has named it.
+    Field(String),
 }
 
-fn plans(func: &HighFunction) -> Vec<Plan> {
+fn plans(func: &HighFunction, structs: &[StructDef]) -> Vec<Plan> {
     let order = emission_order(func);
     let probes: Vec<(ValueId, ValueId, KnownTier)> = order
         .iter()
@@ -129,7 +143,7 @@ fn plans(func: &HighFunction) -> Vec<Plan> {
                     None => continue,
                 }
             };
-            if let Some(plan) = plan(func, &order, *probe, *key, *tier, some_arm, none_arm, None) {
+            if let Some(plan) = plan(func, &order, structs, *probe, *key, *tier, some_arm, none_arm, None) {
                 plans.push(plan);
             }
         }
@@ -159,7 +173,7 @@ fn plans(func: &HighFunction) -> Vec<Plan> {
                 } else {
                     (&fallen_rest, &taken_rest, (fallen, taken))
                 };
-                if let Some(plan) = plan(func, &order, *probe, *key, *tier, some, Some(none), Some(pair)) {
+                if let Some(plan) = plan(func, &order, structs, *probe, *key, *tier, some, Some(none), Some(pair)) {
                     plans.push(plan);
                 }
             }
@@ -187,6 +201,7 @@ fn exit_return(region: &Region) -> Option<(ValueId, Region)> {
 fn plan(
     func: &HighFunction,
     order: &[ValueId],
+    structs: &[StructDef],
     probe: ValueId,
     key: ValueId,
     tier: KnownTier,
@@ -256,6 +271,12 @@ fn plan(
     if pairs.is_empty() {
         return None;
     }
+    let ty = func.bindings.get(get)?.ty.clone();
+    if let Some(fields) = struct_default(func, &pairs, get, structs, &ty) {
+        // A struct default names no single integer, so there is nothing to
+        // evaluate a hoisted check against.
+        return checks.is_empty().then_some(Plan { probe, get, default: Default::Struct(fields), ty });
+    }
     let default = literal_default(func, &pairs, get).or_else(|| zero_default(func, &pairs, get, some_arm))?;
     // The default is spelled as a literal of the read's type; it has to fit
     // the literal the IR carries.
@@ -266,8 +287,7 @@ fn plan(
             return None;
         }
     }
-    let ty = func.bindings.get(get)?.ty.clone();
-    Some(Plan { probe, get, default, ty })
+    Some(Plan { probe, get, default: Default::Int(default), ty })
 }
 
 /// The default the merges name when each is a part of the read against a
@@ -281,6 +301,8 @@ fn literal_default(func: &HighFunction, pairs: &[(ValueId, ValueId)], get: Value
             Part::Whole => &mut whole,
             Part::Lo => &mut lo,
             Part::Hi => &mut hi,
+            // A field is the struct default's business, not this one's.
+            Part::Field(_) => return None,
         };
         if slot.replace(constant).is_some_and(|prev| prev != constant) {
             return None;
@@ -374,14 +396,73 @@ fn polarity(func: &HighFunction, cond: ValueId, probe: ValueId, depth: u32) -> O
 }
 
 fn part_of(func: &HighFunction, value: ValueId, get: ValueId) -> Option<Part> {
-    if value == get {
-        return Some(Part::Whole);
+    let mut current = value;
+    // A field arrives through the conversion its declared type asks for.
+    for _ in 0..4 {
+        if current == get {
+            return Some(Part::Whole);
+        }
+        match &func.bindings.get(current)?.expr {
+            Expr::Unary { op: UnaryOp::WideLo, value } if resolve_use(func, *value) == get => {
+                return Some(Part::Lo)
+            }
+            Expr::Unary { op: UnaryOp::WideHi, value } if resolve_use(func, *value) == get => {
+                return Some(Part::Hi)
+            }
+            Expr::Field { base, field } if resolve_use(func, *base) == get => {
+                return Some(Part::Field(field.clone()))
+            }
+            Expr::Unary {
+                op: UnaryOp::Wrap32 | UnaryOp::ExtendU32 | UnaryOp::ExtendS32,
+                value,
+            }
+            | Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })) => {
+                current = resolve_use(func, *value);
+            }
+            _ => return None,
+        }
     }
-    match &func.bindings.get(value)?.expr {
-        Expr::Unary { op: UnaryOp::WideLo, value } if resolve_use(func, *value) == get => Some(Part::Lo),
-        Expr::Unary { op: UnaryOp::WideHi, value } if resolve_use(func, *value) == get => Some(Part::Hi),
-        _ => None,
+    None
+}
+
+/// The default when the merges name the read's fields: a struct literal,
+/// one constant per field.
+///
+/// Every field of the declared struct must be covered. A field the `Some`
+/// arm never reads has no constant on the other arm either — rustc deleted
+/// it with the read — and inventing one would be a guess about what the
+/// source wrote.
+fn struct_default(
+    func: &HighFunction,
+    pairs: &[(ValueId, ValueId)],
+    get: ValueId,
+    structs: &[StructDef],
+    ty: &IrType,
+) -> Option<Vec<(String, i128, KnownType)>> {
+    let (IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id))) = ty
+    else {
+        return None;
+    };
+    let def = structs.iter().find(|s| s.id == *id)?;
+    let mut by_field: Vec<(String, i128)> = Vec::new();
+    for &(some, none) in pairs {
+        let Part::Field(name) = part_of(func, some, get)? else {
+            return None;
+        };
+        let constant = int_literal(func, none)?;
+        match by_field.iter().find(|(f, _)| *f == name) {
+            Some((_, prev)) if *prev != constant => return None,
+            Some(_) => {}
+            None => by_field.push((name, constant)),
+        }
     }
+    def.fields
+        .iter()
+        .map(|f| {
+            let (_, constant) = by_field.iter().find(|(name, _)| *name == f.name)?;
+            Some((f.name.clone(), *constant, known_of_type_ref(&f.ty)?))
+        })
+        .collect()
 }
 
 fn int_literal(func: &HighFunction, value: ValueId) -> Option<i128> {
@@ -488,21 +569,45 @@ fn uses(func: &HighFunction, order: &[ValueId], value: ValueId) -> usize {
 }
 
 fn apply(func: &mut HighFunction, plan: &Plan) {
-    let default = ValueId::from_index(func.bindings.len() as u32);
-    func.bindings.push(Binding::new(
-        default,
-        plan.ty.clone(),
-        match plan.ty {
-            IrType::Known(KnownType::Bool) | IrType::Inferred(KnownType::Bool) => {
-                Expr::Literal(Literal::Bool(plan.default != 0))
-            }
-            _ => Expr::Literal(Literal::I64(plan.default as i64)),
-        },
-        Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, "the default the source's `unwrap_or` names"),
-    ));
+    let note =
+        Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, "the default the source's `unwrap_or` names");
+    let mut fresh = Vec::new();
+    let mut push = |func: &mut HighFunction, ty: IrType, expr: Expr| {
+        let id = ValueId::from_index(func.bindings.len() as u32);
+        func.bindings.push(Binding::new(id, ty, expr, note.clone()));
+        fresh.push(id);
+        id
+    };
+    let default = match &plan.default {
+        Default::Int(n) => {
+            let expr = match plan.ty {
+                IrType::Known(KnownType::Bool) | IrType::Inferred(KnownType::Bool) => {
+                    Expr::Literal(Literal::Bool(*n != 0))
+                }
+                _ => Expr::Literal(Literal::I64(*n as i64)),
+            };
+            push(func, plan.ty.clone(), expr)
+        }
+        Default::Struct(fields) => {
+            let values: Vec<(String, ValueId)> = fields
+                .iter()
+                .map(|(name, n, ty)| {
+                    let expr = match ty {
+                        KnownType::U32 => Expr::Literal(Literal::U32(*n as u32)),
+                        KnownType::Bool => Expr::Literal(Literal::Bool(*n != 0)),
+                        _ => Expr::Literal(Literal::I64(*n as i64)),
+                    };
+                    (name.clone(), push(func, IrType::Known(ty.clone()), expr))
+                })
+                .collect();
+            push(func, plan.ty.clone(), Expr::Struct { fields: values })
+        }
+    };
     for (_, block) in func.blocks.iter_mut() {
         if let Some(pos) = block.bindings.iter().position(|v| *v == plan.get) {
-            block.bindings.insert(pos, default);
+            for (i, id) in fresh.iter().enumerate() {
+                block.bindings.insert(pos + i, *id);
+            }
             break;
         }
     }

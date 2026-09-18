@@ -93,7 +93,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    BoolCodecPass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    BoolCodecPass, FieldTypePass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -434,6 +434,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // key table a struct literal is built from. After the decode,
             // whose recovered fields it may be spelled from.
             Box::new(UdtEncodePass),
+            // A recovered struct's fields, at the types it declares: the
+            // decode each one arrives through is the derive's. After both
+            // UDT passes, which are what name the struct.
+            Box::new(FieldTypePass),
             // `get(&k).unwrap()`: the proven Option probe, its trapping
             // None branch and the read, collapsed to an unwrap of the
             // read. After the inliner, which is what brings the wrapped
@@ -502,7 +506,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..58],
+        vec![1..7, 31..59],
     )
 }
 
@@ -570,6 +574,7 @@ mod tests {
                 marshalling::option_default::PASS_NAME,
                 marshalling::udt_decode::PASS_NAME,
                 marshalling::udt_encode::PASS_NAME,
+                marshalling::field_type::PASS_NAME,
                 marshalling::option_unwrap::PASS_NAME,
                 marshalling::key_construction::PASS_NAME,
                 marshalling::dead_store::PASS_NAME,

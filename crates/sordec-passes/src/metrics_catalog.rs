@@ -404,6 +404,8 @@ pub const MARSHALLING_TYPED_READS: &str = "marshalling_typed_reads";
 pub const MARSHALLING_BOOL_CODECS: &str = "marshalling_bool_codecs";
 /// Derived struct encodes folded back into the struct literal.
 pub const MARSHALLING_UDT_ENCODES: &str = "marshalling_udt_encodes";
+/// Struct-field decodes folded into the field's declared type.
+pub const MARSHALLING_FIELD_TYPES: &str = "marshalling_field_types";
 /// Merges only one value still reached, retired to renames of it.
 pub const REFINE_TRIVIAL_PHIS: &str = "refine_trivial_phis";
 /// `U32Val` encodes whose folded addend was recovered as arithmetic, and
@@ -753,6 +755,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_TYPED_READS,
         MARSHALLING_BOOL_CODECS,
         MARSHALLING_UDT_ENCODES,
+        MARSHALLING_FIELD_TYPES,
         REFINE_TRIVIAL_PHIS,
         MARSHALLING_FOLDED_ENCODES,
         REFINE_WIDTH_FOLDS,
