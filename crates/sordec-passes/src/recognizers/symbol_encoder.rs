@@ -43,10 +43,15 @@
 //! relocation argument to make and no trap to relocate, because for an
 //! in-alphabet string of nine characters or fewer the loop cannot fail.
 //!
-//! The gate is exactly the fast path's own precondition — length ≤ 9 and
-//! every byte in `[_0-9A-Za-z]`. A string that fails it takes the host
-//! fallback at run time, so folding it would be wrong, and the pass
-//! declines.
+//! The gate is the symbol alphabet — every byte in `[_0-9A-Za-z]`, at
+//! most 32 of them. A string of nine characters or fewer takes the fast
+//! path and the loop cannot fail; a longer one makes the encoder fall
+//! back to the `symbol_new_from_linear_memory` host call, which builds
+//! the same symbol as an object. Either way the helper's result *is* the
+//! symbol for that string, and `Symbol::new(&env, "…")` — what the
+//! folded op renders as — takes exactly the same two paths. A byte
+//! outside the alphabet would make the host reject the string, so that
+//! is where the pass declines.
 //!
 //! The result is self-checking in a way most recognizers are not: the
 //! folded strings have to be readable identifiers. On token-v23 they come
@@ -72,9 +77,11 @@ const M_FOLDED: &str = "symbol_encoder_folded";
 /// Call sites left alone because the string is not a small symbol.
 const M_DECLINED: &str = "symbol_encoder_declined";
 
-/// Longest string the small encoding holds: six bits per character, eight
-/// reserved for the tag, so nine characters fill a 64-bit `Val`.
-const MAX_SMALL_LEN: u32 = 9;
+/// Longest symbol the host accepts. The *small* encoding holds nine (six
+/// bits per character, eight reserved for the tag); beyond that the
+/// encoder's fallback builds a `SymbolObject`, and the fold is still the
+/// same symbol.
+const MAX_SYMBOL_LEN: u32 = 32;
 
 /// The character-code offsets the SDK's encoder subtracts, one per class.
 ///
@@ -281,13 +288,12 @@ fn is_symbol_encoder(func: &HighFunction) -> bool {
     underscore && tag && offsets_seen.iter().all(|b| *b)
 }
 
-/// The string a call site encodes, if it is one the fast path can hold.
+/// The string a call site encodes, if it is a symbol the host accepts.
 ///
 /// Returns `None` — decline, leave the call alone — when the arguments are
 /// not literal, when the pointer does not resolve in rodata, or when the
-/// bytes fall outside what `symbol_short!` can represent. The last case is
-/// not a failure: it is the input that makes the SDK take its host
-/// fallback, so folding it would change behaviour.
+/// bytes fall outside the symbol alphabet. The last case is the input the
+/// host rejects, so there is no symbol to fold to.
 fn resolve_call(func: &HighFunction, memory: &MemoryImage, args: &[ValueId]) -> Option<String> {
     // `(env, pointer, length)` — the emitted signature threads `Env` first,
     // but the IR call carries only the wasm arguments.
@@ -295,7 +301,7 @@ fn resolve_call(func: &HighFunction, memory: &MemoryImage, args: &[ValueId]) -> 
     let pos = u32::try_from(trace_int(func, *pos)?).ok()?;
     let len = u32::try_from(trace_int(func, *len)?).ok()?;
 
-    if len == 0 || len > MAX_SMALL_LEN {
+    if len == 0 || len > MAX_SYMBOL_LEN {
         return None;
     }
     let bytes = memory.read(pos, len)?;
@@ -370,12 +376,16 @@ mod tests {
             .collect()
     }
 
-    /// `[1000, 1007)` holds "Balance"; `[1010, 1024)` holds a name too long
-    /// for the small alphabet.
+    /// `[1000, 1007)` holds "Balance"; `[1010, 1024)` holds a name outside
+    /// the symbol alphabet; `[1030, 1041)` holds an eleven-character name
+    /// that only the host fallback can build; `[1050, 1083)` is one
+    /// character too long for any symbol.
     fn memory() -> MemoryImage {
         MemoryImage::from_segments(vec![
             DataSegment { offset: 1000, bytes: b"Balance".to_vec() },
             DataSegment { offset: 1010, bytes: b"a-hyphenated!!".to_vec() },
+            DataSegment { offset: 1030, bytes: b"TotalShares".to_vec() },
+            DataSegment { offset: 1050, bytes: b"a".repeat(33) },
         ])
     }
 
@@ -452,16 +462,31 @@ mod tests {
         assert!(matches!(expr_at(&m, 1, 2), Expr::Call { .. }));
     }
 
+    /// Past nine characters the encoder takes its host fallback, which
+    /// builds the same symbol as an object — and so does the `Symbol::new`
+    /// the folded op renders as. dex's `DataKey::TotalShares` is the
+    /// corpus witness: declining it kept the whole encoder alive.
     #[test]
-    fn a_string_longer_than_nine_characters_is_declined() {
-        let mut m = ir(vec![
-            function(0, encoder_body()),
-            // Ten bytes starting at 1010 are in-alphabet only for the first
-            // one; length alone must decline it regardless.
-            caller(1000, 10),
-        ]);
+    fn a_string_longer_than_nine_characters_still_folds() {
+        let mut m = ir(vec![function(0, encoder_body()), caller(1030, 11)]);
+        let r = SymbolEncoderPass.run(&mut m);
+        assert!(r.changed);
+        match expr_at(&m, 1, 4) {
+            Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { resolved, .. })) => {
+                assert_eq!(resolved.as_deref(), Some("TotalShares"));
+            }
+            other => panic!("expected a resolved SymbolNew, got {other:?}"),
+        }
+    }
+
+    /// Thirty-two characters is the host's limit; beyond it there is no
+    /// symbol to fold to.
+    #[test]
+    fn a_string_longer_than_any_symbol_is_declined() {
+        let mut m = ir(vec![function(0, encoder_body()), caller(1050, 33)]);
         let r = SymbolEncoderPass.run(&mut m);
         assert!(!r.changed);
+        assert_eq!(r.metrics.get(M_DECLINED), Some(1));
     }
 
     /// The signature is the whole constant set. A body holding only some of

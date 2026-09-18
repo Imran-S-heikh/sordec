@@ -365,6 +365,13 @@ pub const REFINE_AND_MERGE_BLOCKED: &str = "refine_and_merge_blocked";
 /// Argument-decode results bound directly to the parameter they decode
 /// (discriminant and payload loads both count).
 pub const MARSHALLING_DECODE_COLLAPSED: &str = "marshalling_decode_collapsed";
+/// 128-bit argument-decode results (discriminant, low limb, high limb)
+/// rebound to the value, plus the type planted on that value.
+pub const MARSHALLING_WIDE_DECODE_COLLAPSED: &str = "marshalling_wide_decode_collapsed";
+/// 128-bit `IntoVal` helper calls collapsed to a wide join.
+pub const MARSHALLING_WIDE_ENCODE_COLLAPSED: &str = "marshalling_wide_encode_collapsed";
+/// 128-bit decode helper calls elided with their results.
+pub const MARSHALLING_WIDE_CODEC_CALLS_ELIDED: &str = "marshalling_wide_codec_calls_elided";
 /// Calls to an argument-decode helper neutralised once their results
 /// were rebound.
 pub const MARSHALLING_DECODE_CALLS_ELIDED: &str = "marshalling_decode_calls_elided";
@@ -686,6 +693,9 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         REFINE_AND_MERGE_BLOCKED,
         // Marshalling elision.
         MARSHALLING_DECODE_COLLAPSED,
+        MARSHALLING_WIDE_DECODE_COLLAPSED,
+        MARSHALLING_WIDE_ENCODE_COLLAPSED,
+        MARSHALLING_WIDE_CODEC_CALLS_ELIDED,
         MARSHALLING_DECODE_CALLS_ELIDED,
         MARSHALLING_ENCODE_COLLAPSED,
         MARSHALLING_DISPATCH_FOLDED,

@@ -91,7 +91,7 @@ pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use memory::{ArgPromotionPass, SlotPromotionPass, SretReturnPass, StoreForwardPass};
 pub use marshalling::{
     ArgGuardElisionPass, FrameElisionPass, KeyConstructionElisionPass, OptionProbePass, ValDecodeCollapsePass,
-    ValEncodeCollapsePass, WideReturnPass,
+    ValEncodeCollapsePass, WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
@@ -320,6 +320,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // frame pointer is what lets the bracket go.
             Box::new(ValDecodeCollapsePass),
             Box::new(ValEncodeCollapsePass),
+            // The 128-bit codecs the two passes above decline on purpose:
+            // a four-slot decode collapses to limb extractors of the
+            // parameter, and an `(status, Val)` encode to a join. Before
+            // the guard elision so the constant discriminant it plants is
+            // what that pass then folds.
+            Box::new(WideCodecPass),
             // `WideReturnPass` belongs here, strictly after the decode
             // collapse. It is not registered yet: it needs a dominance
             // gate first, and switching it on without one measured +14
@@ -377,7 +383,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // `scope_exit_group_covers_exactly_its_pair` pin those ranges by
         // pass name, so inserting a pass above one fails a test instead of
         // silently shifting the window.
-        vec![1..7, 31..37, 38..40],
+        vec![1..7, 31..38, 39..41],
     )
 }
 
@@ -428,6 +434,7 @@ mod tests {
             &[
                 marshalling::decode::PASS_NAME,
                 marshalling::encode::PASS_NAME,
+                marshalling::wide_codec::PASS_NAME,
                 marshalling::guard::PASS_NAME,
                 marshalling::key_construction::PASS_NAME,
                 marshalling::frame::PASS_NAME,
