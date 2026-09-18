@@ -28,6 +28,7 @@ use sordec_common::{BlockId, IrId, ValueId};
 use sordec_ir::{Expr, HighFunction, HighIr, IrType, KnownType, Region, TypeRegistry};
 
 use crate::rust::expr;
+use crate::rust::fold::Fold;
 use crate::rust::hole::HolePolicy;
 use crate::rust::liveness::{self, Liveness};
 use crate::rust::naming::ValueNames;
@@ -50,6 +51,8 @@ pub(crate) struct FnCtx<'a> {
     /// The single source of every value's emitted identifier (parameters,
     /// hinted locals, and the `vN` fallback). See [`ValueNames`].
     names: ValueNames,
+    /// Renames and literals printed at their reads. See [`Fold`].
+    fold: Fold,
     /// Read counts, driving dead-binding cleanup. See [`Liveness`].
     liveness: Liveness,
     /// Non-phi values whose uses escape the lexical block that defines them
@@ -116,7 +119,8 @@ impl<'a> FnCtx<'a> {
         policy: &'a dyn HolePolicy,
     ) -> Self {
         let names = ValueNames::build(func);
-        let escaping = escaping_values(func);
+        let fold = Fold::build(func);
+        let escaping = escaping_values(func, &fold);
         let mut ctx = Self {
             high,
             func,
@@ -127,6 +131,7 @@ impl<'a> FnCtx<'a> {
             // are consulted while settling, and neither reads liveness.
             liveness: Liveness::build(func),
             escaping,
+            fold,
         };
         ctx.liveness = ctx.settle_liveness();
         ctx
@@ -145,7 +150,7 @@ impl<'a> FnCtx<'a> {
     fn settle_liveness(&self) -> Liveness {
         let mut dead: HashSet<ValueId> = HashSet::new();
         loop {
-            let liveness = Liveness::build_excluding(self.func, &dead);
+            let liveness = Liveness::build_excluding(self.func, &dead, &self.fold);
             let mut grew = false;
             self.func.region.for_each_node(|node| {
                 let Region::Basic(b) = node else { return };
@@ -181,9 +186,17 @@ impl<'a> FnCtx<'a> {
         parse_quote!(e)
     }
 
-    /// Render a `ValueId` as an expression, via the one naming authority.
+    /// Render a `ValueId` as an expression, via the one naming authority:
+    /// a rename reads as what it renames, a literal prints in place (see
+    /// [`Fold`]).
     pub(crate) fn value_ref(&self, vid: ValueId) -> syn::Expr {
-        self.names.expr(vid)
+        let target = self.fold.target(vid);
+        if self.fold.is_literal(target)
+            && let Some(binding) = self.func.bindings.get(target)
+        {
+            return expr::literal_ref(self, binding);
+        }
+        self.names.expr(target)
     }
 
     /// Whether `vid`'s recovered type is `bool`.
@@ -532,9 +545,15 @@ fn block_label(bid: BlockId) -> syn::Lifetime {
 /// any block it *dominates* — including a later sibling, once the defining
 /// block's `{}` has closed. Such a value escapes. (Phis are handled
 /// separately; function parameters are always in scope and never escape.)
-fn escaping_values(func: &HighFunction) -> HashSet<ValueId> {
+fn escaping_values(func: &HighFunction, fold: &Fold) -> HashSet<ValueId> {
     let mut analysis = EscapeAnalysis::default();
     analysis.walk(func, &func.region, ROOT_SCOPE);
+    // Judge each read by the value it prints as, as the renderer will.
+    analysis.uses = analysis
+        .uses
+        .into_iter()
+        .filter_map(|(value, scope)| fold.reads(value).map(|v| (v, scope)))
+        .collect();
     analysis.finish()
 }
 

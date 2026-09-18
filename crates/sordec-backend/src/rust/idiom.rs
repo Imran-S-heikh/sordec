@@ -46,13 +46,16 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
     let e = ctx.env();
     match op {
         // ---- Storage ----
-        KnownOp::StorageGet { tier, key, resolved_key, unwrap, .. } => {
+        KnownOp::StorageGet { tier, key, resolved_key, missing, .. } => {
             let tier = tier_method(tier)?;
             let k = key_expr(ctx, *key, resolved_key);
-            Some(if *unwrap {
-                parse_quote!(#e.storage().#tier().get(&#k).unwrap())
-            } else {
-                parse_quote!(#e.storage().#tier().get(&#k))
+            Some(match missing {
+                sordec_ir::Missing::Option => parse_quote!(#e.storage().#tier().get(&#k)),
+                sordec_ir::Missing::Unwrap => parse_quote!(#e.storage().#tier().get(&#k).unwrap()),
+                sordec_ir::Missing::Or(default) => {
+                    let d = ctx.value_ref(*default);
+                    parse_quote!(#e.storage().#tier().get(&#k).unwrap_or(#d))
+                }
             })
         }
         KnownOp::StorageSet { tier, key, resolved_key, value, .. } => {
@@ -270,6 +273,89 @@ pub(crate) fn ignores_operands(op: &KnownOp) -> bool {
     matches!(op, KnownOp::SymbolNew { resolved: Some(_), .. })
 }
 
+/// The values the chain for `op` prints, when that is narrower than the
+/// operands the IR records. `None` means every operand is read: the op is
+/// not in the family below, or it will not render as a chain at all.
+///
+/// The storage family is why this exists. Its chains print the tier as a
+/// method name, never the durability value; a key the enum-key pass named
+/// as its variant, never the converter result; a TTL amount the recognizer
+/// resolved as the number. Counting those as reads left a dead
+/// `let v9 = ();` and `let v15 = 1i64;` above every storage call.
+pub(crate) fn rendered_operands(
+    func: &sordec_ir::HighFunction,
+    op: &KnownOp,
+) -> Option<Vec<sordec_common::ValueId>> {
+    use sordec_common::ValueId;
+    let key_reads = |key: ValueId, resolved: &Option<EnumKey>| -> Vec<ValueId> {
+        match resolved {
+            Some(ek) => ek.payload.clone(),
+            None => vec![key],
+        }
+    };
+    // Mirrors [`ledger_count`].
+    let amount = |operand: ValueId, resolved: Option<u32>| -> Vec<ValueId> {
+        if resolved.is_some() {
+            return Vec::new();
+        }
+        match func.bindings.get(operand).map(|b| &b.expr) {
+            Some(sordec_ir::Expr::Semantic(sordec_ir::SemanticOp::Known(KnownOp::ValEncodeSmall {
+                ty: sordec_ir::KnownType::U32,
+                value,
+            }))) => vec![*value],
+            _ => vec![operand],
+        }
+    };
+    match op {
+        KnownOp::StorageGet { tier, key, resolved_key, missing, .. } => {
+            tier_method(tier)?;
+            let mut reads = key_reads(*key, resolved_key);
+            if let sordec_ir::Missing::Or(default) = missing {
+                reads.push(*default);
+            }
+            Some(reads)
+        }
+        KnownOp::StorageSet { tier, key, resolved_key, value, .. } => {
+            tier_method(tier)?;
+            let mut reads = key_reads(*key, resolved_key);
+            reads.push(*value);
+            Some(reads)
+        }
+        KnownOp::StorageHas { probe: false, tier, key, resolved_key, .. }
+        | KnownOp::StorageRemove { tier, key, resolved_key, .. } => {
+            tier_method(tier)?;
+            Some(key_reads(*key, resolved_key))
+        }
+        KnownOp::StorageExtendTtl {
+            tier,
+            key,
+            resolved_key,
+            threshold,
+            extend_to,
+            resolved_threshold,
+            resolved_extend_to,
+            ..
+        } => {
+            tier_method(tier)?;
+            let mut reads = key_reads(*key, resolved_key);
+            reads.extend(amount(*threshold, *resolved_threshold));
+            reads.extend(amount(*extend_to, *resolved_extend_to));
+            Some(reads)
+        }
+        KnownOp::ExtendCurrentContractInstanceAndCodeTtl {
+            threshold,
+            extend_to,
+            resolved_threshold,
+            resolved_extend_to,
+        } => {
+            let mut reads = amount(*threshold, *resolved_threshold);
+            reads.extend(amount(*extend_to, *resolved_extend_to));
+            Some(reads)
+        }
+        _ => None,
+    }
+}
+
 /// The tier method (`persistent`/`instance`/`temporary`), or `None` for an
 /// `Unknown` tier — naming an unproven tier would be a guess (K2).
 /// `Inferred` is evidence-based, not a default, so it is emitted.
@@ -285,8 +371,6 @@ fn tier_method(tier: &StorageTier) -> Option<syn::Ident> {
     })
 }
 
-/// The storage key: the recovered `Enum::Variant(payload)` when the
-/// enum-key pass named it, else the raw key value reference.
 /// A TTL ledger count as the source wrote it. The operand is a `U32Val`;
 /// the SDK method takes the `u32` inside it. The count the TTL recognizer
 /// witnessed prints as that number; otherwise a recognized `U32Val`
@@ -310,6 +394,8 @@ fn ledger_count(ctx: &FnCtx, operand: sordec_common::ValueId, resolved: Option<u
     ctx.value_ref(payload.unwrap_or(operand))
 }
 
+/// The storage key: the recovered `Enum::Variant(payload)` when the
+/// enum-key pass named it, else the raw key value reference.
 fn key_expr(ctx: &FnCtx, key: sordec_common::ValueId, resolved: &Option<EnumKey>) -> syn::Expr {
     let Some(ek) = resolved else {
         return ctx.value_ref(key);

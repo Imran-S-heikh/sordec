@@ -608,7 +608,7 @@ mod tests {
                 durability: v(1),
                 key: v(0),
                 resolved_key: None,
-                unwrap: false,
+                missing: sordec_ir::Missing::Option,
             }))],
         )
     }
@@ -1067,7 +1067,7 @@ mod tests {
                     durability: v(1),
                     key: v(0),
                     resolved_key: None,
-                    unwrap: false,
+                    missing: sordec_ir::Missing::Option,
                 })),
             ],
         )]);
@@ -1098,7 +1098,7 @@ mod tests {
                 durability: v(dur),
                 key: v(key),
                 resolved_key: None,
-                unwrap: false,
+                missing: sordec_ir::Missing::Option,
             }))
         };
         let mut ir = module(vec![func(
@@ -1132,7 +1132,7 @@ mod tests {
             durability: v(dur),
             key: v(key),
             resolved_key: None,
-            unwrap: false,
+            missing: sordec_ir::Missing::Option,
         }))
     }
 
@@ -1219,7 +1219,7 @@ mod tests {
                     durability: v(1),
                     key: v(0),
                     resolved_key: None,
-                    unwrap: false,
+                    missing: sordec_ir::Missing::Option,
                 })),
                 i64c(0),
                 i64c(tag14_bits("transfer")),
@@ -1245,7 +1245,7 @@ mod tests {
                 durability: v(1),
                 key: v(0),
                 resolved_key: None,
-                unwrap: false,
+                missing: sordec_ir::Missing::Option,
             }))],
         )]);
         let result = run(&mut ir);

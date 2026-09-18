@@ -165,16 +165,17 @@ impl crate::pass::Pass<HighIr> for ArgGuardElisionPass {
         let mut declines: Vec<&'static str> = Vec::new();
         for func in &mut ir.functions {
             let empty = empty_blocks(func);
-            let guards = collect(func, &empty, &mut declines);
-            if guards.is_empty() {
+            let Found { guards, inverted } = collect_found(func, &empty, &mut declines);
+            if guards.is_empty() && inverted.is_empty() {
                 continue;
             }
             let before = elided;
             let region = std::mem::replace(&mut func.region, Region::Unreachable);
-            func.region = strip(region, &guards, &empty, &mut elided);
+            let region = strip(region, &guards, &empty, &mut elided);
+            func.region = strip_inverted(region, &inverted, &empty, &mut elided);
             // One diagnostic per guard actually removed — a reviewer sees
             // every site the unreachability argument was applied to.
-            for note in guards.values().take((elided - before) as usize) {
+            for note in guards.values().chain(inverted.values()).take((elided - before) as usize) {
                 result.diagnostics.push(Diagnostic::info(
                     LiftDiagnosticCode::MarshallingGuardElided,
                     format!("{}{note}", func_prefix(func)),
@@ -205,16 +206,32 @@ impl crate::pass::Pass<HighIr> for ArgGuardElisionPass {
     }
 }
 
+/// The elidable guards of one function, by sense.
+#[derive(Default)]
+struct Found {
+    /// `if bad { trap }`: the condition, mapped to the note.
+    guards: HashMap<ValueId, String>,
+    /// `if ok { work } trap` with `work` never falling through: the
+    /// condition, mapped to the note.
+    inverted: HashMap<ValueId, String>,
+}
+
 /// Every condition value in `func` that is an elidable argument guard,
 /// mapped to the note explaining why.
+#[cfg(test)]
 fn collect(
     func: &HighFunction,
     empty: &HashSet<BlockId>,
     declines: &mut Vec<&'static str>,
 ) -> HashMap<ValueId, String> {
-    let mut guards = HashMap::new();
-    census(&func.region, func, empty, &mut guards, declines);
-    guards
+    collect_found(func, empty, declines).guards
+}
+
+/// Both senses of elidable guard in `func`.
+fn collect_found(func: &HighFunction, empty: &HashSet<BlockId>, declines: &mut Vec<&'static str>) -> Found {
+    let mut found = Found::default();
+    census(&func.region, func, empty, &mut found, declines);
+    found
 }
 
 /// Walk the region tree, classifying every `If`.
@@ -226,7 +243,7 @@ fn census(
     region: &Region,
     func: &HighFunction,
     empty: &HashSet<BlockId>,
-    guards: &mut HashMap<ValueId, String>,
+    guards: &mut Found,
     declines: &mut Vec<&'static str>,
 ) {
     if let Region::Sequence(items) = region {
@@ -283,20 +300,20 @@ fn classify_if(
     func: &HighFunction,
     cond: ValueId,
     sense: Sense,
-    guards: &mut HashMap<ValueId, String>,
+    found: &mut Found,
     declines: &mut Vec<&'static str>,
 ) {
     match classify_condition(func, cond, sense) {
-        // Measurement only for now: an inverted guard that *would* be
-        // elidable is counted, not removed. Removing it is a different
-        // rewrite — the trap is the `If`'s successor, so deleting the check
-        // means splicing the arm into its parent rather than replacing the
-        // node — and that lands as its own change.
+        // An inverted guard is removed by splicing its arm into the parent
+        // and dropping the trap after it ([`strip_inverted`]); the plain
+        // one by deleting the node ([`strip`]).
         Ok(note) => match sense {
             Sense::TrapIfTrue => {
-                guards.insert(cond, note);
+                found.guards.insert(cond, note);
             }
-            Sense::TrapIfFalse => declines.push(DECLINED_INVERTED_GUARD),
+            Sense::TrapIfFalse => {
+                found.inverted.insert(cond, note);
+            }
         },
         Err(why) => declines.push(match sense {
             Sense::TrapIfTrue => why,
@@ -632,6 +649,72 @@ fn declared_param_type(func: &HighFunction, value: ValueId) -> Option<KnownType>
     let sig = func.signature.as_ref()?;
     let index = func.params.iter().position(|p| *p == value)?;
     known_of_type_ref(&sig.inputs.get(index)?.ty)
+}
+
+/// Bottom-up rewrite dropping every collected inverted guard:
+///
+/// ```text
+/// if ok { work; return }        work; return
+/// panic!()                 →
+/// ```
+///
+/// The trap after the `If` is reached only when `ok` is false, because
+/// `work` never falls through; the check it guards is the regenerated
+/// argument conversion's, exactly as for [`strip`]. The arm is spliced
+/// into the parent sequence and the trap is dropped with the check.
+fn strip_inverted(
+    region: Region,
+    inverted: &HashMap<ValueId, String>,
+    empty: &HashSet<BlockId>,
+    elided: &mut i64,
+) -> Region {
+    if inverted.is_empty() {
+        return region;
+    }
+    let mut recurse = |r: Region| strip_inverted(r, inverted, empty, elided);
+    match region {
+        Region::Sequence(items) => {
+            let items: Vec<Region> = items.into_iter().map(&mut recurse).collect();
+            let at = items.iter().enumerate().position(|(i, item)| {
+                matches!(item, Region::If { cond, then_region, else_region: None }
+                    if inverted.contains_key(cond)
+                        && !is_trap(then_region, empty)
+                        && diverges(then_region)
+                        && is_trap(&Region::Sequence(items[i + 1..].to_vec()), empty))
+            });
+            let Some(at) = at else {
+                return seq(items);
+            };
+            let mut items = items;
+            items.truncate(at + 1);
+            let Some(Region::If { then_region, .. }) = items.pop() else {
+                unreachable!("position matched an If");
+            };
+            *elided += 1;
+            items.push(*then_region);
+            seq(items)
+        }
+        Region::Scope { out, body } => Region::Scope { out, body: Box::new(recurse(*body)) },
+        Region::Loop { header, body, kind } => Region::Loop { header, body: Box::new(recurse(*body)), kind },
+        Region::Switch { index, arms, default, dispatch } => Region::Switch {
+            index,
+            arms: arms
+                .into_iter()
+                .map(|mut arm| {
+                    arm.body = recurse(arm.body);
+                    arm
+                })
+                .collect(),
+            default: Box::new(recurse(*default)),
+            dispatch,
+        },
+        Region::If { cond, then_region, else_region } => Region::If {
+            cond,
+            then_region: Box::new(recurse(*then_region)),
+            else_region: else_region.map(|e| Box::new(recurse(*e))),
+        },
+        leaf => leaf,
+    }
 }
 
 /// Bottom-up rewrite dropping every collected guard. Mirrors

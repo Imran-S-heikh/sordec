@@ -52,6 +52,7 @@ use sordec_passes::effects::expr_effects;
 
 use sordec_common::ValueId;
 
+use crate::rust::fold::Fold;
 use crate::rust::idiom;
 
 /// Per-function read counts for every value the body emits.
@@ -73,7 +74,7 @@ impl Liveness {
     /// phi transfer's *destination* as a read — a phi written but never read
     /// is correctly dead.
     pub(crate) fn build(func: &HighFunction) -> Self {
-        Self::build_excluding(func, &HashSet::new())
+        Self::build_excluding(func, &HashSet::new(), &Fold::build(func))
     }
 
     /// [`Liveness::build`], but treating every binding in `dropped` as
@@ -84,8 +85,17 @@ impl Liveness {
     /// see that — `attestation`'s `domain` needs two rounds, because the
     /// `Symbol::new` lowering discards a pointer whose producer is itself
     /// only read by the thing that discarded it.
-    pub(crate) fn build_excluding(func: &HighFunction, dropped: &HashSet<ValueId>) -> Self {
+    ///
+    /// Reads are counted against the value they print as ([`Fold::reads`]):
+    /// a rename's reads are its target's, and a literal printed in place is
+    /// read by nobody.
+    pub(crate) fn build_excluding(func: &HighFunction, dropped: &HashSet<ValueId>, fold: &Fold) -> Self {
         let mut uses: HashMap<ValueId, u32> = HashMap::new();
+        let mut count = |u: ValueId| {
+            if let Some(v) = fold.reads(u) {
+                *uses.entry(v).or_default() += 1;
+            }
+        };
 
         // Operand reads inside every scheduled binding that survives.
         func.region.for_each_node(|node| {
@@ -100,20 +110,26 @@ impl Liveness {
                         continue;
                     };
                     // A lowering that renders none of its operands reads
-                    // none of them, however many the IR records.
-                    if let Expr::Semantic(SemanticOp::Known(op)) = &binding.expr
-                        && idiom::ignores_operands(op)
-                    {
-                        continue;
+                    // none of them, however many the IR records; one that
+                    // renders some reads exactly those.
+                    if let Expr::Semantic(SemanticOp::Known(op)) = &binding.expr {
+                        if idiom::ignores_operands(op) {
+                            continue;
+                        }
+                        if let Some(reads) = idiom::rendered_operands(func, op) {
+                            for u in reads {
+                                count(u);
+                            }
+                            continue;
+                        }
                     }
-                    binding.expr.for_each_value_use(|u| *uses.entry(u).or_default() += 1);
+                    binding.expr.for_each_value_use(&mut count);
                 }
             }
         });
 
         // Structural reads the region carries directly.
-        func.region
-            .for_each_value_use(|u| *uses.entry(u).or_default() += 1);
+        func.region.for_each_value_use(&mut count);
 
         Self { uses }
     }

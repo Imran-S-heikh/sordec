@@ -303,7 +303,7 @@ mod tests {
             durability: key,
             key,
             resolved_key: None,
-            unwrap: false,
+            missing: sordec_ir::Missing::Option,
         }))
     }
 

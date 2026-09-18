@@ -61,9 +61,12 @@ fn hello_add_emits_a_real_add_body() {
     assert!(src.contains("let mut v"), "phi hoisted as let mut:\n{src}");
 
     // The arguments read as themselves: each decode collapsed to the
-    // parameter it decodes, so no frame pointer is threaded anywhere.
-    assert!(src.contains("= a;"), "`a` bound directly, not decoded:\n{src}");
-    assert!(src.contains("= b;"), "`b` bound directly, not decoded:\n{src}");
+    // parameter it decodes, and the rename it left folds into its reader,
+    // so the addition names `a` and `b` directly.
+    assert!(
+        src.contains("b + a") || src.contains("a + b"),
+        "the parameters are read directly, not decoded:\n{src}"
+    );
     assert!(!src.contains("func0("), "the decode helper has no callers:\n{src}");
     assert!(!src.contains("fn func0"), "and is not emitted at all:\n{src}");
 

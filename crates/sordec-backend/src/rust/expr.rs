@@ -168,6 +168,19 @@ fn int_literal(n: i128, ty: &IrType) -> Option<syn::Expr> {
     })
 }
 
+/// A literal binding printed where it is read. A negative number is
+/// parenthesised: the renderer applies methods and casts to operands, and
+/// `-5i64.checked_mul(x)` is `-(5i64.checked_mul(x))`.
+pub(crate) fn literal_ref(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
+    let Expr::Literal(lit) = &binding.expr else {
+        return ctx.policy.unknown_expr("literal");
+    };
+    let rendered = literal_expr(ctx, lit, &binding.ty);
+    // Judged on what prints: the recovered type may reinterpret the bits.
+    let negative = quote::ToTokens::to_token_stream(&rendered).to_string().starts_with('-');
+    if negative { parse_quote!((#rendered)) } else { rendered }
+}
+
 fn literal_expr(ctx: &FnCtx, lit: &Literal, ty: &IrType) -> syn::Expr {
     match lit {
         Literal::I32(n) => {

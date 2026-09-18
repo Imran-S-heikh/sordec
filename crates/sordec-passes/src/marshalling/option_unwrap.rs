@@ -145,7 +145,7 @@ fn plan(func: &HighFunction) -> Vec<Plan> {
         };
         // The read on the same key at the same tier, not yet unwrapped.
         let get = func.bindings.iter().find_map(|(id, b)| match &b.expr {
-            Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { key: k, tier: t, unwrap: false, .. }))
+            Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { key: k, tier: t, missing: sordec_ir::Missing::Option, .. }))
                 if chase_value(func, *k) == *key && proven_tier(t) == Some(*tier) =>
             {
                 Some(id)
@@ -163,8 +163,8 @@ fn apply(func: &mut HighFunction, p: &Plan) {
     // The read keeps its binding, its type and its name; it gains the
     // unwrap. Every reader already names the payload.
     if let Some(b) = func.bindings.get_mut(p.get) {
-        if let Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { unwrap, .. })) = &mut b.expr {
-            *unwrap = true;
+        if let Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { missing, .. })) = &mut b.expr {
+            *missing = sordec_ir::Missing::Unwrap;
         }
         b.add_provenance(Provenance::new(
             PASS_NAME,
@@ -213,7 +213,7 @@ mod tests {
                 durability: v(0),
                 key: v(0),
                 resolved_key: None,
-                unwrap: false,
+                missing: sordec_ir::Missing::Option,
             }))); // v3
             exprs.push(Expr::Unary { op: UnaryOp::Not, value: v(3) }); // v4 a reader
             sched.extend([3, 4]);
@@ -250,7 +250,7 @@ mod tests {
         // The read is the same binding, now flagged as unwrapped.
         assert!(matches!(
             f.bindings.get(v(3)).unwrap().expr,
-            Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { unwrap: true, .. }))
+            Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { missing: sordec_ir::Missing::Unwrap, .. }))
         ));
         // The reader still names v3.
         assert!(matches!(f.bindings.get(v(4)).unwrap().expr, Expr::Unary { value, .. } if value == v(3)));

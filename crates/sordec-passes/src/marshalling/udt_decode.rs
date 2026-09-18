@@ -812,7 +812,7 @@ mod tests {
                     durability: v(1),
                     key: v(1),
                     resolved_key: None,
-                    unwrap: false,
+                    missing: sordec_ir::Missing::Option,
                 })), // v2 map
                 u32val(2000), // v3 keys
                 u32val(2),    // v4 len

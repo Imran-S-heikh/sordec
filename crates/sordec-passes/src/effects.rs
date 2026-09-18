@@ -1234,7 +1234,7 @@ mod tests {
                     durability: v(0),
                     key: v(1),
                     resolved_key: None,
-                    unwrap: false,
+                    missing: sordec_ir::Missing::Option,
                 },
                 "l",
                 "1",

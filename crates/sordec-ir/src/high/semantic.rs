@@ -138,6 +138,24 @@ pub enum SemanticOp {
     },
 }
 
+/// What a storage read yields for a missing entry.
+///
+/// `Storage::get` returns an `Option`, and the SDK builds that `Option`
+/// from a `has` probe and a branch. The marshalling passes fold the probe
+/// and the branch back into the read once they have proved which
+/// combinator the source applied; until then a read is `Option`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum Missing {
+    /// `get(&key)` — the `Option` itself, nothing proved about its use.
+    Option,
+    /// `get(&key).unwrap()` — a missing entry traps.
+    Unwrap,
+    /// `get(&key).unwrap_or(default)` — a missing entry reads as the
+    /// value bound to this id.
+    Or(ValueId),
+}
+
 /// Soroban operations the decompiler knows how to recover.
 ///
 /// This list is the inventory of pattern matchers Phase 2 implements; new
@@ -162,14 +180,11 @@ pub enum KnownOp {
         /// its evidence gate passes; `None` until proven. See
         /// [`EnumKey`].
         resolved_key: Option<EnumKey>,
-        /// The source wrote `get(&key).unwrap()`: absence is a trap.
-        ///
-        /// Set by the `marshalling-option-unwrap` pass once it has proved
-        /// the SDK's `has` probe and its trapping `None` branch around this
-        /// read, and folded both back into it. The value is typed as the
-        /// payload either way; the flag records that the read traps on a
-        /// missing entry rather than yielding `None`.
-        unwrap: bool,
+        /// What the read does when the entry is missing — the `Option`
+        /// combinator the source applied to `get(&key)`, once the SDK's
+        /// `has` probe and branch around the read have been folded back
+        /// into it. See [`Missing`].
+        missing: Missing,
     },
 
     /// `env.storage().<tier>().set::<_>(&key, &value)`.
@@ -837,13 +852,6 @@ impl KnownOp {
                 resolved_key,
                 probe: _,
             }
-            | KnownOp::StorageGet {
-                tier: _,
-                durability,
-                key,
-                resolved_key,
-                unwrap: _,
-            }
             | KnownOp::StorageRemove {
                 tier: _,
                 durability,
@@ -853,6 +861,20 @@ impl KnownOp {
                 f(*durability);
                 f(*key);
                 visit_key(resolved_key, &mut f);
+            }
+            KnownOp::StorageGet {
+                tier: _,
+                durability,
+                key,
+                resolved_key,
+                missing,
+            } => {
+                f(*durability);
+                f(*key);
+                visit_key(resolved_key, &mut f);
+                if let Missing::Or(default) = missing {
+                    f(*default);
+                }
             }
             KnownOp::StorageSet {
                 tier: _,
@@ -1079,13 +1101,6 @@ impl KnownOp {
                 resolved_key,
                 probe: _,
             }
-            | KnownOp::StorageGet {
-                tier: _,
-                durability,
-                key,
-                resolved_key,
-                unwrap: _,
-            }
             | KnownOp::StorageRemove {
                 tier: _,
                 durability,
@@ -1095,6 +1110,20 @@ impl KnownOp {
                 f(durability);
                 f(key);
                 visit_key(resolved_key, &mut f);
+            }
+            KnownOp::StorageGet {
+                tier: _,
+                durability,
+                key,
+                resolved_key,
+                missing,
+            } => {
+                f(durability);
+                f(key);
+                visit_key(resolved_key, &mut f);
+                if let Missing::Or(default) = missing {
+                    f(default);
+                }
             }
             KnownOp::StorageSet {
                 tier: _,

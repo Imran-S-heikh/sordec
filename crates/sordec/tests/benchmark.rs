@@ -85,11 +85,25 @@ fn score_options(behavior: BehaviorInput) -> ScoreOptions {
 /// a band that means one thing on a provisioned machine and another on a bare
 /// one is not a guard.
 fn measure_inner(name: &'static str, want_behavior: bool) -> Result<Measured, String> {
-    let base = samples_dir().join(name);
-    let wasm_path = base.join(format!("{name}.wasm"));
+    let wasm_path = samples_dir().join(name).join(format!("{name}.wasm"));
     let wasm = std::fs::read(&wasm_path).map_err(|e| format!("read wasm: {e}"))?;
+    measure_wasm(name, &wasm, want_behavior.then_some(wasm_path.as_path()), name)
+}
+
+/// Decompile `wasm` and score it against fixture `name`'s vendored source.
+///
+/// `oracle` is the original wasm to measure behaviour against, when wanted.
+/// `label` names the scratch directory, so two measurements of one fixture
+/// running in parallel test threads do not share one.
+fn measure_wasm(
+    name: &'static str,
+    wasm: &[u8],
+    oracle: Option<&Path>,
+    label: &str,
+) -> Result<Measured, String> {
+    let base = samples_dir().join(name);
     let output = sordec_driver::Driver::standard()
-        .run(&wasm)
+        .run(wasm)
         .map_err(|e| format!("decompile: {e}"))?;
 
     // Lay the reconstruction out as the crate we actually ship: the manifest at
@@ -103,7 +117,7 @@ fn measure_inner(name: &'static str, want_behavior: bool) -> Result<Measured, St
     // `src/`, so a crate root lands as `scratch/src/src/lib.rs`, leaving no lib
     // target for `cargo expand --lib` to find and dropping the whole run back
     // to the pre-expansion basis.
-    let tmp = std::env::temp_dir().join(format!("sordec-bench-{name}-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("sordec-bench-{label}-{}", std::process::id()));
     let src = tmp.join("src");
     std::fs::create_dir_all(&src).map_err(|e| format!("scratch dir: {e}"))?;
     std::fs::write(src.join("lib.rs"), &output.rust).map_err(|e| format!("write recon: {e}"))?;
@@ -112,10 +126,9 @@ fn measure_inner(name: &'static str, want_behavior: bool) -> Result<Measured, St
 
     // Before the scratch directory goes away, and against the original wasm
     // rather than its source: the deployed contract is the oracle.
-    let behavior = if want_behavior {
-        sordec::behavior::measure(&tmp, &wasm_path)
-    } else {
-        BehaviorInput::NotRequested
+    let behavior = match oracle {
+        Some(wasm_path) => sordec::behavior::measure(&tmp, wasm_path),
+        None => BehaviorInput::NotRequested,
     };
 
     let opts = score_options(behavior);
@@ -371,7 +384,7 @@ fn overall_band(name: &str) -> (f64, f64) {
         "token-v23-stripped" => (0.27, 0.31),
         "timelock" => (0.76, 0.80),
         "dex-liquidity-pool" => (0.71, 0.75),
-        "attestation" => (0.76, 0.80),
+        "attestation" => (0.78, 0.82),
         _ => (0.00, 1.00),
     }
 }
@@ -392,30 +405,20 @@ fn accuracy_regression() {
     }
 }
 
-/// Structure must not depend on the binary's name section (score-2.0.0 T13c).
+/// Recovering the ABI must never make structure worse.
 ///
-/// `token-v23` and `token-v23-stripped` are the same contract, and the old
-/// name-keyed algorithm scored them 0.0522 and 0.0045 — an 11.6x swing on
-/// nothing but debug info, which is what motivated per-entrypoint closure
-/// scoring. This guards that regression.
+/// `token-v23-stripped` is `token-v23` without its custom sections, and the
+/// only custom sections `token-v23` carries are the contract's own —
+/// `contractspecv0`, `contractenvmetav0`, `contractmetav0`; it has no name
+/// section. So the gap between the two measures exactly what the ABI lets
+/// the pipeline recover: argument decodes proven the identity, enum keys
+/// named from the spec's unions, struct fields named from its structs. That
+/// gap is supposed to be large, and it grows as recovery does.
 ///
-/// **Exact equality no longer holds, and the reason is not the metric.**
-/// `wasm-tools strip --all` removes *every* custom section, `contractspecv0`
-/// included, so the stripped build recovers no ABI at all. Marshalling
-/// elision needs that ABI — it will only collapse an argument decode whose
-/// declared parameter type proves the decode is the identity — so on the
-/// stripped build it correctly declines and the surplus control flow stays
-/// (measured: 17 argument guards elided on the named build, 0 on the
-/// stripped one). The reconstructions genuinely differ because one of them
-/// had more evidence to work from.
-///
-/// So the invariant is restated as the two properties that actually matter,
-/// which together are sharper than the old equality was on its own:
-///
-/// 1. **Monotone in evidence** — more recovered information must never make
-///    the reconstruction worse.
-/// 2. **Not name-keyed** — the gap must stay nowhere near the 11.6x the
-///    old algorithm produced.
+/// What must hold is that it runs one way: more evidence, never a worse
+/// reconstruction. Independence from function *names* — the failure mode
+/// the per-entrypoint closure scoring (score-2.0.0 T13c) was built against
+/// — is tested directly by [`structure_does_not_depend_on_function_names`].
 #[test]
 fn structure_degrades_gracefully_without_the_abi() {
     let named = measure("token-v23").expect("token-v23");
@@ -427,15 +430,81 @@ fn structure_degrades_gracefully_without_the_abi() {
     );
     assert!(
         a >= b - 1e-9,
-        "structure {a:.4} (named) < {b:.4} (stripped) — recovering the ABI \
+        "structure {a:.4} (with ABI) < {b:.4} (stripped) — recovering the ABI \
          must never make the reconstruction worse"
     );
-    assert!(
-        a < b * 2.0,
-        "structure {a:.4} (named) vs {b:.4} (stripped) — a gap this wide is \
-         the name-keyed failure mode, not the ABI-driven one (elision \
-         accounts for a few percent, never a multiple)"
+}
+
+/// Structure must not depend on the binary's function names (score-2.0.0
+/// T13c).
+///
+/// The name-keyed algorithm scored one contract 0.0522 with its name
+/// section and 0.0045 without — an 11.6x swing on nothing but debug info.
+/// This measures `token-v23` as shipped (no name section) and again with a
+/// name section naming every function, and requires the same structure
+/// score: neither the pipeline nor the scorer may read names the compiler
+/// is free to drop.
+#[test]
+fn structure_does_not_depend_on_function_names() {
+    let wasm_path = samples_dir().join("token-v23/token-v23.wasm");
+    let wasm = std::fs::read(&wasm_path).expect("read token-v23");
+    let plain = measure_wasm("token-v23", &wasm, None, "t23-plain").expect("plain");
+    let named = measure_wasm("token-v23", &with_function_names(&wasm), None, "t23-names").expect("named");
+    let (a, b) = (
+        plain.report.categories.structure.score,
+        named.report.categories.structure.score,
     );
+    assert!(
+        (a - b).abs() < 1e-9,
+        "structure {a:.4} without names vs {b:.4} with — the reconstruction or \
+         its score reads function names from the name section"
+    );
+}
+
+/// `wasm` with a `name` custom section appended, naming every function —
+/// imported and defined — `helper_{index}`.
+fn with_function_names(wasm: &[u8]) -> Vec<u8> {
+    fn leb(mut n: u32, out: &mut Vec<u8>) {
+        loop {
+            let byte = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+    let parsed = sordec_frontend::parse(wasm).expect("fixture parses");
+    let facts = &parsed.wasm_facts;
+    let imported = facts
+        .imports
+        .iter()
+        .filter(|i| matches!(i.kind, sordec_ir::ImportKind::Func(_)))
+        .count();
+    let total = u32::try_from(imported + facts.function_type_indices.len()).expect("function count");
+
+    // Subsection 1: the function name map.
+    let mut map = Vec::new();
+    leb(total, &mut map);
+    for index in 0..total {
+        let name = format!("helper_{index}");
+        leb(index, &mut map);
+        leb(u32::try_from(name.len()).expect("short name"), &mut map);
+        map.extend_from_slice(name.as_bytes());
+    }
+    let mut payload = Vec::new();
+    leb(4, &mut payload);
+    payload.extend_from_slice(b"name");
+    payload.push(1);
+    leb(u32::try_from(map.len()).expect("map size"), &mut payload);
+    payload.extend_from_slice(&map);
+
+    let mut out = wasm.to_vec();
+    out.push(0);
+    leb(u32::try_from(payload.len()).expect("section size"), &mut out);
+    out.extend_from_slice(&payload);
+    out
 }
 
 /// Regenerate `docs/benchmarks/report.{md,json}`. `#[ignore]`d so the fast

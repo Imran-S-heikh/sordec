@@ -13,6 +13,7 @@
 mod body;
 mod contract_type;
 mod expr;
+mod fold;
 mod func;
 mod hole;
 mod idiom;

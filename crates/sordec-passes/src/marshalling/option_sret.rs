@@ -223,7 +223,7 @@ fn classify(func: &HighFunction) -> Option<Helper> {
         key: get_key,
         tier: get_tier,
         resolved_key,
-        unwrap: false,
+        missing: sordec_ir::Missing::Option,
         ..
     })) = &get_binding.expr
     else {
@@ -937,7 +937,7 @@ fn rewrite(func: &mut HighFunction, helper: &Helper, site: &Site) {
             durability,
             key,
             resolved_key,
-            unwrap: true,
+            missing: sordec_ir::Missing::Unwrap,
         })),
         "`get(..).unwrap()`: the SDK's Option out-parameter read, collapsed at its call site",
     );
@@ -1060,7 +1060,7 @@ mod tests {
                 durability: v(2),
                 key: v(1),
                 resolved_key: admin(),
-                unwrap: false,
+                missing: sordec_ir::Missing::Option,
             })), // v4
             Expr::Literal(Literal::I64(1)), // v5
             Expr::Literal(Literal::I64(0)), // v6
@@ -1148,8 +1148,8 @@ mod tests {
         f.bindings
             .iter()
             .filter_map(|(_, b)| match &b.expr {
-                Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { unwrap, resolved_key, .. })) => {
-                    Some((*unwrap, resolved_key.as_ref().map(|k| k.variant.clone())))
+                Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { missing, resolved_key, .. })) => {
+                    Some((*missing == sordec_ir::Missing::Unwrap, resolved_key.as_ref().map(|k| k.variant.clone())))
                 }
                 _ => None,
             })

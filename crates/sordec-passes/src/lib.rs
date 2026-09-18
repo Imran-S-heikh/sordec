@@ -93,7 +93,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    OptionProbePass, OptionSretPass, OptionUnwrapPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    OptionDefaultPass, OptionProbePass, OptionSretPass, OptionUnwrapPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -399,6 +399,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the flag test. After the re-run refiners, which resolve the
             // key and tier the helper's read needs.
             Box::new(OptionSretPass),
+            // `get(&k).unwrap_or(d)`: the probe's branch whose other arm
+            // only merges constants. The read takes the default and the
+            // probe becomes `true`, which the constant-branch fold at the
+            // top of the group then drops.
+            Box::new(OptionDefaultPass),
             // The derived `#[contracttype]` struct decode: once the unpack
             // wrapper is inlined, the key table names the struct and the
             // slot loads become its fields. After the inliner for that
@@ -469,7 +474,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..51],
+        vec![1..7, 31..52],
     )
 }
 
@@ -529,6 +534,7 @@ mod tests {
                 TTL_AFTER_INLINE,
                 ENUM_KEY_AFTER_INLINE,
                 marshalling::option_sret::PASS_NAME,
+                marshalling::option_default::PASS_NAME,
                 marshalling::udt_decode::PASS_NAME,
                 marshalling::option_unwrap::PASS_NAME,
                 marshalling::key_construction::PASS_NAME,

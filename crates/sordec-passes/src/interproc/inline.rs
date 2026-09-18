@@ -46,8 +46,8 @@
 //! e.storage().instance().get(&DataKey::TokenA).unwrap() }` is as short as
 //! any SDK helper once its `Option` is collapsed, but it is a function the
 //! source wrote and calls from four places. The SDK's generic helpers take
-//! the key they operate on from a parameter; an accessor fixes it. So a
-//! body with a storage operation on a key built from no parameter stays a
+//! the key they operate on from a parameter; an accessor names it. So a
+//! body with a storage operation on a key it builds itself stays a
 //! function when more than one call site reaches it — pasting it into
 //! each caller would report its read or write once per caller instead of
 //! once. With a single caller there is nothing to duplicate, and it is
@@ -237,24 +237,31 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
     Some(Wrapper { id: func.id, params: func.params.clone(), items, ret })
 }
 
-/// Whether `func` performs a storage operation on a key that depends on
-/// none of its parameters — the author's accessor, not the SDK's generic
+/// Whether `func` performs a storage operation on a key it builds itself
+/// rather than receives — the author's accessor, not the SDK's generic
 /// helper. See the module docs.
+///
+/// The key *value* is what separates them. The SDK's `Storage::extend_ttl`
+/// receives the key and converts it, so its key value is computed from a
+/// parameter. An accessor names its key: `DataKey::TokenA`, or
+/// `DataKey::Shares(user)` whose payload is an argument but whose
+/// construction is the accessor's own — by the time this runs, the
+/// converter that built it has been elided and the key value is a
+/// constant.
 fn is_accessor(func: &HighFunction) -> bool {
     use sordec_ir::{KnownOp, SemanticOp};
     emission_order(func).into_iter().any(|id| {
-        let (key, resolved) = match func.bindings.get(id).map(|b| &b.expr) {
+        let key = match func.bindings.get(id).map(|b| &b.expr) {
             Some(Expr::Semantic(SemanticOp::Known(
-                KnownOp::StorageGet { key, resolved_key, .. }
-                | KnownOp::StorageSet { key, resolved_key, .. }
-                | KnownOp::StorageRemove { key, resolved_key, .. }
-                | KnownOp::StorageExtendTtl { key, resolved_key, .. }
-                | KnownOp::StorageHas { key, resolved_key, probe: false, .. },
-            ))) => (*key, resolved_key),
+                KnownOp::StorageGet { key, .. }
+                | KnownOp::StorageSet { key, .. }
+                | KnownOp::StorageRemove { key, .. }
+                | KnownOp::StorageExtendTtl { key, .. }
+                | KnownOp::StorageHas { key, probe: false, .. },
+            ))) => *key,
             _ => return false,
         };
-        let payload = resolved.iter().flat_map(|k| k.payload.iter());
-        !reads_a_param(func, key, 0) && !payload.into_iter().any(|p| reads_a_param(func, *p, 0))
+        !reads_a_param(func, key, 0)
     })
 }
 

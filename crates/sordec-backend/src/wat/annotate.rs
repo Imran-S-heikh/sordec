@@ -310,7 +310,7 @@ mod tests {
                 variant: "Balance".to_string(),
                 payload: vec![],
             }),
-            unwrap: false,
+            missing: sordec_ir::Missing::Option,
         };
         assert_eq!(label_known_op(&op), "storage_get<persistent> DataKey::Balance");
     }
