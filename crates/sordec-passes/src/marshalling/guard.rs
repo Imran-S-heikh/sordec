@@ -472,11 +472,23 @@ fn classify_constant_discriminant(
 }
 
 /// Shape 2 — a direct tag check on an entry parameter.
-/// The declared type of a value that is a field access on a recovered
-/// struct, as the struct decode planted it.
+/// The proven type of a value a struct decode typed: a field access on a
+/// recovered struct, or the host operation's result the decode was the
+/// proof of (a storage read typed as the struct it unpacks into).
+///
+/// Only `Known` counts, and only on those two shapes. A host result whose
+/// type is merely the ABI's `Val` fails [`val_abi::tag_admits`] for every
+/// object tag, so nothing is licensed by the operation alone.
 fn recovered_field_type(func: &HighFunction, value: ValueId) -> Option<sordec_ir::KnownType> {
     let binding = func.bindings.get(value)?;
-    if !matches!(binding.expr, Expr::Field { .. }) {
+    let decoded = match &binding.expr {
+        Expr::Field { .. } => true,
+        Expr::Semantic(SemanticOp::Known(_)) => {
+            matches!(&binding.ty, sordec_ir::IrType::Known(sordec_ir::KnownType::UserDefined(_)))
+        }
+        _ => false,
+    };
+    if !decoded {
         return None;
     }
     match &binding.ty {

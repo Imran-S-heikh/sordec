@@ -67,6 +67,8 @@ pub(crate) use const_branch::PASS_NAME as CONST_BRANCH_PASS_NAME;
 #[cfg(test)]
 pub(crate) use guard_clause::PASS_NAME as GUARD_CLAUSE_PASS_NAME;
 #[cfg(test)]
+pub(crate) use overflow_guard::PASS_NAME as OVERFLOW_GUARD_PASS_NAME;
+#[cfg(test)]
 pub(crate) use scope_fallthrough::PASS_NAME as SCOPE_FALLTHROUGH_PASS_NAME;
 #[cfg(test)]
 pub(crate) use scope_if_else::PASS_NAME as SCOPE_IF_ELSE_PASS_NAME;

@@ -341,6 +341,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // A forwarded discriminant leaves its guard testing `0 != 1`;
             // the fold replaces the branch with the arm it always took.
             Box::new(ConstBranchFoldPass),
+            // rustc's arithmetic overflow guard, in the group rather than
+            // after it: a helper is only straight-line — and so only
+            // inlinable — once its `if a < b { panic }` borrow check is
+            // gone. It removes guards and rewrites no binding, so the
+            // group's measure still strictly decreases.
+            Box::new(OverflowGuardElisionPass),
             // `WideReturnPass` belongs here, strictly after the decode
             // collapse. It is not registered yet: it needs a dominance
             // gate first, and switching it on without one measured +14
@@ -373,13 +379,9 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // extractors it cancels, and each cancellation may expose the
             // next; it strictly reduces the count of wide nodes.
             Box::new(WideFoldPass),
-            // Compiler-inserted control flow the source never wrote, in the
-            // order one exposes the next: dropping the overflow guard can
-            // leave its merge scope with a single tail `Break`, which is then
-            // a fallthrough rather than a jump. Both are one-directional —
-            // neither rewrites a binding — so they sit after the marshalling
-            // fixpoint group rather than inside it.
-            Box::new(OverflowGuardElisionPass),
+            // Dropping the overflow guard (above, in the group) can leave
+            // its merge scope with a single tail `Break`, which is then a
+            // fallthrough rather than a jump — the pair below undoes that.
             // Wasm's forward-branch spelling of `if`/`else`, undone in two
             // steps that feed each other: the first deletes the breaks that
             // jump where control was already going, the second turns a
@@ -414,7 +416,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // `scope_exit_group_covers_exactly_its_pair` pin those ranges by
         // pass name, so inserting a pass above one fails a test instead of
         // silently shifting the window.
-        vec![1..7, 31..43, 44..46],
+        vec![1..7, 31..44, 44..46],
     )
 }
 
@@ -468,6 +470,7 @@ mod tests {
                 marshalling::wide_codec::PASS_NAME,
                 marshalling::forward::PASS_NAME,
                 refine::CONST_BRANCH_PASS_NAME,
+                refine::OVERFLOW_GUARD_PASS_NAME,
                 marshalling::guard::PASS_NAME,
                 interproc::inline::PASS_NAME,
                 marshalling::udt_decode::PASS_NAME,

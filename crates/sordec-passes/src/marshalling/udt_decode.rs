@@ -41,16 +41,16 @@
 //! parameter declared with the type, or a field of a struct already
 //! recovered this way.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use sordec_common::{FuncId, TypeId, ValueId};
 use sordec_ir::{
     Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MapOpKind, SemanticOp,
-    StructDef, WasmOpcodeKind,
+    StructDef, UnionDef, WasmOpcodeKind,
 };
 
 use super::{apply_elisions, metrics, sret, Elision};
-use crate::dataflow::{canon_addr, resolve_use, trace_u32val, CallIndex};
+use crate::dataflow::{canon_addr, resolve_use, trace_int, trace_u32val, CallIndex};
 use crate::pass::{Pass, PassResult};
 use crate::type_infer::known_of_type_ref;
 
@@ -84,19 +84,38 @@ impl Pass<HighIr> for UdtDecodePass {
         // struct its caller recovered has no signature to consult; the
         // callers are its evidence.
         let param_types = caller_param_types(ir);
+        let unions: Vec<UnionDef> = facts.types.unions.clone();
+        // Helpers whose own body has already been recognised as a struct
+        // decode, so their out-parameter can be read as the struct's
+        // fields at every call site.
+        let helpers: HashMap<FuncId, DecoderHelper> = ir
+            .functions
+            .iter()
+            .filter_map(|f| classify_helper(f, &structs, &unions).map(|h| (f.id, h)))
+            .collect();
         for func in &mut ir.functions {
-            let (elisions, typed) = plan(func, &memory, &structs, &param_types);
-            if elisions.is_empty() {
+            let planned = plan(func, &memory, &structs, &unions, &param_types, &helpers);
+            if planned.elisions.is_empty() {
                 continue;
             }
             result.changed = true;
-            for el in &elisions {
+            for el in &planned.elisions {
                 result.metrics.increment(el.metric, 1);
             }
-            apply_elisions(func, PASS_NAME, elisions);
+            // The derived `Result` test on a niche-carrying field, first:
+            // `strip` rewrites the region tree and must see the
+            // condition bindings as they are.
+            if !planned.guards.is_empty() {
+                let empty = super::guard::empty_blocks(func);
+                let region = std::mem::replace(&mut func.region, sordec_ir::Region::Unreachable);
+                let mut stripped = 0_i64;
+                func.region = super::guard::strip(region, &planned.guards, &empty, &mut stripped);
+                result.metrics.increment(metrics::GUARDS_ELIDED, stripped);
+            }
+            apply_elisions(func, PASS_NAME, planned.elisions);
             // Type-only: the value's own latest note stays the recognizer
             // that produced it.
-            for (v, ty) in typed {
+            for (v, ty) in planned.typed {
                 if let Some(b) = func.bindings.get_mut(v) {
                     b.ty = ty;
                 }
@@ -106,15 +125,29 @@ impl Pass<HighIr> for UdtDecodePass {
     }
 }
 
-/// One unpack whose slots are live in the caller's frame.
+/// Everything one caller's walk decided.
+struct Planned {
+    elisions: Vec<Elision>,
+    typed: Vec<(ValueId, IrType)>,
+    /// Guard conditions (in `guard::strip`'s shape) that test a niche
+    /// discriminant the collapse has just made a field.
+    guards: HashMap<ValueId, String>,
+}
+
+/// One decode whose result is live in the caller's frame: an unpack's
+/// slot region, or a helper's out-parameter.
 struct Frame<'a> {
     base: ValueId,
     start: u32,
-    unpack: ValueId,
+    size: u32,
+    /// The unpack or the helper call, elided once a slot was read.
+    producer: ValueId,
     map: ValueId,
     def: &'a StructDef,
-    /// Field name per slot, in key-table order.
-    slots: Vec<String>,
+    /// Byte offset -> field name.
+    fields: BTreeMap<u32, String>,
+    /// Offsets holding a `Result` discriminant, read as the Ok value.
+    discs: Vec<u32>,
     consumed: bool,
 }
 
@@ -174,18 +207,23 @@ fn udt_of(func: &HighFunction, value: ValueId) -> Option<TypeId> {
     }
 }
 
-fn plan(
+fn plan<'a>(
     func: &HighFunction,
     memory: &sordec_ir::MemoryImage,
-    structs: &[StructDef],
+    structs: &'a [StructDef],
+    unions: &[UnionDef],
     param_types: &HashMap<(FuncId, usize), TypeId>,
-) -> (Vec<Elision>, Vec<(ValueId, IrType)>) {
+    helpers: &HashMap<FuncId, DecoderHelper>,
+) -> Planned {
     let mut elisions = Vec::new();
     let mut typed = Vec::new();
-    let mut active: Vec<Frame<'_>> = Vec::new();
-    let mut finished: Vec<Frame<'_>> = Vec::new();
+    let mut guards = HashMap::new();
+    let mut active: Vec<Frame<'a>> = Vec::new();
+    let mut finished: Vec<Frame<'a>> = Vec::new();
+    // Loads rebound to a field, with the field's type, for the niche test.
+    let mut rebound: Vec<(ValueId, KnownType)> = Vec::new();
     let overlaps = |f: &Frame<'_>, base: ValueId, off: u32| {
-        f.base == base && off >= f.start && off < f.start + SLOT * f.slots.len() as u32
+        f.base == base && off >= f.start && off < f.start + f.size
     };
 
     for id in sret::emission_order(func) {
@@ -211,21 +249,59 @@ fn plan(
                     continue;
                 };
                 let (base, start) = canon_addr(func, vals);
-                // A second unpack into the same region displaces the first.
+                // A second decode into the same region displaces the first.
                 let (dropped, kept): (Vec<_>, Vec<_>) =
                     active.drain(..).partition(|f| f.base == base && f.start == start);
                 active = kept;
                 finished.extend(dropped);
                 typed.push((map, evidence));
-                active.push(Frame { base, start, unpack: id, map, def, slots: keys, consumed: false });
+                let fields = keys.into_iter().enumerate().map(|(i, k)| (SLOT * i as u32, k)).collect();
+                active.push(Frame {
+                    base,
+                    start,
+                    size: SLOT * len,
+                    producer: id,
+                    map,
+                    def,
+                    fields,
+                    discs: Vec::new(),
+                    consumed: false,
+                });
             }
-            Expr::Call { args, .. } => {
+            Expr::Call { target, args } => {
                 for a in args {
                     let (b, o) = canon_addr(func, *a);
                     let (dropped, kept): (Vec<_>, Vec<_>) = active.drain(..).partition(|f| overlaps(f, b, o));
                     active = kept;
                     finished.extend(dropped);
                 }
+                // A helper-shaped decode: its out-parameter now holds the
+                // struct's fields, provided the value it was handed is
+                // already proven to be that struct.
+                let Some(h) = helpers.get(target) else { continue };
+                if args.len() != 2 {
+                    trace(func, "helper call arity");
+                    continue;
+                }
+                let map = resolve_use(func, args[1]);
+                if udt_of(func, map) != Some(h.ty) {
+                    trace(func, &format!("helper call: value {:?} is {:?}, wanted {:?}", map, udt_of(func, map), h.ty));
+                    continue;
+                }
+                let Some(def) = structs.iter().find(|s| s.id == h.ty) else { trace(func, "helper struct missing"); continue };
+                trace(func, &format!("helper frame claimed for func_{}", sordec_common::IrId::index(*target)));
+                let (base, start) = canon_addr(func, args[0]);
+                active.push(Frame {
+                    base,
+                    start,
+                    size: h.size,
+                    producer: id,
+                    map,
+                    def,
+                    fields: h.fields.clone(),
+                    discs: h.discs.clone(),
+                    consumed: false,
+                });
             }
             Expr::Load { addr, offset, .. } => {
                 let (b, o) = canon_addr(func, *addr);
@@ -234,24 +310,36 @@ fn plan(
                     continue;
                 };
                 let rel = o - frame.start;
-                if rel % SLOT != 0 {
+                if frame.discs.contains(&rel) {
+                    frame.consumed = true;
+                    elisions.push(Elision {
+                        id,
+                        expr: Expr::Literal(ok_discriminant(&binding.ty)),
+                        ty: None,
+                        note: format!(
+                            "derived `{}` decode discriminant is Ok: the value was proven at its boundary",
+                            frame.def.name
+                        ),
+                        metric: metrics::UDT_FIELDS_RECOVERED,
+                    });
                     continue;
                 }
-                let index = (rel / SLOT) as usize;
-                let Some(field) = frame.slots.get(index) else { continue };
-                let ty = frame
+                let Some(field) = frame.fields.get(&rel) else { continue };
+                let known = frame
                     .def
                     .fields
                     .iter()
                     .find(|f| f.name == *field)
-                    .and_then(|f| known_of_type_ref(&f.ty))
-                    .map(IrType::Known);
+                    .and_then(|f| known_of_type_ref(&f.ty));
+                if let Some(k) = &known {
+                    rebound.push((id, k.clone()));
+                }
                 frame.consumed = true;
                 elisions.push(Elision {
                     id,
                     expr: Expr::Field { base: frame.map, field: field.clone() },
-                    ty,
-                    note: format!("{}.{field}: slot {index} of the derived struct decode", frame.def.name),
+                    ty: known.map(IrType::Known),
+                    note: format!("{}.{field}: slot +{rel} of the derived struct decode", frame.def.name),
                     metric: metrics::UDT_FIELDS_RECOVERED,
                 });
             }
@@ -267,15 +355,62 @@ fn plan(
     }
     finished.extend(active);
     for frame in finished.into_iter().filter(|f| f.consumed) {
+        let is_call = matches!(func.bindings.get(frame.producer).map(|b| &b.expr), Some(Expr::Call { .. }));
+        let (note, metric) = if is_call {
+            (
+                format!("call to the derived `{}` decode helper, elided with its out-parameter", frame.def.name),
+                metrics::UDT_HELPERS_COLLAPSED,
+            )
+        } else {
+            (
+                format!("derived `{}` decode: the unpack, elided with its slots", frame.def.name),
+                metrics::UDT_DECODES_COLLAPSED,
+            )
+        };
         elisions.push(Elision {
-            id: frame.unpack,
+            id: frame.producer,
             expr: Expr::Literal(Literal::Unit),
             ty: Some(IrType::Known(KnownType::Unit)),
-            note: format!("derived `{}` decode: the unpack, elided with its slots", frame.def.name),
-            metric: metrics::UDT_DECODES_COLLAPSED,
+            note,
+            metric,
         });
     }
-    (elisions, typed)
+
+    // The derived `Result` test on a niche: rustc folds the discriminant
+    // into a unit-enum field, whose next code past the variants means
+    // `Err`. The caller compares the field's code against that constant
+    // and traps. With the field recovered the check is the derived
+    // `TryFromVal`'s, relocated with the rest.
+    for (load, known) in &rebound {
+        let KnownType::UserDefined(uid) = known else { continue };
+        let Some(union) = unions.iter().find(|u| u.id == *uid) else { continue };
+        if union.cases.is_empty() || union.cases.iter().any(|c| !c.fields.is_empty()) {
+            continue;
+        }
+        let niche = union.cases.len() as i128;
+        for (cid, cb) in func.bindings.iter() {
+            let Expr::Binary { op: sordec_ir::BinaryOp::Eq, lhs, rhs } = &cb.expr else { continue };
+            let (l, r) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
+            let hit = (l == *load && crate::dataflow::trace_int(func, r) == Some(niche))
+                || (r == *load && crate::dataflow::trace_int(func, l) == Some(niche));
+            if hit {
+                guards.insert(
+                    cid,
+                    format!("derived `Result` niche test on {}: regenerated by `TryFromVal`", union.name),
+                );
+            }
+        }
+    }
+    Planned { elisions, typed, guards }
+}
+
+/// A zero discriminant in the width the load claimed.
+fn ok_discriminant(ty: &IrType) -> Literal {
+    match ty {
+        IrType::Known(KnownType::I64 | KnownType::U64)
+        | IrType::Inferred(KnownType::I64 | KnownType::U64) => Literal::I64(0),
+        _ => Literal::I32(0),
+    }
 }
 
 /// `(map, keys_pos, vals_ptr, len)` from the host call's operands, in
@@ -385,10 +520,253 @@ fn value_evidence(
     }
 }
 
+// ---------------------------------------------------------------------
+// Helper-shape decoders
+// ---------------------------------------------------------------------
+
+/// A helper proven to be `<T as TryFromVal<Env, Val>>::try_from_val` for a
+/// struct `T`, once its own body has been recognised: it takes
+/// `(out, val)`, `val` is typed as the struct by the inner decode, it
+/// touches no host state, and every slot it writes through `out` is
+/// computed from exactly one field of `val` — or is a constant, which
+/// makes it the `Result` discriminant.
+///
+/// rustc may fold the discriminant into a field with spare values (a unit
+/// enum's next code means `Err`), so a field slot's arms can include a
+/// constant beside the field-derived value. The caller's check of that
+/// constant is the derived `Result` test, stripped with the collapse.
+struct DecoderHelper {
+    ty: TypeId,
+    fields: BTreeMap<u32, String>,
+    discs: Vec<u32>,
+    size: u32,
+}
+
+fn classify_helper(func: &HighFunction, structs: &[StructDef], unions: &[UnionDef]) -> Option<DecoderHelper> {
+    if func.signature.is_some() || func.params.len() != 2 {
+        { trace(func, "not a two-parameter helper"); return None; }
+    }
+    let (out, val) = (func.params[0], func.params[1]);
+    let IrType::Known(KnownType::UserDefined(ty)) = func.bindings.get(val)?.ty else {
+        trace(func, "value parameter not yet typed as a struct");
+        return None;
+    };
+    let Some(def) = structs.iter().find(|s| s.id == ty) else {
+        trace(func, &format!("typed as {ty:?} but no struct has that id"));
+        return None;
+    };
+
+    let mut slots: BTreeMap<u32, Vec<ValueId>> = BTreeMap::new();
+    let mut size = 0_u32;
+    for id in sret::emission_order(func) {
+        let binding = func.bindings.get(id)?;
+        match &binding.expr {
+            Expr::Store { addr, value, offset, width } if resolve_use(func, *addr) == out => {
+                slots.entry(*offset).or_default().push(*value);
+                size = size.max(offset + width.bytes());
+            }
+            Expr::Call { target, .. } => {
+                trace(func, &format!("still calls func_{}", sordec_common::IrId::index(*target)));
+                return None;
+            }
+            Expr::IndirectCall { .. } => {
+                trace(func, "indirect call");
+                return None;
+            }
+            other => {
+                let mut escapes = false;
+                other.for_each_value_use(|u| {
+                    if resolve_use(func, u) == out {
+                        escapes = true;
+                    }
+                });
+                if escapes || touches_state(other) {
+                    { trace(func, "out-pointer escapes or the body touches host state"); return None; }
+                }
+            }
+        }
+    }
+    let mut region_reads = false;
+    func.region.for_each_value_use(|u| {
+        if resolve_use(func, u) == out {
+            region_reads = true;
+        }
+    });
+    if region_reads || slots.is_empty() {
+        { trace(func, "region reads the out-pointer, or nothing is stored through it"); return None; }
+    }
+
+    let mut fields: BTreeMap<u32, String> = BTreeMap::new();
+    let mut discs: Vec<u32> = Vec::new();
+    for (offset, values) in &slots {
+        let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut consts: std::collections::BTreeSet<i128> = std::collections::BTreeSet::new();
+        let mut arms: Vec<ValueId> = Vec::new();
+        for v in values {
+            flat_arms(func, *v, 6, &mut arms);
+        }
+        for arm in &arms {
+            match field_source(func, *arm, val) {
+                Some(name) => {
+                    names.insert(name);
+                }
+                None => match trace_int(func, *arm) {
+                    Some(n) => {
+                        consts.insert(n);
+                    }
+                    None => {
+                        trace(func, &format!("slot +{offset}: arm {arm:?} is neither a field nor a constant"));
+                        return None;
+                    }
+                },
+            }
+        }
+        match names.len() {
+            1 => {
+                fields.insert(*offset, names.pop_first()?);
+            }
+            // Every arm a constant. A unit enum's codes with its niche —
+            // the code past the last variant, meaning `Err` — name the
+            // enum field the dispatch on that field selected; anything
+            // else is the `Result` discriminant.
+            0 if !arms.is_empty() => match niche_enum_field(def, unions, &consts, &fields) {
+                Some(name) => {
+                    fields.insert(*offset, name);
+                }
+                None => discs.push(*offset),
+            },
+            n => {
+                trace(func, &format!("slot +{offset}: {n} field sources {names:?}, {consts:?} constants"));
+                return None;
+            }
+        }
+    }
+    if fields.is_empty() || fields.values().any(|n| !def.fields.iter().any(|f| f.name == *n)) {
+        { trace(func, "no slot names a declared field"); return None; }
+    }
+    trace(func, &format!("decoder helper for {}: fields {fields:?} discs {discs:?} size {size}", def.name));
+    Some(DecoderHelper { ty, fields, discs, size })
+}
+
+/// Trace for the helper classifier and the call-site walk, printed when
+/// `SORDEC_UDT_TRACE` is set: which gate declined a helper, and where a
+/// call site was claimed.
+#[allow(clippy::print_stderr)]
+fn trace(func: &HighFunction, why: &str) {
+    if std::env::var_os("SORDEC_UDT_TRACE").is_some() {
+        eprintln!("udt-decode: func_{}: {why}", sordec_common::IrId::index(func.id));
+    }
+}
+
+/// The per-path values of `value` through nested phis: a switch arm's
+/// constant reaches the out-slot through the merge of the switch and
+/// then the merge of the guards, one block parameter per level.
+fn flat_arms(func: &HighFunction, value: ValueId, depth: u32, out: &mut Vec<ValueId>) {
+    let id = resolve_use(func, value);
+    match func.bindings.get(id).map(|b| &b.expr) {
+        Some(Expr::Phi { incoming }) if depth > 0 && !incoming.is_empty() => {
+            for (_, v) in incoming {
+                flat_arms(func, *v, depth - 1, out);
+            }
+        }
+        _ => out.push(id),
+    }
+}
+
+/// The struct's unit-enum field a set of constant slot values stands for:
+/// the enum's variant codes plus its niche (`cases.len()`, the `Err`
+/// marker rustc folds into the spare code), and no other field already
+/// claimed. `None` when the constants are not such a set — then the slot
+/// is a plain `Result` discriminant.
+fn niche_enum_field(
+    def: &StructDef,
+    unions: &[UnionDef],
+    consts: &std::collections::BTreeSet<i128>,
+    taken: &BTreeMap<u32, String>,
+) -> Option<String> {
+    let mut hits: Vec<String> = Vec::new();
+    for field in &def.fields {
+        if taken.values().any(|t| *t == field.name) {
+            continue;
+        }
+        let Some(KnownType::UserDefined(uid)) = known_of_type_ref(&field.ty) else { continue };
+        let Some(union) = unions.iter().find(|u| u.id == uid) else { continue };
+        if union.cases.is_empty() || union.cases.iter().any(|c| !c.fields.is_empty()) {
+            continue;
+        }
+        let niche = union.cases.len() as i128;
+        if consts.contains(&niche) && consts.iter().all(|c| *c >= 0 && *c <= niche) {
+            hits.push(field.name.clone());
+        }
+    }
+    match hits.len() {
+        1 => hits.pop(),
+        _ => None,
+    }
+}
+
+/// Whether an expression reaches state a decode helper never touches:
+/// anything written to the host, or read from it beyond the object and
+/// collection accessors a derived `TryFromVal` is built from.
+fn touches_state(expr: &Expr) -> bool {
+    let effects = crate::effects::expr_effects(expr);
+    if effects.writes_host {
+        return true;
+    }
+    if !effects.reads_host {
+        return false;
+    }
+    !matches!(
+        expr,
+        Expr::Semantic(SemanticOp::Known(
+            KnownOp::VecOp { .. }
+                | KnownOp::MapOp { .. }
+                | KnownOp::ValObject { .. }
+                | KnownOp::ValTagCheck { .. }
+                | KnownOp::ValDecodeSmall { .. }
+                | KnownOp::ValEncodeSmall { .. }
+                | KnownOp::SymbolDispatch { .. }
+                | KnownOp::SymbolNew { .. }
+        ))
+    )
+}
+
+/// The one field of `val` that `value` is computed from, walking operands
+/// backwards through the field's own decode (tag checks, object
+/// extractors, vector reads, symbol dispatch, phis). `None` when it
+/// reaches no field, or more than one.
+fn field_source(func: &HighFunction, value: ValueId, val: ValueId) -> Option<String> {
+    let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut seen: std::collections::HashSet<ValueId> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<ValueId> = std::collections::VecDeque::from([value]);
+    while let Some(v) = queue.pop_front() {
+        let id = resolve_use(func, v);
+        if !seen.insert(id) {
+            continue;
+        }
+        if seen.len() > 96 {
+            return None;
+        }
+        let Some(binding) = func.bindings.get(id) else {
+            continue;
+        };
+        match &binding.expr {
+            Expr::Field { base, field } if resolve_use(func, *base) == val => {
+                found.insert(field.clone());
+            }
+            Expr::Literal(_) => {}
+            other => other.for_each_value_use(|u| queue.push_back(u)),
+        }
+    }
+    if found.len() == 1 { found.pop_first() } else { None }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::marshalling::test_support::{func_with, load, module, v};
+    use crate::marshalling::test_support::{func_with, load, module, store, v};
+    use sordec_common::IrId;
     use sordec_ir::{
         DataSegment, KnownTier, MemoryImage, PrimitiveType, SorobanFacts, StorageTier, StructField,
         TypeRef, TypeRegistry,
@@ -495,6 +873,71 @@ mod tests {
         f.bindings.get_mut(v(2)).unwrap().expr = load(v(0), 64);
         let mut m = ir(f);
         assert!(!UdtDecodePass.run(&mut m).changed);
+    }
+
+
+    /// A helper-shaped decoder: `(out, val)` with `val` already typed as
+    /// the struct, storing `val.token` (through a tag check the field's own
+    /// decode makes) at `out+0` and a `Result` discriminant at `out+8`.
+    fn decoder_helper(id: u32) -> HighFunction {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                               // v0 out
+                Expr::Phi { incoming: vec![] },                               // v1 val
+                Expr::Field { base: v(1), field: "token".to_string() },      // v2
+                store(v(0), v(2), 0),                                         // v3
+                Expr::Literal(Literal::I64(0)),                               // v4
+                store(v(0), v(4), 8),                                         // v5
+            ],
+            vec![v(0), v(1)],
+            vec![2, 3, 4, 5],
+        );
+        f.id = FuncId::from_index(id);
+        f.bindings.get_mut(v(1)).unwrap().ty = IrType::Known(KnownType::UserDefined(TypeId::new(7)));
+        f
+    }
+
+    /// An entrypoint `f(b: Balance)` calling the helper on its parameter
+    /// and reading both out slots.
+    fn helper_caller(id: u32, helper: u32) -> HighFunction {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                               // v0 b
+                Expr::Phi { incoming: vec![] },                               // v1 fp
+                Expr::Call { target: FuncId::from_index(helper), args: vec![v(1), v(0)] }, // v2
+                load(v(1), 0),                                                // v3 token
+                load(v(1), 8),                                                // v4 disc
+            ],
+            vec![v(0)],
+            vec![2, 3, 4],
+        );
+        f.id = FuncId::from_index(id);
+        f.signature = Some(sordec_ir::FunctionSignature {
+            name: "f".to_string(),
+            inputs: vec![sordec_ir::FunctionParam {
+                name: "b".to_string(),
+                ty: TypeRef::UserDefined(TypeId::new(7)),
+            }],
+            outputs: vec![],
+        });
+        f
+    }
+
+    #[test]
+    fn a_helper_shaped_decoder_collapses_at_its_call_site() {
+        // Functions are looked up by index, so the caller sits at 0 and
+        // the helper at 1, matching their ids.
+        let mut m = ir(helper_caller(0, 1));
+        m.functions.push(decoder_helper(1));
+        let r = UdtDecodePass.run(&mut m);
+        assert!(r.changed);
+        let caller = m.function(FuncId::from_index(0)).unwrap();
+        assert!(matches!(&caller.bindings.get(v(3)).unwrap().expr, Expr::Field { base, field } if *base == v(0) && field == "token"));
+        // The load's own type was unknown, so the Ok discriminant takes the
+        // narrower literal.
+        assert!(matches!(caller.bindings.get(v(4)).unwrap().expr, Expr::Literal(Literal::I32(0))));
+        assert!(matches!(caller.bindings.get(v(2)).unwrap().expr, Expr::Literal(Literal::Unit)));
+        assert_eq!(r.metrics.get(metrics::UDT_HELPERS_COLLAPSED), Some(1));
     }
 
     #[test]

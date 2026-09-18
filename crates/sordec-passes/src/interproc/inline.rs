@@ -139,9 +139,14 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
     let mut returns: Vec<Vec<ValueId>> = Vec::new();
     let mut shape_ok = true;
     func.region.for_each_node(|node| match node {
-        Region::Sequence(_) | Region::Basic(_) => {}
+        // A transfer is the block-parameter rename an elided guard leaves
+        // between two straight-line blocks; it moves no control.
+        Region::Sequence(_) | Region::Basic(_) | Region::Transfer { .. } => {}
         Region::Return { values } => returns.push(values.clone()),
-        _ => shape_ok = false,
+        other => {
+            trace_shape(func, other);
+            shape_ok = false;
+        }
     });
     if !shape_ok || returns.len() > 1 {
         return None;
@@ -186,6 +191,16 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
                     items.push((dep, dep_binding.ty.clone(), dep_binding.expr.clone()));
                     known.insert(dep);
                 }
+                // A block parameter every edge feeds the same known value
+                // is a rename too — the shape a guard elision leaves when
+                // the guarded block's parameters outlive the guard.
+                Expr::Phi { incoming }
+                    if !incoming.is_empty()
+                        && incoming.iter().all(|(_, v)| known.contains(v) && *v == incoming[0].1) =>
+                {
+                    items.push((dep, dep_binding.ty.clone(), Expr::Use(incoming[0].1)));
+                    known.insert(dep);
+                }
                 _ => return None,
             }
         }
@@ -198,6 +213,33 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
         return None;
     }
     Some(Wrapper { id: func.id, params: func.params.clone(), items, ret })
+}
+
+/// Why a body was not straight-line, printed when `SORDEC_INLINE_TRACE`
+/// is set.
+#[allow(clippy::print_stderr)]
+fn trace_shape(func: &HighFunction, node: &Region) {
+    if std::env::var_os("SORDEC_INLINE_TRACE").is_some() {
+        eprintln!("inline: func_{} not straight-line: {}", IrId::index(func.id), region_kind(node));
+    }
+}
+
+fn region_kind(r: &Region) -> &'static str {
+    match r {
+        Region::Basic(_) => "basic",
+        Region::Sequence(_) => "sequence",
+        Region::Scope { .. } => "scope",
+        Region::If { .. } => "if",
+        Region::Loop { .. } => "loop",
+        Region::Switch { .. } => "switch",
+        Region::Break { .. } => "break",
+        Region::Continue { .. } => "continue",
+        Region::Transfer { .. } => "transfer",
+        Region::Return { .. } => "return",
+        Region::Unreachable => "unreachable",
+        Region::Panic { .. } => "panic",
+        Region::Unstructured { .. } => "unstructured",
+    }
 }
 
 /// Whether an expression can be pasted into another function unchanged

@@ -1056,12 +1056,11 @@ fn dump_hir_flattens_timelock_claim_guard_cascade() {
         .stdout(predicate::str::contains(
             "panic!()  ;; unwrap: tag-checked trap",
         ))
-        // The `amount` field's i128 discriminant check is collapsed with
-        // the struct decode now; the `TimeBound.kind` discriminant check
-        // is the bare-panic guard that survives.
-        .stdout(predicate::str::contains(
-            "if (eq v67, 2i32) {\n    panic!()  ;; no error code",
-        ));
+        // Both discriminant checks are collapsed with the struct decodes
+        // now: the `ClaimableBalance` unpack names its fields, and the
+        // `TimeBound` decode helper's `Result` niche test goes with it.
+        .stdout(predicate::str::contains(".time_bound  ;; SdkPattern: ClaimableBalance.time_bound"))
+        .stdout(predicate::str::contains(".kind  ;; SdkPattern: TimeBound.kind"));
 }
 
 #[test]
