@@ -74,6 +74,7 @@ pub(crate) use scope_fallthrough::PASS_NAME as SCOPE_FALLTHROUGH_PASS_NAME;
 pub(crate) use scope_if_else::PASS_NAME as SCOPE_IF_ELSE_PASS_NAME;
 pub use switch_dedup::SwitchDedupPass;
 pub use trap_call::TrapCallInlinePass;
+pub(crate) use trap_call::pure_traps;
 pub use trap_inline::TrapInlinePass;
 
 use sordec_ir::{HighIr, Region};

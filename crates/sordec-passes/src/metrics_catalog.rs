@@ -392,6 +392,9 @@ pub const MARSHALLING_UDT_HELPERS_COLLAPSED: &str = "marshalling_udt_helpers_col
 /// Proven `Option` probes with a trapping None branch collapsed to
 /// `.unwrap()` on the storage read.
 pub const MARSHALLING_OPTIONS_UNWRAPPED: &str = "marshalling_options_unwrapped";
+/// Calls to an SDK `Option` out-parameter storage helper replaced by the
+/// `get(..).unwrap()` it makes.
+pub const MARSHALLING_OPTION_HELPERS_COLLAPSED: &str = "marshalling_option_helpers_collapsed";
 /// Calls to an argument-decode helper neutralised once their results
 /// were rebound.
 pub const MARSHALLING_DECODE_CALLS_ELIDED: &str = "marshalling_decode_calls_elided";
@@ -727,6 +730,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_UDT_FIELDS_RECOVERED,
         MARSHALLING_UDT_HELPERS_COLLAPSED,
         MARSHALLING_OPTIONS_UNWRAPPED,
+        MARSHALLING_OPTION_HELPERS_COLLAPSED,
         MARSHALLING_DECODE_CALLS_ELIDED,
         MARSHALLING_ENCODE_COLLAPSED,
         MARSHALLING_DISPATCH_FOLDED,

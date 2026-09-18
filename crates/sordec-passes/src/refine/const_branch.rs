@@ -181,18 +181,44 @@ fn constant(func: &HighFunction, cond: sordec_common::ValueId) -> Option<bool> {
     let id = resolve_use(func, cond);
     match &func.bindings.get(id)?.expr {
         Expr::Literal(Literal::Bool(b)) => Some(*b),
-        Expr::Literal(lit) => int_of(lit).map(|n| n != 0),
         Expr::Unary {
             op: UnaryOp::Eqz | UnaryOp::Not,
             value,
         } => constant(func, *value).map(|b| !b),
-        Expr::Binary {
-            op: op @ (BinaryOp::Eq | BinaryOp::Ne),
-            lhs,
-            rhs,
-        } => {
-            let (a, b) = (trace_int(func, *lhs)?, trace_int(func, *rhs)?);
-            Some(if *op == BinaryOp::Eq { a == b } else { a != b })
+        _ => int_value(func, id, INT_FOLD_DEPTH).map(|n| n != 0),
+    }
+}
+
+/// How deep [`int_value`] follows operands. A forwarded discriminant is
+/// tested through one or two operators (`d & 1`, `(d & 1) != 0`).
+const INT_FOLD_DEPTH: u32 = 4;
+
+/// The integer a binding evaluates to, when every operand it reads is a
+/// constant: a literal, or the comparisons and bit operations a guard
+/// wraps around one. Width is not modelled, so only operators whose
+/// result does not depend on it are folded — no arithmetic that could
+/// wrap, no shifts.
+fn int_value(func: &HighFunction, value: sordec_common::ValueId, depth: u32) -> Option<i128> {
+    let id = resolve_use(func, value);
+    match &func.bindings.get(id)?.expr {
+        Expr::Literal(Literal::Bool(b)) => Some(i128::from(*b)),
+        Expr::Literal(lit) => int_of(lit),
+        Expr::Unary { op: UnaryOp::Eqz | UnaryOp::Not, value } if depth > 0 => {
+            int_value(func, *value, depth - 1).map(|n| i128::from(n == 0))
+        }
+        Expr::Binary { op, lhs, rhs } if depth > 0 => {
+            let a = int_value(func, *lhs, depth - 1).or_else(|| trace_int(func, *lhs))?;
+            let b = int_value(func, *rhs, depth - 1).or_else(|| trace_int(func, *rhs))?;
+            match op {
+                BinaryOp::Eq => Some(i128::from(a == b)),
+                BinaryOp::Ne => Some(i128::from(a != b)),
+                // Bitwise operators on two non-negative operands agree at
+                // every width; a negative one would need the width.
+                BinaryOp::BitAnd if a >= 0 && b >= 0 => Some(a & b),
+                BinaryOp::BitOr if a >= 0 && b >= 0 => Some(a | b),
+                BinaryOp::BitXor if a >= 0 && b >= 0 => Some(a ^ b),
+                _ => None,
+            }
         }
         _ => None,
     }

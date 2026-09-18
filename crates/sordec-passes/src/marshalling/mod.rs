@@ -58,6 +58,7 @@ pub mod frame;
 pub mod guard;
 pub mod key_construction;
 pub mod option_probe;
+pub mod option_sret;
 pub mod option_unwrap;
 pub mod dead_store;
 pub mod forward;
@@ -76,6 +77,7 @@ pub use frame::FrameElisionPass;
 pub use guard::ArgGuardElisionPass;
 pub use key_construction::KeyConstructionElisionPass;
 pub use option_probe::OptionProbePass;
+pub use option_sret::OptionSretPass;
 pub use option_unwrap::OptionUnwrapPass;
 pub use wide_return::WideReturnPass;
 

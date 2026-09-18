@@ -23,10 +23,13 @@
 //! Every fact comes from [`crate::dataflow::frame_facts`], whose kill
 //! discipline is the whole argument: a store to a different base may
 //! alias and kills everything, any call may write through an escaped
-//! pointer and kills everything, and facts are strictly block-local and
-//! position-sensitive. A load is forwarded only when a store of the
-//! **same base, same offset and same width** reaches it within its own
-//! block with nothing in between that may write memory.
+//! pointer and kills everything, and facts are position-sensitive. A load
+//! is forwarded only when a store of the **same base, same offset and same
+//! width** reaches it along the blocks that dominate it, with nothing on
+//! the way that may write memory. [`facts_at`] walks the region tree to
+//! find those blocks: a branch arm, a loop or a scope with an early exit
+//! that the path does not pass through contributes no facts, and kills
+//! them all if it may write.
 //!
 //! Width is exact with one exception: a narrower load of a slot holding a
 //! *literal* becomes the truncated literal, because rustc reads a
@@ -40,7 +43,7 @@
 use sordec_ir::{Expr, HighFunction, HighIr, IrType, KnownType, Literal, MemWidth};
 
 use super::{apply_elisions, metrics, Elision};
-use crate::dataflow::frame_facts::facts_before;
+use crate::dataflow::frame_facts::facts_at;
 use crate::dataflow::{canon_addr, resolve_use};
 use crate::pass::{Pass, PassResult};
 
@@ -85,7 +88,7 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
             let Some(total) = off.checked_add(*offset) else {
                 continue;
             };
-            let facts = facts_before(func, block, id, base);
+            let facts = facts_at(func, id, base);
             if let Some(value) = facts.value_at(total, *width) {
                 let value = resolve_use(func, value);
                 elisions.push(Elision {

@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.7017856772206169,
-  "aggregate_overall_with_behavior": 0.7017856772206169,
+  "aggregate_overall": 0.717976050730737,
+  "aggregate_overall_with_behavior": 0.717976050730737,
   "behavior_measured_fixtures": 0,
   "fixtures": {
     "attestation": {
@@ -79,22 +79,22 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=0.6364 recall=0.5122 (41 original facts, 33 reconstructed)",
-            "under-recovered: panic:bare, panic:unwrap, storage:get:instance:DataKey::TokenB, xcall:transfer",
-            "over-recovered: ledger:current_contract_address, storage:set:instance:?, storage:set:instance:DataKey::ReserveA, storage:set:instance:DataKey::ReserveB, storage:set:instance:DataKey::TotalShares, storage:set:persistent:DataKey::Shares"
+            "precision=0.6923 recall=0.6585 (41 original facts, 39 reconstructed)",
+            "under-recovered: panic:bare, xcall:transfer",
+            "over-recovered: ledger:current_contract_address, storage:set:instance:DataKey::ReserveA, storage:set:instance:DataKey::ReserveB, storage:set:instance:DataKey::TotalShares, storage:set:persistent:DataKey::Shares"
           ],
-          "score": 0.5675675675675675,
+          "score": 0.675,
           "weight": 0.3
         },
         "structure": {
           "checked": true,
           "notes": [
-            "6 entrypoints (0 unreconstructed, 0 without control flow)",
+            "6 entrypoints (0 unreconstructed, 1 without control flow)",
             "ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.1802 recall=0.8696 (23 original tokens, 111 reconstructed) — bloat 4.8x, dice ceiling ~0.3433",
-            "low-similarity: __constructor(0.27), balance_shares(0.00), deposit(0.26), get_rsrvs(0.00), swap(0.50), withdraw(0.26)"
+            "control flow: precision=0.2903 recall=0.7826 (23 original tokens, 62 reconstructed) — bloat 2.7x, dice ceiling ~0.5412",
+            "low-similarity: balance_shares(0.00), deposit(0.31), swap(0.64), withdraw(0.40)"
           ],
-          "score": 0.21461723461723461,
+          "score": 0.47102920523917347,
           "weight": 0.25
         }
       },
@@ -105,7 +105,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 6 entrypoints, 1 types recovered"
       ],
-      "overall": 0.6163818575583281,
+      "overall": 0.7297144721291686,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,

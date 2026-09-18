@@ -298,59 +298,58 @@ fn walk_facts(
     base: ValueId,
     facts: &mut FrameFacts,
 ) -> bool {
+    if !contains_block(region, target) {
+        pass_over(func, region, base, facts);
+        return false;
+    }
     match region {
-        Region::Basic(b) => {
-            let Some(block) = func.blocks.get(*b) else {
+        Region::Basic(b) => match func.blocks.get(*b) {
+            Some(block) => scan(func, block, Some(at), base, facts),
+            None => {
                 facts.kill_all();
-                return false;
-            };
-            if *b == target {
-                scan(func, block, Some(at), base, facts)
-            } else {
-                scan(func, block, None, base, facts);
                 false
             }
-        }
+        },
+        // The items before the one holding the target run first and in
+        // order; `any` stops at the holder, so nothing after it is read.
         Region::Sequence(items) => items
             .iter()
             .any(|item| walk_facts(func, item, target, at, base, facts)),
         Region::Scope { body, .. } => walk_facts(func, body, target, at, base, facts),
         Region::Loop { body, .. } => {
+            // A later iteration reaches the target after the rest of the
+            // body has run, so nothing from before the loop survives a
+            // body that may write.
             if region_may_write(func, body) {
                 facts.kill_all();
             }
-            contains_block(body, target) && walk_facts(func, body, target, at, base, facts)
+            walk_facts(func, body, target, at, base, facts)
         }
+        // Only the arm holding the target is entered, and it is entered
+        // with the facts that held at the branch.
         Region::If {
             then_region,
             else_region,
             ..
         } => {
             if contains_block(then_region, target) {
-                return walk_facts(func, then_region, target, at, base, facts);
+                walk_facts(func, then_region, target, at, base, facts)
+            } else {
+                else_region
+                    .as_ref()
+                    .is_some_and(|e| walk_facts(func, e, target, at, base, facts))
             }
-            if let Some(else_region) = else_region
-                && contains_block(else_region, target)
-            {
-                return walk_facts(func, else_region, target, at, base, facts);
-            }
-            if region_may_write(func, region) {
-                facts.kill_all();
-            }
-            false
         }
         Region::Switch { arms, default, .. } => {
-            for arm in arms {
-                if contains_block(&arm.body, target) {
-                    return walk_facts(func, &arm.body, target, at, base, facts);
-                }
+            match arms.iter().find(|arm| contains_block(&arm.body, target)) {
+                Some(arm) => walk_facts(func, &arm.body, target, at, base, facts),
+                None => walk_facts(func, default, target, at, base, facts),
             }
-            if contains_block(default, target) {
-                return walk_facts(func, default, target, at, base, facts);
-            }
-            if region_may_write(func, region) {
-                facts.kill_all();
-            }
+        }
+        // An unstructured remnant holding the target has no order to
+        // follow: fail closed.
+        Region::Unstructured { .. } => {
+            facts.kill_all();
             false
         }
         Region::Break { .. }
@@ -359,11 +358,47 @@ fn walk_facts(
         | Region::Return { .. }
         | Region::Unreachable
         | Region::Panic { .. } => false,
-        Region::Unstructured { .. } => {
-            facts.kill_all();
-            false
-        }
     }
+}
+
+/// Advance `facts` across a region that runs before the query but does not
+/// hold it.
+///
+/// Straight-line code — blocks, sequences, transfers and scopes with no
+/// way out but the bottom — runs every store it holds, so it is scanned.
+/// Anything else may leave part of its body unrun on the way to the query:
+/// a branch takes one arm, a `break` skips the rest of its scope, a loop
+/// may run zero times. What such a region stores cannot be relied on, and
+/// if it may write at all, nothing from before it can either.
+fn pass_over(func: &HighFunction, region: &Region, base: ValueId, facts: &mut FrameFacts) {
+    if is_straight_line(region) {
+        region.for_each_node(|node| {
+            if let Region::Basic(b) = node {
+                match func.blocks.get(*b) {
+                    Some(block) => {
+                        scan(func, block, None, base, facts);
+                    }
+                    None => facts.kill_all(),
+                }
+            }
+        });
+    } else if region_may_write(func, region) {
+        facts.kill_all();
+    }
+}
+
+/// Whether every path into `region` runs all of it, top to bottom.
+fn is_straight_line(region: &Region) -> bool {
+    let mut straight = true;
+    region.for_each_node(|node| {
+        if !matches!(
+            node,
+            Region::Basic(_) | Region::Sequence(_) | Region::Scope { .. } | Region::Transfer { .. }
+        ) {
+            straight = false;
+        }
+    });
+    straight
 }
 
 /// Whether `region` holds `target` anywhere in its tree.
@@ -795,5 +830,152 @@ mod tests {
         let func = func_with_block(vec![i64c(1)]);
         assert_eq!(block_containing(&func, v(0)), Some(BlockId::from_index(0)));
         assert_eq!(block_containing(&func, v(9)), None);
+    }
+
+    // --- facts_at: the region walk ---
+
+    fn bb(i: u32) -> BlockId {
+        BlockId::from_index(i)
+    }
+
+    /// Bindings `exprs` at ids 0..N, scheduled into blocks by `layout`
+    /// (`layout[b]` lists block `b`'s binding ids in order), under
+    /// `region`. `v0` is the frame base.
+    fn func_with_blocks(exprs: Vec<Expr>, layout: Vec<Vec<u32>>, region: Region) -> HighFunction {
+        let mut func = func_with_block(exprs);
+        let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
+        for (i, ids) in layout.into_iter().enumerate() {
+            blocks.push(HighBlock {
+                id: bb(i as u32),
+                bindings: ids.into_iter().map(v).collect(),
+            });
+        }
+        func.blocks = blocks;
+        func.region = region;
+        func
+    }
+
+    fn load(addr: u32, offset: u32) -> Expr {
+        Expr::Load {
+            addr: v(addr),
+            offset,
+            width: MemWidth::W8,
+            signed: None,
+            ty: IrType::Unknown(UnknownReason::InsufficientEvidence),
+        }
+    }
+
+    /// v0 base, v1 = 7, v2 = store v0+0 <- v1, v3 = cond, v4 = load v0+0.
+    fn store_then_load() -> Vec<Expr> {
+        vec![
+            Expr::Phi { incoming: vec![] },
+            i64c(7),
+            store(0, 1, 0, MemWidth::W8),
+            Expr::Phi { incoming: vec![] },
+            load(0, 0),
+        ]
+    }
+
+    /// A store in the entry block reaches a load inside a branch arm.
+    #[test]
+    fn a_store_in_a_dominating_block_reaches_a_load_in_an_arm() {
+        let func = func_with_blocks(
+            store_then_load(),
+            vec![vec![1, 2], vec![4]],
+            Region::Sequence(vec![
+                Region::Basic(bb(0)),
+                Region::If {
+                    cond: v(3),
+                    then_region: Box::new(Region::Basic(bb(1))),
+                    else_region: None,
+                },
+            ]),
+        );
+        assert_eq!(facts_at(&func, v(4), v(0)).value_at(0, MemWidth::W8), Some(v(1)));
+    }
+
+    /// A store inside a branch the load does not pass through is not a
+    /// fact at the load: the other arm may have run instead.
+    #[test]
+    fn a_store_in_a_sibling_arm_is_not_a_fact() {
+        let func = func_with_blocks(
+            store_then_load(),
+            vec![vec![1], vec![2], vec![4]],
+            Region::Sequence(vec![
+                Region::Basic(bb(0)),
+                Region::If {
+                    cond: v(3),
+                    then_region: Box::new(Region::Basic(bb(1))),
+                    else_region: None,
+                },
+                Region::Basic(bb(2)),
+            ]),
+        );
+        assert!(facts_at(&func, v(4), v(0)).value_at(0, MemWidth::W8).is_none());
+    }
+
+    /// The hole the straight-line rule closes: a scope whose body breaks
+    /// out before its store. The load after the scope is reached on the
+    /// break path too, where the store never ran.
+    #[test]
+    fn a_store_after_an_early_exit_is_not_a_fact_after_the_scope() {
+        let func = func_with_blocks(
+            store_then_load(),
+            vec![vec![1], vec![2], vec![4]],
+            Region::Sequence(vec![
+                Region::Scope {
+                    out: bb(2),
+                    body: Box::new(Region::Sequence(vec![
+                        Region::Basic(bb(0)),
+                        Region::If {
+                            cond: v(3),
+                            then_region: Box::new(Region::Break {
+                                target: bb(2),
+                                transfer: vec![],
+                            }),
+                            else_region: None,
+                        },
+                        Region::Basic(bb(1)),
+                    ])),
+                },
+                Region::Basic(bb(2)),
+            ]),
+        );
+        assert!(facts_at(&func, v(4), v(0)).value_at(0, MemWidth::W8).is_none());
+    }
+
+    /// A straight-line scope before the load runs all of its stores.
+    #[test]
+    fn a_straight_line_scope_contributes_its_stores() {
+        let func = func_with_blocks(
+            store_then_load(),
+            vec![vec![1, 2], vec![4]],
+            Region::Sequence(vec![
+                Region::Scope { out: bb(1), body: Box::new(Region::Basic(bb(0))) },
+                Region::Basic(bb(1)),
+            ]),
+        );
+        assert_eq!(facts_at(&func, v(4), v(0)).value_at(0, MemWidth::W8), Some(v(1)));
+    }
+
+    /// A loop body that writes, entered on the way to the load, drops
+    /// what was known before the loop.
+    #[test]
+    fn a_writing_loop_around_the_load_drops_earlier_facts() {
+        let mut exprs = store_then_load();
+        exprs.push(call(9, vec![])); // v5: may write
+        let func = func_with_blocks(
+            exprs,
+            vec![vec![1, 2], vec![4, 5]],
+            Region::Sequence(vec![
+                Region::Basic(bb(0)),
+                Region::Loop {
+                    header: bb(1),
+                    body: Box::new(Region::Basic(bb(1))),
+                    kind: sordec_ir::LoopKind::Unclassified,
+                },
+            ]),
+        );
+        assert!(facts_at(&func, v(4), v(0)).value_at(0, MemWidth::W8).is_none());
     }
 }

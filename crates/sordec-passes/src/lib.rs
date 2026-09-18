@@ -93,7 +93,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    OptionProbePass, OptionUnwrapPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    OptionProbePass, OptionSretPass, OptionUnwrapPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -391,6 +391,14 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
                 ENUM_KEY_AFTER_INLINE,
                 recognizers::enum_key::RESOLUTION_COUNTERS,
             )),
+            // `get(&k).unwrap()` of a value wider than a register: the SDK
+            // writes the `Option` into the caller's frame from a branching
+            // helper. Each call becomes the read and the stores its `Some`
+            // path makes; the frame forwarder at the top of the group then
+            // carries them to the loads, and the constant-branch fold drops
+            // the flag test. After the re-run refiners, which resolve the
+            // key and tier the helper's read needs.
+            Box::new(OptionSretPass),
             // The derived `#[contracttype]` struct decode: once the unpack
             // wrapper is inlined, the key table names the struct and the
             // slot loads become its fields. After the inliner for that
@@ -433,6 +441,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // trailing `Break` that made the arm terminate, so the shape it
             // emits is one `GuardClausePass` cannot match — belt and braces,
             // and its own test pins the belt.
+            //
+            // They close the elision group rather than following it: the
+            // `Option` helper collapse above recognizes a branch on the
+            // probe, which only exists as an `if` once this pair has run,
+            // and the elisions after it need the next iteration to see the
+            // result.
             Box::new(ScopeFallthroughPass),
             Box::new(ScopeIfElsePass),
             Box::new(UnrecognizedScanPass),
@@ -448,14 +462,14 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(StructuringCensusPass),
         ],
         // Two fixpoint groups: wave-1 region refinement, and marshalling
-        // elision. Both converge because every member strictly reduces a
-        // measure — nesting depth for the first, live marshalling bindings
-        // for the second, and labeled exits for the third.
-        // `marshalling_group_covers_exactly_the_elision_passes` and
-        // `scope_exit_group_covers_exactly_its_pair` pin those ranges by
-        // pass name, so inserting a pass above one fails a test instead of
-        // silently shifting the window.
-        vec![1..7, 31..48, 48..50],
+        // elision with the scope-exit pair at its tail. Both converge
+        // because every member strictly reduces a measure — nesting depth
+        // for the first; live marshalling bindings and labeled exits for
+        // the second. `marshalling_group_covers_exactly_the_elision_passes`
+        // and `scope_exit_pair_shares_the_elision_group` pin those ranges
+        // by pass name, so inserting a pass above one fails a test instead
+        // of silently shifting the window.
+        vec![1..7, 31..51],
     )
 }
 
@@ -465,29 +479,28 @@ mod tests {
 
     /// A fixpoint group is a pair of raw indices into the manifest, so
     /// adding a pass anywhere above one silently moves the window over the
-    /// wrong passes. This pins the marshalling group by name.
-    /// Same pinning for the scope-exit pair. It matters more than most:
-    /// the group must stay clear of `GuardClausePass`, whose transform is
-    /// the inverse of `ScopeIfElsePass`.
+    /// wrong passes. This pins where the scope-exit pair lives by name. It
+    /// matters more than most: its group must stay clear of
+    /// `GuardClausePass`, whose transform is the inverse of
+    /// `ScopeIfElsePass`.
     #[test]
-    fn scope_exit_group_covers_exactly_its_pair() {
+    fn scope_exit_pair_shares_the_elision_group() {
         let pipeline = default_high_pipeline();
         let names: Vec<&str> = pipeline.pass_names();
         let group = pipeline
             .fixpoint_groups()
             .iter()
-            .find(|r| names[r.start] == refine::SCOPE_FALLTHROUGH_PASS_NAME)
-            .expect("the scope-exit group starts at the fallthrough pass");
+            .find(|r| names[(*r).clone()].contains(&refine::SCOPE_FALLTHROUGH_PASS_NAME))
+            .expect("the scope-exit pair is in a fixpoint group");
+        let members = &names[group.clone()];
         assert_eq!(
-            &names[group.clone()],
-            &[
-                refine::SCOPE_FALLTHROUGH_PASS_NAME,
-                refine::SCOPE_IF_ELSE_PASS_NAME,
-            ]
+            &members[members.len() - 2..],
+            &[refine::SCOPE_FALLTHROUGH_PASS_NAME, refine::SCOPE_IF_ELSE_PASS_NAME],
+            "the pair closes its group"
         );
         // The inverse transform must not share the group.
         assert!(
-            !names[group.clone()].contains(&refine::GUARD_CLAUSE_PASS_NAME),
+            !members.contains(&refine::GUARD_CLAUSE_PASS_NAME),
             "guard-clause hoisting is ScopeIfElsePass's inverse and would oscillate"
         );
     }
@@ -515,12 +528,15 @@ mod tests {
                 CONST_PROP_AFTER_INLINE,
                 TTL_AFTER_INLINE,
                 ENUM_KEY_AFTER_INLINE,
+                marshalling::option_sret::PASS_NAME,
                 marshalling::udt_decode::PASS_NAME,
                 marshalling::option_unwrap::PASS_NAME,
                 marshalling::key_construction::PASS_NAME,
                 marshalling::dead_store::PASS_NAME,
                 marshalling::frame::PASS_NAME,
                 arith::wide_fold::PASS_NAME,
+                refine::SCOPE_FALLTHROUGH_PASS_NAME,
+                refine::SCOPE_IF_ELSE_PASS_NAME,
             ],
         );
     }

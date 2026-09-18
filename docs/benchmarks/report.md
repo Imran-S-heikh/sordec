@@ -11,10 +11,10 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | token-v23 | 0.6652 | 0.6875 | 0.4038 | 0.8608 | n/a |
 | token-v23-stripped | 0.2849 | 0.0000 | 0.2092 | 0.6329 | n/a |
 | timelock | 0.7929 | 1.0000 | 0.5027 | 0.8276 | n/a |
-| dex-liquidity-pool | 0.6164 | 1.0000 | 0.2146 | 0.5676 | n/a |
+| dex-liquidity-pool | 0.7297 | 1.0000 | 0.4710 | 0.6750 | n/a |
 | attestation | 0.7794 | 1.0000 | 0.2500 | 1.0000 | n/a |
-| **aggregate (mean, AST)** | **0.7018** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.7018** | | | | |
+| **aggregate (mean, AST)** | **0.7180** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.7180** | | | | |
 
 ## Per-fixture detail
 
@@ -56,8 +56,8 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 ### dex-liquidity-pool
 
 - **interface** 1.0000 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (6 original, 6 reconstructed) — types 1.0000  precision=1.0000 recall=1.0000 (1 original, 1 reconstructed)
-- **structure** 0.2146 — 6 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.1802 recall=0.8696 (23 original tokens, 111 reconstructed) — bloat 4.8x, dice ceiling ~0.3433 — low-similarity: __constructor(0.27), balance_shares(0.00), deposit(0.26), get_rsrvs(0.00), swap(0.50), withdraw(0.26)
-- **semantic** 0.5676 — precision=0.6364 recall=0.5122 (41 original facts, 33 reconstructed) — under-recovered: panic:bare, panic:unwrap, storage:get:instance:DataKey::TokenB, xcall:transfer — over-recovered: ledger:current_contract_address, storage:set:instance:?, storage:set:instance:DataKey::ReserveA, storage:set:instance:DataKey::ReserveB, storage:set:instance:DataKey::TotalShares, storage:set:persistent:DataKey::Shares
+- **structure** 0.4710 — 6 entrypoints (0 unreconstructed, 1 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.2903 recall=0.7826 (23 original tokens, 62 reconstructed) — bloat 2.7x, dice ceiling ~0.5412 — low-similarity: balance_shares(0.00), deposit(0.31), swap(0.64), withdraw(0.40)
+- **semantic** 0.6750 — precision=0.6923 recall=0.6585 (41 original facts, 39 reconstructed) — under-recovered: panic:bare, xcall:transfer — over-recovered: ledger:current_contract_address, storage:set:instance:DataKey::ReserveA, storage:set:instance:DataKey::ReserveB, storage:set:instance:DataKey::TotalShares, storage:set:persistent:DataKey::Shares
 - **behavior** n/a — behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`
 
 ### attestation

@@ -66,7 +66,7 @@ use sordec_ir::{
 use super::symbols::{unique_union_index_by_cases, valid_symbol_text};
 use super::{apply_rewrites, Rewrite};
 use crate::dataflow::{
-    canon_addr, facts_at, may_write_memory, trace_int,
+    canon_addr, facts_at, may_write_memory, resolve_use, trace_int,
     trace_u32val, CallIndex, Resolver,
 };
 use crate::pass::{Pass, PassResult};
@@ -108,12 +108,18 @@ enum DiscChannel {
         /// Exact width of the discriminant load.
         width: MemWidth,
     },
-    /// All-unit enums (no payload anywhere): the discriminant travels
-    /// by value in a register argument. No fixed position is recorded —
-    /// at each callsite, exactly one distinct in-range constant must
-    /// appear among the arguments (out-pointers are runtime stack
-    /// addresses and never resolve to small constants).
-    ByValue,
+    /// The discriminant travels by value in a register argument.
+    ///
+    /// `param` is the parameter the constructor dispatches on — the index
+    /// of its `match`, seen through renames and width conversions — when
+    /// the body shows one. Then the discriminant is that argument and
+    /// nothing else: dex's `get_token_a` and `get_token_b` share a helper
+    /// that calls the constructor as `ctor(which, 0)`, and the zero
+    /// payload placeholder is a constant too. Without a known position,
+    /// exactly one distinct in-range constant must appear among the
+    /// arguments (out-pointers are runtime stack addresses and never
+    /// resolve to small constants).
+    ByValue { param: Option<usize> },
 }
 
 /// What one helper function proved to be, memoized per [`FuncId`].
@@ -420,7 +426,27 @@ fn try_name_key_at(
             };
             (d, payload, note)
         }
-        DiscChannel::ByValue => {
+        DiscChannel::ByValue { param: Some(p) } => {
+            // The argument the constructor dispatches on is the
+            // discriminant. resolve_int crosses phis and agreeing
+            // callers; callers that disagree leave it unresolved, which
+            // is the honest answer for a shared helper.
+            let Some(d) = args
+                .get(*p)
+                .and_then(|arg| resolver.resolve_int(func.id, *arg))
+                .filter(|n| *n >= 0 && (*n as usize) < union.cases.len())
+            else {
+                return Naming::Unresolved;
+            };
+            let others: Vec<ValueId> = args
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| i != p)
+                .map(|(_, arg)| *arg)
+                .collect();
+            (d, others, "by value")
+        }
+        DiscChannel::ByValue { param: None } => {
             // Exactly one distinct in-range constant among the args is
             // the discriminant (out-pointers are runtime values and
             // never resolve). resolve_int crosses phis and agreeing
@@ -466,7 +492,7 @@ fn try_name_key_at(
     // whose shape is the frame's, not the declaration's, so it keeps the
     // original presence test.
     let payload: Vec<ValueId> = match &summary.disc {
-        DiscChannel::ByValue => {
+        DiscChannel::ByValue { .. } => {
             if payload.len() < case.fields.len() {
                 return Naming::Unresolved;
             }
@@ -717,7 +743,7 @@ fn summarize_ctor(ir: &HighIr, target: FuncId) -> Option<CtorSummary> {
             offset,
             width,
         },
-        None if !func.params.is_empty() => DiscChannel::ByValue,
+        None if !func.params.is_empty() => DiscChannel::ByValue { param: dispatch_param(func) },
         None => return None,
     };
 
@@ -767,6 +793,34 @@ fn summarize_ctor(ir: &HighIr, target: FuncId) -> Option<CtorSummary> {
     let union_idx = unique_union_index_by_cases(unions, &texts)?;
 
     Some(CtorSummary { union_idx, disc })
+}
+
+/// The parameter a by-value constructor dispatches on: the index of its
+/// outermost `match`, followed back through renames and width conversions
+/// to a parameter. `None` when the body has no such `match`.
+fn dispatch_param(func: &HighFunction) -> Option<usize> {
+    let mut index = None;
+    func.region.for_each_node(|node| {
+        if index.is_none()
+            && let sordec_ir::Region::Switch { index: i, .. } = node
+        {
+            index = Some(*i);
+        }
+    });
+    let mut value = index?;
+    for _ in 0..8 {
+        let terminal = resolve_use(func, value);
+        if let Some(p) = func.params.iter().position(|p| *p == terminal) {
+            return Some(p);
+        }
+        match &func.bindings.get(terminal)?.expr {
+            Expr::Unknown { op_kind: sordec_ir::WasmOpcodeKind::Conversion, args, .. } if args.len() == 1 => {
+                value = args[0];
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// Resolve a `(pos, len)` pair at a callsite to symbol text in rodata.
@@ -1179,6 +1233,40 @@ mod tests {
         let key = resolved_key_of(&ir, 0, v(2)).expect("named");
         assert_eq!(key.variant, "Admin");
         assert!(key.payload.is_empty());
+    }
+
+    /// dex's `get_token_a`/`get_token_b` shape: one helper builds the key
+    /// as `ctor(which, 0)`, where `which` is the helper's own parameter
+    /// and the `0` fills the payload slot. The constructor dispatches on
+    /// its first argument, so that argument is the discriminant; the
+    /// constant `0` must not be read as `TokenA`.
+    #[test]
+    fn by_value_discriminant_is_the_argument_the_constructor_dispatches_on() {
+        let mut ctor = func(
+            1,
+            None,
+            2,
+            vec![
+                i32c(1000),
+                i32c(5),
+                call(2, vec![v(2), v(3)]),
+                i32c(1005),
+                i32c(5),
+                call(2, vec![v(5), v(6)]),
+            ],
+        );
+        ctor.region = Region::Switch {
+            index: v(0),
+            arms: vec![],
+            default: Box::new(Region::Unreachable),
+            dispatch: None,
+        };
+        // v0 = which (a parameter no caller pins); v1 = 0; v2 = ctor(v0, v1).
+        let caller = func(0, None, 1, vec![i64c(0), call(1, vec![v(0), v(1)]), storage_get(2)]);
+        let mut ir = module(vec![caller, ctor, symbol_wrapper(2)], vec![unit_union()]);
+        let result = run(&mut ir);
+        assert!(resolved_key_of(&ir, 0, v(3)).is_none(), "{:?}", result.metrics);
+        assert_eq!(result.metrics.get(M_UNRESOLVED), Some(1));
     }
 
     #[test]

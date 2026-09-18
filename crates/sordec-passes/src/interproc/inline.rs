@@ -40,6 +40,19 @@
 //! value is the same binding the callee returned. Provenance on every
 //! copied binding names the helper it came from.
 //!
+//! # What is not a wrapper, however small
+//!
+//! The author's own accessors. `fn get_token_a(e) -> Address {
+//! e.storage().instance().get(&DataKey::TokenA).unwrap() }` is as short as
+//! any SDK helper once its `Option` is collapsed, but it is a function the
+//! source wrote and calls from four places. The SDK's generic helpers take
+//! the key they operate on from a parameter; an accessor fixes it. So a
+//! body with a storage operation on a key built from no parameter stays a
+//! function when more than one call site reaches it — pasting it into
+//! each caller would report its read or write once per caller instead of
+//! once. With a single caller there is nothing to duplicate, and it is
+//! inlined as before.
+//!
 //! # Placement
 //!
 //! Late: after every recognizer, inside the marshalling elision group.
@@ -79,9 +92,18 @@ impl Pass<HighIr> for WrapperInlinePass {
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
+        let mut call_sites: HashMap<FuncId, usize> = HashMap::new();
+        for f in &ir.functions {
+            for id in emission_order(f) {
+                if let Some(Expr::Call { target, .. }) = f.bindings.get(id).map(|b| &b.expr) {
+                    *call_sites.entry(*target).or_default() += 1;
+                }
+            }
+        }
         let wrappers: HashMap<FuncId, Wrapper> = ir
             .functions
             .iter()
+            .filter(|f| call_sites.get(&f.id).copied().unwrap_or(0) < 2 || !is_accessor(f))
             .filter_map(|f| classify(f).map(|w| (f.id, w)))
             .collect();
         if wrappers.is_empty() {
@@ -213,6 +235,45 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
         return None;
     }
     Some(Wrapper { id: func.id, params: func.params.clone(), items, ret })
+}
+
+/// Whether `func` performs a storage operation on a key that depends on
+/// none of its parameters — the author's accessor, not the SDK's generic
+/// helper. See the module docs.
+fn is_accessor(func: &HighFunction) -> bool {
+    use sordec_ir::{KnownOp, SemanticOp};
+    emission_order(func).into_iter().any(|id| {
+        let (key, resolved) = match func.bindings.get(id).map(|b| &b.expr) {
+            Some(Expr::Semantic(SemanticOp::Known(
+                KnownOp::StorageGet { key, resolved_key, .. }
+                | KnownOp::StorageSet { key, resolved_key, .. }
+                | KnownOp::StorageRemove { key, resolved_key, .. }
+                | KnownOp::StorageExtendTtl { key, resolved_key, .. }
+                | KnownOp::StorageHas { key, resolved_key, probe: false, .. },
+            ))) => (*key, resolved_key),
+            _ => return false,
+        };
+        let payload = resolved.iter().flat_map(|k| k.payload.iter());
+        !reads_a_param(func, key, 0) && !payload.into_iter().any(|p| reads_a_param(func, *p, 0))
+    })
+}
+
+/// Whether `value` is computed from any of `func`'s parameters. Unsure
+/// answers yes, which keeps the helper inlinable as before.
+fn reads_a_param(func: &HighFunction, value: ValueId, depth: u32) -> bool {
+    const MAX_DEPTH: u32 = 8;
+    if depth > MAX_DEPTH || func.params.contains(&value) {
+        return true;
+    }
+    match func.bindings.get(value).map(|b| &b.expr) {
+        Some(Expr::Literal(_)) => false,
+        Some(Expr::Phi { .. }) | None => true,
+        Some(expr) => {
+            let mut reads = false;
+            expr.for_each_value_use(|u| reads |= reads_a_param(func, u, depth + 1));
+            reads
+        }
+    }
 }
 
 /// Why a body was not straight-line, printed when `SORDEC_INLINE_TRACE`

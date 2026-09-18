@@ -137,7 +137,10 @@ impl Pass<HighIr> for TrapCallInlinePass {
 /// A fixpoint, because a helper qualifies only once the helpers *it* calls
 /// already have. Two rounds settle the corpus; the loop runs to stability
 /// rather than a fixed count so a deeper chain is not silently truncated.
-fn pure_traps(ir: &HighIr) -> HashSet<FuncId> {
+/// Every function whose whole body is a trap, computed to a fixpoint over
+/// the call graph. Also what [`crate::marshalling::option_sret`] asks when
+/// it needs to know that a `None` path does nothing but die.
+pub(crate) fn pure_traps(ir: &HighIr) -> HashSet<FuncId> {
     let mut traps: HashSet<FuncId> = HashSet::new();
     loop {
         let mut grew = false;
@@ -156,17 +159,18 @@ fn pure_traps(ir: &HighIr) -> HashSet<FuncId> {
     }
 }
 
-/// Whether every binding `func` schedules is a call to a known pure trap.
+/// Whether every binding `func` schedules is a call to a known pure trap,
+/// or pure: the literal `core::option::unwrap_failed` hands the panic
+/// helper as its message length has no effect to lose.
 ///
 /// Scheduled bindings only: the arenas keep unscheduled residue, and a
 /// binding no block emits cannot have an effect.
 fn body_is_only_trap_calls(func: &HighFunction, traps: &HashSet<FuncId>) -> bool {
     func.blocks.iter().all(|(_, block)| {
-        block.bindings.iter().all(|id| {
-            matches!(
-                func.bindings.get(*id).map(|b| &b.expr),
-                Some(Expr::Call { target, .. }) if traps.contains(target)
-            )
+        block.bindings.iter().all(|id| match func.bindings.get(*id).map(|b| &b.expr) {
+            Some(Expr::Call { target, .. }) => traps.contains(target),
+            Some(other) => crate::effects::expr_effects(other).is_pure_total(),
+            None => false,
         })
     })
 }
