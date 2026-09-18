@@ -1471,6 +1471,9 @@ fn unary_str(op: UnaryOp) -> &'static str {
         UnaryOp::Trunc => "trunc",
         UnaryOp::WideLo => "wide_lo",
         UnaryOp::WideHi => "wide_hi",
+        UnaryOp::Wrap32 => "wrap32",
+        UnaryOp::ExtendU32 => "extend_u32",
+        UnaryOp::ExtendS32 => "extend_s32",
     }
 }
 

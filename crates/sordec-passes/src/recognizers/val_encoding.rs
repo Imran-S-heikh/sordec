@@ -215,6 +215,7 @@ fn try_tag_check(func: &HighFunction, id: ValueId, expr: &Expr) -> Option<Rewrit
                 args,
                 ..
             }) => args.first().copied().unwrap_or(value_side),
+            Some(Expr::Unary { op: sordec_ir::UnaryOp::Wrap32 | sordec_ir::UnaryOp::ExtendU32 | sordec_ir::UnaryOp::ExtendS32, value }) => *value,
             _ => value_side,
         };
         return Some(Rewrite {
@@ -276,6 +277,16 @@ fn try_encode(func: &HighFunction, id: ValueId, expr: &Expr) -> Option<Rewrite> 
             _ => continue,
         };
         let payload = val_abi::small_tag_payload_type(tag)?;
+        // A 32-bit payload is widened to the 64-bit register before the
+        // shift; `<< 32` keeps only its low half, which is the 32-bit value
+        // itself whichever extension ran. Report that value, so the encode's
+        // payload carries the payload's own type rather than the register's.
+        let value = match (shift, resolved_expr(func, value)) {
+            (32, Some(Expr::Unary { op: sordec_ir::UnaryOp::ExtendU32 | sordec_ir::UnaryOp::ExtendS32, value: inner })) => {
+                *inner
+            }
+            _ => value,
+        };
         return Some(Rewrite {
             id,
             expr: Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall {

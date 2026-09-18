@@ -162,6 +162,9 @@ fn operand_param_walk(
             args,
             ..
         }) if args.len() == 1 => operand_param_walk(func, args[0], depth - 1, path),
+        Some(Expr::Unary { op: sordec_ir::UnaryOp::Wrap32 | sordec_ir::UnaryOp::ExtendU32 | sordec_ir::UnaryOp::ExtendS32, value }) => {
+            operand_param_walk(func, *value, depth - 1, path)
+        }
         Some(Expr::Phi { incoming }) if !incoming.is_empty() => {
             let mut agreed: Option<usize> = None;
             let mut failed = false;

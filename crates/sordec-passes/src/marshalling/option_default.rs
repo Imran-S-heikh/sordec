@@ -184,11 +184,8 @@ fn plan(
     }
     let get = get?;
 
-    // Every merge fed from the read's arm: a part of the read against a
-    // constant from the other side.
-    let mut whole = None;
-    let (mut lo, mut hi) = (None, None);
-    let mut merges = 0;
+    // Every merge fed from the read's arm, as (read's arm, other arm).
+    let mut pairs = Vec::new();
     for &id in order.iter().chain(unscheduled(func).iter()) {
         let Some(Expr::Phi { incoming }) = func.bindings.get(id).map(|b| &b.expr) else {
             continue;
@@ -204,26 +201,12 @@ fn plan(
             (false, true) => (*b, *a),
             _ => return None,
         };
-        let constant = int_literal(func, resolve_use(func, none))?;
-        let slot = match part_of(func, resolve_use(func, some), get)? {
-            Part::Whole => &mut whole,
-            Part::Lo => &mut lo,
-            Part::Hi => &mut hi,
-        };
-        if slot.replace(constant).is_some_and(|prev| prev != constant) {
-            return None;
-        }
-        merges += 1;
+        pairs.push((resolve_use(func, some), resolve_use(func, none)));
     }
-    if merges == 0 {
+    if pairs.is_empty() {
         return None;
     }
-    let default = match (whole, lo, hi) {
-        (Some(w), None, None) => w,
-        (None, Some(l), Some(h)) => (h << 64) | i128::from(l as u64),
-        (Some(w), Some(l), Some(h)) if w == (h << 64) | i128::from(l as u64) => w,
-        _ => return None,
-    };
+    let default = literal_default(func, &pairs, get).or_else(|| zero_default(func, &pairs, get, some_arm))?;
     // The default is spelled as a literal of the read's type; it has to fit
     // the literal the IR carries.
     i64::try_from(default).ok()?;
@@ -235,6 +218,93 @@ fn plan(
     }
     let ty = func.bindings.get(get)?.ty.clone();
     Some(Plan { probe, get, default, ty })
+}
+
+/// The default the merges name when each is a part of the read against a
+/// constant: the read itself, or both of its limbs.
+fn literal_default(func: &HighFunction, pairs: &[(ValueId, ValueId)], get: ValueId) -> Option<i128> {
+    let mut whole = None;
+    let (mut lo, mut hi) = (None, None);
+    for &(some, none) in pairs {
+        let constant = int_literal(func, none)?;
+        let slot = match part_of(func, some, get)? {
+            Part::Whole => &mut whole,
+            Part::Lo => &mut lo,
+            Part::Hi => &mut hi,
+        };
+        if slot.replace(constant).is_some_and(|prev| prev != constant) {
+            return None;
+        }
+    }
+    match (whole, lo, hi) {
+        (Some(w), None, None) => Some(w),
+        (None, Some(l), Some(h)) => Some((h << 64) | i128::from(l as u64)),
+        (Some(w), Some(l), Some(h)) if w == (h << 64) | i128::from(l as u64) => Some(w),
+        _ => None,
+    }
+}
+
+/// `0`, when the compiler folded the source's arithmetic into both arms:
+/// `unwrap_or_default() + value` becomes `value` on the `None` arm and
+/// `read + value` on the other. Each merge's read-arm expression, with the
+/// read standing for `0`, must reduce to exactly what the other arm merges.
+fn zero_default(func: &HighFunction, pairs: &[(ValueId, ValueId)], get: ValueId, some_arm: &Region) -> Option<i128> {
+    for &(some, none) in pairs {
+        let reduced = reduce(func, some, get, 0, some_arm, 0)?;
+        let expected = match int_literal(func, none) {
+            Some(c) => Sym::Const(c),
+            None => Sym::Value(none),
+        };
+        if reduced != expected {
+            return None;
+        }
+    }
+    Some(0)
+}
+
+/// A value computed on the read's arm, with the read replaced by a default:
+/// a constant, or a value from outside the arm.
+#[derive(PartialEq, Eq)]
+enum Sym {
+    Const(i128),
+    Value(ValueId),
+}
+
+/// Reduce `value` with the read `get` standing for `default`, by identities
+/// only: `x + 0`, `x - 0`, `x | 0`, `x ^ 0`, and constant arithmetic whose
+/// result does not depend on width. `None` for anything else.
+fn reduce(func: &HighFunction, value: ValueId, get: ValueId, default: i128, arm: &Region, depth: u32) -> Option<Sym> {
+    let value = resolve_use(func, value);
+    if value == get {
+        return Some(Sym::Const(default));
+    }
+    if depth > 8 {
+        return None;
+    }
+    // A value from outside the arm is what it is on either path.
+    let inside = block_containing(func, value).is_some_and(|b| contains_block(arm, b));
+    if !inside && !matches!(func.bindings.get(value)?.expr, Expr::Literal(_)) {
+        return Some(Sym::Value(value));
+    }
+    let next = |v: ValueId| reduce(func, v, get, default, arm, depth + 1);
+    match &func.bindings.get(value)?.expr {
+        Expr::Literal(_) => int_literal(func, value).map(Sym::Const),
+        Expr::Binary { op, lhs, rhs } => {
+            let (a, b) = (next(*lhs)?, next(*rhs)?);
+            use sordec_ir::BinaryOp as B;
+            match (op, a, b) {
+                (B::Add | B::BitOr | B::BitXor, Sym::Const(0), x)
+                | (B::Add | B::Sub | B::BitOr | B::BitXor, x, Sym::Const(0)) => Some(x),
+                (B::Add, Sym::Const(x), Sym::Const(y)) if x >= 0 && y >= 0 => Some(Sym::Const(x + y)),
+                _ => None,
+            }
+        }
+        Expr::Unary { op: UnaryOp::Wrap32 | UnaryOp::ExtendU32, value } => match next(*value)? {
+            Sym::Const(c) if (0..=i128::from(i32::MAX)).contains(&c) => Some(Sym::Const(c)),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Whether `cond` is true exactly when `probe` is (`Some(true)`) or exactly

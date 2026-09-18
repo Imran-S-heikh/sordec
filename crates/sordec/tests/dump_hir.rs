@@ -954,7 +954,9 @@ fn dump_hir_folds_single_use_pure_chains() {
         .assert()
         .success()
         .stdout(
-            predicate::str::is_match(r"add \(add v\d+, v\d+\), v\d+")
+            // The third operand is the i128 carry, itself a folded pure
+            // chain since width moves are named: `extend_u32((lt …))`.
+            predicate::str::is_match(r"add \(add v\d+, v\d+\), \(extend_u32")
                 .expect("a valid regex"),
         );
 }
@@ -1073,7 +1075,9 @@ fn dump_hir_renders_timelock_dispatcher_as_match() {
         .args(["dump-hir", TIMELOCK])
         .assert()
         .success()
-        .stdout(predicate::str::contains("match v"))
+        // The selector is the decoded tag narrowed to i32; that narrowing is
+        // pure and single-use, so it folds into the header.
+        .stdout(predicate::str::contains("match (wrap32(v"))
         .stdout(predicate::str::contains("TimeBoundKind::Before => {"))
         .stdout(predicate::str::contains("TimeBoundKind::After => {"))
         .stdout(predicate::str::contains("_ => {"));

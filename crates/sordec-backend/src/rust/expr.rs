@@ -21,6 +21,9 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
     match &binding.expr {
         Expr::Literal(lit) => literal_expr(ctx, lit, &binding.ty),
         Expr::Use(v) => ctx.value_ref(*v),
+        Expr::Unary { op: op @ (UnaryOp::Wrap32 | UnaryOp::ExtendU32 | UnaryOp::ExtendS32), value } => {
+            width_move(*op, ctx.value_ref(*value), &binding.ty)
+        }
         Expr::Unary { op, value } => {
             unary_expr(*op, ctx.value_ref(*value), ctx.is_boolean(*value))
         }
@@ -267,6 +270,24 @@ fn unary_expr(op: UnaryOp, v: syn::Expr, operand_is_bool: bool) -> syn::Expr {
         // and the arithmetic shift brings the high word down with its sign.
         UnaryOp::WideLo => parse_quote!((#v as i64)),
         UnaryOp::WideHi => parse_quote!(((#v >> 64) as i64)),
+        // Width moves, spelled by what they do to the bits; the operand's
+        // own Rust type does not matter to either cast chain.
+        UnaryOp::Wrap32 => parse_quote!((#v as i32)),
+        UnaryOp::ExtendU32 => parse_quote!((#v as u32 as i64)),
+        UnaryOp::ExtendS32 => parse_quote!((#v as i32 as i64)),
+    }
+}
+
+/// A width move rendered at the type the pipeline recovered for its
+/// result: the low half of a `u64` reads as `u32`, a zero-extended `u32`
+/// as `u64`. The cast chain fixes the bits whatever the operand's Rust type.
+fn width_move(op: UnaryOp, v: syn::Expr, ty: &IrType) -> syn::Expr {
+    let unsigned = |k: KnownType| matches!(ty, IrType::Known(t) | IrType::Inferred(t) if *t == k);
+    match op {
+        UnaryOp::Wrap32 if unsigned(KnownType::U32) => parse_quote!((#v as u32)),
+        UnaryOp::ExtendU32 if unsigned(KnownType::U64) => parse_quote!((#v as u32 as u64)),
+        UnaryOp::ExtendS32 if unsigned(KnownType::U64) => parse_quote!((#v as i32 as i64 as u64)),
+        other => unary_expr(other, v, false),
     }
 }
 

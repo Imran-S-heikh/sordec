@@ -479,6 +479,12 @@ pub enum UnaryOp {
     ///
     /// Renders as `(x >> 64) as i64`.
     WideHi,
+    /// `i32.wrap_i64`: the low 32 bits of a 64-bit integer.
+    Wrap32,
+    /// `i64.extend_i32_u`: a 32-bit integer zero-extended to 64 bits.
+    ExtendU32,
+    /// `i64.extend_i32_s`: a 32-bit integer sign-extended to 64 bits.
+    ExtendS32,
 }
 
 /// Binary operations after recovery.

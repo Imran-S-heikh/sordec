@@ -445,6 +445,7 @@ fn raw_address(func: &HighFunction, v: ValueId) -> ValueId {
             Some(Expr::Unknown { op_kind: WasmOpcodeKind::Conversion, args, .. }) if args.len() == 1 => {
                 cur = resolve_use(func, args[0]);
             }
+            Some(Expr::Unary { op: sordec_ir::UnaryOp::Wrap32 | sordec_ir::UnaryOp::ExtendU32 | sordec_ir::UnaryOp::ExtendS32, value }) => cur = resolve_use(func, *value),
             _ => break,
         }
     }

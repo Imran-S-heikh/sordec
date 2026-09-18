@@ -552,6 +552,7 @@ fn peel_encode(func: &HighFunction, value: ValueId) -> ValueId {
                 args,
                 ..
             }) if args.len() == 1 => current = args[0],
+            Some(Expr::Unary { op: sordec_ir::UnaryOp::Wrap32 | sordec_ir::UnaryOp::ExtendU32 | sordec_ir::UnaryOp::ExtendS32, value }) => current = *value,
             _ => return current,
         }
     }

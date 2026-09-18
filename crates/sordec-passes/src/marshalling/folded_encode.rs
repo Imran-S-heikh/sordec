@@ -123,7 +123,11 @@ fn encodes(func: &HighFunction) -> Vec<Site> {
             else {
                 continue;
             };
-            let x = resolve_use(func, *x);
+            // The u32 may arrive zero-extended to the 64-bit register first.
+            let mut x = resolve_use(func, *x);
+            if let Some(Expr::Unary { op: sordec_ir::UnaryOp::ExtendU32, value }) = func.bindings.get(x).map(|b| &b.expr) {
+                x = resolve_use(func, *value);
+            }
             if trace_int(func, *by) != Some(32) || !is_u32(func, x) {
                 continue;
             }

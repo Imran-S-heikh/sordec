@@ -111,6 +111,7 @@ fn conversion_operand(func: &HighFunction, id: ValueId) -> Option<ValueId> {
             args,
             ..
         } if args.len() == 1 => Some(args[0]),
+        Expr::Unary { op: sordec_ir::UnaryOp::Wrap32 | sordec_ir::UnaryOp::ExtendU32 | sordec_ir::UnaryOp::ExtendS32, value } => Some(*value),
         _ => None,
     }
 }

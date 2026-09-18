@@ -160,10 +160,9 @@ impl Pass<HighIr> for ValDecodeCollapsePass {
             .iter()
             .filter_map(|f| classify(f).map(|h| (f.id, h)))
             .collect();
-        if helpers.is_empty() {
-            return result;
-        }
 
+        // No early return on an empty helper set: an inline decode (SDK 27)
+        // needs no helper, and `plan` collapses those too.
         for func in &mut ir.functions {
             let (elisions, metrics) = plan(func, &helpers);
             if elisions.is_empty() {
@@ -734,6 +733,7 @@ fn plan(
             metric: metrics::DECODE_CALLS_ELIDED,
         });
     }
+    elisions.extend(inline_decodes(func));
     for el in &elisions {
         metrics.increment(el.metric, 1);
     }
@@ -824,6 +824,34 @@ fn projected_half(
     let call = resolve_use(func, *call);
     let act = by_call.get(&call)?;
     Some((call, half_of(&act.helper, SlotKey::Component(*index as usize))?))
+}
+
+/// The decode written inline rather than through a helper.
+///
+/// SDK 27 unpacks a `u32` argument where it is used: the tag check (which
+/// [`super::guard`] removes) and a shift, `val_decode(a)`, with no call to
+/// collapse. For a parameter `contractspecv0` declares `u32` or `i32` the
+/// shift *is* the conversion the regenerated wrapper performs — those two
+/// types have one encoding, whose payload is the high word — so the decode
+/// is the parameter.
+fn inline_decodes(func: &HighFunction) -> Vec<Elision> {
+    sret::emission_order(func)
+        .into_iter()
+        .filter_map(|id| {
+            let Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })) = &func.bindings.get(id)?.expr else {
+                return None;
+            };
+            let param = resolve_use(func, *value);
+            let declared = declared_param_type(func, param)?;
+            matches!(declared, KnownType::U32 | KnownType::I32).then(|| Elision {
+                id,
+                expr: Expr::Use(param),
+                ty: Some(IrType::Known(declared)),
+                note: "inline argument decode collapsed to its parameter".to_string(),
+                metric: metrics::DECODE_COLLAPSED,
+            })
+        })
+        .collect()
 }
 
 /// The `contractspecv0` type of `value`, when it is one of this

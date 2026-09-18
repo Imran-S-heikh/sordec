@@ -363,6 +363,11 @@ impl<'a> Resolver<'a> {
             // so peel only where every integer conversion agrees on the
             // result: a non-negative value that fits `i32`. Raw-integer
             // flavor only — a `Val`'s bits are not an integer to widen.
+            // A named width move is evaluated exactly.
+            Expr::Unary { op: op @ (sordec_ir::UnaryOp::Wrap32 | sordec_ir::UnaryOp::ExtendU32 | sordec_ir::UnaryOp::ExtendS32), value } if flavor == Flavor::RawInt => {
+                let (lit, taint) = self.walk(func_id, *value, Flavor::RawInt);
+                (lit.and_then(|l| width_move(*op, &l)), taint)
+            }
             Expr::Unknown { op_kind: sordec_ir::WasmOpcodeKind::Conversion, args, .. }
                 if flavor == Flavor::RawInt && args.len() == 1 =>
             {
@@ -549,6 +554,23 @@ impl<'a> Resolver<'a> {
 /// literals through untouched; `U32Val` applies the
 /// [`trace_u32val`](super::trace_u32val) terminal rules and normalizes
 /// to `Literal::U32` so meets compare decoded values.
+/// `op` applied to an integer literal, bit for bit.
+fn width_move(op: sordec_ir::UnaryOp, lit: &Literal) -> Option<Literal> {
+    let bits: u64 = match lit {
+        Literal::I32(n) => *n as u32 as u64,
+        Literal::U32(n) => u64::from(*n),
+        Literal::I64(n) => *n as u64,
+        Literal::U64(n) => *n,
+        _ => return None,
+    };
+    Some(match op {
+        sordec_ir::UnaryOp::Wrap32 => Literal::I32(bits as u32 as i32),
+        sordec_ir::UnaryOp::ExtendU32 => Literal::I64(i64::from(bits as u32)),
+        sordec_ir::UnaryOp::ExtendS32 => Literal::I64(i64::from(bits as u32 as i32)),
+        _ => return None,
+    })
+}
+
 /// Whether every integer width conversion of `lit` yields the same value:
 /// it is non-negative and fits `i32`, so sign- and zero-extension agree
 /// and a wrap loses nothing.

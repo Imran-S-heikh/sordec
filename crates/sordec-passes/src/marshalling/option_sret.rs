@@ -739,7 +739,12 @@ fn step(func: &HighFunction, user: ValueId, value: ValueId, some: i128, none: i1
         Expr::Unary { op: UnaryOp::Eqz | UnaryOp::Not, .. } => {
             Some((i128::from(some == 0), i128::from(none == 0)))
         }
-        // A width conversion of a small non-negative flag keeps it.
+        // A width move of a small non-negative flag keeps it.
+        Expr::Unary { op: sordec_ir::UnaryOp::Wrap32 | sordec_ir::UnaryOp::ExtendU32 | sordec_ir::UnaryOp::ExtendS32, .. }
+            if (0..=i128::from(i32::MAX)).contains(&some) && (0..=i128::from(i32::MAX)).contains(&none) =>
+        {
+            Some((some, none))
+        }
         Expr::Unknown { op_kind: sordec_ir::WasmOpcodeKind::Conversion, args, .. }
             if args.len() == 1 && (0..=i128::from(i32::MAX)).contains(&some) && (0..=i128::from(i32::MAX)).contains(&none) =>
         {

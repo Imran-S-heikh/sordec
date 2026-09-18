@@ -478,6 +478,17 @@ fn unary_result(op: UnaryOp, operand: Option<&IrType>) -> Option<IrType> {
         // A limb of a 128-bit value is the raw 64-bit word the wasm
         // carried; its signedness is not the wide value's.
         UnaryOp::WideLo | UnaryOp::WideHi => Some(IrType::Inferred(KnownType::I64)),
+        // A width move keeps the operand's signedness where it has one: the
+        // low half of a `u64` is a `u32`, a zero-extended `u32` a `u64`.
+        UnaryOp::Wrap32 => Some(IrType::Inferred(match base_of(operand) {
+            Some(KnownType::U32 | KnownType::U64) => KnownType::U32,
+            _ => KnownType::I32,
+        })),
+        UnaryOp::ExtendU32 => Some(IrType::Inferred(match base_of(operand) {
+            Some(KnownType::U32) => KnownType::U64,
+            _ => KnownType::I64,
+        })),
+        UnaryOp::ExtendS32 => Some(IrType::Inferred(KnownType::I64)),
     }
 }
 

@@ -137,12 +137,15 @@ fn trace_to_dispatch(
         Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value: inner })) => {
             trace_to_dispatch(bindings, *inner, depth - 1)
         }
+        // The i64→i32 narrowing between decode and `br_table`.
+        Expr::Unary { op: sordec_ir::UnaryOp::Wrap32, value: inner } => {
+            trace_to_dispatch(bindings, *inner, depth - 1)
+        }
         Expr::Unknown { args, .. } if args.len() == 1 => {
-            // The i64→i32 narrowing between decode and `br_table` lowers
-            // as an unrecovered single-operand Conversion. Any other
-            // one-arg Unknown is opaque — refusing to peel it can only
-            // cost a link, never mint a wrong one, and Unknowns carry no
-            // op identity worth branching on here.
+            // A conversion the lowering could not name. Any other one-arg
+            // Unknown is opaque — refusing to peel it can only cost a link,
+            // never mint a wrong one, and Unknowns carry no op identity
+            // worth branching on here.
             trace_to_dispatch(bindings, args[0], depth - 1)
         }
         _ => None,

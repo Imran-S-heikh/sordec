@@ -47,6 +47,7 @@ mod switch_dedup;
 mod trap_call;
 mod trap_inline;
 mod trivial_phi;
+mod width_fold;
 
 pub use and_merge::AndMergePass;
 pub use const_branch::ConstBranchFoldPass;
@@ -68,6 +69,8 @@ pub(crate) use const_branch::PASS_NAME as CONST_BRANCH_PASS_NAME;
 #[cfg(test)]
 pub(crate) use trivial_phi::PASS_NAME as TRIVIAL_PHI_PASS_NAME;
 #[cfg(test)]
+pub(crate) use width_fold::PASS_NAME as WIDTH_FOLD_PASS_NAME;
+#[cfg(test)]
 pub(crate) use guard_clause::PASS_NAME as GUARD_CLAUSE_PASS_NAME;
 #[cfg(test)]
 pub(crate) use overflow_guard::PASS_NAME as OVERFLOW_GUARD_PASS_NAME;
@@ -78,6 +81,7 @@ pub(crate) use scope_if_else::PASS_NAME as SCOPE_IF_ELSE_PASS_NAME;
 pub use switch_dedup::SwitchDedupPass;
 pub use trap_call::TrapCallInlinePass;
 pub use trivial_phi::TrivialPhiPass;
+pub use width_fold::WidthFoldPass;
 pub(crate) use trap_call::pure_traps;
 pub use trap_inline::TrapInlinePass;
 

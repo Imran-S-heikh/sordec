@@ -540,6 +540,13 @@ fn unary_op(w: &waffle::Operator) -> Option<UnaryOp> {
         W::F32Floor | W::F64Floor => U::Floor,
         W::F32Ceil | W::F64Ceil => U::Ceil,
         W::F32Trunc | W::F64Trunc => U::Trunc,
+        // The integer width moves, each named for what it does to the bits;
+        // passes and the emitter need that, and "some conversion" cannot
+        // tell a zero-extension from a sign-extension. Float conversions
+        // (some of which trap) stay honest unknowns.
+        W::I32WrapI64 => U::Wrap32,
+        W::I64ExtendI32U => U::ExtendU32,
+        W::I64ExtendI32S => U::ExtendS32,
         _ => return None,
     })
 }
@@ -897,13 +904,30 @@ mod tests {
     }
 
     #[test]
-    fn conversion_lowers_to_unknown() {
-        // I32WrapI64 has no Expr variant → honest Unknown with kind.
+    fn integer_width_moves_lower_to_named_unary_ops() {
+        for (w, expected) in [
+            (waffle::Operator::I32WrapI64, UnaryOp::Wrap32),
+            (waffle::Operator::I64ExtendI32U, UnaryOp::ExtendU32),
+            (waffle::Operator::I64ExtendI32S, UnaryOp::ExtendS32),
+        ] {
+            let ir = lifted_one_fn(
+                facts_with(vec![], vec![]),
+                vec![op(waffle::Operator::I64Const { value: 5 }, vec![]), op(w, vec![v(0)])],
+            );
+            let b = lower_and_bindings(ir);
+            assert!(matches!(b.get(v(1)).unwrap().expr, Expr::Unary { op, .. } if op == expected));
+        }
+    }
+
+    #[test]
+    fn float_conversion_lowers_to_unknown() {
+        // A float conversion may trap and has no Expr variant: an honest
+        // Unknown with its kind.
         let ir = lifted_one_fn(
             facts_with(vec![], vec![]),
             vec![
-                op(waffle::Operator::I64Const { value: 5 }, vec![]),
-                op(waffle::Operator::I32WrapI64, vec![v(0)]),
+                op(waffle::Operator::F64Const { value: 5 }, vec![]),
+                op(waffle::Operator::I64TruncF64S, vec![v(0)]),
             ],
         );
         let b = lower_and_bindings(ir);

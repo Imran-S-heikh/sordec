@@ -107,7 +107,7 @@ pub use refine::{
     AndMergePass, ConstBranchFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
     OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass,
     SwitchDedupPass,
-    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass,
+    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WidthFoldPass,
 };
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringCensusPass, StructuringStatsPass};
@@ -356,6 +356,9 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // The fold keeps one arm; a merge that arm alone now reaches is
             // a rename of the one value it carries, and takes its type.
             Box::new(TrivialPhiPass),
+            // A narrowing of a value the passes above typed as 32 bits —
+            // a typed read, a decoded argument — is that value.
+            Box::new(WidthFoldPass),
             // rustc's arithmetic overflow guard, in the group rather than
             // after it: a helper is only straight-line — and so only
             // inlinable — once its `if a < b { panic }` borrow check is
@@ -487,7 +490,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..55],
+        vec![1..7, 31..56],
     )
 }
 
@@ -541,6 +544,7 @@ mod tests {
                 marshalling::forward::PASS_NAME,
                 refine::CONST_BRANCH_PASS_NAME,
                 refine::TRIVIAL_PHI_PASS_NAME,
+                refine::WIDTH_FOLD_PASS_NAME,
                 refine::OVERFLOW_GUARD_PASS_NAME,
                 marshalling::guard::PASS_NAME,
                 interproc::inline::PASS_NAME,

@@ -835,6 +835,7 @@ fn dispatch_param(func: &HighFunction) -> Option<usize> {
             Expr::Unknown { op_kind: sordec_ir::WasmOpcodeKind::Conversion, args, .. } if args.len() == 1 => {
                 value = args[0];
             }
+            Expr::Unary { op: sordec_ir::UnaryOp::Wrap32 | sordec_ir::UnaryOp::ExtendU32 | sordec_ir::UnaryOp::ExtendS32, value: inner } => value = *inner,
             _ => return None,
         }
     }

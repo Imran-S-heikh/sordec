@@ -405,6 +405,8 @@ pub const REFINE_TRIVIAL_PHIS: &str = "refine_trivial_phis";
 /// `U32Val` encodes whose folded addend was recovered as arithmetic, and
 /// stores of encodes named by their `u32`.
 pub const MARSHALLING_FOLDED_ENCODES: &str = "marshalling_folded_encodes";
+/// Narrowings of values already 32 bits wide, replaced by the values.
+pub const REFINE_WIDTH_FOLDS: &str = "refine_width_folds";
 /// Calls to an argument-decode helper neutralised once their results
 /// were rebound.
 pub const MARSHALLING_DECODE_CALLS_ELIDED: &str = "marshalling_decode_calls_elided";
@@ -745,6 +747,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_TYPED_READS,
         REFINE_TRIVIAL_PHIS,
         MARSHALLING_FOLDED_ENCODES,
+        REFINE_WIDTH_FOLDS,
         MARSHALLING_DECODE_CALLS_ELIDED,
         MARSHALLING_ENCODE_COLLAPSED,
         MARSHALLING_DISPATCH_FOLDED,
