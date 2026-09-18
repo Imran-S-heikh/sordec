@@ -7,14 +7,14 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | fixture | overall (AST) | interface | structure | semantic | behavior |
 |---|---|---|---|---|---|
 | hello-add | 1.0000 | 1.0000 | 0.0000 | 0.0000 | n/a |
-| token-v22 | 0.7840 | 0.9286 | 0.4848 | 0.8889 | n/a |
-| token-v23 | 0.6976 | 0.7500 | 0.4390 | 0.8608 | n/a |
+| token-v22 | 0.8168 | 0.9286 | 0.6302 | 0.8605 | n/a |
+| token-v23 | 0.7267 | 0.7500 | 0.5707 | 0.8333 | n/a |
 | token-v23-stripped | 0.2849 | 0.0000 | 0.2092 | 0.6329 | n/a |
 | timelock | 0.7929 | 1.0000 | 0.5027 | 0.8276 | n/a |
 | dex-liquidity-pool | 0.7319 | 1.0000 | 0.4784 | 0.6750 | n/a |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | n/a |
-| **aggregate (mean, AST)** | **0.7559** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.7559** | | | | |
+| **aggregate (mean, AST)** | **0.7647** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.7647** | | | | |
 
 ## Per-fixture detail
 
@@ -28,15 +28,15 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 ### token-v22
 
 - **interface** 0.9286 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.8571  precision=0.7500 recall=1.0000 (3 original, 4 reconstructed) — types extra: type TokenMetadata
-- **structure** 0.4848 — 13 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.4493 recall=0.9394 (33 original tokens, 69 reconstructed) — bloat 2.1x, dice ceiling ~0.6471 — low-similarity: allowance(0.00), approve(0.72), burn_from(0.66), decimals(0.00), mint(0.70), name(0.00), set_admin(0.00), symbol(0.00), … (+1)
-- **semantic** 0.8889 — precision=0.9474 recall=0.8372 (43 original facts, 38 reconstructed) — under-recovered: panic:bare, panic:unwrap, storage:get:temporary:DataKey::Allowance — over-recovered: storage:get:instance:?, storage:set:instance:?
+- **structure** 0.6302 — 13 entrypoints (0 unreconstructed, 3 without control flow) — ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.5167 recall=0.9394 (33 original tokens, 60 reconstructed) — bloat 1.8x, dice ceiling ~0.7097 — low-similarity: allowance(0.00), approve(0.72), burn_from(0.66), mint(0.70), set_admin(0.00), transfer_from(0.66)
+- **semantic** 0.8605 — precision=0.8605 recall=0.8605 (43 original facts, 43 reconstructed) — under-recovered: panic:bare, storage:get:temporary:DataKey::Allowance — over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?
 - **behavior** n/a — behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`
 
 ### token-v23
 
 - **interface** 0.7500 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.5000  precision=0.3333 recall=1.0000 (4 original, 12 reconstructed) — types extra: type Approve, type Burn, type Clawback, type Mint, type MintWithAmountOnly, type TokenMetadata, type Transfer, type TransferWithAmountOnly
-- **structure** 0.4390 — 13 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.3647 recall=0.9394 (33 original tokens, 85 reconstructed) — bloat 2.6x, dice ceiling ~0.5593 — low-similarity: allowance(0.00), approve(0.64), burn_from(0.66), decimals(0.00), mint(0.70), name(0.00), set_admin(0.00), symbol(0.00), … (+2)
-- **semantic** 0.8608 — precision=0.9444 recall=0.7907 (43 original facts, 36 reconstructed) — under-recovered: event, panic:bare, panic:unwrap, storage:get:temporary:DataKey::Allowance — over-recovered: storage:get:instance:?, storage:set:instance:?
+- **structure** 0.5707 — 13 entrypoints (0 unreconstructed, 3 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.4079 recall=0.9394 (33 original tokens, 76 reconstructed) — bloat 2.3x, dice ceiling ~0.6055 — low-similarity: allowance(0.00), approve(0.64), burn_from(0.66), mint(0.70), set_admin(0.00), transfer(0.34), transfer_from(0.58)
+- **semantic** 0.8333 — precision=0.8537 recall=0.8140 (43 original facts, 41 reconstructed) — under-recovered: event, panic:bare, storage:get:temporary:DataKey::Allowance — over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?
 - **behavior** n/a — behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`
 
 ### token-v23-stripped

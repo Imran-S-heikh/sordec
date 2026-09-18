@@ -57,7 +57,7 @@ pub use frame_facts::{
     block_containing, canon_addr, facts_at, facts_at_end, facts_before, may_write_memory, FrameFacts,
     SlotFact,
 };
-pub use high::{resolve_use, trace_int, trace_literal, DEFAULT_USE_DEPTH};
+pub use high::{dead_residue, resolve_use, trace_int, trace_literal, DEFAULT_USE_DEPTH};
 pub use high_uses::{HighUseIndex, HighUseSite};
 pub use inline_plan::{InlineClass, InlinePlan, InlineSite, InlineStats};
 pub use trace_bytes::{trace_bytes, trace_u32val};

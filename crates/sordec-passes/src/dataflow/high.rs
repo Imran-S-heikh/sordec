@@ -13,6 +13,8 @@
 //! terminal binding.
 
 use sordec_common::{IrId, ValueId};
+use std::collections::HashSet;
+
 use sordec_ir::{Expr, HighFunction, Literal};
 
 /// Default chase depth for [`trace_literal`] / [`resolve_use`].
@@ -63,6 +65,48 @@ pub fn trace_int(func: &HighFunction, value: ValueId) -> Option<i128> {
         Literal::U32(n) => Some(i128::from(n)),
         Literal::U64(n) => Some(i128::from(n)),
         _ => None,
+    }
+}
+
+/// Every scheduled pure binding whose value nothing live reads, to a
+/// fixpoint: dropping one can be what makes its operands dead in turn, and
+/// an elided unpack leaves whole chains of them (its address arithmetic
+/// feeding its `U32Val` encodes feeding nothing).
+#[must_use]
+pub fn dead_residue(func: &HighFunction, order: &[ValueId]) -> HashSet<ValueId> {
+    let mut dead: HashSet<ValueId> = HashSet::new();
+    loop {
+        let mut reads: HashSet<ValueId> = HashSet::new();
+        for id in order {
+            if dead.contains(id) {
+                continue;
+            }
+            if let Some(b) = func.bindings.get(*id) {
+                b.expr.for_each_value_use(|u| {
+                    reads.insert(resolve_use(func, u));
+                });
+            }
+        }
+        func.region.for_each_value_use(|u| {
+            reads.insert(resolve_use(func, u));
+        });
+        let mut grew = false;
+        for &id in order {
+            if dead.contains(&id) || reads.contains(&id) {
+                continue;
+            }
+            let pure = func
+                .bindings
+                .get(id)
+                .is_some_and(|b| crate::effects::expr_effects(&b.expr).is_pure_total());
+            if pure {
+                dead.insert(id);
+                grew = true;
+            }
+        }
+        if !grew {
+            return dead;
+        }
     }
 }
 

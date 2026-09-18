@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.7559050592592537,
-  "aggregate_overall_with_behavior": 0.7559050592592537,
+  "aggregate_overall": 0.7647331613864943,
+  "aggregate_overall_with_behavior": 0.7647331613864943,
   "behavior_measured_fixtures": 0,
   "fixtures": {
     "attestation": {
@@ -237,22 +237,22 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=0.9474 recall=0.8372 (43 original facts, 38 reconstructed)",
-            "under-recovered: panic:bare, panic:unwrap, storage:get:temporary:DataKey::Allowance",
-            "over-recovered: storage:get:instance:?, storage:set:instance:?"
+            "precision=0.8605 recall=0.8605 (43 original facts, 43 reconstructed)",
+            "under-recovered: panic:bare, storage:get:temporary:DataKey::Allowance",
+            "over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?"
           ],
-          "score": 0.8888888888888888,
+          "score": 0.8604651162790697,
           "weight": 0.3
         },
         "structure": {
           "checked": true,
           "notes": [
-            "13 entrypoints (0 unreconstructed, 0 without control flow)",
+            "13 entrypoints (0 unreconstructed, 3 without control flow)",
             "ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.4493 recall=0.9394 (33 original tokens, 69 reconstructed) — bloat 2.1x, dice ceiling ~0.6471",
-            "low-similarity: allowance(0.00), approve(0.72), burn_from(0.66), decimals(0.00), mint(0.70), name(0.00), set_admin(0.00), symbol(0.00), … (+1)"
+            "control flow: precision=0.5167 recall=0.9394 (33 original tokens, 60 reconstructed) — bloat 1.8x, dice ceiling ~0.7097",
+            "low-similarity: allowance(0.00), approve(0.72), burn_from(0.66), mint(0.70), set_admin(0.00), transfer_from(0.66)"
           ],
-          "score": 0.48479720279720284,
+          "score": 0.6302363636363637,
           "weight": 0.25
         }
       },
@@ -263,7 +263,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 3 types recovered"
       ],
-      "overall": 0.7840439952204658,
+      "overall": 0.8167882992520474,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
@@ -293,22 +293,22 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=0.9444 recall=0.7907 (43 original facts, 36 reconstructed)",
-            "under-recovered: event, panic:bare, panic:unwrap, storage:get:temporary:DataKey::Allowance",
-            "over-recovered: storage:get:instance:?, storage:set:instance:?"
+            "precision=0.8537 recall=0.8140 (43 original facts, 41 reconstructed)",
+            "under-recovered: event, panic:bare, storage:get:temporary:DataKey::Allowance",
+            "over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?"
           ],
-          "score": 0.8607594936708861,
+          "score": 0.8333333333333333,
           "weight": 0.3
         },
         "structure": {
           "checked": true,
           "notes": [
-            "13 entrypoints (0 unreconstructed, 0 without control flow)",
+            "13 entrypoints (0 unreconstructed, 3 without control flow)",
             "ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.3647 recall=0.9394 (33 original tokens, 85 reconstructed) — bloat 2.6x, dice ceiling ~0.5593",
-            "low-similarity: allowance(0.00), approve(0.64), burn_from(0.66), decimals(0.00), mint(0.70), name(0.00), set_admin(0.00), symbol(0.00), … (+2)"
+            "control flow: precision=0.4079 recall=0.9394 (33 original tokens, 76 reconstructed) — bloat 2.3x, dice ceiling ~0.6055",
+            "low-similarity: allowance(0.00), approve(0.64), burn_from(0.66), mint(0.70), set_admin(0.00), transfer(0.34), transfer_from(0.58)"
           ],
-          "score": 0.4389652977533836,
+          "score": 0.5706548870793987,
           "weight": 0.25
         }
       },
@@ -319,7 +319,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.6976107912230725,
+      "overall": 0.7266632020821759,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,

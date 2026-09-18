@@ -161,6 +161,9 @@ enum KeySource {
     Param(usize),
     /// A resolved key whose converter was elided: the name is the key.
     Resolved,
+    /// A constant key — a `Symbol` the contract names directly, as the
+    /// token SDK's `METADATA` — rebuilt at the call site.
+    Const(Literal, IrType),
     /// The helper builds the key by calling a constructor on its own
     /// parameters and constants — dex's shared `get_token_a`/`get_token_b`
     /// body, which only one caller's argument tells apart. The call is
@@ -186,11 +189,21 @@ enum Slot {
     Const(Literal),
 }
 
-#[derive(Clone, Copy)]
-enum Part {
-    Whole,
-    Lo,
-    Hi,
+/// How a payload slot is computed from the read: the read itself, or a
+/// short chain over it — a field of a recovered struct, a limb of a wide
+/// value, a payload decode, a width move. Steps are listed outermost-last,
+/// each with the type the helper gave it, so the call site rebuilds the
+/// same chain with the same types.
+#[derive(Clone)]
+struct Part(Vec<(Step, IrType)>);
+
+#[derive(Clone)]
+enum Step {
+    Field(String),
+    WideLo,
+    WideHi,
+    Decode,
+    Width(UnaryOp),
 }
 
 fn classify(func: &HighFunction) -> Option<Helper> {
@@ -338,8 +351,11 @@ fn classify(func: &HighFunction) -> Option<Helper> {
     }
 
     let key = key_value;
+    let key_binding = func.bindings.get(key)?;
     let key = if let Some(i) = func.params.iter().position(|p| *p == key) {
         KeySource::Param(i)
+    } else if let Expr::Literal(lit @ (Literal::Symbol(_) | Literal::I64(_) | Literal::U64(_))) = &key_binding.expr {
+        KeySource::Const(lit.clone(), key_binding.ty.clone())
     } else if let Some((_, target, args)) = key_call {
         if args.iter().any(|a| matches!(a, Arg::Param(i) if Some(*i) == out)) {
             return decline(func, "key constructor reads the out-pointer");
@@ -453,14 +469,40 @@ fn bare_trap(func: &HighFunction, region: &Region) -> bool {
 
 /// The part of the read a payload store writes.
 fn part_of(func: &HighFunction, value: ValueId, get: ValueId) -> Option<Part> {
-    if value == get {
-        return Some(Part::Whole);
+    const MAX_STEPS: usize = 4;
+    let mut steps = Vec::new();
+    let mut current = value;
+    while steps.len() <= MAX_STEPS {
+        let current_id = resolve_use(func, current);
+        if current_id == get {
+            steps.reverse();
+            // A field that is decoded straight away is the typed field:
+            // `TokenMetadata { decimal: u32 }` stores a `u32`, and the
+            // decode is how the struct's `Val` slot became one.
+            let mut folded: Vec<(Step, IrType)> = Vec::with_capacity(steps.len());
+            for (step, ty) in steps {
+                match (&step, folded.last_mut()) {
+                    (Step::Decode, Some((Step::Field(_), field_ty))) => *field_ty = ty,
+                    _ => folded.push((step, ty)),
+                }
+            }
+            return Some(Part(folded));
+        }
+        let binding = func.bindings.get(current_id)?;
+        let (step, next) = match &binding.expr {
+            Expr::Field { base, field } => (Step::Field(field.clone()), *base),
+            Expr::Unary { op: UnaryOp::WideLo, value } => (Step::WideLo, *value),
+            Expr::Unary { op: UnaryOp::WideHi, value } => (Step::WideHi, *value),
+            Expr::Unary { op: op @ (UnaryOp::Wrap32 | UnaryOp::ExtendU32 | UnaryOp::ExtendS32), value } => {
+                (Step::Width(*op), *value)
+            }
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })) => (Step::Decode, *value),
+            _ => return None,
+        };
+        steps.push((step, binding.ty.clone()));
+        current = next;
     }
-    match &func.bindings.get(value)?.expr {
-        Expr::Unary { op: UnaryOp::WideLo, value } if resolve_use(func, *value) == get => Some(Part::Lo),
-        Expr::Unary { op: UnaryOp::WideHi, value } if resolve_use(func, *value) == get => Some(Part::Hi),
-        _ => None,
-    }
+    None
 }
 
 fn literal(func: &HighFunction, value: ValueId) -> Option<Literal> {
@@ -903,6 +945,7 @@ fn rewrite(func: &mut HighFunction, helper: &Helper, site: &Site) {
             Expr::Literal(Literal::Unit),
             "resolved storage key: spelled by its name",
         )),
+        KeySource::Const(lit, ty) => Some(push(func, ty.clone(), Expr::Literal(lit.clone()), "the key the helper read")),
         KeySource::Call { target, args, ty } => {
             let mut mapped = Vec::with_capacity(args.len());
             for arg in args {
@@ -950,19 +993,20 @@ fn rewrite(func: &mut HighFunction, helper: &Helper, site: &Site) {
         let value = match slot {
             Slot::Flag { some, .. } => push(func, lit_type(some), Expr::Literal(some.clone()), "Option discriminant: Some"),
             Slot::Const(lit) => push(func, lit_type(lit), Expr::Literal(lit.clone()), "constant slot of the Option"),
-            Slot::Payload(Part::Whole) => read,
-            Slot::Payload(Part::Lo) => push(
-                func,
-                IrType::Inferred(KnownType::I64),
-                Expr::Unary { op: UnaryOp::WideLo, value: read },
-                "low limb of the read",
-            ),
-            Slot::Payload(Part::Hi) => push(
-                func,
-                IrType::Inferred(KnownType::I64),
-                Expr::Unary { op: UnaryOp::WideHi, value: read },
-                "high limb of the read",
-            ),
+            Slot::Payload(part) => {
+                let mut value = read;
+                for (step, ty) in &part.0 {
+                    let expr = match step {
+                        Step::Field(field) => Expr::Field { base: value, field: field.clone() },
+                        Step::WideLo => Expr::Unary { op: UnaryOp::WideLo, value },
+                        Step::WideHi => Expr::Unary { op: UnaryOp::WideHi, value },
+                        Step::Width(op) => Expr::Unary { op: *op, value },
+                        Step::Decode => Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })),
+                    };
+                    value = push(func, ty.clone(), expr, "part of the read the helper stored");
+                }
+                value
+            }
         };
         push(
             func,
@@ -1167,7 +1211,8 @@ mod tests {
         assert_eq!(h.out, 0);
         assert!(matches!(h.key, KeySource::Resolved));
         assert!(h.slots.iter().any(|(off, _, s)| *off == 0 && matches!(s, Slot::Flag { .. })));
-        assert!(h.slots.iter().any(|(off, _, s)| *off == 8 && matches!(s, Slot::Payload(Part::Whole))));
+        // The payload is the read itself: no steps over it.
+        assert!(h.slots.iter().any(|(off, _, s)| *off == 8 && matches!(s, Slot::Payload(p) if p.0.is_empty())));
     }
 
     #[test]

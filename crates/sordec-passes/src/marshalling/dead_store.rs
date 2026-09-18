@@ -36,6 +36,7 @@ use sordec_ir::{BinaryOp, Expr, HighFunction, HighIr, IrType, KnownType, Literal
 
 use super::{apply_elisions, metrics, Elision};
 use crate::dataflow::{canon_addr, resolve_use, trace_int};
+use crate::effects::expr_effects;
 use crate::pass::{Pass, PassResult};
 
 /// Pass name — also the provenance `pass` field for every elision.
@@ -82,6 +83,7 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
             derived.insert(id);
         }
     }
+    let dead = crate::dataflow::dead_residue(func, &order);
     let mut loads: Vec<(u32, u32)> = Vec::new();
     let mut stores: Vec<(ValueId, u32, u32)> = Vec::new();
     for &id in &order {
@@ -113,6 +115,10 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
             // and the `global.set`s consume `fp` and that add.
             Expr::Unknown { op_kind: sordec_ir::WasmOpcodeKind::GlobalSet, .. } => {}
             Expr::Binary { op: BinaryOp::Add, .. } if derived.contains(&id) => {}
+            // Residue an elision left behind — the operands of a collapsed
+            // unpack, say. None of it is emitted, so it cannot carry the
+            // pointer anywhere.
+            other if dead.contains(&id) && expr_effects(other).is_pure_total() => {}
             other => {
                 let mut escapes = false;
                 other.for_each_value_use(|u| {

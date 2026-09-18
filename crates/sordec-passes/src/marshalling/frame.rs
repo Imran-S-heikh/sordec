@@ -176,9 +176,19 @@ fn find_unused_frame(func: &HighFunction) -> Option<Frame> {
 /// `sordec-backend`'s `Liveness` performs, so "unread" here means exactly
 /// "unread in the generated Rust" — counting unscheduled de-cluttering
 /// residue would make every frame look live and elide nothing.
+///
+/// Scheduled bindings nothing live reads are residue too
+/// ([`crate::dataflow::dead_residue`]): the emitter drops them, so their
+/// operands are not reads either. An elided struct unpack leaves a chain of
+/// them addressing the frame it no longer uses.
 fn read_counts(func: &HighFunction) -> HashMap<ValueId, u32> {
     let mut uses: HashMap<ValueId, u32> = HashMap::new();
-    for id in crate::marshalling::sret::emission_order(func) {
+    let order = crate::marshalling::sret::emission_order(func);
+    let dead = crate::dataflow::dead_residue(func, &order);
+    for id in order {
+        if dead.contains(&id) {
+            continue;
+        }
         if let Some(binding) = func.bindings.get(id) {
             binding
                 .expr
