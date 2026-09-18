@@ -160,6 +160,7 @@ mod tests {
             durability: ValueId::new(0),
             key: ValueId::new(1),
             resolved_key: None,
+            unwrap: false,
         };
         let vid = bindings.push(Binding::new(
             ValueId::new(0),

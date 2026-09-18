@@ -1234,6 +1234,7 @@ mod tests {
                     durability: v(0),
                     key: v(1),
                     resolved_key: None,
+                    unwrap: false,
                 },
                 "l",
                 "1",

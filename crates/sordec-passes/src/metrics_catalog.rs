@@ -389,6 +389,9 @@ pub const MARSHALLING_UDT_FIELDS_RECOVERED: &str = "marshalling_udt_fields_recov
 /// Calls to a helper-shaped `#[contracttype]` struct decoder elided with
 /// their out-parameter reads.
 pub const MARSHALLING_UDT_HELPERS_COLLAPSED: &str = "marshalling_udt_helpers_collapsed";
+/// Proven `Option` probes with a trapping None branch collapsed to
+/// `.unwrap()` on the storage read.
+pub const MARSHALLING_OPTIONS_UNWRAPPED: &str = "marshalling_options_unwrapped";
 /// Calls to an argument-decode helper neutralised once their results
 /// were rebound.
 pub const MARSHALLING_DECODE_CALLS_ELIDED: &str = "marshalling_decode_calls_elided";
@@ -723,6 +726,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_UDT_DECODES_COLLAPSED,
         MARSHALLING_UDT_FIELDS_RECOVERED,
         MARSHALLING_UDT_HELPERS_COLLAPSED,
+        MARSHALLING_OPTIONS_UNWRAPPED,
         MARSHALLING_DECODE_CALLS_ELIDED,
         MARSHALLING_ENCODE_COLLAPSED,
         MARSHALLING_DISPATCH_FOLDED,

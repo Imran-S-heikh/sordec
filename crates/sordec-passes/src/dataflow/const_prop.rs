@@ -358,6 +358,18 @@ impl<'a> Resolver<'a> {
         match &binding.expr {
             Expr::Literal(lit) => (decode_terminal_literal(lit, flavor), false),
 
+            // A width conversion over a constant. The lowering erases
+            // which conversion it was (`extend_u`, `extend_s`, `wrap`),
+            // so peel only where every integer conversion agrees on the
+            // result: a non-negative value that fits `i32`. Raw-integer
+            // flavor only — a `Val`'s bits are not an integer to widen.
+            Expr::Unknown { op_kind: sordec_ir::WasmOpcodeKind::Conversion, args, .. }
+                if flavor == Flavor::RawInt && args.len() == 1 =>
+            {
+                let (lit, taint) = self.walk(func_id, args[0], Flavor::RawInt);
+                (lit.filter(conversion_agnostic), taint)
+            }
+
             // A recognized symbol constructor in a Symbol position:
             // re-derive the text from rodata via its own (lm_pos, len)
             // operands — independent of whether the op's `resolved`
@@ -537,6 +549,20 @@ impl<'a> Resolver<'a> {
 /// literals through untouched; `U32Val` applies the
 /// [`trace_u32val`](super::trace_u32val) terminal rules and normalizes
 /// to `Literal::U32` so meets compare decoded values.
+/// Whether every integer width conversion of `lit` yields the same value:
+/// it is non-negative and fits `i32`, so sign- and zero-extension agree
+/// and a wrap loses nothing.
+fn conversion_agnostic(lit: &Literal) -> bool {
+    let n = match lit {
+        Literal::I32(n) => i128::from(*n),
+        Literal::U32(n) => i128::from(*n),
+        Literal::I64(n) => i128::from(*n),
+        Literal::U64(n) => i128::from(*n),
+        _ => return false,
+    };
+    (0..=i128::from(i32::MAX)).contains(&n)
+}
+
 fn decode_terminal_literal(lit: &Literal, flavor: Flavor) -> Option<Literal> {
     match flavor {
         Flavor::RawInt => match lit {

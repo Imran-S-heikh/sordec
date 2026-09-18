@@ -163,7 +163,7 @@ fn get_keys(func: &HighFunction) -> Vec<(ValueId, KnownTier)> {
 
 /// The tier of an operation, but only when it was *proved*. An unproven
 /// tier cannot witness that two calls address the same entry.
-fn proven_tier(tier: &StorageTier) -> Option<KnownTier> {
+pub(super) fn proven_tier(tier: &StorageTier) -> Option<KnownTier> {
     match tier {
         StorageTier::Known(t) => Some(*t),
         StorageTier::Inferred(_) | StorageTier::Unknown(_) => None,
@@ -303,6 +303,7 @@ mod tests {
             durability: key,
             key,
             resolved_key: None,
+            unwrap: false,
         }))
     }
 

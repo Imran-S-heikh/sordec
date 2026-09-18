@@ -296,6 +296,7 @@ mod tests {
             durability: v(0),
             key: v(0),
             resolved_key: key,
+            unwrap: false,
         }))
     }
 

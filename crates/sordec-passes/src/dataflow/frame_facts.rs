@@ -35,7 +35,7 @@
 use std::collections::BTreeMap;
 
 use sordec_common::{BlockId, IrId, ValueId};
-use sordec_ir::{BinaryOp, Expr, HighBlock, HighFunction, MemWidth};
+use sordec_ir::{BinaryOp, Expr, HighBlock, HighFunction, MemWidth, Region};
 
 use super::high::{resolve_use, trace_int};
 
@@ -191,9 +191,39 @@ pub fn facts_before(
     base: ValueId,
 ) -> FrameFacts {
     let mut facts = FrameFacts::default();
+    if scan(func, block, Some(at), base, &mut facts) {
+        facts
+    } else {
+        // `at` was never reached: the query position is not in this
+        // block, so no computed fact is positionally valid.
+        FrameFacts::default()
+    }
+}
+
+/// Compute the facts about `base` visible at the **end** of `block` —
+/// the same forward scan as [`facts_before`] run to completion. Used by
+/// analyses (the client-call copy-loop tier) that prove a later reader
+/// observes this block's final frame state.
+#[must_use]
+pub fn facts_at_end(func: &HighFunction, block: &HighBlock, base: ValueId) -> FrameFacts {
+    let mut facts = FrameFacts::default();
+    scan(func, block, None, base, &mut facts);
+    facts
+}
+
+/// The forward scan behind [`facts_before`] and [`facts_at_end`]: advance
+/// `facts` through `block`'s bindings, stopping before `stop` when it is
+/// given. Returns whether `stop` was reached.
+fn scan(
+    func: &HighFunction,
+    block: &HighBlock,
+    stop: Option<ValueId>,
+    base: ValueId,
+    facts: &mut FrameFacts,
+) -> bool {
     for &id in &block.bindings {
-        if id == at {
-            return facts;
+        if Some(id) == stop {
+            return true;
         }
         let Some(binding) = func.bindings.get(id) else {
             // Malformed schedule entry: fail closed.
@@ -218,40 +248,154 @@ pub fn facts_before(
             facts.kill_all();
         }
     }
-    // `at` was never reached: the query position is not in this block,
-    // so no computed fact is positionally valid.
-    FrameFacts::default()
+    false
 }
 
-/// Compute the facts about `base` visible at the **end** of `block` —
-/// the same forward scan as [`facts_before`] run to completion. Used by
-/// analyses (the client-call copy-loop tier) that prove a later reader
-/// observes this block's final frame state.
+/// Compute the facts about `base` visible immediately before `at`,
+/// following the function's region tree instead of one block.
+///
+/// The scan runs over the blocks that dominate `at`, in emission order:
+/// at every enclosing `Sequence`, the items before the one holding `at`,
+/// then `at`'s own block up to the query. A sibling the path does not
+/// enter — an `If`, `Switch`, `Loop` or `Scope` — is not read for facts;
+/// if any binding inside it may write memory, every fact is dropped,
+/// since some path through it may have written. Entering a loop body
+/// drops everything on the same reasoning: a later iteration may reach
+/// the query after a write further down the body. The kill discipline
+/// inside a block is [`facts_before`]'s. Empty when the tree holds an
+/// unstructured remnant on the way.
+///
+/// A block the region tree does not reach — IR that has not been
+/// structured, or a placeholder region — gets the block-local answer of
+/// [`facts_before`], which is sound on its own.
 #[must_use]
-pub fn facts_at_end(func: &HighFunction, block: &HighBlock, base: ValueId) -> FrameFacts {
+pub fn facts_at(func: &HighFunction, at: ValueId, base: ValueId) -> FrameFacts {
+    let Some(target) = block_containing(func, at) else {
+        return FrameFacts::default();
+    };
+    if !contains_block(&func.region, target) {
+        return func
+            .blocks
+            .get(target)
+            .map_or_else(FrameFacts::default, |block| facts_before(func, block, at, base));
+    }
     let mut facts = FrameFacts::default();
-    for &id in &block.bindings {
-        let Some(binding) = func.bindings.get(id) else {
-            facts.kill_all();
-            continue;
-        };
-        if let Expr::Store {
-            addr,
-            value,
-            offset,
-            width,
-        } = &binding.expr
-        {
-            let (store_base, addr_off) = canon_addr(func, *addr);
-            match u32::checked_add(addr_off, *offset) {
-                Some(total) if store_base == base => facts.record(total, *width, *value),
-                _ => facts.kill_all(),
+    if walk_facts(func, &func.region, target, at, base, &mut facts) {
+        facts
+    } else {
+        FrameFacts::default()
+    }
+}
+
+/// Advance `facts` through `region` toward `target`, the block holding
+/// the query `at`. Returns whether the query was reached, at which point
+/// `facts` is final.
+fn walk_facts(
+    func: &HighFunction,
+    region: &Region,
+    target: BlockId,
+    at: ValueId,
+    base: ValueId,
+    facts: &mut FrameFacts,
+) -> bool {
+    match region {
+        Region::Basic(b) => {
+            let Some(block) = func.blocks.get(*b) else {
+                facts.kill_all();
+                return false;
+            };
+            if *b == target {
+                scan(func, block, Some(at), base, facts)
+            } else {
+                scan(func, block, None, base, facts);
+                false
             }
-        } else if may_write_memory(&binding.expr) {
+        }
+        Region::Sequence(items) => items
+            .iter()
+            .any(|item| walk_facts(func, item, target, at, base, facts)),
+        Region::Scope { body, .. } => walk_facts(func, body, target, at, base, facts),
+        Region::Loop { body, .. } => {
+            if region_may_write(func, body) {
+                facts.kill_all();
+            }
+            contains_block(body, target) && walk_facts(func, body, target, at, base, facts)
+        }
+        Region::If {
+            then_region,
+            else_region,
+            ..
+        } => {
+            if contains_block(then_region, target) {
+                return walk_facts(func, then_region, target, at, base, facts);
+            }
+            if let Some(else_region) = else_region
+                && contains_block(else_region, target)
+            {
+                return walk_facts(func, else_region, target, at, base, facts);
+            }
+            if region_may_write(func, region) {
+                facts.kill_all();
+            }
+            false
+        }
+        Region::Switch { arms, default, .. } => {
+            for arm in arms {
+                if contains_block(&arm.body, target) {
+                    return walk_facts(func, &arm.body, target, at, base, facts);
+                }
+            }
+            if contains_block(default, target) {
+                return walk_facts(func, default, target, at, base, facts);
+            }
+            if region_may_write(func, region) {
+                facts.kill_all();
+            }
+            false
+        }
+        Region::Break { .. }
+        | Region::Continue { .. }
+        | Region::Transfer { .. }
+        | Region::Return { .. }
+        | Region::Unreachable
+        | Region::Panic { .. } => false,
+        Region::Unstructured { .. } => {
             facts.kill_all();
+            false
         }
     }
-    facts
+}
+
+/// Whether `region` holds `target` anywhere in its tree.
+fn contains_block(region: &Region, target: BlockId) -> bool {
+    let mut found = false;
+    region.for_each_node(|node| {
+        if matches!(node, Region::Basic(b) if *b == target) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Whether any binding scheduled anywhere in `region` may write linear
+/// memory. An unstructured remnant counts as a writer: its blocks are not
+/// enumerable here.
+fn region_may_write(func: &HighFunction, region: &Region) -> bool {
+    let mut writes = false;
+    region.for_each_node(|node| match node {
+        Region::Basic(b) => {
+            if let Some(block) = func.blocks.get(*b) {
+                writes |= block.bindings.iter().any(|id| {
+                    func.bindings
+                        .get(*id)
+                        .is_none_or(|binding| matches!(binding.expr, Expr::Store { .. }) || may_write_memory(&binding.expr))
+                });
+            }
+        }
+        Region::Unstructured { .. } => writes = true,
+        _ => {}
+    });
+    writes
 }
 
 /// Whether an expression may write linear memory — the module's shared

@@ -46,10 +46,14 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
     let e = ctx.env();
     match op {
         // ---- Storage ----
-        KnownOp::StorageGet { tier, key, resolved_key, .. } => {
+        KnownOp::StorageGet { tier, key, resolved_key, unwrap, .. } => {
             let tier = tier_method(tier)?;
             let k = key_expr(ctx, *key, resolved_key);
-            Some(parse_quote!(#e.storage().#tier().get(&#k)))
+            Some(if *unwrap {
+                parse_quote!(#e.storage().#tier().get(&#k).unwrap())
+            } else {
+                parse_quote!(#e.storage().#tier().get(&#k))
+            })
         }
         KnownOp::StorageSet { tier, key, resolved_key, value, .. } => {
             let tier = tier_method(tier)?;
@@ -72,11 +76,20 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             let k = key_expr(ctx, *key, resolved_key);
             Some(parse_quote!(#e.storage().#tier().remove(&#k)))
         }
-        KnownOp::StorageExtendTtl { tier, key, resolved_key, threshold, extend_to, .. } => {
+        KnownOp::StorageExtendTtl {
+            tier,
+            key,
+            resolved_key,
+            threshold,
+            extend_to,
+            resolved_threshold,
+            resolved_extend_to,
+            ..
+        } => {
             let tier = tier_method(tier)?;
             let k = key_expr(ctx, *key, resolved_key);
-            let t = ctx.value_ref(*threshold);
-            let x = ctx.value_ref(*extend_to);
+            let t = ledger_count(ctx, *threshold, *resolved_threshold);
+            let x = ledger_count(ctx, *extend_to, *resolved_extend_to);
             Some(parse_quote!(#e.storage().#tier().extend_ttl(&#k, #t, #x)))
         }
         KnownOp::ExtendCurrentContractInstanceAndCodeTtl {
@@ -85,17 +98,8 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             resolved_threshold,
             resolved_extend_to,
         } => {
-            // The ledger counts the TTL recognizer witnessed, when it did:
-            // the operands are `U32Val`s, and rendering those raw prints
-            // the tagged encoding rather than the number the source wrote.
-            let t: syn::Expr = match resolved_threshold {
-                Some(n) => parse_quote!(#n),
-                None => ctx.value_ref(*threshold),
-            };
-            let x: syn::Expr = match resolved_extend_to {
-                Some(n) => parse_quote!(#n),
-                None => ctx.value_ref(*extend_to),
-            };
+            let t = ledger_count(ctx, *threshold, *resolved_threshold);
+            let x = ledger_count(ctx, *extend_to, *resolved_extend_to);
             // Instance TTL extension takes no key (matches the scorer's
             // `instance().extend_ttl(threshold, amount)` special case).
             Some(parse_quote!(#e.storage().instance().extend_ttl(#t, #x)))
@@ -283,6 +287,29 @@ fn tier_method(tier: &StorageTier) -> Option<syn::Ident> {
 
 /// The storage key: the recovered `Enum::Variant(payload)` when the
 /// enum-key pass named it, else the raw key value reference.
+/// A TTL ledger count as the source wrote it. The operand is a `U32Val`;
+/// the SDK method takes the `u32` inside it. The count the TTL recognizer
+/// witnessed prints as that number; otherwise a recognized `U32Val`
+/// encode prints its payload, and only an operand that is neither prints
+/// as the raw value.
+fn ledger_count(ctx: &FnCtx, operand: sordec_common::ValueId, resolved: Option<u32>) -> syn::Expr {
+    if let Some(n) = resolved {
+        return parse_quote!(#n);
+    }
+    let payload = ctx
+        .func
+        .bindings
+        .get(operand)
+        .and_then(|b| match &b.expr {
+            sordec_ir::Expr::Semantic(sordec_ir::SemanticOp::Known(KnownOp::ValEncodeSmall {
+                ty: sordec_ir::KnownType::U32,
+                value,
+            })) => Some(*value),
+            _ => None,
+        });
+    ctx.value_ref(payload.unwrap_or(operand))
+}
+
 fn key_expr(ctx: &FnCtx, key: sordec_common::ValueId, resolved: &Option<EnumKey>) -> syn::Expr {
     let Some(ek) = resolved else {
         return ctx.value_ref(key);

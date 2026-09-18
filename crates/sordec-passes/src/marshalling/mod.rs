@@ -58,6 +58,7 @@ pub mod frame;
 pub mod guard;
 pub mod key_construction;
 pub mod option_probe;
+pub mod option_unwrap;
 pub mod dead_store;
 pub mod forward;
 pub(crate) mod sret;
@@ -75,6 +76,7 @@ pub use frame::FrameElisionPass;
 pub use guard::ArgGuardElisionPass;
 pub use key_construction::KeyConstructionElisionPass;
 pub use option_probe::OptionProbePass;
+pub use option_unwrap::OptionUnwrapPass;
 pub use wide_return::WideReturnPass;
 
 use sordec_common::{Provenance, ProvenanceSource, ValueId};
@@ -139,6 +141,7 @@ pub(crate) mod metrics {
         MARSHALLING_FRAME_LOADS_FORWARDED as FRAME_LOADS_FORWARDED,
         MARSHALLING_FRAMES_ELIDED as FRAMES_ELIDED,
         MARSHALLING_GUARDS_ELIDED as GUARDS_ELIDED,
+        MARSHALLING_OPTIONS_UNWRAPPED as OPTIONS_UNWRAPPED,
         MARSHALLING_UDT_DECODES_COLLAPSED as UDT_DECODES_COLLAPSED,
         MARSHALLING_UDT_FIELDS_RECOVERED as UDT_FIELDS_RECOVERED,
         MARSHALLING_UDT_HELPERS_COLLAPSED as UDT_HELPERS_COLLAPSED,

@@ -69,6 +69,11 @@ const M_UNIT_VALUE: &str = "const_prop_unit_value";
 /// remaining-work signal).
 const M_UNRESOLVED: &str = "const_prop_unresolved";
 
+/// The counters that record something this pass newly resolved — what a
+/// re-run may report without recounting the misses of the first run.
+pub(crate) const RESOLUTION_COUNTERS: &[&str] =
+    &[M_TIER_UPGRADED, M_LITERAL_RESOLVED, M_CALLEE_NAMED, M_KEY_NAMED, M_UNIT_VALUE];
+
 /// The constant-propagation upgrade pass. Stateless between runs.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ConstPropPass;
@@ -603,6 +608,7 @@ mod tests {
                 durability: v(1),
                 key: v(0),
                 resolved_key: None,
+                unwrap: false,
             }))],
         )
     }
@@ -1061,6 +1067,7 @@ mod tests {
                     durability: v(1),
                     key: v(0),
                     resolved_key: None,
+                    unwrap: false,
                 })),
             ],
         )]);
@@ -1091,6 +1098,7 @@ mod tests {
                 durability: v(dur),
                 key: v(key),
                 resolved_key: None,
+                unwrap: false,
             }))
         };
         let mut ir = module(vec![func(
@@ -1124,6 +1132,7 @@ mod tests {
             durability: v(dur),
             key: v(key),
             resolved_key: None,
+            unwrap: false,
         }))
     }
 
@@ -1210,6 +1219,7 @@ mod tests {
                     durability: v(1),
                     key: v(0),
                     resolved_key: None,
+                    unwrap: false,
                 })),
                 i64c(0),
                 i64c(tag14_bits("transfer")),
@@ -1235,6 +1245,7 @@ mod tests {
                 durability: v(1),
                 key: v(0),
                 resolved_key: None,
+                unwrap: false,
             }))],
         )]);
         let result = run(&mut ir);

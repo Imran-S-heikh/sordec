@@ -58,12 +58,15 @@ use std::collections::{BTreeSet, HashMap};
 use sordec_common::{
     Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, ProvenanceSource, ValueId,
 };
-use sordec_ir::{EnumKey, Expr, HighFunction, HighIr, KnownOp, MemWidth, SemanticOp};
+use sordec_ir::{
+    CompositeType, EnumKey, Expr, HighFunction, HighIr, KnownOp, MemWidth, PrimitiveType,
+    SemanticOp, TypeRef, TypeRegistry,
+};
 
 use super::symbols::{unique_union_index_by_cases, valid_symbol_text};
 use super::{apply_rewrites, Rewrite};
 use crate::dataflow::{
-    block_containing, canon_addr, facts_before, may_write_memory, trace_int,
+    canon_addr, facts_at, may_write_memory, trace_int,
     trace_u32val, CallIndex, Resolver,
 };
 use crate::pass::{Pass, PassResult};
@@ -79,6 +82,11 @@ const M_CTOR_MATCHED: &str = "enum_key_ctor_matched";
 /// Constructor-shaped keys that stayed honestly unnamed (the
 /// remaining-work signal).
 const M_UNRESOLVED: &str = "enum_key_unresolved";
+
+/// The counters that record something this pass newly resolved — what a
+/// re-run may report without recounting the first run's misses or its
+/// per-run constructor census.
+pub(crate) const RESOLUTION_COUNTERS: &[&str] = &[M_KEY_NAMED];
 
 /// Nesting cap for locating the `SymbolNew` op behind a wrapper call
 /// (the SDK's `Symbol::new` sits one or two tiny helpers deep).
@@ -379,13 +387,12 @@ fn try_name_key_at(
     let Some(summary) = summary else {
         return Naming::Unresolved;
     };
-    let unions = &ir
+    let types = &ir
         .soroban_facts
         .as_ref()
         .expect("gated at run() entry")
-        .types
-        .unions;
-    let union = &unions[summary.union_idx];
+        .types;
+    let union = &types.unions[summary.union_idx];
 
     // Gate 3: per-callsite discriminant, through the channel the
     // constructor was proven to use.
@@ -465,7 +472,20 @@ fn try_name_key_at(
             }
             payload.into_iter().take(case.fields.len()).collect()
         }
-        _ => payload,
+        // The frame facts run on past the key's own slots to whatever
+        // rustc laid out next — in token-v23's `write_allowance`, a
+        // second copy of the same key. Cut to the variant's own footprint
+        // in word slots when every field's width is known; otherwise
+        // the presence test below is all there is.
+        DiscChannel::ByPointer { .. } => match case_footprint(types, &case.fields) {
+            Some(n) => {
+                if payload.len() < n {
+                    return Naming::Unresolved;
+                }
+                payload.into_iter().take(n).collect()
+            }
+            None => payload,
+        },
     };
     if case.fields.is_empty() != payload.is_empty() {
         return Naming::Unresolved;
@@ -483,6 +503,42 @@ fn try_name_key_at(
         },
         note,
     )
+}
+
+/// The number of word (8-byte) frame slots a variant's fields occupy in
+/// the key the caller built, when every field's width is known: a `Val`
+/// or 64-bit integer takes one, a 128-bit integer two, a 256-bit four, a
+/// `#[contracttype]` struct the sum of its fields. A field whose layout
+/// is not pinned down here — a sub-word integer, a nested enum, an
+/// `Option`, a tuple — answers `None`, and the caller keeps its presence
+/// test.
+fn case_footprint(types: &TypeRegistry, fields: &[TypeRef]) -> Option<usize> {
+    fields.iter().map(|f| slot_width(types, f, 0)).sum()
+}
+
+fn slot_width(types: &TypeRegistry, ty: &TypeRef, depth: u32) -> Option<usize> {
+    const MAX_DEPTH: u32 = 8;
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    match ty {
+        TypeRef::Primitive(p) => match p {
+            PrimitiveType::U128 | PrimitiveType::I128 => Some(2),
+            PrimitiveType::U256 | PrimitiveType::I256 => Some(4),
+            PrimitiveType::Void => Some(0),
+            PrimitiveType::Bool | PrimitiveType::U32 | PrimitiveType::I32 => None,
+            _ => Some(1),
+        },
+        TypeRef::Composite(
+            CompositeType::Vec(_) | CompositeType::Map(_, _) | CompositeType::BytesN(_),
+        ) => Some(1),
+        TypeRef::Composite(_) => None,
+        TypeRef::UserDefined(id) => {
+            let def = types.structs.iter().find(|s| s.id == *id)?;
+            def.fields.iter().map(|f| slot_width(types, &f.ty, depth + 1)).sum()
+        }
+        TypeRef::Unknown(_) => None,
+    }
 }
 
 /// Where the frame facts for a callsite were found.
@@ -545,36 +601,35 @@ fn slot_values_at(
 ) -> Option<SlotValues> {
     let (base, k) = canon_addr(func, ptr_arg);
 
-    // Local frame facts at the callsite.
-    if let Some(block_id) = block_containing(func, call_id) {
-        let block = func.blocks.get(block_id)?;
-        let facts = facts_before(func, block, call_id, base);
-        let disc_at = k.checked_add(disc_offset)?;
-        // Truncating read: rustc stores the enum head full-width but
-        // the constructor reads the tag narrow. Sound here because the
-        // resolved constant is range-checked against the union's case
-        // count — a value truncation would change fails that gate.
-        if let Some(disc) = facts.value_at_trunc(disc_at, disc_width) {
-            let payload_from = disc_at.checked_add(disc_width.bytes())?;
-            let mut payload = Vec::new();
-            for (off, fact) in facts.iter() {
-                if off < payload_from {
-                    continue;
-                }
-                // A non-word slot behind the discriminant is a shape
-                // this recognizer does not understand: fail closed.
-                if fact.width != MemWidth::W8 {
-                    return None;
-                }
-                payload.push(fact.value);
+    // Frame facts at the callsite, along the blocks that dominate it:
+    // the key is built where the source built it, and the converter
+    // call an inlined helper brought in may sit several blocks later.
+    let facts = facts_at(func, call_id, base);
+    let disc_at = k.checked_add(disc_offset)?;
+    // Truncating read: rustc stores the enum head full-width but
+    // the constructor reads the tag narrow. Sound here because the
+    // resolved constant is range-checked against the union's case
+    // count — a value truncation would change fails that gate.
+    if let Some(disc) = facts.value_at_trunc(disc_at, disc_width) {
+        let payload_from = disc_at.checked_add(disc_width.bytes())?;
+        let mut payload = Vec::new();
+        for (off, fact) in facts.iter() {
+            if off < payload_from {
+                continue;
             }
-            return Some(SlotValues {
-                disc,
-                payload,
-                hopped: false,
-                hop_owner: None,
-            });
+            // A non-word slot behind the discriminant is a shape
+            // this recognizer does not understand: fail closed.
+            if fact.width != MemWidth::W8 {
+                return None;
+            }
+            payload.push(fact.value);
         }
+        return Some(SlotValues {
+            disc,
+            payload,
+            hopped: false,
+            hop_owner: None,
+        });
     }
 
     // Sole-caller hop: the pointer is our own parameter, and exactly
@@ -912,6 +967,7 @@ mod tests {
             durability: v(key),
             key: v(key),
             resolved_key: None,
+            unwrap: false,
         }))
     }
 
@@ -1209,10 +1265,28 @@ mod tests {
         assert!(resolved_key_of(&ir, 0, storage_id).is_none());
     }
 
+    /// Discriminant 1 = Admin (unit), and the caller's frame holds a word
+    /// behind it. That word is whatever rustc laid out next, not payload:
+    /// the variant's footprint is zero slots, so it is named without one.
     #[test]
-    fn footprint_mismatch_stays_unnamed() {
-        // Discriminant 1 = Admin (unit) but the caller wrote payload.
+    fn a_frame_slot_beyond_a_unit_variants_footprint_is_not_payload() {
         let (caller, storage_id) = caller_with(1, true, 1);
+        let mut ir = module(
+            vec![caller, ctor(1, 2), symbol_wrapper(2)],
+            vec![data_key_union()],
+        );
+        let result = run(&mut ir);
+        assert!(result.changed);
+        let key = resolved_key_of(&ir, 0, storage_id).expect("named");
+        assert_eq!(key.variant, "Admin");
+        assert!(key.payload.is_empty());
+    }
+
+    /// Discriminant 0 = State, a one-slot payload variant, but the caller
+    /// wrote no payload: the frame is short of the footprint.
+    #[test]
+    fn a_frame_short_of_the_variants_footprint_stays_unnamed() {
+        let (caller, storage_id) = caller_with(0, false, 1);
         let mut ir = module(
             vec![caller, ctor(1, 2), symbol_wrapper(2)],
             vec![data_key_union()],

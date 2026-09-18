@@ -234,9 +234,15 @@ fn coverage_matrix_prints_and_holds_invariants() {
     // *more* storage sites visible, not because the same sites got
     // better: each source-level `put_*`/`get_*` that rustc folded into
     // one body is now its own op with its own key and tier to resolve.
+    //
+    // 2026-09-18: 26/31 (84%). Inlining the SDK's TTL and has-probe
+    // wrappers pastes a copy of each helper's storage op into its caller,
+    // and the refiners re-run after the inliner resolve all six copies —
+    // storage-tier 11/13, enum-key 12/14 (+4), ttl 3/4 (+2). The helpers
+    // keep their own unresolved originals, so the misses stay counted once.
     let (resolved, attempted) = deep_facts("token-v23", &matrix);
-    assert_eq!(attempted, 25, "token-v23 deep facts attempted");
-    assert_eq!(resolved, 20, "token-v23 deep facts resolved");
+    assert_eq!(attempted, 31, "token-v23 deep facts attempted");
+    assert_eq!(resolved, 26, "token-v23 deep facts resolved");
 
     // --- A6/H3: structuring coverage columns (measured 2026-07-20) ---
     //

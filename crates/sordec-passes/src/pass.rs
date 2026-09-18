@@ -44,6 +44,57 @@ pub trait Pass<Ir> {
     fn run(&self, ir: &mut Ir) -> PassResult;
 }
 
+/// A pass registered a second time, later in the same pipeline, under a
+/// distinct name.
+///
+/// Every pass name is unique per pipeline (see [`Pass::name`]), so a
+/// refiner that must run again — after a transform has created fresh
+/// instances of the shapes it fills — is registered through this wrapper.
+/// The wrapped pass runs unchanged; provenance it writes still names the
+/// original pass, since that is what did the work. Only the pipeline's
+/// own bookkeeping sees the second name.
+///
+/// # What a re-run reports
+///
+/// Only what it newly resolved. The first run already counted and
+/// diagnosed every site it could not resolve, and a re-run inside a
+/// fixpoint group runs once per iteration: passing its miss counters and
+/// diagnostics through would count the same unresolved site once per
+/// loop. So the wrapper keeps the counters named in `report` — each a
+/// rewrite, which an idempotent pass makes at most once — and drops the
+/// rest, diagnostics included.
+pub struct Rerun<P> {
+    inner: P,
+    name: &'static str,
+    report: &'static [&'static str],
+}
+
+impl<P> Rerun<P> {
+    /// Wrap `inner` under `name`, which must itself be unique in the
+    /// pipeline, reporting only the counters in `report`.
+    #[must_use]
+    pub const fn new(inner: P, name: &'static str, report: &'static [&'static str]) -> Self {
+        Self { inner, name, report }
+    }
+}
+
+impl<Ir, P: Pass<Ir>> Pass<Ir> for Rerun<P> {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn run(&self, ir: &mut Ir) -> PassResult {
+        let inner = self.inner.run(ir);
+        let mut result = PassResult { changed: inner.changed, ..PassResult::default() };
+        for (key, value) in inner.metrics.iter() {
+            if self.report.contains(&key) {
+                result.metrics.increment(key, value);
+            }
+        }
+        result
+    }
+}
+
 /// Result of a single [`Pass::run`] invocation.
 ///
 /// Used by the [`crate::Pipeline`] to detect fixpoint termination

@@ -366,10 +366,10 @@ fn overall_band(name: &str) -> (f64, f64) {
     // unchanged at 2/7, behaviour 1.0000 on both measured fixtures.
     match name {
         "hello-add" => (0.99, 1.00),
-        "token-v22" => (0.67, 0.71),
-        "token-v23" => (0.58, 0.62),
-        "token-v23-stripped" => (0.26, 0.30),
-        "timelock" => (0.74, 0.78),
+        "token-v22" => (0.75, 0.79),
+        "token-v23" => (0.64, 0.68),
+        "token-v23-stripped" => (0.27, 0.31),
+        "timelock" => (0.76, 0.80),
         "dex-liquidity-pool" => (0.58, 0.62),
         "attestation" => (0.76, 0.80),
         _ => (0.00, 1.00),

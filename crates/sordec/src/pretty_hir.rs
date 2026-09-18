@@ -844,12 +844,14 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io:
             durability: _,
             key,
             resolved_key,
+            unwrap,
         } => {
             write!(
                 out,
-                "storage_get<{}>({})",
+                "storage_get<{}>({}){}",
                 tier_str(tier),
-                key_str(key, resolved_key, ctx)
+                key_str(key, resolved_key, ctx),
+                if *unwrap { ".unwrap()" } else { "" }
             )
         }
         KnownOp::StorageSet {
@@ -1742,6 +1744,7 @@ mod tests {
             durability: v(93),
             key: v(92),
             resolved_key: None,
+            unwrap: false,
         }));
         let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "storage_get<instance>(v92)");
@@ -1759,6 +1762,7 @@ mod tests {
                 variant: "Admin".to_string(),
                 payload: vec![],
             }),
+            unwrap: false,
         }));
         let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "storage_get<instance>(v92: DataKey::Admin)");
@@ -1773,6 +1777,7 @@ mod tests {
                 variant: "Allowance".to_string(),
                 payload: vec![v(1), v(2)],
             }),
+            unwrap: false,
         }));
         let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "storage_get<temporary>(v15: DataKey::Allowance(v1, v2))");

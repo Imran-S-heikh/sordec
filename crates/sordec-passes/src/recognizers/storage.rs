@@ -269,6 +269,7 @@ fn classify(func: &HighFunction, host_fn: &str, args: &[ValueId]) -> Option<Reco
                     durability: args[ops.durability],
                     key: args[ops.key],
                     resolved_key: None,
+                    unwrap: false,
                 },
                 ty: KnownType::Val,
                 metric: M_GET,

@@ -93,8 +93,8 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    OptionProbePass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass, WideCodecPass,
-    WideReturnPass,
+    OptionProbePass, OptionUnwrapPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
@@ -190,6 +190,13 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
     )
 }
 
+/// [`ConstPropPass`] re-run after the inliner; see [`default_high_pipeline`].
+pub const CONST_PROP_AFTER_INLINE: &str = "const-prop-after-inline";
+/// [`TtlPass`] re-run after the inliner; see [`default_high_pipeline`].
+pub const TTL_AFTER_INLINE: &str = "ttl-after-inline";
+/// [`EnumKeyPass`] re-run after the inliner; see [`default_high_pipeline`].
+pub const ENUM_KEY_AFTER_INLINE: &str = "enum-key-after-inline";
+
 /// Build the default high-IR pattern-recovery pipeline.
 ///
 /// The manifest of `Pass<HighIr>` recognizers that run after the
@@ -245,6 +252,11 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
 /// ordering between the group and the recognizer chain is by clarity,
 /// not dependency. The recognizer chain itself needs no fixpoint: its
 /// dependencies are a straight line and every pass is idempotent.
+///
+/// Three refiners run a second time inside the marshalling group, after
+/// the inliner, under the names below: a pasted helper body carries the
+/// unresolved slots its helper had, and only the copy sees the caller's
+/// constants.
 #[must_use]
 pub fn default_high_pipeline() -> Pipeline<HighIr> {
     Pipeline::new(
@@ -358,12 +370,39 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // pass cannot see through; inside the group because inlining
             // a wrapper exposes its frame and guards to the passes above.
             Box::new(WrapperInlinePass),
+            // A pasted body carries the facts its helper had, and a helper
+            // called with different durabilities or keys had none: the
+            // tier slot is `Unknown`, the key unnamed, the TTL unresolved.
+            // Each copy now sees its caller's constants, so the three
+            // refiners that fill those slots run again here. All are
+            // idempotent by contract (a filled slot no longer matches).
+            Box::new(pass::Rerun::new(
+                ConstPropPass,
+                CONST_PROP_AFTER_INLINE,
+                recognizers::const_prop::RESOLUTION_COUNTERS,
+            )),
+            Box::new(pass::Rerun::new(
+                TtlPass,
+                TTL_AFTER_INLINE,
+                recognizers::ttl::RESOLUTION_COUNTERS,
+            )),
+            Box::new(pass::Rerun::new(
+                EnumKeyPass,
+                ENUM_KEY_AFTER_INLINE,
+                recognizers::enum_key::RESOLUTION_COUNTERS,
+            )),
             // The derived `#[contracttype]` struct decode: once the unpack
             // wrapper is inlined, the key table names the struct and the
             // slot loads become its fields. After the inliner for that
             // reason; before the wide codec's next iteration, whose
             // evidence rule accepts a field of a recovered struct.
             Box::new(UdtDecodePass),
+            // `get(&k).unwrap()`: the proven Option probe, its trapping
+            // None branch and the read, collapsed to an unwrap of the
+            // read. After the inliner, which is what brings the wrapped
+            // probe next to its read; before the key-construction elision,
+            // which then sees one consumer fewer of the key.
+            Box::new(OptionUnwrapPass),
             // The derived `#[contracttype]` enum-to-`Val` converter behind
             // a storage key the recognizers already resolved. Inside this
             // group because eliding the converter can leave its frame slot
@@ -416,7 +455,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // `scope_exit_group_covers_exactly_its_pair` pin those ranges by
         // pass name, so inserting a pass above one fails a test instead of
         // silently shifting the window.
-        vec![1..7, 31..44, 44..46],
+        vec![1..7, 31..48, 48..50],
     )
 }
 
@@ -473,7 +512,11 @@ mod tests {
                 refine::OVERFLOW_GUARD_PASS_NAME,
                 marshalling::guard::PASS_NAME,
                 interproc::inline::PASS_NAME,
+                CONST_PROP_AFTER_INLINE,
+                TTL_AFTER_INLINE,
+                ENUM_KEY_AFTER_INLINE,
                 marshalling::udt_decode::PASS_NAME,
+                marshalling::option_unwrap::PASS_NAME,
                 marshalling::key_construction::PASS_NAME,
                 marshalling::dead_store::PASS_NAME,
                 marshalling::frame::PASS_NAME,

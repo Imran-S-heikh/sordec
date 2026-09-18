@@ -37,6 +37,10 @@ const M_RESOLVED: &str = "ttl_resolved";
 /// TTL ops with an amount that stayed honestly unresolved.
 const M_UNRESOLVED: &str = "ttl_unresolved";
 
+/// The counters that record something this pass newly resolved — what a
+/// re-run may report without recounting the misses of the first run.
+pub(crate) const RESOLUTION_COUNTERS: &[&str] = &[M_RESOLVED];
+
 /// The TTL ledger-amount recognizer. Stateless between runs.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TtlPass;

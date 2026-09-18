@@ -356,6 +356,7 @@ mod tests {
                 durability: v(0),
                 key: v(0),
                 resolved_key: resolved.then(|| key("Admin")),
+                unwrap: false,
             })),
         ]
         .into_iter()

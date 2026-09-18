@@ -162,6 +162,14 @@ pub enum KnownOp {
         /// its evidence gate passes; `None` until proven. See
         /// [`EnumKey`].
         resolved_key: Option<EnumKey>,
+        /// The source wrote `get(&key).unwrap()`: absence is a trap.
+        ///
+        /// Set by the `marshalling-option-unwrap` pass once it has proved
+        /// the SDK's `has` probe and its trapping `None` branch around this
+        /// read, and folded both back into it. The value is typed as the
+        /// payload either way; the flag records that the read traps on a
+        /// missing entry rather than yielding `None`.
+        unwrap: bool,
     },
 
     /// `env.storage().<tier>().set::<_>(&key, &value)`.
@@ -834,6 +842,7 @@ impl KnownOp {
                 durability,
                 key,
                 resolved_key,
+                unwrap: _,
             }
             | KnownOp::StorageRemove {
                 tier: _,
@@ -1075,6 +1084,7 @@ impl KnownOp {
                 durability,
                 key,
                 resolved_key,
+                unwrap: _,
             }
             | KnownOp::StorageRemove {
                 tier: _,
