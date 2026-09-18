@@ -98,6 +98,19 @@ pub(crate) fn emit_body(
 /// whose last region is a trap ends in `panic!();` / `unreachable!();` and is
 /// left alone.
 fn tail_expression(stmts: &mut Vec<syn::Stmt>) {
+    // A trailing `if`/`else` whose every arm ends in a return is the
+    // source's `if c { a } else { b }` in tail position: each arm's return
+    // becomes its tail value and the `if` becomes the body's.
+    if let Some(syn::Stmt::Expr(syn::Expr::If(branch), _)) = stmts.last()
+        && every_arm_returns(branch)
+    {
+        let Some(syn::Stmt::Expr(syn::Expr::If(mut branch), _)) = stmts.pop() else {
+            return;
+        };
+        arms_to_tail(&mut branch);
+        stmts.push(syn::Stmt::Expr(syn::Expr::If(branch), None));
+        return;
+    }
     // Only a *semicolon-terminated* `return`, i.e. one in statement
     // position. `Stmt::Expr(_, None)` is already a tail expression.
     let Some(syn::Stmt::Expr(syn::Expr::Return(ret), Some(_))) = stmts.last() else {
@@ -528,6 +541,37 @@ impl<'a> FnCtx<'a> {
             | None => v,
             Some(_) if sig::is_unit(ok_ty) => parse_quote!(Ok(())),
             Some(_) => parse_quote!(Ok(#v)),
+        }
+    }
+}
+
+/// Whether `branch` has an `else` and every arm, through `else if` chains,
+/// ends in a `return` — so the whole `if` can be the tail value.
+fn every_arm_returns(branch: &syn::ExprIf) -> bool {
+    let ends_in_return = |stmts: &[syn::Stmt]| match stmts.last() {
+        Some(syn::Stmt::Expr(syn::Expr::Return(_), Some(_))) => true,
+        Some(syn::Stmt::Expr(syn::Expr::If(inner), _)) => every_arm_returns(inner),
+        _ => false,
+    };
+    let Some((_, else_branch)) = &branch.else_branch else {
+        return false;
+    };
+    ends_in_return(&branch.then_branch.stmts)
+        && match else_branch.as_ref() {
+            syn::Expr::Block(block) => ends_in_return(&block.block.stmts),
+            syn::Expr::If(inner) => every_arm_returns(inner),
+            _ => false,
+        }
+}
+
+/// Turn every arm's trailing `return` into its tail value.
+fn arms_to_tail(branch: &mut syn::ExprIf) {
+    tail_expression(&mut branch.then_branch.stmts);
+    if let Some((_, else_branch)) = &mut branch.else_branch {
+        match else_branch.as_mut() {
+            syn::Expr::Block(block) => tail_expression(&mut block.block.stmts),
+            syn::Expr::If(inner) => arms_to_tail(inner),
+            _ => {}
         }
     }
 }

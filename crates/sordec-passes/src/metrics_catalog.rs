@@ -407,6 +407,8 @@ pub const REFINE_TRIVIAL_PHIS: &str = "refine_trivial_phis";
 pub const MARSHALLING_FOLDED_ENCODES: &str = "marshalling_folded_encodes";
 /// Narrowings of values already 32 bits wide, replaced by the values.
 pub const REFINE_WIDTH_FOLDS: &str = "refine_width_folds";
+/// Returned `select`s turned back into the `if`/`else` they compile from.
+pub const REFINE_SELECTS_BRANCHED: &str = "refine_selects_branched";
 /// Calls to an argument-decode helper neutralised once their results
 /// were rebound.
 pub const MARSHALLING_DECODE_CALLS_ELIDED: &str = "marshalling_decode_calls_elided";
@@ -748,6 +750,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         REFINE_TRIVIAL_PHIS,
         MARSHALLING_FOLDED_ENCODES,
         REFINE_WIDTH_FOLDS,
+        REFINE_SELECTS_BRANCHED,
         MARSHALLING_DECODE_CALLS_ELIDED,
         MARSHALLING_ENCODE_COLLAPSED,
         MARSHALLING_DISPATCH_FOLDED,

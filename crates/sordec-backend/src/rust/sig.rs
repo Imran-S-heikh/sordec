@@ -78,9 +78,14 @@ pub(crate) fn result_ok_type(func: &HighFunction) -> Option<&TypeRef> {
     }
 }
 
-/// Whether a `contractspecv0` type is the unit type `()`.
+/// Whether a `contractspecv0` type is the unit type `()`: `Void`, or the
+/// empty tuple the spec writes for `Result<(), E>`'s `Ok`.
 pub(crate) fn is_unit(ty: &TypeRef) -> bool {
-    matches!(ty, TypeRef::Primitive(PrimitiveType::Void))
+    match ty {
+        TypeRef::Primitive(PrimitiveType::Void) => true,
+        TypeRef::Composite(CompositeType::Tuple(items)) => items.is_empty(),
+        _ => false,
+    }
 }
 
 /// A synthesized `fn func{id}(arg0: T, …) -> R` for a non-spec function.

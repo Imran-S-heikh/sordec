@@ -105,7 +105,7 @@ pub use recognizers::{
 };
 pub use refine::{
     AndMergePass, ConstBranchFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
-    OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass,
+    OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass, SelectReturnPass,
     SwitchDedupPass,
     TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WidthFoldPass,
 };
@@ -470,6 +470,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // result.
             Box::new(ScopeFallthroughPass),
             Box::new(ScopeIfElsePass),
+            // After the group, on settled IR: a returned `select` becomes
+            // the `if`/`else` it compiled from, so each arm can be the
+            // `Ok`/`Err` it is.
+            Box::new(SelectReturnPass),
             Box::new(UnrecognizedScanPass),
             // General type propagation — runs once the recognizers have
             // planted their host-call/val result types, flowing them

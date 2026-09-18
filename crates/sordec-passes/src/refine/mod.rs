@@ -43,6 +43,7 @@ mod panic_recover;
 mod polarity;
 mod scope_fallthrough;
 mod scope_if_else;
+mod select_return;
 mod switch_dedup;
 mod trap_call;
 mod trap_inline;
@@ -59,6 +60,7 @@ pub use panic_recover::PanicRecoverPass;
 pub use polarity::PolarityPass;
 pub use scope_fallthrough::ScopeFallthroughPass;
 pub use scope_if_else::ScopeIfElsePass;
+pub use select_return::SelectReturnPass;
 
 // Pass names, re-exported for the manifest's fixpoint-group pin tests.
 // `crate`-scoped so the submodules stay private — only their identities

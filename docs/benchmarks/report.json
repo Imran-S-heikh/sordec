@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.7317453953937073,
-  "aggregate_overall_with_behavior": 0.7317453953937073,
+  "aggregate_overall": 0.7527537987550519,
+  "aggregate_overall_with_behavior": 0.7527537987550519,
   "behavior_measured_fixtures": 0,
   "fixtures": {
     "attestation": {
@@ -36,10 +36,9 @@
           "notes": [
             "6 entrypoints (0 unreconstructed, 4 without control flow)",
             "ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=1.0000 recall=0.6667 (3 original tokens, 2 reconstructed) — bloat 0.7x, dice ceiling ~1.2000",
-            "low-similarity: check(0.00)"
+            "control flow: precision=1.0000 recall=1.0000 (3 original tokens, 3 reconstructed) — bloat 1.0x, dice ceiling ~1.0000"
           ],
-          "score": 0.5,
+          "score": 1.0,
           "weight": 0.25
         }
       },
@@ -50,8 +49,8 @@
       "notes": [
         "basis: macro-expanded — original ABI: 6 entrypoints, 1 types recovered"
       ],
-      "overall": 0.8529411764705881,
-      "passed": false,
+      "overall": 1.0,
+      "passed": true,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"

@@ -12,9 +12,9 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | token-v23-stripped | 0.2849 | 0.0000 | 0.2092 | 0.6329 | n/a |
 | timelock | 0.7929 | 1.0000 | 0.5027 | 0.8276 | n/a |
 | dex-liquidity-pool | 0.7319 | 1.0000 | 0.4784 | 0.6750 | n/a |
-| attestation | 0.8529 | 1.0000 | 0.5000 | 1.0000 | n/a |
-| **aggregate (mean, AST)** | **0.7317** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.7317** | | | | |
+| attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | n/a |
+| **aggregate (mean, AST)** | **0.7528** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.7528** | | | | |
 
 ## Per-fixture detail
 
@@ -63,7 +63,7 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 ### attestation
 
 - **interface** 1.0000 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (6 original, 6 reconstructed) — types 1.0000  precision=1.0000 recall=1.0000 (1 original, 1 reconstructed)
-- **structure** 0.5000 — 6 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=1.0000 recall=0.6667 (3 original tokens, 2 reconstructed) — bloat 0.7x, dice ceiling ~1.2000 — low-similarity: check(0.00)
+- **structure** 1.0000 — 6 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=1.0000 recall=1.0000 (3 original tokens, 3 reconstructed) — bloat 1.0x, dice ceiling ~1.0000
 - **semantic** 1.0000 — precision=1.0000 recall=1.0000 (5 original facts, 5 reconstructed)
 - **behavior** n/a — behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`
 
