@@ -145,7 +145,7 @@ fn known_op_hint(op: &KnownOp) -> Option<String> {
 /// digit, or one that starts a word after an acronym (the last capital of a
 /// run, when a lowercase follows). Sufficient for `contractspecv0` variant
 /// names, which are valid Rust identifiers by construction.
-fn snake(pascal: &str) -> String {
+pub(crate) fn snake(pascal: &str) -> String {
     let chars: Vec<char> = pascal.chars().collect();
     let mut out = String::with_capacity(pascal.len() + 2);
     for (i, &c) in chars.iter().enumerate() {

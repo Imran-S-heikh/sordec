@@ -11,7 +11,7 @@ use quote::quote;
 use proc_macro2::Literal;
 use syn::parse_quote;
 
-use sordec_ir::{EnumDef, EventDef, StructDef, TypeRegistry, UnionDef};
+use sordec_ir::{EnumDef, EventDef, EventParamLocation, StructDef, TypeRegistry, UnionDef};
 
 use crate::rust::hole::HolePolicy;
 use crate::rust::ty::{ident, is_tuple_struct, type_ref};
@@ -112,24 +112,53 @@ fn error_item(def: &EnumDef) -> syn::Item {
 }
 
 /// Events are reconstructed as a `#[contractevent]` struct over their
-/// parameters. Topic/data placement ([`EventParamLocation`]) and the
-/// declared `data_format` are recorded in the IR but not yet re-expressed
-/// here — full event fidelity is a later refinement (category S). The
-/// skeleton is a faithful, parseable field list.
+/// parameters, with everything `contractspecv0` records about them: which
+/// parameters are topics, the data format, and the topic prefix.
 ///
-/// [`EventParamLocation`]: sordec_ir::EventParamLocation
+/// Only what differs from the macro's own defaults is spelled, because the
+/// declaration has to *regenerate* this spec, not describe it: the default
+/// prefix is the struct's name in snake case and the default data format is
+/// `map`, so spelling those would be noise, and spelling anything else
+/// wrongly would change the event the contract emits.
 fn event_item(def: &EventDef, reg: &TypeRegistry, policy: &dyn HolePolicy) -> syn::Item {
     let name = ident(&def.name);
     let fields = def.params.iter().map(|p| {
         let pname = ident(&p.name);
         let pty = type_ref(&p.ty, reg, policy);
-        quote!(pub #pname: #pty)
+        match p.location {
+            EventParamLocation::Topic => quote!(#[topic] pub #pname: #pty),
+            EventParamLocation::Data => quote!(pub #pname: #pty),
+        }
     });
+    let mut args: Vec<proc_macro2::TokenStream> = Vec::new();
+    if def.prefix_topics != vec![crate::rust::naming::snake(&def.name)] {
+        let topics = def.prefix_topics.iter().map(|t| syn::LitStr::new(t, proc_macro2::Span::call_site()));
+        args.push(quote!(topics = [#(#topics),*]));
+    }
+    if let Some(format) = data_format(&def.data_format) {
+        let format = syn::LitStr::new(format, proc_macro2::Span::call_site());
+        args.push(quote!(data_format = #format));
+    }
+    let attr = if args.is_empty() {
+        quote!(#[contractevent])
+    } else {
+        quote!(#[contractevent(#(#args),*)])
+    };
     parse_quote! {
-        #[contractevent]
+        #attr
         pub struct #name {
             #(#fields,)*
         }
+    }
+}
+
+/// The `data_format` the macro spells for a recorded format, or `None` for
+/// `map` — its default, which is spelled by saying nothing.
+fn data_format(recorded: &str) -> Option<&'static str> {
+    match recorded {
+        "SingleValue" => Some("single-value"),
+        "Vec" => Some("vec"),
+        _ => None,
     }
 }
 

@@ -8,13 +8,13 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 |---|---|---|---|---|---|
 | hello-add | 1.0000 | 1.0000 | 0.0000 | 0.0000 | n/a |
 | token-v22 | 0.7840 | 0.9286 | 0.4848 | 0.8889 | n/a |
-| token-v23 | 0.6756 | 0.6875 | 0.4390 | 0.8608 | n/a |
+| token-v23 | 0.6976 | 0.7500 | 0.4390 | 0.8608 | n/a |
 | token-v23-stripped | 0.2849 | 0.0000 | 0.2092 | 0.6329 | n/a |
 | timelock | 0.7929 | 1.0000 | 0.5027 | 0.8276 | n/a |
 | dex-liquidity-pool | 0.7319 | 1.0000 | 0.4784 | 0.6750 | n/a |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | n/a |
-| **aggregate (mean, AST)** | **0.7528** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.7528** | | | | |
+| **aggregate (mean, AST)** | **0.7559** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.7559** | | | | |
 
 ## Per-fixture detail
 
@@ -34,7 +34,7 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 
 ### token-v23
 
-- **interface** 0.6875 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.3750  precision=0.2500 recall=0.7500 (4 original, 12 reconstructed) — types missing: type SetAdmin — types extra: type Approve, type Burn, type Clawback, type Mint, type MintWithAmountOnly, type SetAdmin, type TokenMetadata, type Transfer, … (+1)
+- **interface** 0.7500 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.5000  precision=0.3333 recall=1.0000 (4 original, 12 reconstructed) — types extra: type Approve, type Burn, type Clawback, type Mint, type MintWithAmountOnly, type TokenMetadata, type Transfer, type TransferWithAmountOnly
 - **structure** 0.4390 — 13 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.3647 recall=0.9394 (33 original tokens, 85 reconstructed) — bloat 2.6x, dice ceiling ~0.5593 — low-similarity: allowance(0.00), approve(0.64), burn_from(0.66), decimals(0.00), mint(0.70), name(0.00), set_admin(0.00), symbol(0.00), … (+2)
 - **semantic** 0.8608 — precision=0.9444 recall=0.7907 (43 original facts, 36 reconstructed) — under-recovered: event, panic:bare, panic:unwrap, storage:get:temporary:DataKey::Allowance — over-recovered: storage:get:instance:?, storage:set:instance:?
 - **behavior** n/a — behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`

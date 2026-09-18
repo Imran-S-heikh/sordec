@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.7527537987550519,
-  "aggregate_overall_with_behavior": 0.7527537987550519,
+  "aggregate_overall": 0.7559050592592537,
+  "aggregate_overall_with_behavior": 0.7559050592592537,
   "behavior_measured_fixtures": 0,
   "fixtures": {
     "attestation": {
@@ -284,11 +284,10 @@
           "checked": true,
           "notes": [
             "entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed)",
-            "types 0.3750  precision=0.2500 recall=0.7500 (4 original, 12 reconstructed)",
-            "types missing: type SetAdmin",
-            "types extra: type Approve, type Burn, type Clawback, type Mint, type MintWithAmountOnly, type SetAdmin, type TokenMetadata, type Transfer, … (+1)"
+            "types 0.5000  precision=0.3333 recall=1.0000 (4 original, 12 reconstructed)",
+            "types extra: type Approve, type Burn, type Clawback, type Mint, type MintWithAmountOnly, type TokenMetadata, type Transfer, type TransferWithAmountOnly"
           ],
-          "score": 0.6875,
+          "score": 0.75,
           "weight": 0.3
         },
         "semantic": {
@@ -320,7 +319,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.6755519676936608,
+      "overall": 0.6976107912230725,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
