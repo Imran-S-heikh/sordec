@@ -120,6 +120,12 @@ enum DiscChannel {
     /// arguments (out-pointers are runtime stack addresses and never
     /// resolve to small constants).
     ByValue { param: Option<usize> },
+    /// No discriminant travels at all: the constructor builds one variant
+    /// only, and the spec union it matched has that one case. SDK 27
+    /// compiles `DataKey::MyKey` and `DataKey::Counter(user)` for a
+    /// one-variant enum this way — no tag to pass, so no argument carries
+    /// it. The variant is the union's only case; every argument is payload.
+    Only,
 }
 
 /// What one helper function proved to be, memoized per [`FuncId`].
@@ -446,6 +452,7 @@ fn try_name_key_at(
                 .collect();
             (d, others, "by value")
         }
+        DiscChannel::Only => (0, args.clone(), "the union's only variant"),
         DiscChannel::ByValue { param: None } => {
             // Exactly one distinct in-range constant among the args is
             // the discriminant (out-pointers are runtime values and
@@ -492,7 +499,7 @@ fn try_name_key_at(
     // whose shape is the frame's, not the declaration's, so it keeps the
     // original presence test.
     let payload: Vec<ValueId> = match &summary.disc {
-        DiscChannel::ByValue { .. } => {
+        DiscChannel::ByValue { .. } | DiscChannel::Only => {
             if payload.len() < case.fields.len() {
                 return Naming::Unresolved;
             }
@@ -738,13 +745,15 @@ fn summarize_ctor(ir: &HighIr, target: FuncId) -> Option<CtorSummary> {
         }
     }
     let disc = match candidate {
-        Some((param, offset, width)) => DiscChannel::ByPointer {
+        Some((param, offset, width)) => Some(DiscChannel::ByPointer {
             param,
             offset,
             width,
-        },
-        None if !func.params.is_empty() => DiscChannel::ByValue { param: dispatch_param(func) },
-        None => return None,
+        }),
+        None if !func.params.is_empty() => Some(DiscChannel::ByValue { param: dispatch_param(func) }),
+        // No parameters: only a one-variant enum can be built this way,
+        // which the registry gate below decides.
+        None => None,
     };
 
     // (1b) The variant texts this helper can construct, from the
@@ -792,6 +801,15 @@ fn summarize_ctor(ir: &HighIr, target: FuncId) -> Option<CtorSummary> {
     let unions = &ir.soroban_facts.as_ref()?.types.unions;
     let union_idx = unique_union_index_by_cases(unions, &texts)?;
 
+    // A one-case union needs no discriminant; a constructor that dispatches
+    // on nothing (no parameter, or none it switches on) builds exactly that
+    // case.
+    let one_case = unions.get(union_idx).is_some_and(|u| u.cases.len() == 1);
+    let disc = match disc {
+        None | Some(DiscChannel::ByValue { param: None }) if one_case => DiscChannel::Only,
+        Some(d) => d,
+        None => return None,
+    };
     Some(CtorSummary { union_idx, disc })
 }
 
