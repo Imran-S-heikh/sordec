@@ -129,12 +129,58 @@ fn plans(func: &HighFunction) -> Vec<Plan> {
                     None => continue,
                 }
             };
-            if let Some(plan) = plan(func, &order, *probe, *key, *tier, some_arm, none_arm) {
+            if let Some(plan) = plan(func, &order, *probe, *key, *tier, some_arm, none_arm, None) {
                 plans.push(plan);
             }
         }
     });
+    // The same branch spelled as an early return: the `None` arm leaves the
+    // function and the read is what follows, so the merge is the two
+    // `return`s rather than a block parameter.
+    func.region.for_each_node(|node| {
+        let Region::Sequence(items) = node else {
+            return;
+        };
+        for (i, item) in items.iter().enumerate() {
+            let Region::If { cond, then_region, else_region: None } = item else {
+                continue;
+            };
+            let (Some((taken, taken_rest)), Some((fallen, fallen_rest))) =
+                (exit_return(then_region), exit_return(&Region::Sequence(items[i + 1..].to_vec())))
+            else {
+                continue;
+            };
+            for (probe, key, tier) in &probes {
+                let Some(on_probe) = polarity(func, *cond, *probe, 0) else {
+                    continue;
+                };
+                let (some, none, pair) = if on_probe {
+                    (&taken_rest, &fallen_rest, (taken, fallen))
+                } else {
+                    (&fallen_rest, &taken_rest, (fallen, taken))
+                };
+                if let Some(plan) = plan(func, &order, *probe, *key, *tier, some, Some(none), Some(pair)) {
+                    plans.push(plan);
+                }
+            }
+        }
+    });
     plans
+}
+
+/// An arm that ends by returning one value: that value, and everything the
+/// arm does before returning it.
+fn exit_return(region: &Region) -> Option<(ValueId, Region)> {
+    match region {
+        Region::Return { values } if values.len() == 1 => Some((values[0], Region::Sequence(Vec::new()))),
+        Region::Sequence(items) => match items.split_last() {
+            Some((Region::Return { values }, rest)) if values.len() == 1 => {
+                Some((values[0], Region::Sequence(rest.to_vec())))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -146,6 +192,7 @@ fn plan(
     tier: KnownTier,
     some_arm: &Region,
     none_arm: Option<&Region>,
+    returned: Option<(ValueId, ValueId)>,
 ) -> Option<Plan> {
     let mut checks = Vec::new();
     if !arm_fits(func, some_arm, &mut checks) || none_arm.is_some_and(|n| !straight(n)) {
@@ -186,6 +233,9 @@ fn plan(
 
     // Every merge fed from the read's arm, as (read's arm, other arm).
     let mut pairs = Vec::new();
+    if let Some((some, none)) = returned {
+        pairs.push((resolve_use(func, some), resolve_use(func, none)));
+    }
     for &id in order.iter().chain(unscheduled(func).iter()) {
         let Some(Expr::Phi { incoming }) = func.bindings.get(id).map(|b| &b.expr) else {
             continue;
@@ -442,7 +492,12 @@ fn apply(func: &mut HighFunction, plan: &Plan) {
     func.bindings.push(Binding::new(
         default,
         plan.ty.clone(),
-        Expr::Literal(Literal::I64(plan.default as i64)),
+        match plan.ty {
+            IrType::Known(KnownType::Bool) | IrType::Inferred(KnownType::Bool) => {
+                Expr::Literal(Literal::Bool(plan.default != 0))
+            }
+            _ => Expr::Literal(Literal::I64(plan.default as i64)),
+        },
         Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, "the default the source's `unwrap_or` names"),
     ));
     for (_, block) in func.blocks.iter_mut() {
@@ -572,6 +627,82 @@ mod tests {
     fn a_default_the_literal_cannot_carry_is_declined() {
         let mut m = module(vec![shape(7)]);
         assert!(!OptionDefaultPass.run(&mut m).changed);
+    }
+
+    /// The same read spelled as an early return:
+    /// `if !has(k) { return false } … return get(k)`.
+    fn exit_shape() -> HighFunction {
+        let tier = || StorageTier::Known(KnownTier::Persistent);
+        let exprs = vec![
+            Expr::Phi { incoming: vec![] },  // v0 key
+            Expr::Literal(Literal::I64(1)),  // v1 durability
+            Expr::Semantic(SemanticOp::Known(KnownOp::StorageHas {
+                tier: tier(),
+                durability: v(1),
+                key: v(0),
+                resolved_key: None,
+                probe: true,
+            })), // v2
+            Expr::Unary { op: UnaryOp::Eqz, value: v(2) }, // v3
+            Expr::Literal(Literal::I64(0)),                // v4 the default
+            Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+                tier: tier(),
+                durability: v(1),
+                key: v(0),
+                resolved_key: None,
+                missing: Missing::Option,
+            })), // v5
+        ];
+        let mut bindings: Arena<ValueId, Binding> = Arena::new();
+        for expr in exprs {
+            let id = ValueId::from_index(bindings.len() as u32);
+            bindings.push(Binding::new(
+                id,
+                IrType::Unknown(UnknownReason::InsufficientEvidence),
+                expr,
+                Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+            ));
+        }
+        let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
+        blocks.push(HighBlock { id: bb(0), bindings: vec![v(2), v(3)] });
+        blocks.push(HighBlock { id: bb(1), bindings: vec![v(4)] });
+        blocks.push(HighBlock { id: bb(2), bindings: vec![v(5)] });
+        HighFunction {
+            id: FuncId::from_index(0),
+            name: None,
+            signature: None,
+            blocks,
+            bindings,
+            region: Region::Sequence(vec![
+                Region::Basic(bb(0)),
+                Region::If {
+                    cond: v(3),
+                    then_region: Box::new(Region::Sequence(vec![
+                        Region::Basic(bb(1)),
+                        Region::Return { values: vec![v(4)] },
+                    ])),
+                    else_region: None,
+                },
+                Region::Basic(bb(2)),
+                Region::Return { values: vec![v(5)] },
+            ]),
+            params: vec![v(0)],
+            returns: vec![],
+        }
+    }
+
+    #[test]
+    fn an_early_return_none_arm_becomes_the_reads_default() {
+        let mut m = module(vec![exit_shape()]);
+        assert!(OptionDefaultPass.run(&mut m).changed);
+        let f = &m.functions[0];
+        let Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { missing: Missing::Or(d), .. })) =
+            &f.bindings.get(v(5)).unwrap().expr
+        else {
+            panic!("the read takes a default");
+        };
+        assert!(matches!(f.bindings.get(*d).unwrap().expr, Expr::Literal(Literal::I64(0))));
+        assert!(matches!(f.bindings.get(v(2)).unwrap().expr, Expr::Literal(Literal::Bool(true))));
     }
 
     #[test]

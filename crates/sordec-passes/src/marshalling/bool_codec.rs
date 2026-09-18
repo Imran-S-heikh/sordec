@@ -96,12 +96,31 @@ impl Pass<HighIr> for BoolCodecPass {
                 result.metrics.increment(M_BOOLS, folded.len() as i64);
                 result.changed = true;
             }
-            let mut decoded = 0;
+            let mut decoded = Vec::new();
             let region = std::mem::replace(&mut func.region, Region::Unreachable);
             func.region = fold_decodes(func, region, &mut decoded);
-            if decoded > 0 {
-                result.metrics.increment(M_BOOLS, decoded);
+            if !decoded.is_empty() {
+                result.metrics.increment(M_BOOLS, decoded.len() as i64);
                 result.changed = true;
+            }
+            // The dispatch proved the value is a `bool`, so the read it came
+            // from is one — as long as the dispatch was its only reader.
+            // A value someone else still reads as a `Val` keeps its type,
+            // the same gate [`super::typed_read`] makes.
+            for (value, chain) in decoded {
+                let only_reader = !func.bindings.iter().any(|(id, b)| {
+                    let mut reads = false;
+                    b.expr.for_each_value_use(|u| reads |= resolve_use(func, u) == value);
+                    reads && !chain.contains(&id)
+                });
+                if only_reader && let Some(b) = func.bindings.get_mut(value) {
+                    b.ty = IrType::Inferred(KnownType::Bool);
+                    b.add_provenance(Provenance::new(
+                        PASS_NAME,
+                        ProvenanceSource::SdkPattern,
+                        "read as a `bool` by the dispatch that decoded it",
+                    ));
+                }
             }
         }
         result
@@ -190,12 +209,12 @@ fn marker_tests(func: &HighFunction, folded: &[(ValueId, ValueId)]) -> Vec<(Valu
 
 /// Rewrites every `match tag_byte(v) { False => false, True => true }`
 /// whose arms return the re-encoded answer to a return of `v` itself.
-fn fold_decodes(func: &HighFunction, region: Region, decoded: &mut i64) -> Region {
+fn fold_decodes(func: &HighFunction, region: Region, decoded: &mut Vec<(ValueId, Vec<ValueId>)>) -> Region {
     let mut recurse = |r: Region| fold_decodes(func, r, decoded);
     match region {
         Region::Switch { index, arms, default, dispatch } => {
-            if let Some(value) = decoded_bool(func, index, &arms, &default) {
-                *decoded += 1;
+            if let Some((value, chain)) = decoded_bool(func, index, &arms, &default) {
+                decoded.push((value, chain));
                 return Region::Return { values: vec![value] };
             }
             Region::Switch {
@@ -224,11 +243,17 @@ fn fold_decodes(func: &HighFunction, region: Region, decoded: &mut i64) -> Regio
 }
 
 /// The value a decoding dispatch converts, if that is what this is.
-fn decoded_bool(func: &HighFunction, index: ValueId, arms: &[sordec_ir::SwitchArm], default: &Region) -> Option<ValueId> {
+fn decoded_bool(
+    func: &HighFunction,
+    index: ValueId,
+    arms: &[sordec_ir::SwitchArm],
+    default: &Region,
+) -> Option<(ValueId, Vec<ValueId>)> {
     if !traps(default) {
         return None;
     }
-    let value = tag_byte_of(func, index)?;
+    let mut chain = Vec::new();
+    let value = tag_byte_chain(func, index, &mut chain)?;
     let [a, b] = arms else {
         return None;
     };
@@ -238,7 +263,8 @@ fn decoded_bool(func: &HighFunction, index: ValueId, arms: &[sordec_ir::SwitchAr
                 .and_then(|v| int_literal(func, resolve_use(func, v)))
                 == Some(i128::from(tag))
     };
-    (returned(a, u32::from(TAG_FALSE), TAG_FALSE) && returned(b, u32::from(TAG_TRUE), TAG_TRUE)).then_some(value)
+    (returned(a, u32::from(TAG_FALSE), TAG_FALSE) && returned(b, u32::from(TAG_TRUE), TAG_TRUE))
+        .then_some((value, chain))
 }
 
 /// An arm that only traps: the conversion error on a tag that is neither.
@@ -285,7 +311,15 @@ fn arm_return(func: &HighFunction, region: &Region) -> Option<ValueId> {
 
 /// The value whose tag byte this is: `x & 0xFF` on `x` or its narrowing.
 fn tag_byte_of(func: &HighFunction, value: ValueId) -> Option<ValueId> {
-    let Expr::Binary { op: BinaryOp::BitAnd, lhs, rhs } = &func.bindings.get(resolve_use(func, value))?.expr else {
+    tag_byte_chain(func, value, &mut Vec::new())
+}
+
+/// As [`tag_byte_of`], also collecting the bindings the mask is spelled
+/// with, so a caller can tell them from a reader that wanted the `Val`.
+fn tag_byte_chain(func: &HighFunction, value: ValueId, chain: &mut Vec<ValueId>) -> Option<ValueId> {
+    let masked_id = resolve_use(func, value);
+    chain.push(masked_id);
+    let Expr::Binary { op: BinaryOp::BitAnd, lhs, rhs } = &func.bindings.get(masked_id)?.expr else {
         return None;
     };
     let masked = if int_literal(func, resolve_use(func, *rhs)) == Some(0xFF) {
@@ -296,6 +330,7 @@ fn tag_byte_of(func: &HighFunction, value: ValueId) -> Option<ValueId> {
         return None;
     };
     let masked = resolve_use(func, masked);
+    chain.push(masked);
     match &func.bindings.get(masked)?.expr {
         Expr::Unary { op: UnaryOp::Wrap32, value } => Some(resolve_use(func, *value)),
         _ => Some(masked),
