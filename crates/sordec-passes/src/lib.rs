@@ -92,7 +92,7 @@ pub use memory::{
     ArgPromotionPass, SlotPromotionPass, SretReturnPass, StoreForwardPass, UnrollFillLoopsPass,
 };
 pub use marshalling::{
-    ArgGuardElisionPass, DeadFrameStorePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
+    ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     OptionDefaultPass, OptionProbePass, OptionSretPass, OptionUnwrapPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
@@ -107,7 +107,7 @@ pub use refine::{
     AndMergePass, ConstBranchFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
     OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass,
     SwitchDedupPass,
-    TrapCallInlinePass, TrapInlinePass,
+    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass,
 };
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringCensusPass, StructuringStatsPass};
@@ -353,6 +353,9 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // A forwarded discriminant leaves its guard testing `0 != 1`;
             // the fold replaces the branch with the arm it always took.
             Box::new(ConstBranchFoldPass),
+            // The fold keeps one arm; a merge that arm alone now reaches is
+            // a rename of the one value it carries, and takes its type.
+            Box::new(TrivialPhiPass),
             // rustc's arithmetic overflow guard, in the group rather than
             // after it: a helper is only straight-line — and so only
             // inlinable — once its `if a < b { panic }` borrow check is
@@ -403,6 +406,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the Option passes, whose gates then see the payload rather
             // than a `Val` and its checks.
             Box::new(TypedReadPass),
+            // A typed read's `count + 1` arrives folded into the U32Val
+            // encode of the result; recover the addition, label its
+            // overflow check for the elision above, and name the stored
+            // value by its `u32`.
+            Box::new(FoldedEncodePass),
             Box::new(OptionSretPass),
             // `get(&k).unwrap_or(d)`: the probe's branch whose other arm
             // only merges constants. The read takes the default and the
@@ -479,7 +487,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..53],
+        vec![1..7, 31..55],
     )
 }
 
@@ -532,6 +540,7 @@ mod tests {
                 marshalling::wide_codec::PASS_NAME,
                 marshalling::forward::PASS_NAME,
                 refine::CONST_BRANCH_PASS_NAME,
+                refine::TRIVIAL_PHI_PASS_NAME,
                 refine::OVERFLOW_GUARD_PASS_NAME,
                 marshalling::guard::PASS_NAME,
                 interproc::inline::PASS_NAME,
@@ -539,6 +548,7 @@ mod tests {
                 TTL_AFTER_INLINE,
                 ENUM_KEY_AFTER_INLINE,
                 marshalling::typed_read::PASS_NAME,
+                marshalling::folded_encode::PASS_NAME,
                 marshalling::option_sret::PASS_NAME,
                 marshalling::option_default::PASS_NAME,
                 marshalling::udt_decode::PASS_NAME,

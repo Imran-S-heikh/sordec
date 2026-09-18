@@ -400,6 +400,11 @@ pub const MARSHALLING_OPTION_HELPERS_COLLAPSED: &str = "marshalling_option_helpe
 pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defaults_recovered";
 /// Storage reads whose SDK payload conversion folded into the read's type.
 pub const MARSHALLING_TYPED_READS: &str = "marshalling_typed_reads";
+/// Merges only one value still reached, retired to renames of it.
+pub const REFINE_TRIVIAL_PHIS: &str = "refine_trivial_phis";
+/// `U32Val` encodes whose folded addend was recovered as arithmetic, and
+/// stores of encodes named by their `u32`.
+pub const MARSHALLING_FOLDED_ENCODES: &str = "marshalling_folded_encodes";
 /// Calls to an argument-decode helper neutralised once their results
 /// were rebound.
 pub const MARSHALLING_DECODE_CALLS_ELIDED: &str = "marshalling_decode_calls_elided";
@@ -738,6 +743,8 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_OPTION_HELPERS_COLLAPSED,
         MARSHALLING_OPTION_DEFAULTS_RECOVERED,
         MARSHALLING_TYPED_READS,
+        REFINE_TRIVIAL_PHIS,
+        MARSHALLING_FOLDED_ENCODES,
         MARSHALLING_DECODE_CALLS_ELIDED,
         MARSHALLING_ENCODE_COLLAPSED,
         MARSHALLING_DISPATCH_FOLDED,

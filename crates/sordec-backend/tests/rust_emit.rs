@@ -57,8 +57,10 @@ fn hello_add_emits_a_real_add_body() {
         src.contains("pub fn add(e: Env, a: u64, b: u64) -> u64 {"),
         "spec method signature with env:\n{src}"
     );
-    // SSA destruction: a hoisted `let mut` phi, assigned and yielded.
-    assert!(src.contains("let mut v"), "phi hoisted as let mut:\n{src}");
+    // The merge the width dispatch left is reached by one value once that
+    // dispatch folds, so it is not a variable at all: the sum is yielded
+    // directly, as the source's `a + b` is.
+    assert!(!src.contains("let mut"), "no merge variable for a single value:\n{src}");
 
     // The arguments read as themselves: each decode collapsed to the
     // parameter it decodes, and the rename it left folds into its reader,
