@@ -52,6 +52,7 @@
 //! and epilogue go. Running them in one direction to a fixpoint converges
 //! because each strictly reduces the number of live marshalling bindings.
 
+pub mod bool_codec;
 pub mod decode;
 pub mod encode;
 pub mod frame;
@@ -70,6 +71,7 @@ pub mod udt_decode;
 pub mod wide_codec;
 pub mod wide_return;
 
+pub use bool_codec::BoolCodecPass;
 pub use dead_store::DeadFrameStorePass;
 pub use decode::ValDecodeCollapsePass;
 pub use encode::ValEncodeCollapsePass;
