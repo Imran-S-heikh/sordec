@@ -25,10 +25,10 @@
 //! the tie-break testing the same two high halves that the fallback
 //! compares. Anything less is some other use of `select`.
 
-use sordec_common::{Provenance, ProvenanceSource, ValueId};
+use sordec_common::{IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{BinaryOp, Expr, HighFunction, HighIr, IrType, KnownType, UnaryOp, WasmOpcodeKind};
 
-use crate::dataflow::resolve_use;
+use crate::dataflow::{resolve_use, trace_int};
 use crate::metrics_catalog::REFINE_WIDE_COMPARES as M_COMPARES;
 use crate::pass::{Pass, PassResult};
 
@@ -47,9 +47,33 @@ impl Pass<HighIr> for WideComparePass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
         for func in &mut ir.functions {
-            let found: Vec<_> =
-                func.bindings.iter().filter_map(|(id, b)| comparison(func, &b.expr).map(|c| (id, c))).collect();
-            for (id, (op, lhs, rhs)) in found {
+            let found: Vec<_> = func
+                .bindings
+                .iter()
+                .filter_map(|(id, b)| {
+                    comparison(func, &b.expr)
+                        .or_else(|| against_zero(func, &b.expr).map(|(op, a)| (op, a, zero_sentinel())))
+                        .map(|c| (id, c))
+                })
+                .collect();
+            for (id, (op, lhs, mut rhs)) in found {
+                // The zero side is not a value the function had; make one
+                // at the width the comparison is really at.
+                if rhs == zero_sentinel() {
+                    rhs = ValueId::from_index(func.bindings.len() as u32);
+                    func.bindings.push(sordec_ir::Binding::new(
+                        rhs,
+                        IrType::Inferred(KnownType::I128),
+                        Expr::Literal(sordec_ir::Literal::I64(0)),
+                        Provenance::new(PASS_NAME, ProvenanceSource::DataFlow, "the zero it is compared against"),
+                    ));
+                    for (_, block) in func.blocks.iter_mut() {
+                        if let Some(pos) = block.bindings.iter().position(|v| *v == id) {
+                            block.bindings.insert(pos, rhs);
+                            break;
+                        }
+                    }
+                }
                 if let Some(b) = func.bindings.get_mut(id) {
                     b.expr = Expr::Binary { op, lhs, rhs };
                     b.ty = IrType::Inferred(KnownType::Bool);
@@ -94,6 +118,70 @@ fn comparison(func: &HighFunction, expr: &Expr) -> Option<(BinaryOp, ValueId, Va
         return None;
     }
     Some((high_op, a, b))
+}
+
+/// Sentinel for "the right-hand side is the constant zero, which the
+/// function does not yet have a binding for".
+fn zero_sentinel() -> ValueId {
+    ValueId::from_index(u32::MAX)
+}
+
+/// The comparison against zero a `select` over one value's halves makes.
+///
+/// A bound of zero lets rustc drop one operand entirely: the high half
+/// decides unless it is zero, and then the low half — read unsigned, so
+/// `<= 0` on it is `== 0` and `> 0` is `!= 0`.
+///
+/// ```text
+/// select(lo(a) == 0, hi(a) <  0, hi(a) == 0)   →  a <= 0
+/// select(lo(a) != 0, hi(a) >  0, hi(a) == 0)   →  a >  0
+/// ```
+fn against_zero(func: &HighFunction, expr: &Expr) -> Option<(BinaryOp, ValueId)> {
+    let Expr::Unknown { op_kind: WasmOpcodeKind::Select, args, .. } = expr else {
+        return None;
+    };
+    let [on_equal, otherwise, tie] = args.as_slice() else {
+        return None;
+    };
+    let (on_equal, otherwise, tie) = (*on_equal, *otherwise, *tie);
+    // The tie-break: the high half is zero.
+    let a = is_zero(func, tie).and_then(|v| half_of(func, v, UnaryOp::WideHi))?;
+    // The fallback orders the same high half against zero.
+    let (op, hi, bound) = compare_of(func, otherwise)?;
+    if half_of(func, hi, UnaryOp::WideHi)? != a || trace_int(func, bound) != Some(0) {
+        return None;
+    }
+    // And the tie case asks the unsigned question of the low half.
+    let low = match op {
+        BinaryOp::Le => is_zero(func, on_equal),
+        BinaryOp::Gt => is_nonzero(func, on_equal),
+        _ => None,
+    }?;
+    (half_of(func, low, UnaryOp::WideLo)? == a).then_some((op, a))
+}
+
+/// The value a `x == 0` test names, however it is spelled.
+fn is_zero(func: &HighFunction, value: ValueId) -> Option<ValueId> {
+    match &func.bindings.get(resolve_use(func, value))?.expr {
+        Expr::Unary { op: UnaryOp::Eqz, value } => Some(resolve_use(func, *value)),
+        Expr::Binary { op: BinaryOp::Eq, lhs, rhs } => sided(func, *lhs, *rhs),
+        _ => None,
+    }
+}
+
+/// The value a `x != 0` test names.
+fn is_nonzero(func: &HighFunction, value: ValueId) -> Option<ValueId> {
+    match &func.bindings.get(resolve_use(func, value))?.expr {
+        Expr::Binary { op: BinaryOp::Ne, lhs, rhs } => sided(func, *lhs, *rhs),
+        _ => None,
+    }
+}
+
+/// Of a comparison against the constant zero, the other operand.
+fn sided(func: &HighFunction, lhs: ValueId, rhs: ValueId) -> Option<ValueId> {
+    [(lhs, rhs), (rhs, lhs)]
+        .into_iter()
+        .find_map(|(v, k)| (trace_int(func, k) == Some(0)).then(|| resolve_use(func, v)))
 }
 
 /// Whether this operator orders — equality decides nothing lexicographic.
