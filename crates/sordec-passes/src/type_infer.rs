@@ -932,6 +932,37 @@ pub(crate) fn known_of_type_ref(t: &TypeRef) -> Option<KnownType> {
     })
 }
 
+/// The spec primitive naming a recovered type, where one does.
+///
+/// The inverse of [`primitive_to_known`], for the recoveries that run
+/// the other way: something in the body proves a type and the
+/// *declaration* is what has to carry it. Composite and user-defined
+/// types have no primitive to name them and return `None`.
+pub(crate) fn primitive_of_known(k: &KnownType) -> Option<PrimitiveType> {
+    Some(match k {
+        KnownType::Val => PrimitiveType::Val,
+        KnownType::Bool => PrimitiveType::Bool,
+        KnownType::Unit => PrimitiveType::Void,
+        KnownType::Error => PrimitiveType::Error,
+        KnownType::U32 => PrimitiveType::U32,
+        KnownType::I32 => PrimitiveType::I32,
+        KnownType::U64 => PrimitiveType::U64,
+        KnownType::I64 => PrimitiveType::I64,
+        KnownType::Timepoint => PrimitiveType::Timepoint,
+        KnownType::Duration => PrimitiveType::Duration,
+        KnownType::U128 => PrimitiveType::U128,
+        KnownType::I128 => PrimitiveType::I128,
+        KnownType::U256 => PrimitiveType::U256,
+        KnownType::I256 => PrimitiveType::I256,
+        KnownType::Bytes => PrimitiveType::Bytes,
+        KnownType::String => PrimitiveType::String,
+        KnownType::Symbol => PrimitiveType::Symbol,
+        KnownType::Address => PrimitiveType::Address,
+        KnownType::MuxedAddress => PrimitiveType::MuxedAddress,
+        _ => return None,
+    })
+}
+
 fn primitive_to_known(p: PrimitiveType) -> KnownType {
     match p {
         PrimitiveType::Val => KnownType::Val,

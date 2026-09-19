@@ -65,6 +65,7 @@ pub mod option_default;
 pub mod option_probe;
 pub mod option_sret;
 pub mod option_unwrap;
+pub mod spec_from_guards;
 pub mod dead_store;
 pub mod folded_encode;
 pub mod forward;
@@ -95,6 +96,7 @@ pub use option_default::OptionDefaultPass;
 pub use option_probe::OptionProbePass;
 pub use option_sret::OptionSretPass;
 pub use option_unwrap::OptionUnwrapPass;
+pub use spec_from_guards::SpecFromGuardsPass;
 pub use wide_return::WideReturnPass;
 
 use sordec_common::{Provenance, ProvenanceSource, ValueId};

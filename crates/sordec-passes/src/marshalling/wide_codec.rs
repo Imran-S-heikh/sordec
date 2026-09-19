@@ -101,6 +101,20 @@ struct WideEncoder {
     ty: KnownType,
 }
 
+/// The 128-bit type a helper decodes, and which argument carries the
+/// `Val` it decodes, when `func` is one of those helpers.
+///
+/// Shared with [`super::spec_from_guards`], which reads it the other way
+/// round: with no spec section the helper's own tags are what says how
+/// the argument was declared.
+pub(crate) fn decoded_wide_type(func: &HighFunction) -> Option<(usize, KnownType)> {
+    classify_decoder(func).map(|d| (VAL_ARGUMENT, d.ty))
+}
+
+/// Which argument of a wide decode helper carries the `Val`; the first
+/// is the out-pointer, as [`classify_decoder`] requires.
+const VAL_ARGUMENT: usize = 1;
+
 /// Collapses 128-bit `Val` decodes and encodes.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WideCodecPass;

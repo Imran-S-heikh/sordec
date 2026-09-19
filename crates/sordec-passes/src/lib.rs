@@ -96,7 +96,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    BoolCodecPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    BoolCodecPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -345,6 +345,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // collapsing a decode makes its failure guard constant,
             // removing that guard makes the frame pointer dead, and a dead
             // frame pointer is what lets the bracket go.
+            // Before the elision group, and outside it: what it recovers
+            // is a *declaration*, which every gate below reads and none
+            // produces. Only fires where the module carries no spec.
+            Box::new(SpecFromGuardsPass),
             Box::new(ValDecodeCollapsePass),
             Box::new(ValEncodeCollapsePass),
             // The 128-bit codecs the two passes above decline on purpose:
@@ -565,7 +569,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..71],
+        vec![1..7, 32..72],
     )
 }
 

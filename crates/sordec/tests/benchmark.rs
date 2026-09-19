@@ -392,11 +392,28 @@ fn overall_band(name: &str) -> (f64, f64) {
     //
     // token-v22 structure 0.8615 -> 0.9063, token-v23 0.8123 -> 0.8565.
     // Aggregate 0.7988 -> 0.8025. Held-out mean unchanged at 0.7090.
+    // Re-centred 2026-09-20 — a contract with no spec section.
+    //
+    // The export table names every entrypoint and gives its arity, and
+    // `#[contractimpl]` compiles each declared parameter type into a
+    // check the body still carries. Reading both back gives the stripped
+    // fixture the dispatch wrapper it really has and the declarations
+    // the marshalling gates need, so its argument conversions relocate
+    // like any other contract's: structure 0.2322 -> 0.3057, bloat 5.5x
+    // -> 4.1x, overall 0.2917 -> 0.3133.
+    //
+    // Its interface stays 0.0000, and not for want of types: on the
+    // spec-XDR basis a signature's value includes each parameter's
+    // *name*, which no stripped binary carries. That contradicts the
+    // interface module's own stated rule (names excluded, types are the
+    // identity) and the source-basis extractor, which does exclude them
+    // — recorded in `plan/NOTES.md` for the basis negotiation rather
+    // than changed here, because changing it raises our own number.
     match name {
         "hello-add" => (0.99, 1.00),
         "token-v22" => (0.88, 0.92),
         "token-v23" => (0.79, 0.83),
-        "token-v23-stripped" => (0.27, 0.31),
+        "token-v23-stripped" => (0.29, 0.33),
         "timelock" => (0.84, 0.88),
         "dex-liquidity-pool" => (0.73, 0.77),
         "attestation" => (0.98, 1.0),

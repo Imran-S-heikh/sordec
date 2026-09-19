@@ -406,6 +406,12 @@ pub const MARSHALLING_BOOL_CODECS: &str = "marshalling_bool_codecs";
 pub const MARSHALLING_UDT_ENCODES: &str = "marshalling_udt_encodes";
 /// Struct-field decodes folded into the field's declared type.
 pub const MARSHALLING_FIELD_TYPES: &str = "marshalling_field_types";
+/// Entrypoint parameters whose declared type was read off the wrapper's
+/// own conversion check, where the module carries no spec section.
+pub const MARSHALLING_SPEC_PARAMS: &str = "marshalling_spec_params";
+/// Entrypoints recovered as returning nothing, because every return site
+/// hands back the constant `Void`.
+pub const MARSHALLING_SPEC_RETURNS: &str = "marshalling_spec_returns";
 /// Call-site projections replaced by the callee's constant return.
 pub const INTERPROC_CONST_RETURNS: &str = "interproc_const_returns";
 /// Helpers whose two-register wide return was promoted to the value.
@@ -776,6 +782,8 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_BOOL_CODECS,
         MARSHALLING_UDT_ENCODES,
         MARSHALLING_FIELD_TYPES,
+        MARSHALLING_SPEC_PARAMS,
+        MARSHALLING_SPEC_RETURNS,
         MARSHALLING_ENUM_DISCRIMINANTS,
         MARSHALLING_ENUM_ENCODES,
         INTERPROC_CONST_RETURNS,

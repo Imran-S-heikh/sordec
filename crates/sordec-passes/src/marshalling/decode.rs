@@ -140,6 +140,20 @@ pub(crate) struct DecodeHelper {
     tags: Vec<u8>,
 }
 
+impl DecodeHelper {
+    /// Which argument a call site hands the `Val` being decoded.
+    pub(crate) fn val_index(&self) -> usize {
+        self.val_index
+    }
+
+    /// Every tag this helper tests — what the decoded value's declared
+    /// type has to agree with, and, where there is no declaration,
+    /// what it is.
+    pub(crate) fn tags(&self) -> &[u8] {
+        &self.tags
+    }
+}
+
 /// The C1-elision pass: collapse argument decodes to their parameters.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ValDecodeCollapsePass;
