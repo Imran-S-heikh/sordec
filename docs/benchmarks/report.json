@@ -406,8 +406,9 @@
         "interface": {
           "checked": true,
           "notes": [
-            "entrypoints 0.0000  precision=n/a recall=0.0000 (13 original, 0 reconstructed)",
+            "entrypoints 0.0000  precision=0.0000 recall=0.0000 (13 original, 13 reconstructed)",
             "entrypoints missing: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn decimals, fn mint, … (+5)",
+            "entrypoints extra: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn decimals, fn mint, … (+5)",
             "types 0.0000  precision=n/a recall=0.0000 (4 original, 0 reconstructed)",
             "types missing: type AllowanceDataKey, type AllowanceValue, type DataKey, type SetAdmin"
           ],

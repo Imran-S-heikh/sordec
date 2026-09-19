@@ -46,10 +46,10 @@ use sordec_common::{
     Arena, BlockId, FuncId, IrId, Provenance, ProvenanceSource, UnknownReason, ValueId,
 };
 use sordec_ir::{
-    Binding, BinaryOp, BlockTarget, Expr, ExportKind, FunctionSignature, HighBlock, HighFunction,
-    HighIr, ImportKind, Import, IrType, LiftedFunction, LiftedIr, LiftedTerminator, LiftedValue,
-    LiftedValueDef, Literal, MemWidth, Region, SemanticOp, SorobanFacts, UnaryOp, WasmFacts,
-    WasmOp, WasmOpcodeKind,
+    Binding, BinaryOp, BlockTarget, Expr, ExportKind, FunctionParam, FunctionSignature, HighBlock,
+    HighFunction, HighIr, ImportKind, Import, IrType, LiftedFunction, LiftedIr, LiftedTerminator,
+    LiftedValue, LiftedValueDef, Literal, MemWidth, PrimitiveType, Region, SemanticOp,
+    SorobanFacts, TypeRef, UnaryOp, WasmFacts, WasmOp, WasmOpcodeKind,
 };
 use waffle::entity::EntityRef as _;
 
@@ -129,9 +129,18 @@ fn lower_function(
         .count() as u32;
 
     let name = recover_name(facts, func.id, imported_func_count);
-    let signature = name
-        .as_deref()
-        .and_then(|n| recover_signature(soroban_facts, n));
+    let arity = func
+        .blocks
+        .get(func.entry)
+        .map_or(0, |entry| entry.params.len());
+    let returns_a_value = func
+        .blocks
+        .iter()
+        .any(|(_, b)| matches!(&b.terminator, LiftedTerminator::Return { values } if !values.is_empty()));
+    let signature = name.as_deref().and_then(|n| {
+        recover_signature(soroban_facts, n)
+            .or_else(|| exported_signature(soroban_facts, n, arity, returns_a_value))
+    });
 
     let phi_edges = build_phi_edges(func);
     let ctx = LowerCtx {
@@ -232,6 +241,59 @@ fn recover_signature(
     name: &str,
 ) -> Option<FunctionSignature> {
     soroban_facts?.functions.get(name).cloned()
+}
+
+/// The signature an export implies when the module carries no
+/// `contractspecv0`.
+///
+/// A Soroban contract is invoked *by exported name*: the host looks the
+/// entrypoint up in the export table and hands it one `Val` per
+/// argument. So the export table names every entrypoint and gives its
+/// arity, and that is true of any deployed contract — the spec section
+/// is metadata a build can strip, the export table is the calling
+/// convention and cannot be.
+///
+/// What it does not give is types. Every parameter is recorded as the
+/// ABI's `Val`, which is exactly what the wasm says and no more, and the
+/// marshalling gates read the declaration rather than guess: a `Val`
+/// admits no tag, so nothing is elided on the strength of a signature
+/// recovered this way. The entrypoints are named, and the reconstruction
+/// gets the `#[contractimpl]` wrapper the contract really has.
+///
+/// Only when the spec is missing entirely. A module that has one and
+/// omits a function from it is telling us that function is not an
+/// entrypoint, and inventing one would contradict the evidence.
+fn exported_signature(
+    soroban_facts: Option<&SorobanFacts>,
+    name: &str,
+    arity: usize,
+    returns_a_value: bool,
+) -> Option<FunctionSignature> {
+    if soroban_facts.is_some_and(|f| !f.functions.is_empty()) {
+        return None;
+    }
+    if !is_entrypoint_export(name) {
+        return None;
+    }
+    let val = || TypeRef::Primitive(PrimitiveType::Val);
+    Some(FunctionSignature {
+        name: name.to_owned(),
+        inputs: (0..arity)
+            .map(|i| FunctionParam { name: format!("arg{i}"), ty: val() })
+            .collect(),
+        outputs: if returns_a_value { vec![val()] } else { vec![] },
+    })
+}
+
+/// Whether an exported function name is a contract entrypoint rather
+/// than linker furniture.
+///
+/// `_` is what the Rust wasm target exports for its entry shim, and
+/// `__data_end` / `__heap_base` are the allocator's bounds — none is
+/// callable as a contract function. `__constructor` looks like furniture
+/// and is not: it is a Soroban entrypoint with a reserved name.
+fn is_entrypoint_export(name: &str) -> bool {
+    !matches!(name, "_" | "__data_end" | "__heap_base" | "memory")
 }
 
 /// Build the phi-edge map for a function in one forward pass: for each

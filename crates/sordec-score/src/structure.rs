@@ -218,6 +218,7 @@ fn score_entrypoints(
         }
 
         census.observe(&ours, &theirs);
+        trace_streams(name, &ours, &theirs);
         let sim = function_similarity(&ours, &theirs);
         total += sim;
         measured += 1;
@@ -350,6 +351,19 @@ fn function_similarity(a: &[String], b: &[String]) -> f64 {
     let (ca, cb) = (content(a), content(b));
     let bag = simil::multiset_similarity(&simil::multiset(&ca), &simil::multiset(&cb));
     SEQUENCE_WEIGHT * seq + MULTISET_WEIGHT * bag
+}
+
+/// The two token streams an entrypoint's number is computed from,
+/// printed when `SORDEC_SCORE_STREAMS` is set.
+///
+/// Every structure figure in the report is a summary of these, and
+/// working back from a summary to the construct that caused it is
+/// guesswork. Reading them out is how a surplus `if` gets found.
+#[allow(clippy::print_stderr)]
+fn trace_streams(name: &str, ours: &[String], theirs: &[String]) {
+    if std::env::var_os("SORDEC_SCORE_STREAMS").is_some() {
+        eprintln!("[streams] {name}\n  ours:   {ours:?}\n  theirs: {theirs:?}");
+    }
 }
 
 /// A skeleton stream with the [`CLOSE`] markers removed.
