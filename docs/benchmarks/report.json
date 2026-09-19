@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.7945947003871184,
-  "aggregate_overall_with_behavior": 0.7945947003871184,
+  "aggregate_overall": 0.7973958208352979,
+  "aggregate_overall_with_behavior": 0.7973958208352979,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -233,7 +233,7 @@
         "behavior": {
           "checked": false,
           "notes": [
-            "behavior unavailable: both modules build and load, but no entrypoint could be driven — 0 of 2 entrypoints drivable (skipped — claim: parameter `claimant` is an Address, which needs a value constructed against a live host; deposit: parameter `from` is an Address, which needs a value constructed against a live host)"
+            "behavior unavailable: crate does not build: error[E0382]: use of moved value: `token`"
           ],
           "score": 0.0,
           "weight": 0.15
@@ -261,10 +261,10 @@
           "notes": [
             "2 entrypoints (0 unreconstructed, 0 without control flow)",
             "ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.5000 recall=1.0000 (5 original tokens, 10 reconstructed) — bloat 2.0x, dice ceiling ~0.6667",
-            "low-similarity: claim(0.67), deposit(0.67)"
+            "control flow: precision=0.5556 recall=1.0000 (5 original tokens, 9 reconstructed) — bloat 1.8x, dice ceiling ~0.7143",
+            "low-similarity: claim(0.67)"
           ],
-          "score": 0.6666666666666666,
+          "score": 0.7333333333333334,
           "weight": 0.25
         }
       },
@@ -275,7 +275,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 2 entrypoints, 4 types recovered"
       ],
-      "overall": 0.8411088573360377,
+      "overall": 0.8607167004732926,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,

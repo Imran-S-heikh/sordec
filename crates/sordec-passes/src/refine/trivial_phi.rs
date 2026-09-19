@@ -54,6 +54,27 @@ impl Pass<HighIr> for TrivialPhiPass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
         for func in &mut ir.functions {
+            // A merge nothing reads takes no assignments. The value is
+            // still merged by the CFG, but the region need not say so,
+            // and while it does the arms that feed it cannot be seen as
+            // doing nothing — which is what keeps a branch alive after
+            // the elisions have taken everything that read it.
+            let unread = unread_phis(func);
+            if !unread.is_empty() {
+                let region = std::mem::replace(&mut func.region, Region::Unreachable);
+                func.region = drop_assignments(region, &unread);
+                for id in &unread {
+                    if let Some(b) = func.bindings.get_mut(*id) {
+                        b.expr = Expr::Phi { incoming: Vec::new() };
+                        b.add_provenance(Provenance::new(
+                            PASS_NAME,
+                            ProvenanceSource::DataFlow,
+                            "a merge nothing reads: its assignments are gone",
+                        ));
+                    }
+                }
+                result.changed = true;
+            }
             let retired = plan(func);
             if retired.is_empty() {
                 continue;
@@ -167,6 +188,50 @@ fn substitute(region: Region, retired: &HashMap<ValueId, ValueId>) -> Region {
 }
 
 /// `region` with every assignment to a retired merge removed.
+/// Merges no binding and no region node reads.
+///
+/// A `Transfer`'s destination is not a read of the merge — it is the
+/// assignment this looks for — so the walk counts the sources only.
+fn unread_phis(func: &HighFunction) -> HashSet<ValueId> {
+    let mut read: HashSet<ValueId> = HashSet::new();
+    let note = |func: &HighFunction, v: ValueId, read: &mut HashSet<ValueId>| {
+        read.insert(v);
+        read.insert(resolve_use(func, v));
+    };
+    for (_, b) in func.bindings.iter() {
+        b.expr.for_each_value_use(|u| note(func, u, &mut read));
+    }
+    func.region.for_each_node(|node| match node {
+        Region::If { cond, .. } => note(func, *cond, &mut read),
+        Region::Switch { index, dispatch, .. } => {
+            note(func, *index, &mut read);
+            if let Some(d) = dispatch {
+                note(func, *d, &mut read);
+            }
+        }
+        Region::Return { values } => {
+            for v in values {
+                note(func, *v, &mut read);
+            }
+        }
+        Region::Transfer { transfer, .. }
+        | Region::Break { transfer, .. }
+        | Region::Continue { transfer, .. } => {
+            for (_, src) in transfer {
+                note(func, *src, &mut read);
+            }
+        }
+        _ => {}
+    });
+    func.bindings
+        .iter()
+        .filter(|(id, b)| {
+            matches!(&b.expr, Expr::Phi { incoming } if !incoming.is_empty()) && !read.contains(id)
+        })
+        .map(|(id, _)| id)
+        .collect()
+}
+
 fn drop_assignments(region: Region, retired: &HashSet<ValueId>) -> Region {
     let keep = |transfer: Vec<(ValueId, ValueId)>| -> Vec<(ValueId, ValueId)> {
         transfer.into_iter().filter(|(phi, _)| !retired.contains(phi)).collect()
