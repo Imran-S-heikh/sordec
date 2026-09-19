@@ -402,6 +402,12 @@ pub enum PanicKind {
     /// assumed, so that eliding it stays a separate, reviewable decision
     /// from recognizing it.
     ArithOverflow,
+    /// The pair of checks rustc puts in front of an integer division: the
+    /// divisor against zero, and `MIN / -1`. Unlike
+    /// [`ArithOverflow`](Self::ArithOverflow) these do not depend on
+    /// `overflow-checks` — Rust's `/` and `%` panic on both regardless —
+    /// so re-emitting the division regenerates them unconditionally.
+    DivisionGuard,
 }
 
 /// One arm of a [`Region::Switch`].

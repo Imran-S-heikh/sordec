@@ -39,7 +39,7 @@ mod dispatch_link;
 mod guard_clause;
 mod loop_classify;
 mod overflow_guard;
-mod panic_recover;
+pub mod panic_recover;
 mod polarity;
 mod scope_fallthrough;
 mod scope_if_else;

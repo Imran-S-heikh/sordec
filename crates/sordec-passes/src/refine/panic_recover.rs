@@ -39,7 +39,7 @@ use sordec_common::{
     Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, ValueId,
 };
 use sordec_ir::{
-    BinaryOp, Expr, HighFunction, HighIr, KnownOp, Literal, PanicKind, Region, SemanticOp,
+    BinaryOp, Expr, HighFunction, HighIr, KnownOp, Literal, PanicKind, Region, SemanticOp, UnaryOp,
 };
 
 use super::debug_validate;
@@ -56,6 +56,14 @@ const M_BARE: &str = "refine_bare_panics";
 const M_UNWRAP: &str = "refine_unwraps";
 /// Trap leaves typed as rustc's arithmetic overflow check.
 const M_ARITH_OVERFLOW: &str = "refine_arith_overflows";
+const M_DIVISION_GUARD: &str = "refine_division_guards";
+
+/// What a re-run of this pass inside the elision group has to say. The
+/// division guards it can only classify once the 128-bit division they
+/// stand in front of has been recovered, which happens in that group; the
+/// bare/unwrap split was settled on the first run and re-reporting it
+/// would double every count.
+pub const RESOLUTION_COUNTERS: &[&str] = &[M_DIVISION_GUARD];
 
 /// The `Val` tag mask — a cond comparing `x & 0xFF` against a constant
 /// is the SDK's small-vs-object tag dispatch, i.e. an unwrap shape.
@@ -86,6 +94,9 @@ impl Pass<HighIr> for PanicRecoverPass {
             result.metrics.increment(M_UNWRAP, stats.unwraps);
             result.changed = true;
         }
+        if stats.division_guards > 0 {
+            result.metrics.increment(M_DIVISION_GUARD, stats.division_guards);
+        }
         if stats.arith_overflows > 0 {
             result.metrics.increment(M_ARITH_OVERFLOW, stats.arith_overflows);
             result.changed = true;
@@ -100,6 +111,7 @@ struct Stats {
     bare: i64,
     unwraps: i64,
     arith_overflows: i64,
+    division_guards: i64,
 }
 
 /// Bottom-up rewrite: children first, then this node's own trap shapes.
@@ -220,7 +232,7 @@ fn retype_trailing_trap(
     let kind = classify(cond, func);
     // Only an overflow classification may claim a trap the fallthrough
     // rule has already typed — see the doc comment.
-    let retypes_bare = kind == PanicKind::ArithOverflow;
+    let retypes_bare = matches!(kind, PanicKind::ArithOverflow | PanicKind::DivisionGuard);
     if retypes_bare && is_bare_panic(then_region) {
         retract_bare(func_id, stats, result);
         *then_region = typed_panic(kind, Some(cond), func_id, stats, result);
@@ -273,14 +285,98 @@ fn typed_panic(
         }
         PanicKind::Unwrap => stats.unwraps += 1,
         PanicKind::ArithOverflow => stats.arith_overflows += 1,
+        PanicKind::DivisionGuard => stats.division_guards += 1,
     }
     Region::Panic { kind }
 }
 
 /// Classify a guard condition: `Val` tag evidence marks the trap as an
 /// unwrap; a carry/borrow test on one arithmetic binding marks it as
-/// rustc's overflow check; anything else is a bare panic.
+/// rustc's overflow check; a test on the operands of a division it stands
+/// in front of marks it as that division's guard; anything else is a bare
+/// panic.
 fn classify(cond: ValueId, func: &HighFunction) -> PanicKind {
+    if is_division_guard(func, cond) {
+        return PanicKind::DivisionGuard;
+    }
+    classify_other(cond, func)
+}
+
+/// Whether this condition is one of the two checks rustc puts in front of
+/// an integer division, tested against the operands of a division this
+/// function actually performs.
+///
+/// ```text
+/// eqz(d)                                   → d == 0
+/// eqz(lo(n) | (hi(n) ^ i64::MIN))          → n == i128::MIN
+/// ```
+///
+/// The second is only ever reached under `(lo(d) & hi(d)) == -1`, which is
+/// `d == -1`; that outer branch carries no trap of its own and falls away
+/// once this one does.
+///
+/// Requiring the tested value to be an operand of a *recovered* division
+/// is what makes the elision safe: the reconstruction emits `n / d`, and
+/// Rust's `/` panics on both conditions whatever the profile says. A
+/// source that wrote its own `if d == 0 { panic!() }` in front of a
+/// division would be mistaken for this and lose that line — the program
+/// still traps in the same place, on the division, so what is lost is the
+/// line and not the behaviour.
+fn is_division_guard(func: &HighFunction, cond: ValueId) -> bool {
+    let mut numerators = Vec::new();
+    let mut divisors = Vec::new();
+    for (_, b) in func.bindings.iter() {
+        if let Expr::Binary { op: BinaryOp::Div | BinaryOp::Rem, lhs, rhs } = &b.expr {
+            numerators.push(resolve_use(func, *lhs));
+            divisors.push(resolve_use(func, *rhs));
+        }
+    }
+    if divisors.is_empty() {
+        return false;
+    }
+    let Some(Expr::Unary { op: UnaryOp::Eqz, value }) =
+        func.bindings.get(resolve_use(func, cond)).map(|b| &b.expr)
+    else {
+        return false;
+    };
+    let tested = resolve_use(func, *value);
+    if divisors.contains(&tested) {
+        return true;
+    }
+    // `lo(n) | (hi(n) ^ i64::MIN)`, in either operand order.
+    let Some(Expr::Binary { op: BinaryOp::BitOr, lhs, rhs }) =
+        func.bindings.get(tested).map(|b| &b.expr)
+    else {
+        return false;
+    };
+    [(*lhs, *rhs), (*rhs, *lhs)].into_iter().any(|(low, high)| {
+        limb_of(func, low, UnaryOp::WideLo)
+            .zip(min_xor(func, high))
+            .is_some_and(|(a, b)| a == b && numerators.contains(&a))
+    })
+}
+
+/// The value `half(x)` names, when it is that half of something.
+fn limb_of(func: &HighFunction, value: ValueId, want: UnaryOp) -> Option<ValueId> {
+    match &func.bindings.get(resolve_use(func, value))?.expr {
+        Expr::Unary { op, value } if *op == want => Some(resolve_use(func, *value)),
+        _ => None,
+    }
+}
+
+/// The value `hi(x) ^ i64::MIN` names.
+fn min_xor(func: &HighFunction, value: ValueId) -> Option<ValueId> {
+    let Expr::Binary { op: BinaryOp::BitXor, lhs, rhs } =
+        &func.bindings.get(resolve_use(func, value))?.expr
+    else {
+        return None;
+    };
+    [(*lhs, *rhs), (*rhs, *lhs)].into_iter().find_map(|(half, mask)| {
+        (trace_int(func, mask) == Some(i128::from(i64::MIN))).then(|| limb_of(func, half, UnaryOp::WideHi))?
+    })
+}
+
+fn classify_other(cond: ValueId, func: &HighFunction) -> PanicKind {
     // Through any `Use` chain: an elision that replaced a load with the
     // value it read leaves the guard's condition one alias away from the
     // expression that classifies it.

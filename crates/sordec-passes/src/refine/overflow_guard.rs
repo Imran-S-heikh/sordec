@@ -52,7 +52,9 @@
 //! outlines most of them into shared helpers, and those helper bodies are
 //! the `sub`-borrow shape.
 
-use sordec_common::{Diagnostic, LiftDiagnosticCode};
+use std::collections::HashSet;
+
+use sordec_common::{BlockId, Diagnostic, LiftDiagnosticCode};
 use sordec_ir::{HighFunction, HighIr, PanicKind, Region};
 
 use super::debug_validate;
@@ -77,8 +79,9 @@ impl Pass<HighIr> for OverflowGuardElisionPass {
         let mut elided: i64 = 0;
         for func in &mut ir.functions {
             let before = elided;
+            let inert = inert_blocks(func);
             let region = std::mem::replace(&mut func.region, Region::Unreachable);
-            func.region = strip(region, &mut elided);
+            func.region = strip(region, &mut elided, &inert);
             // One diagnostic per removal. Deleting a reachable trap is a
             // behavioural claim; it should be reviewable without diffing
             // two decompilations.
@@ -113,18 +116,18 @@ fn func_prefix(func: &HighFunction) -> String {
 }
 
 /// Bottom-up rewrite dropping every overflow guard.
-fn strip(region: Region, elided: &mut i64) -> Region {
+fn strip(region: Region, elided: &mut i64, inert: &HashSet<BlockId>) -> Region {
     match region {
         Region::Sequence(items) => {
-            seq(items.into_iter().map(|item| strip(item, elided)).collect())
+            seq(items.into_iter().map(|item| strip(item, elided, inert)).collect())
         }
         Region::Scope { out, body } => Region::Scope {
             out,
-            body: Box::new(strip(*body, elided)),
+            body: Box::new(strip(*body, elided, inert)),
         },
         Region::Loop { header, body, kind } => Region::Loop {
             header,
-            body: Box::new(strip(*body, elided)),
+            body: Box::new(strip(*body, elided, inert)),
             kind,
         },
         Region::Switch {
@@ -137,11 +140,11 @@ fn strip(region: Region, elided: &mut i64) -> Region {
             arms: arms
                 .into_iter()
                 .map(|mut arm| {
-                    arm.body = strip(arm.body, elided);
+                    arm.body = strip(arm.body, elided, inert);
                     arm
                 })
                 .collect(),
-            default: Box::new(strip(*default, elided)),
+            default: Box::new(strip(*default, elided, inert)),
             dispatch,
         },
         Region::If {
@@ -153,10 +156,19 @@ fn strip(region: Region, elided: &mut i64) -> Region {
                 *elided += 1;
                 return seq(vec![]);
             }
+            let then_region = strip(*then_region, elided, inert);
+            let else_region = else_region.map(|e| strip(*e, elided, inert));
+            // Both arms now empty: the division guards come in a pair, and
+            // the `d == -1` test that selects between them carries no trap
+            // of its own. Once the trap inside it goes, the branch decides
+            // between doing nothing and doing nothing.
+            if empty(&then_region, inert) && else_region.as_ref().is_none_or(|e| empty(e, inert)) {
+                return seq(vec![]);
+            }
             Region::If {
                 cond,
-                then_region: Box::new(strip(*then_region, elided)),
-                else_region: else_region.map(|e| Box::new(strip(*e, elided))),
+                then_region: Box::new(then_region),
+                else_region: else_region.map(Box::new),
             }
         }
         leaf @ (Region::Basic(_)
@@ -170,6 +182,28 @@ fn strip(region: Region, elided: &mut i64) -> Region {
     }
 }
 
+/// Blocks that compute nothing anyone reads: no bindings at all, or only
+/// pure ones the rest of the function has stopped reading. Dropping the
+/// branch that reaches such a block drops nothing.
+fn inert_blocks(func: &HighFunction) -> HashSet<BlockId> {
+    let order = crate::marshalling::sret::emission_order(func);
+    let dead = crate::dataflow::dead_residue(func, &order);
+    func.blocks
+        .iter()
+        .filter(|(_, block)| block.bindings.iter().all(|v| dead.contains(v)))
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// A region that does nothing at all.
+fn empty(region: &Region, inert: &HashSet<BlockId>) -> bool {
+    match region {
+        Region::Sequence(items) => items.iter().all(|item| empty(item, inert)),
+        Region::Basic(b) => inert.contains(b),
+        _ => false,
+    }
+}
+
 /// A guard arm that does nothing but reach the overflow panic.
 ///
 /// The panic glue arrives as `Seq([Basic(call core::panicking), Panic])`,
@@ -179,7 +213,7 @@ fn strip(region: Region, elided: &mut i64) -> Region {
 fn is_overflow_trap(region: &Region) -> bool {
     match region {
         Region::Panic {
-            kind: PanicKind::ArithOverflow,
+            kind: PanicKind::ArithOverflow | PanicKind::DivisionGuard,
         } => true,
         Region::Sequence(items) => {
             items.last().is_some_and(is_overflow_trap)
@@ -220,10 +254,45 @@ mod tests {
         }
     }
 
+    /// No block is inert unless a test says so: these shapes are about
+    /// the trap, not about what the arms compute.
     fn run(region: Region) -> (Region, i64) {
+        run_with(region, &HashSet::new())
+    }
+
+    fn run_with(region: Region, inert: &HashSet<BlockId>) -> (Region, i64) {
         let mut n = 0;
-        let out = strip(region, &mut n);
+        let out = strip(region, &mut n, inert);
         (out, n)
+    }
+
+    /// The `MIN / -1` pair: the inner guard holds the trap, the outer
+    /// branch only chooses whether to reach it. Both go.
+    #[test]
+    fn a_branch_left_with_nothing_in_either_arm_goes_too() {
+        let inner = guard(PanicKind::DivisionGuard);
+        let region = Region::If {
+            cond: ValueId::from_index(9),
+            then_region: Box::new(Region::Basic(bb(7))),
+            else_region: Some(Box::new(inner)),
+        };
+        let inert: HashSet<BlockId> = [bb(7)].into_iter().collect();
+        let (out, n) = run_with(region, &inert);
+        assert_eq!(n, 1);
+        assert!(matches!(out, Region::Sequence(ref s) if s.is_empty()));
+    }
+
+    /// An arm that still computes something keeps its branch.
+    #[test]
+    fn a_branch_whose_other_arm_works_stays() {
+        let region = Region::If {
+            cond: ValueId::from_index(9),
+            then_region: Box::new(Region::Basic(bb(7))),
+            else_region: Some(Box::new(guard(PanicKind::DivisionGuard))),
+        };
+        let (out, n) = run_with(region, &HashSet::new());
+        assert_eq!(n, 1, "the guard itself still goes");
+        assert!(matches!(out, Region::If { .. }), "the branch stays");
     }
 
     #[test]

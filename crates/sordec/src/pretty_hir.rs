@@ -449,6 +449,9 @@ fn render_region(
             PanicKind::ArithOverflow => {
                 writeln!(out, "{ind}panic!()  ;; rustc arithmetic overflow check")?;
             }
+            PanicKind::DivisionGuard => {
+                writeln!(out, "{ind}panic!()  ;; rustc division guard")?;
+            }
         },
         Region::Unstructured { entry, .. } => {
             // Not reached from render_function (it routes Unstructured

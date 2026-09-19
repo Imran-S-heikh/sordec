@@ -196,6 +196,8 @@ pub const CONST_PROP_AFTER_INLINE: &str = "const-prop-after-inline";
 pub const TTL_AFTER_INLINE: &str = "ttl-after-inline";
 /// [`EnumKeyPass`] re-run after the inliner; see [`default_high_pipeline`].
 pub const ENUM_KEY_AFTER_INLINE: &str = "enum-key-after-inline";
+/// Name of the panic-recovery re-run inside the elision group.
+pub const PANIC_RECOVER_AFTER_RECOVERY: &str = "panic-recover-after-recovery";
 
 /// Build the default high-IR pattern-recovery pipeline.
 ///
@@ -364,6 +366,14 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // inlinable — once its `if a < b { panic }` borrow check is
             // gone. It removes guards and rewrites no binding, so the
             // group's measure still strictly decreases.
+            // Again, now that the group has recovered the 128-bit
+            // divisions: a guard is only recognizable as a division's own
+            // once there is a division to attribute it to.
+            Box::new(pass::Rerun::new(
+                PanicRecoverPass,
+                PANIC_RECOVER_AFTER_RECOVERY,
+                refine::panic_recover::RESOLUTION_COUNTERS,
+            )),
             Box::new(OverflowGuardElisionPass),
             // `WideReturnPass` belongs here, strictly after the decode
             // collapse. It is not registered yet: it needs a dominance
@@ -519,7 +529,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..62],
+        vec![1..7, 31..63],
     )
 }
 
@@ -574,6 +584,7 @@ mod tests {
                 refine::CONST_BRANCH_PASS_NAME,
                 refine::TRIVIAL_PHI_PASS_NAME,
                 refine::WIDTH_FOLD_PASS_NAME,
+                PANIC_RECOVER_AFTER_RECOVERY,
                 refine::OVERFLOW_GUARD_PASS_NAME,
                 marshalling::guard::PASS_NAME,
                 interproc::const_return::PASS_NAME,
