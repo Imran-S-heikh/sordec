@@ -83,8 +83,12 @@ impl Pass<HighIr> for BoolCodecPass {
             let folded = encodings(func);
             let tests = marker_tests(func, &folded);
             let widened = widenings(func, &folded);
+            let masked = masks(func, &folded);
             for (id, value) in &folded {
                 retype(func, *id, Expr::Use(*value), "the `bool` this encoding was made from");
+            }
+            for (id, value) in masked {
+                retype(func, id, Expr::Use(value), "the low bit of a `bool` encoding is the `bool`");
             }
             for (id, value) in widened {
                 retype(func, id, Expr::Use(value), "the widening of a `bool` to its `Val` is the `bool`");
@@ -156,15 +160,46 @@ fn encodings(func: &HighFunction) -> Vec<(ValueId, ValueId)> {
             if !is_bool(func, value) {
                 return None;
             }
-            // The `false` arm: the tag byte of the same value decides
-            // between the encoding of `false` and the void marker.
-            let [marker, on_zero, byte] =
-                select_args(&func.bindings.get(resolve_use(func, on_false))?.expr)?;
-            (int_literal(func, marker)? == i128::from(TAG_VOID)).then_some(())?;
-            (int_literal(func, on_zero)? == i128::from(TAG_FALSE)).then_some(())?;
-            (tag_byte_of(func, byte)? == value).then_some((id, value))
+            // The `false` arm decides between the encoding of `false` and
+            // the void marker, and rustc spells it two ways.
+            other_arm(func, on_false, value).then_some((id, value))
         })
         .collect()
+}
+
+/// The arm taken when the value is not `Tag::True`: it yields the
+/// encoding of `false` when the value is `Tag::False`, and the void
+/// marker when it is neither.
+///
+/// ```text
+/// select(Void, False, tag_byte(v))     the tag byte decides
+/// (!has_tag(v, False)) << 1            0 when it is False, 2 when not
+/// ```
+///
+/// The shift is the same statement arithmetically: `Tag::Void` is 2 and
+/// `Tag::False` is 0, so doubling the "is not false" flag gives one or
+/// the other.
+fn other_arm(func: &HighFunction, arm: ValueId, value: ValueId) -> bool {
+    let Some(expr) = func.bindings.get(resolve_use(func, arm)).map(|b| &b.expr) else {
+        return false;
+    };
+    if let Some([marker, on_zero, byte]) = select_args(expr) {
+        return int_literal(func, marker) == Some(i128::from(TAG_VOID))
+            && int_literal(func, on_zero) == Some(i128::from(TAG_FALSE))
+            && tag_byte_of(func, byte) == Some(value);
+    }
+    let Expr::Binary { op: BinaryOp::Shl, lhs, rhs } = expr else {
+        return false;
+    };
+    // One doubling, of the "not false" test on the same value.
+    if int_literal(func, resolve_use(func, *rhs)) != Some(1) {
+        return false;
+    }
+    matches!(
+        func.bindings.get(resolve_use(func, *lhs)).map(|b| &b.expr),
+        Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value: v, tag, negated: true })))
+            if *tag == TAG_FALSE && resolve_use(func, *v) == value
+    )
 }
 
 /// The widening of a folded encoding to a full `Val`. A `bool` is its tag,
@@ -178,6 +213,24 @@ fn widenings(func: &HighFunction, folded: &[(ValueId, ValueId)]) -> Vec<(ValueId
             };
             let target = resolve_use(func, *value);
             folded.iter().find(|(f, _)| *f == target).map(|(_, v)| (id, *v))
+        })
+        .collect()
+}
+
+/// `encoding & 1`, which reads the flag back out. A `bool` encoding is 0
+/// or 1, so masking its low bit gives it back.
+fn masks(func: &HighFunction, folded: &[(ValueId, ValueId)]) -> Vec<(ValueId, ValueId)> {
+    func.bindings
+        .iter()
+        .filter_map(|(id, b)| {
+            let Expr::Binary { op: BinaryOp::BitAnd, lhs, rhs } = &b.expr else {
+                return None;
+            };
+            [(*lhs, *rhs), (*rhs, *lhs)].into_iter().find_map(|(value, mask)| {
+                (int_literal(func, resolve_use(func, mask))? == 1).then_some(())?;
+                let target = resolve_use(func, value);
+                folded.iter().find(|(f, _)| *f == target).map(|(_, v)| (id, *v))
+            })
         })
         .collect()
 }
@@ -426,6 +479,45 @@ mod tests {
         assert!(matches!(f.bindings.get(v(9)).unwrap().expr, Expr::Use(x) if x == v(0)));
         assert!(matches!(f.bindings.get(v(10)).unwrap().expr, Expr::Literal(Literal::Bool(true))));
         assert!(matches!(f.bindings.get(v(11)).unwrap().expr, Expr::Use(x) if x == v(0)), "the widening too");
+    }
+
+    /// The other spelling of the `false` arm: `(!has_tag(v, False)) << 1`
+    /// is 0 when the value is false and the void marker when it is not a
+    /// bool at all. The mask that reads the flag back out goes with it.
+    #[test]
+    fn the_shift_spelling_of_the_false_arm_is_recognized_too() {
+        let mut m = module(vec![{
+            let mut f = func_with(
+                vec![
+                    Expr::Phi { incoming: vec![] },                      // v0
+                    Expr::Literal(Literal::I32(1)),                      // v1
+                    Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                        value: v(0),
+                        tag: TAG_FALSE,
+                        negated: true,
+                    })), // v2
+                    Expr::Binary { op: BinaryOp::Shl, lhs: v(2), rhs: v(1) }, // v3
+                    Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                        value: v(0),
+                        tag: TAG_TRUE,
+                        negated: false,
+                    })), // v4
+                    select(v(1), v(3), v(4)),                            // v5
+                    Expr::Binary { op: BinaryOp::BitAnd, lhs: v(5), rhs: v(1) }, // v6
+                ],
+                vec![v(0)],
+                vec![1, 2, 3, 4, 5, 6],
+            );
+            f.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(KnownType::Bool);
+            f
+        }]);
+        assert!(BoolCodecPass.run(&mut m).changed);
+        let f = &m.functions[0];
+        assert!(matches!(f.bindings.get(v(5)).unwrap().expr, Expr::Use(x) if x == v(0)));
+        assert!(
+            matches!(f.bindings.get(v(6)).unwrap().expr, Expr::Use(x) if x == v(0)),
+            "the low bit of the encoding is the bool"
+        );
     }
 
     /// The same shape on an untyped value is a real conversion.
