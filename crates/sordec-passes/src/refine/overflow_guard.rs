@@ -200,6 +200,10 @@ fn empty(region: &Region, inert: &HashSet<BlockId>) -> bool {
     match region {
         Region::Sequence(items) => items.iter().all(|item| empty(item, inert)),
         Region::Basic(b) => inert.contains(b),
+        // A fall-through to the join. It assigns the join's block
+        // parameters; with nothing to assign it is the arm doing nothing
+        // and then arriving, which is what both arms do anyway.
+        Region::Transfer { transfer, .. } => transfer.is_empty(),
         _ => false,
     }
 }
@@ -280,6 +284,39 @@ mod tests {
         let (out, n) = run_with(region, &inert);
         assert_eq!(n, 1);
         assert!(matches!(out, Region::Sequence(ref s) if s.is_empty()));
+    }
+
+    /// The fall-through arms carry an empty block-parameter transfer,
+    /// which assigns nothing.
+    #[test]
+    fn a_branch_whose_arms_only_fall_through_goes() {
+        let region = Region::If {
+            cond: ValueId::from_index(9),
+            then_region: Box::new(Region::Transfer { target: bb(7), transfer: vec![] }),
+            else_region: Some(Box::new(Region::Sequence(vec![
+                guard(PanicKind::DivisionGuard),
+                Region::Transfer { target: bb(7), transfer: vec![] },
+            ]))),
+        };
+        let (out, n) = run_with(region, &HashSet::new());
+        assert_eq!(n, 1);
+        assert!(matches!(out, Region::Sequence(ref s) if s.is_empty()));
+    }
+
+    /// A transfer that assigns something is work.
+    #[test]
+    fn a_branch_whose_arm_assigns_a_parameter_stays() {
+        let region = Region::If {
+            cond: ValueId::from_index(9),
+            then_region: Box::new(Region::Transfer {
+                target: bb(7),
+                transfer: vec![(ValueId::from_index(1), ValueId::from_index(2))],
+            }),
+            else_region: Some(Box::new(guard(PanicKind::DivisionGuard))),
+        };
+        let (out, n) = run_with(region, &HashSet::new());
+        assert_eq!(n, 1);
+        assert!(matches!(out, Region::If { .. }));
     }
 
     /// An arm that still computes something keeps its branch.
