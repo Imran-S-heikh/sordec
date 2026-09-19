@@ -86,7 +86,8 @@ pub use arith::{I128BuiltinPass, WideFoldPass};
 pub use attribution::SdkAttributionPass;
 pub use recognizers::symbol_encoder::SymbolEncoderPass;
 pub use interproc::{
-    ConstReturnPass, SpecializePass, StructArgPass, WideReturnPromotePass, WrapperInlinePass,
+    ConstReturnPass, SpecializePass, StructArgPass, WideParamPass, WideReturnPromotePass,
+    WrapperInlinePass,
 };
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
@@ -109,7 +110,7 @@ pub use refine::{
     AndMergePass, ConstBranchFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
     OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass, SelectReturnPass,
     SwitchDedupPass,
-    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WideComparePass, WideZeroPass, WidthFoldPass,
+    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WideArithPass, WideComparePass, WideZeroPass, WidthFoldPass,
 };
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringCensusPass, StructuringStatsPass};
@@ -399,8 +400,14 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // a whole to belong to, every comparison and sum the caller
             // makes on them stays split and unreadable.
             Box::new(WideReturnPromotePass),
+            // And the same in the other direction: a helper handed the
+            // two halves of an `i128` by every caller takes the value.
+            Box::new(WideParamPass),
             // With the halves owned, the OR tree that tests a 128-bit
             // value against zero can be read as that test.
+            // The sum or difference rustc wrote out limb by limb, before
+            // the promotions that need a whole value to hand over.
+            Box::new(WideArithPass),
             Box::new(WideZeroPass),
             // And the lexicographic comparison of two values' halves,
             // which is where the borrow check on a 128-bit subtraction
@@ -556,7 +563,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..68],
+        vec![1..7, 31..70],
     )
 }
 
@@ -616,6 +623,8 @@ mod tests {
                 marshalling::guard::PASS_NAME,
                 interproc::const_return::PASS_NAME,
                 interproc::wide_promote::PASS_NAME,
+                interproc::wide_param::PASS_NAME,
+                refine::WIDE_ARITH_PASS_NAME,
                 refine::WIDE_ZERO_PASS_NAME,
                 refine::WIDE_COMPARE_PASS_NAME,
                 interproc::inline::PASS_NAME,
