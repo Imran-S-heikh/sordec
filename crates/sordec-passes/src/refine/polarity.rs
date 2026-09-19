@@ -121,11 +121,12 @@ fn normalize(
             }
             if empty_arm(then_region, inert)
                 && matches!(plan.class(*cond), InlineClass::Inline(InlineSite::RegionUse))
-                && invert_comparator(bindings, *cond)
+                && let Some(flipped_cond) = inverted(bindings, *cond)
             {
                 let recovered = std::mem::replace(&mut **inner, Region::Sequence(Vec::new()));
                 **then_region = recovered;
                 *else_region = None;
+                *cond = flipped_cond;
                 return flips + 1;
             }
             let else_region = inner;
@@ -139,9 +140,10 @@ fn normalize(
                     plan.class(*cond),
                     InlineClass::Inline(InlineSite::RegionUse)
                 )
-                && invert_comparator(bindings, *cond)
+                && let Some(flipped_cond) = inverted(bindings, *cond)
             {
                 std::mem::swap(&mut **then_region, &mut **else_region);
+                *cond = flipped_cond;
                 flips += 1;
             }
             flips
@@ -160,6 +162,44 @@ fn normalize(
         | Region::Unreachable
         | Region::Panic { .. }
         | Region::Unstructured { .. } => 0,
+    }
+}
+
+/// The condition that is `cond` negated, or `None` when nothing here
+/// negates.
+///
+/// Two ways to negate. A comparison inverts its comparator in place, and
+/// the condition keeps its name. A condition that is *already* a
+/// negation needs nothing rewritten at all: the thing it negates is the
+/// inversion, so the branch reads that instead and the `!` disappears.
+/// The second is strictly better — it removes a negation where the first
+/// only moves one — and it reaches conditions the first cannot, such as
+/// a `!` over a marshalling hole.
+fn inverted(bindings: &mut Arena<ValueId, Binding>, cond: ValueId) -> Option<ValueId> {
+    if let Some(binding) = bindings.get(cond)
+        && let Expr::Unary { op, value } = &binding.expr
+        && negates(*op, bindings.get(*value).map(|b| &b.ty))
+    {
+        return Some(*value);
+    }
+    invert_comparator(bindings, cond).then_some(cond)
+}
+
+/// Whether this operator negates the boolean beneath it.
+///
+/// [`UnaryOp::Not`] is the logical one by definition. [`UnaryOp::Eqz`] is
+/// "the operand is zero", which is the same question only when the
+/// operand is a `bool` — on an integer its negation is `!= 0`, which is
+/// not the operand.
+fn negates(op: sordec_ir::UnaryOp, operand: Option<&sordec_ir::IrType>) -> bool {
+    match op {
+        sordec_ir::UnaryOp::Not => true,
+        sordec_ir::UnaryOp::Eqz => matches!(
+            operand,
+            Some(sordec_ir::IrType::Inferred(sordec_ir::KnownType::Bool))
+                | Some(sordec_ir::IrType::Known(sordec_ir::KnownType::Bool))
+        ),
+        _ => false,
     }
 }
 
@@ -412,6 +452,81 @@ mod tests {
             f.bindings.get(v(1)).expect("cond").expr,
             Expr::Binary { op: BinaryOp::Ne, .. }
         ));
+    }
+
+    /// A condition that is already a negation inverts by dropping it:
+    /// the branch reads what the `!` was applied to, and no binding is
+    /// rewritten.
+    #[test]
+    fn a_negated_condition_inverts_by_losing_the_negation() {
+        let mut f = exit_in_else();
+        f.bindings.push(binding(
+            2,
+            Expr::Unary {
+                op: sordec_ir::UnaryOp::Not,
+                value: v(1),
+            },
+        ));
+        let mut sched = f.blocks.get(bb(0)).expect("bb0").bindings.clone();
+        sched.push(v(2));
+        f.blocks.get_mut(bb(0)).expect("bb0").bindings = sched;
+        if let Region::Sequence(items) = &mut f.region
+            && let Region::Scope { body, .. } = &mut items[0]
+            && let Region::Sequence(body_items) = &mut **body
+            && let Region::If { cond, .. } = &mut body_items[1]
+        {
+            *cond = v(2);
+        }
+        let (f, result) = run_pass(f);
+        assert!(result.changed);
+        // The negation is gone from the branch...
+        let Region::Sequence(items) = &f.region else {
+            panic!("root stays a sequence");
+        };
+        let Region::Scope { body, .. } = &items[0] else {
+            panic!("scope survives");
+        };
+        let Region::Sequence(body_items) = &**body else {
+            panic!("scope body stays a sequence");
+        };
+        let Region::If { cond, then_region, .. } = &body_items[1] else {
+            panic!("if survives");
+        };
+        assert_eq!(*cond, v(1), "the branch reads what the `!` negated");
+        assert!(matches!(&**then_region, Region::Break { .. }));
+        // ...and the comparison it wrapped is untouched.
+        assert!(matches!(
+            f.bindings.get(v(1)).expect("cond").expr,
+            Expr::Binary { op: BinaryOp::Ne, .. }
+        ));
+    }
+
+    /// `eqz` is only a negation over a `bool`; over an integer it asks
+    /// whether the value is zero, and the operand is not its inverse.
+    #[test]
+    fn eqz_over_an_integer_is_not_a_negation() {
+        let mut f = exit_in_else();
+        f.bindings.push(binding(
+            2,
+            Expr::Unary {
+                op: sordec_ir::UnaryOp::Eqz,
+                value: v(0),
+            },
+        ));
+        let mut sched = f.blocks.get(bb(0)).expect("bb0").bindings.clone();
+        sched.push(v(2));
+        f.blocks.get_mut(bb(0)).expect("bb0").bindings = sched;
+        if let Region::Sequence(items) = &mut f.region
+            && let Region::Scope { body, .. } = &mut items[0]
+            && let Region::Sequence(body_items) = &mut **body
+            && let Region::If { cond, .. } = &mut body_items[1]
+        {
+            *cond = v(2);
+        }
+        let before = f.region.clone();
+        let (f, result) = run_pass(f);
+        assert!(!result.changed);
+        assert_eq!(f.region, before);
     }
 
     #[test]

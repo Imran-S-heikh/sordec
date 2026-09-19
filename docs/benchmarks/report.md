@@ -7,14 +7,14 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | fixture | overall (AST) | interface | structure | semantic | behavior |
 |---|---|---|---|---|---|
 | hello-add | 1.0000 | 1.0000 | 0.0000 | 0.0000 | 1.0000 |
-| token-v22 | 0.8823 | 0.9286 | 0.8531 | 0.8605 | n/a |
-| token-v23 | 0.7953 | 0.7500 | 0.8042 | 0.8333 | n/a |
+| token-v22 | 0.8848 | 0.9286 | 0.8615 | 0.8605 | n/a |
+| token-v23 | 0.7977 | 0.7500 | 0.8123 | 0.8333 | n/a |
 | token-v23-stripped | 0.2909 | 0.0000 | 0.2294 | 0.6329 | n/a |
 | timelock | 0.8607 | 1.0000 | 0.7333 | 0.8276 | n/a |
 | dex-liquidity-pool | 0.7574 | 1.0000 | 0.5653 | 0.6750 | n/a |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
-| **aggregate (mean, AST)** | **0.7981** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.7981** | | | | |
+| **aggregate (mean, AST)** | **0.7988** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.7988** | | | | |
 
 ## Per-fixture detail
 
@@ -28,14 +28,14 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 ### token-v22
 
 - **interface** 0.9286 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.8571  precision=0.7500 recall=1.0000 (3 original, 4 reconstructed) — types extra: type TokenMetadata
-- **structure** 0.8531 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.6818 recall=0.9091 (33 original tokens, 44 reconstructed) — bloat 1.3x, dice ceiling ~0.8571 — low-similarity: approve(0.57)
+- **structure** 0.8615 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.7273 recall=0.9697 (33 original tokens, 44 reconstructed) — bloat 1.3x, dice ceiling ~0.8571 — low-similarity: approve(0.57)
 - **semantic** 0.8605 — precision=0.8605 recall=0.8605 (43 original facts, 43 reconstructed) — under-recovered: panic:bare, storage:get:temporary:DataKey::Allowance — over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?
 - **behavior** n/a — behavior unavailable: crate does not build: error[E0308]: mismatched types
 
 ### token-v23
 
 - **interface** 0.7500 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.5000  precision=0.3333 recall=1.0000 (4 original, 12 reconstructed) — types extra: type Approve, type Burn, type Clawback, type Mint, type MintWithAmountOnly, type TokenMetadata, type Transfer, type TransferWithAmountOnly
-- **structure** 0.8042 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.5660 recall=0.9091 (33 original tokens, 53 reconstructed) — bloat 1.6x, dice ceiling ~0.7674 — low-similarity: approve(0.57), transfer(0.41), transfer_from(0.70)
+- **structure** 0.8123 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.6038 recall=0.9697 (33 original tokens, 53 reconstructed) — bloat 1.6x, dice ceiling ~0.7674 — low-similarity: approve(0.57), transfer(0.41), transfer_from(0.74)
 - **semantic** 0.8333 — precision=0.8537 recall=0.8140 (43 original facts, 41 reconstructed) — under-recovered: event, panic:bare, storage:get:temporary:DataKey::Allowance — over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?
 - **behavior** n/a — behavior unavailable: crate does not build: error[E0308]: mismatched types
 
