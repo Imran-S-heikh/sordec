@@ -45,6 +45,7 @@ use crate::rust::ty::ident;
 /// rendered honestly (an unmapped op, or an `Unknown` storage tier).
 pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
     let e = ctx.env();
+    let eb = ctx.env_borrow();
     match op {
         // ---- Collections ----
         //
@@ -177,7 +178,7 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             let method = ident(callee);
             let call_args = resolved_args.as_ref().unwrap_or(args);
             let a: Vec<syn::Expr> = call_args.iter().map(|v| ctx.value_ref(*v)).collect();
-            Some(parse_quote!(soroban_sdk::token::Client::new(&#e, &#c).#method(#(&#a),*)))
+            Some(parse_quote!(soroban_sdk::token::Client::new(#eb, &#c).#method(#(&#a),*)))
         }
 
         // ---- Ledger context ----
@@ -274,7 +275,7 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             ..
         } => {
             let lit = syn::LitStr::new(text, proc_macro2::Span::call_site());
-            Some(parse_quote!(soroban_sdk::Symbol::new(&#e, #lit)))
+            Some(parse_quote!(soroban_sdk::Symbol::new(#eb, #lit)))
         }
 
         // Everything else stays an honest hole (later waves).

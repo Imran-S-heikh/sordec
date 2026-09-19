@@ -392,6 +392,18 @@ fn overall_band(name: &str) -> (f64, f64) {
     //
     // token-v22 structure 0.8615 -> 0.9063, token-v23 0.8123 -> 0.8565.
     // Aggregate 0.7988 -> 0.8025. Held-out mean unchanged at 0.7090.
+    // Amended same day — the `Env` a helper is handed is borrowed.
+    //
+    // Cloning it at every call site compiled, but it is not what the
+    // sources write: a Soroban helper takes `&Env`, and so does ours
+    // now. That costs dex 0.7922 -> 0.7736 and the aggregate 0.8240 ->
+    // 0.8214, every point of it through the `.clone()` closure edge in
+    // `plan/NOTES.md` — the clones were dragging a derived `Clone` impl
+    // into our closures, which happened to match the original's. Taken
+    // anyway: emitting a clone the code does not need, because the
+    // scorer rewards it, is the one thing that edge is recorded so we
+    // do not do.
+    //
     // Re-centred 2026-09-20 — call arguments the caller still needs.
     //
     // Every emitted helper takes its arguments by value, which is what

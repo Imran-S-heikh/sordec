@@ -52,20 +52,30 @@ pub(crate) fn spec_signature(
             quote!(#pn: #pt)
         })
         .collect();
-    let env = env_param();
+    let env = env_param(true);
     match spec_return(&sig.outputs, reg, policy) {
         Some(ret) => parse_quote!(fn #name(#env, #(#params),*) -> #ret),
         None => parse_quote!(fn #name(#env, #(#params),*)),
     }
 }
 
-/// The synthesized leading `e: Env` parameter every emitted function
+/// The synthesized leading `Env` parameter every emitted function
 /// carries. Host operations reach the `Env` through the VM, so it is not a
 /// WASM argument and never appears in the IR — the emitter supplies it, and
 /// the body walk roots every host idiom on it. Fully qualified so no import
 /// is required.
-fn env_param() -> proc_macro2::TokenStream {
-    quote!(e: soroban_sdk::Env)
+///
+/// An entrypoint takes it by value because `#[contractimpl]` does; a
+/// helper takes it by reference because the alternative is a caller
+/// that no longer owns its own `Env` after the first call it makes.
+/// That is also how the sources are written — `fn get_shares(e: &Env,
+/// …)` — so the two reasons agree.
+fn env_param(entrypoint: bool) -> proc_macro2::TokenStream {
+    if entrypoint {
+        quote!(e: soroban_sdk::Env)
+    } else {
+        quote!(e: &soroban_sdk::Env)
+    }
 }
 
 /// The `Ok` type of a `Result<Ok, Err>` entrypoint — `Some` only when the
@@ -104,7 +114,7 @@ pub(crate) fn helper_signature(
             quote!(#pn: #pt)
         })
         .collect();
-    let env = env_param();
+    let env = env_param(false);
     match helper_return(func, reg, policy) {
         Some(ret) => parse_quote!(fn #name(#env, #(#params),*) -> #ret),
         None => parse_quote!(fn #name(#env, #(#params),*)),

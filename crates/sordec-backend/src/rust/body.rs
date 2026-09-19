@@ -236,14 +236,20 @@ impl<'a> FnCtx<'a> {
         parse_quote!(#rendered.clone())
     }
 
-    /// The `Env` as an internal call's leading argument.
+    /// The `Env` as an internal call's leading argument, and as any
+    /// argument a host idiom takes it by reference.
     ///
-    /// Always cloned: it is the one value every helper takes and every
-    /// caller goes on using, so the question [`Self::arg_ref`] asks has
-    /// the same answer every time.
-    pub(crate) fn env_arg(&self) -> syn::Expr {
+    /// Every helper takes `&Env`, so this is the borrow — written as
+    /// `&e` where this function owns its own (an entrypoint, which
+    /// `#[contractimpl]` hands the value) and as the bare name where it
+    /// was handed a reference already.
+    pub(crate) fn env_borrow(&self) -> syn::Expr {
         let e = self.env();
-        parse_quote!(#e.clone())
+        if self.func.signature.is_some() {
+            parse_quote!(&#e)
+        } else {
+            e
+        }
     }
 
     /// Whether handing this value to a call would move it away from a
