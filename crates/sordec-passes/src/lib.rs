@@ -95,7 +95,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    BoolCodecPass, FieldTypePass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    BoolCodecPass, EnumDiscriminantPass, FieldTypePass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -472,6 +472,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the callee's own key table says which slot is which field.
             // After the UDT passes, which is what reads that table.
             Box::new(StructArgPass),
+            // A unit enum, once typed, is masked and compared as a
+            // number. Name the variant instead — there is no `&` between
+            // an enum and an integer. After the field typing that gives
+            // the value its enum type.
+            Box::new(EnumDiscriminantPass),
             // `get(&k).unwrap()`: the proven Option probe, its trapping
             // None branch and the read, collapsed to an unwrap of the
             // read. After the inliner, which is what brings the wrapped
@@ -540,7 +545,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..65],
+        vec![1..7, 31..66],
     )
 }
 
@@ -615,6 +620,7 @@ mod tests {
                 marshalling::udt_encode::PASS_NAME,
                 marshalling::field_type::PASS_NAME,
                 interproc::struct_arg::PASS_NAME,
+                marshalling::enum_discriminant::PASS_NAME,
                 marshalling::option_unwrap::PASS_NAME,
                 marshalling::key_construction::PASS_NAME,
                 marshalling::dead_store::PASS_NAME,

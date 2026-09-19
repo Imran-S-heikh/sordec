@@ -327,6 +327,7 @@ fn copyable(expr: &Expr, this: FuncId) -> bool {
         | Expr::WideJoin { .. }
         | Expr::Field { .. }
         | Expr::Struct { .. }
+        | Expr::Variant { .. }
         | Expr::Semantic(_) => true,
         Expr::Call { target, .. } => *target != this,
         // A width conversion or a select is a pure operator the lowering

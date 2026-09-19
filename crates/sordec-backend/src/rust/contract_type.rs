@@ -69,9 +69,21 @@ fn union_item(def: &UnionDef, reg: &TypeRegistry, policy: &dyn HolePolicy) -> sy
             quote!(#vname(#(#tys),*))
         }
     });
+    // A union of payload-free variants also derives `PartialEq`, so the
+    // reconstruction can say `kind == TimeBoundKind::After` where the
+    // compiler tested the discriminant. The alternative, `matches!`, is a
+    // conditional: it reads as one to anyone diffing the control flow, and
+    // the source wrote a `match` once, not once per test. Restricted to
+    // payload-free variants, where the derive cannot fail on a field type.
+    let comparable = def.cases.iter().all(|c| c.fields.is_empty());
+    let derives: syn::Attribute = if comparable {
+        parse_quote!(#[derive(Clone, PartialEq)])
+    } else {
+        parse_quote!(#[derive(Clone)])
+    };
     parse_quote! {
         #[contracttype]
-        #[derive(Clone)]
+        #derives
         pub enum #name {
             #(#variants,)*
         }

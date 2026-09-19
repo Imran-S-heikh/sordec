@@ -208,7 +208,8 @@ fn is_effectful(expr: &Expr) -> bool {
         | Expr::Project { .. }
         | Expr::WideJoin { .. }
         | Expr::Field { .. }
-        | Expr::Struct { .. } => false,
+        | Expr::Struct { .. }
+        | Expr::Variant { .. } => false,
     }
 }
 

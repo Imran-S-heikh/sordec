@@ -212,6 +212,11 @@ impl<'a> FnCtx<'a> {
     /// Render a `ValueId` as an expression, via the one naming authority:
     /// a rename reads as what it renames, a literal prints in place (see
     /// [`Fold`]).
+    /// What a reference to `vid` names after renames are followed.
+    pub(crate) fn fold_target(&self, vid: ValueId) -> ValueId {
+        self.fold.target(vid)
+    }
+
     pub(crate) fn value_ref(&self, vid: ValueId) -> syn::Expr {
         let target = self.fold.target(vid);
         if self.fold.is_literal(target)

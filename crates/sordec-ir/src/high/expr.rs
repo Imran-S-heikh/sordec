@@ -98,6 +98,15 @@ pub enum Expr {
         fields: Vec<(String, ValueId)>,
     },
 
+    /// One variant of a `#[contracttype]` enum, named. The enum is named
+    /// by the binding's type, as for [`Expr::Struct`], so a variant of a
+    /// type the registry cannot name has nothing to print.
+    Variant {
+        /// Variant name as declared.
+        // JUSTIFY: variant names come from the contract's own spec.
+        name: String,
+    },
+
     /// Direct call to a local function (not a host call).
     Call {
         /// Target function in the same module.
@@ -250,6 +259,7 @@ impl Expr {
                     f(*value);
                 }
             }
+            Expr::Variant { name: _ } => {}
             Expr::IndirectCall {
                 table: _,
                 sig: _,
@@ -320,6 +330,7 @@ impl Expr {
                     f(value);
                 }
             }
+            Expr::Variant { name: _ } => {}
             Expr::Unary { op: _, value } => f(value),
             Expr::Binary { op: _, lhs, rhs } => {
                 f(lhs);

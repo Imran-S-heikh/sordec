@@ -16,6 +16,24 @@ use crate::rust::body::FnCtx;
 use crate::rust::{idiom, sig, ty};
 use crate::wat::annotate;
 
+/// `Owner::Variant`, when this value is a named variant of a type the
+/// registry can name.
+fn variant_path(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<syn::Path> {
+    let binding = ctx.func.bindings.get(ctx.fold_target(value))?;
+    let Expr::Variant { name } = &binding.expr else {
+        return None;
+    };
+    let owner = match &binding.ty {
+        IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => {
+            ctx.reg.name_of(*id)?
+        }
+        _ => return None,
+    };
+    let owner = ty::ident(owner);
+    let variant = ty::ident(name);
+    Some(parse_quote!(#owner::#variant))
+}
+
 /// The right-hand side expression for one binding.
 pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
     match &binding.expr {
@@ -96,6 +114,11 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 None => ctx.policy.unknown_expr("struct literal of an unnamed type"),
             }
         }
+        // `Name::Variant`, the enum named by the binding's type.
+        Expr::Variant { name: _ } => match variant_path(ctx, binding.id) {
+            Some(path) => parse_quote!(#path),
+            None => ctx.policy.unknown_expr("variant of an unnamed type"),
+        },
         Expr::Load { .. } => ctx.policy.unknown_expr("memory load"),
         Expr::Store { .. } => ctx.policy.unknown_expr("memory store"),
         Expr::GlobalGet { index } => ctx.policy.unknown_expr(&format!("global.get {index}")),

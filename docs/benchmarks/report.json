@@ -192,7 +192,7 @@
           "checked": true,
           "notes": [
             "2 entrypoints (0 unreconstructed, 0 without control flow)",
-            "ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound",
+            "ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound",
             "control flow: precision=0.4167 recall=1.0000 (5 original tokens, 12 reconstructed) — bloat 2.4x, dice ceiling ~0.5882",
             "low-similarity: claim(0.67), deposit(0.50)"
           ],
