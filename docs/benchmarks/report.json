@@ -233,7 +233,7 @@
         "behavior": {
           "checked": false,
           "notes": [
-            "behavior unavailable: crate does not build: error[E0277]: can't compare `()` with `i64`"
+            "behavior unavailable: crate does not build: error[E0308]: mismatched types"
           ],
           "score": 0.0,
           "weight": 0.15

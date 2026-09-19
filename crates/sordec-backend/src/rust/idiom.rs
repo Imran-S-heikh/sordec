@@ -35,6 +35,7 @@ use syn::parse_quote;
 
 use sordec_ir::{
     BufOpKind, ClientInterface, CryptoOpKind, EnumKey, KnownOp, KnownTier, PrngOpKind, StorageTier,
+    VecOpKind,
 };
 
 use crate::rust::body::FnCtx;
@@ -45,6 +46,34 @@ use crate::rust::ty::ident;
 pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
     let e = ctx.env();
     match op {
+        // ---- Collections ----
+        //
+        // Only the operations whose SDK spelling is unambiguous. The rest
+        // stay holes rather than guess a method: a wrong chain is worse
+        // than an honest `todo!()`, because the scorer's extractor reads
+        // these chains as facts.
+        KnownOp::VecOp { kind, args } => {
+            let v = ctx.value_ref(*args.first()?);
+            let arg = |i: usize| args.get(i).map(|a| ctx.value_ref(*a));
+            match kind {
+                // `Len`, `Get` and the pushes are deliberately absent.
+                // These operations take and return *encoded* `Val`s, and
+                // the compiler compares them encoded: `len() > 10` is
+                // `vec_len(v) > (11 << 32) - 1`. Spelling the chain
+                // without decoding both sides would read as the source's
+                // own bound and be wrong by a factor of 2^32. They need
+                // the packed-compare recognizer first.
+                VecOpKind::FirstIndexOf => {
+                    let x = arg(1)?;
+                    Some(parse_quote!(#v.first_index_of(&#x)))
+                }
+                VecOpKind::LastIndexOf => {
+                    let x = arg(1)?;
+                    Some(parse_quote!(#v.last_index_of(&#x)))
+                }
+                _ => None,
+            }
+        }
         // ---- Storage ----
         KnownOp::StorageGet { tier, key, resolved_key, missing, .. } => {
             let tier = tier_method(tier)?;

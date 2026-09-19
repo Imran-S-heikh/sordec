@@ -56,9 +56,62 @@ fn unsuffixed(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common
         Expr::Literal(Literal::U64(n)) => i128::from(*n),
         _ => return None,
     };
+    // Only when the constant actually fits the type it would take. A
+    // value that does not fit is evidence the two sides disagree about
+    // what they hold — an encoded `Val` against a decoded bound, say —
+    // and dropping the suffix would turn a type error into a range error
+    // without making either side more true.
+    let fits = match base_of(&other.ty) {
+        Some(KnownType::I32) => i32::try_from(n).is_ok(),
+        Some(KnownType::U32) => u32::try_from(n).is_ok(),
+        Some(KnownType::I64) => i64::try_from(n).is_ok(),
+        Some(KnownType::U64) => u64::try_from(n).is_ok(),
+        _ => true,
+    };
+    if !fits {
+        return None;
+    }
     let lit = proc_macro2::Literal::i128_unsuffixed(n);
     let rendered: syn::Expr = parse_quote!(#lit);
     Some(if n < 0 { parse_quote!((#rendered)) } else { rendered })
+}
+
+/// The `KnownType` behind a type, whatever its certainty.
+fn base_of(ty: &IrType) -> Option<KnownType> {
+    match ty {
+        IrType::Known(k) | IrType::Inferred(k) => Some(k.clone()),
+        IrType::Unknown(_) => None,
+    }
+}
+
+/// The index-of chain being tested for absence, when one side is such a
+/// lookup and the other is the `Void` tag the host returns for "no match".
+fn index_of_absence(
+    ctx: &FnCtx,
+    lhs: sordec_common::ValueId,
+    rhs: sordec_common::ValueId,
+) -> Option<syn::Expr> {
+    const TAG_VOID: i128 = 2;
+    [(lhs, rhs), (rhs, lhs)].into_iter().find_map(|(lookup, tag)| {
+        let marker = ctx.func.bindings.get(ctx.fold_target(tag))?;
+        let n = match &marker.expr {
+            Expr::Literal(Literal::I32(n)) => i128::from(*n),
+            Expr::Literal(Literal::I64(n)) => i128::from(*n),
+            Expr::Literal(Literal::U32(n)) => i128::from(*n),
+            Expr::Literal(Literal::U64(n)) => i128::from(*n),
+            _ => return None,
+        };
+        (n == TAG_VOID).then_some(())?;
+        let binding = ctx.func.bindings.get(ctx.fold_target(lookup))?;
+        matches!(
+            &binding.expr,
+            Expr::Semantic(SemanticOp::Known(sordec_ir::KnownOp::VecOp {
+                kind: sordec_ir::VecOpKind::FirstIndexOf | sordec_ir::VecOpKind::LastIndexOf,
+                ..
+            }))
+        )
+        .then(|| ctx.value_ref(lookup))
+    })
 }
 
 /// The right-hand side expression for one binding.
@@ -71,6 +124,19 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
         }
         Expr::Unary { op, value } => {
             unary_expr(*op, ctx.value_ref(*value), ctx.is_boolean(*value))
+        }
+        // An index-of result tested against `Tag::Void` is the SDK's own
+        // "not found": the host returns Void when the element is absent,
+        // and the SDK turns that into `None`. This is how `Vec::contains`
+        // and friends compile.
+        Expr::Binary { op: op @ (BinaryOp::Eq | BinaryOp::Ne), lhs, rhs }
+            if index_of_absence(ctx, *lhs, *rhs).is_some() =>
+        {
+            let found = index_of_absence(ctx, *lhs, *rhs).expect("checked by the guard");
+            match op {
+                BinaryOp::Eq => parse_quote!(#found.is_none()),
+                _ => parse_quote!(#found.is_some()),
+            }
         }
         Expr::Binary { op, lhs, rhs } => {
             // A constant compared against a typed operand prints without
