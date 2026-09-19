@@ -178,19 +178,36 @@ fn recover(out: BlockId, body: Region) -> Result<Recovered, Region> {
     if breaks == 0 || redeclares(out, &body) {
         return Err(body);
     }
-    let Region::Sequence(items) = body else {
+    let Region::Sequence(mut items) = body else {
         return Err(body);
     };
     // Find the guard: an else-less `If` whose `then` ends in the break.
     let Some(at) = items.iter().position(is_guard_for(out)) else {
-        return Err(Region::Sequence(items));
+        // None directly here. A guard nested in the *last* item's arms
+        // still skips exactly the rest of that arm, because nothing
+        // follows the item it is in — token-v23's `transfer` breaks out of
+        // its scope from inside a branch on whether the address was
+        // muxed. Descend, and let the scope stand: the splice happens
+        // inside it.
+        return match items.pop() {
+            Some(last) => match descend(out, last) {
+                Ok(rebuilt) => {
+                    items.push(rebuilt);
+                    Ok(Recovered::Kept(seq(items)))
+                }
+                Err(last) => {
+                    items.push(last);
+                    Err(Region::Sequence(items))
+                }
+            },
+            None => Err(Region::Sequence(items)),
+        };
     };
     // Something has to become the else-arm.
     if at + 1 >= items.len() {
         return Err(Region::Sequence(items));
     }
 
-    let mut items = items;
     let rest: Vec<Region> = items.split_off(at + 1);
     let guard = items.pop().expect("position() found it");
     let Region::If {
@@ -222,6 +239,31 @@ fn recover(out: BlockId, body: Region) -> Result<Recovered, Region> {
         return Err(spliced);
     }
     Ok(Recovered::Inlined(spliced))
+}
+
+/// Recover inside the arms of an `If` that is the last thing in a scope.
+///
+/// Everything the break skips is the rest of the arm it sits in, since
+/// nothing follows the `If` itself. Each arm is tried as its own sequence;
+/// the scope stays, because this splice does not consume the label's last
+/// exit — the caller's next pass decides that.
+fn descend(out: BlockId, item: Region) -> Result<Region, Region> {
+    let Region::If { cond, then_region, else_region } = item else {
+        return Err(item);
+    };
+    let mut any = false;
+    let taken = |arm: Region, any: &mut bool| match recover(out, arm) {
+        Ok(Recovered::Kept(spliced) | Recovered::Inlined(spliced)) => {
+            *any = true;
+            spliced
+        }
+        Err(unchanged) => unchanged,
+    };
+    let then_region = taken(*then_region, &mut any);
+    let else_region = else_region.map(|e| taken(*e, &mut any));
+    let rebuilt =
+        Region::If { cond, then_region: Box::new(then_region), else_region: else_region.map(Box::new) };
+    if any { Ok(rebuilt) } else { Err(rebuilt) }
 }
 
 /// An else-less `If` whose `then` arm ends in a `Break` to `out`.
