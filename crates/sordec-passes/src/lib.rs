@@ -85,7 +85,7 @@ pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATAL
 pub use arith::{I128BuiltinPass, WideFoldPass};
 pub use attribution::SdkAttributionPass;
 pub use recognizers::symbol_encoder::SymbolEncoderPass;
-pub use interproc::{ConstReturnPass, SpecializePass, WrapperInlinePass};
+pub use interproc::{ConstReturnPass, SpecializePass, WideReturnPromotePass, WrapperInlinePass};
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use memory::{
@@ -107,7 +107,7 @@ pub use refine::{
     AndMergePass, ConstBranchFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
     OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass, SelectReturnPass,
     SwitchDedupPass,
-    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WidthFoldPass,
+    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WideZeroPass, WidthFoldPass,
 };
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringCensusPass, StructuringStatsPass};
@@ -381,6 +381,13 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // unwrap it guards. Beside the inliner: both are what let a
             // caller see through a helper it does not inline.
             Box::new(ConstReturnPass),
+            // An `i128` comes back in two registers. Until the halves have
+            // a whole to belong to, every comparison and sum the caller
+            // makes on them stays split and unreadable.
+            Box::new(WideReturnPromotePass),
+            // With the halves owned, the OR tree that tests a 128-bit
+            // value against zero can be read as that test.
+            Box::new(WideZeroPass),
             Box::new(WrapperInlinePass),
             // A pasted body carries the facts its helper had, and a helper
             // called with different durabilities or keys had none: the
@@ -512,7 +519,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..60],
+        vec![1..7, 31..62],
     )
 }
 
@@ -570,6 +577,8 @@ mod tests {
                 refine::OVERFLOW_GUARD_PASS_NAME,
                 marshalling::guard::PASS_NAME,
                 interproc::const_return::PASS_NAME,
+                interproc::wide_promote::PASS_NAME,
+                refine::WIDE_ZERO_PASS_NAME,
                 interproc::inline::PASS_NAME,
                 CONST_PROP_AFTER_INLINE,
                 TTL_AFTER_INLINE,

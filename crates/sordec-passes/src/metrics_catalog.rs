@@ -408,6 +408,10 @@ pub const MARSHALLING_UDT_ENCODES: &str = "marshalling_udt_encodes";
 pub const MARSHALLING_FIELD_TYPES: &str = "marshalling_field_types";
 /// Call-site projections replaced by the callee's constant return.
 pub const INTERPROC_CONST_RETURNS: &str = "interproc_const_returns";
+/// Helpers whose two-register wide return was promoted to the value.
+pub const INTERPROC_WIDE_RETURNS: &str = "interproc_wide_returns";
+/// Limb OR trees read back as a test on the wide values.
+pub const REFINE_WIDE_ZERO_TESTS: &str = "refine_wide_zero_tests";
 /// Merges only one value still reached, retired to renames of it.
 pub const REFINE_TRIVIAL_PHIS: &str = "refine_trivial_phis";
 /// `U32Val` encodes whose folded addend was recovered as arithmetic, and
@@ -759,6 +763,8 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_UDT_ENCODES,
         MARSHALLING_FIELD_TYPES,
         INTERPROC_CONST_RETURNS,
+        INTERPROC_WIDE_RETURNS,
+        REFINE_WIDE_ZERO_TESTS,
         REFINE_TRIVIAL_PHIS,
         MARSHALLING_FOLDED_ENCODES,
         REFINE_WIDTH_FOLDS,
