@@ -548,6 +548,24 @@ fn classify_tag_check(
             val_abi::tag_name(*tag).unwrap_or("?")
         ));
     }
+    // A storage read carries the same licence, for the reason
+    // [`super::typed_read`] gives: the reconstruction emits the read at
+    // the payload type the tag names, and `Storage::get::<K, T>` runs
+    // `T::try_from_val` on the host's `Val` and traps on a mismatch —
+    // this very check, relocated into the derived conversion.
+    //
+    // Object tags only. A small tag has a payload to unpack and the
+    // unpacking is what `typed_read` owns; an object tag is the whole
+    // encoding, so the check is the only thing standing between the read
+    // and its type.
+    if reads_storage(func, value)
+        && let Some(named) = val_abi::object_tag_payload_type(*tag)
+    {
+        return Ok(format!(
+            "tag check ({}) on a storage read: the reconstruction reads at {named:?}, and the              derived `TryFromVal` regenerates it",
+            val_abi::tag_name(*tag).unwrap_or("?")
+        ));
+    }
     let declared = declared_param_type(func, value).ok_or(DECLINED_TAG_NOT_PARAM)?;
     // `tag_carries`, not `==`: a `BytesN<N>` parameter rides in a plain
     // `BytesObject`, so the tag denotes `Bytes` while the declaration says
@@ -641,6 +659,14 @@ fn func_prefix(func: &HighFunction) -> String {
         Some(name) => format!("fn {name}: "),
         None => format!("func{}: ", func.id.index()),
     }
+}
+
+/// Whether `value` is what a storage read produced.
+fn reads_storage(func: &HighFunction, value: ValueId) -> bool {
+    matches!(
+        func.bindings.get(resolve_use(func, value)).map(|b| &b.expr),
+        Some(Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. })))
+    )
 }
 
 /// The declared type of `value` when it is one of this entrypoint's

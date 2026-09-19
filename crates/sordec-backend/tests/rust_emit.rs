@@ -171,7 +171,13 @@ fn token_v23_names_locals_from_structure() {
     // A ledger-context read named after the quantity it returns.
     assert!(src.contains("let sequence = e.ledger().sequence()"), "ledger read named:\n{src}");
     // The name is consistent at the use site, not just the binding.
-    assert!(src.contains("return admin;"), "named local reused at its use:\n{src}");
+    // Either statement form counts: whether the read is returned early or
+    // falls out as the tail expression depends on whether a guard stands
+    // between them, and that is not what this test is about.
+    assert!(
+        src.contains("return admin;") || src.lines().any(|l| l.trim() == "admin"),
+        "named local reused at its use:\n{src}"
+    );
 }
 
 /// R3: a value that is never read is not bound. An unused *effectful*

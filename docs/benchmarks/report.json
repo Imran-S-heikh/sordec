@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.7713665199290232,
-  "aggregate_overall_with_behavior": 0.7713665199290232,
+  "aggregate_overall": 0.7798995359728913,
+  "aggregate_overall_with_behavior": 0.7798995359728913,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -315,12 +315,12 @@
         "structure": {
           "checked": true,
           "notes": [
-            "13 entrypoints (0 unreconstructed, 3 without control flow)",
+            "13 entrypoints (0 unreconstructed, 4 without control flow)",
             "ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.5167 recall=0.9394 (33 original tokens, 60 reconstructed) — bloat 1.8x, dice ceiling ~0.7097",
-            "low-similarity: allowance(0.00), approve(0.72), burn_from(0.66), mint(0.70), set_admin(0.00), transfer_from(0.66)"
+            "control flow: precision=0.5536 recall=0.9394 (33 original tokens, 56 reconstructed) — bloat 1.7x, dice ceiling ~0.7416",
+            "low-similarity: allowance(0.00), approve(0.72), burn_from(0.66), transfer_from(0.66)"
           ],
-          "score": 0.6302363636363637,
+          "score": 0.7332592592592593,
           "weight": 0.25
         }
       },
@@ -331,7 +331,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 3 types recovered"
       ],
-      "overall": 0.8167882992520474,
+      "overall": 0.8470891509058404,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
@@ -371,12 +371,12 @@
         "structure": {
           "checked": true,
           "notes": [
-            "13 entrypoints (0 unreconstructed, 3 without control flow)",
+            "13 entrypoints (0 unreconstructed, 4 without control flow)",
             "ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.4133 recall=0.9394 (33 original tokens, 75 reconstructed) — bloat 2.3x, dice ceiling ~0.6111",
-            "low-similarity: allowance(0.00), approve(0.72), burn_from(0.66), mint(0.70), set_admin(0.00), transfer(0.34), transfer_from(0.58)"
+            "control flow: precision=0.4366 recall=0.9394 (33 original tokens, 71 reconstructed) — bloat 2.2x, dice ceiling ~0.6346",
+            "low-similarity: allowance(0.00), approve(0.72), burn_from(0.66), transfer(0.34), transfer_from(0.58)"
           ],
-          "score": 0.5783215537460654,
+          "score": 0.6755761371589278,
           "weight": 0.25
         }
       },
@@ -387,7 +387,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.7289181040429603,
+      "overall": 0.7575223932820374,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
@@ -430,10 +430,10 @@
           "notes": [
             "13 entrypoints (0 unreconstructed, 0 without control flow)",
             "ambiguous names (2 original, 0 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.1626 recall=1.0000 (33 original tokens, 203 reconstructed) — bloat 6.2x, dice ceiling ~0.2797",
-            "low-similarity: __constructor(0.20), allowance(0.20), approve(0.31), balance(0.26), burn(0.37), burn_from(0.46), decimals(0.00), mint(0.28), … (+5)"
+            "control flow: precision=0.1658 recall=1.0000 (33 original tokens, 199 reconstructed) — bloat 6.0x, dice ceiling ~0.2845",
+            "low-similarity: __constructor(0.20), allowance(0.20), approve(0.31), balance(0.26), burn(0.37), burn_from(0.46), decimals(0.00), mint(0.31), … (+5)"
           ],
-          "score": 0.2103746936691578,
+          "score": 0.21318299647746058,
           "weight": 0.25
         }
       },
@@ -444,7 +444,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.2852554013397746,
+      "overall": 0.2860813727539813,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
