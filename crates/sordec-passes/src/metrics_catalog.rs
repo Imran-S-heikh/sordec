@@ -414,6 +414,8 @@ pub const INTERPROC_WIDE_RETURNS: &str = "interproc_wide_returns";
 pub const REFINE_WIDE_ZERO_TESTS: &str = "refine_wide_zero_tests";
 /// Lexicographic half-comparisons read back as 128-bit comparisons.
 pub const REFINE_WIDE_COMPARES: &str = "refine_wide_compares";
+/// By-pointer struct arguments promoted to the struct.
+pub const INTERPROC_STRUCT_ARGS: &str = "interproc_struct_args";
 /// Merges only one value still reached, retired to renames of it.
 pub const REFINE_TRIVIAL_PHIS: &str = "refine_trivial_phis";
 /// `U32Val` encodes whose folded addend was recovered as arithmetic, and
@@ -766,6 +768,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_FIELD_TYPES,
         INTERPROC_CONST_RETURNS,
         INTERPROC_WIDE_RETURNS,
+        INTERPROC_STRUCT_ARGS,
         REFINE_WIDE_ZERO_TESTS,
         REFINE_WIDE_COMPARES,
         REFINE_TRIVIAL_PHIS,

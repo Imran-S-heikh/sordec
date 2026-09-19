@@ -85,7 +85,9 @@ pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATAL
 pub use arith::{I128BuiltinPass, WideFoldPass};
 pub use attribution::SdkAttributionPass;
 pub use recognizers::symbol_encoder::SymbolEncoderPass;
-pub use interproc::{ConstReturnPass, SpecializePass, WideReturnPromotePass, WrapperInlinePass};
+pub use interproc::{
+    ConstReturnPass, SpecializePass, StructArgPass, WideReturnPromotePass, WrapperInlinePass,
+};
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use memory::{
@@ -466,6 +468,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // decode each one arrives through is the derive's. After both
             // UDT passes, which are what name the struct.
             Box::new(FieldTypePass),
+            // A struct too big for a register is passed by reference, and
+            // the callee's own key table says which slot is which field.
+            // After the UDT passes, which is what reads that table.
+            Box::new(StructArgPass),
             // `get(&k).unwrap()`: the proven Option probe, its trapping
             // None branch and the read, collapsed to an unwrap of the
             // read. After the inliner, which is what brings the wrapped
@@ -534,7 +540,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..64],
+        vec![1..7, 31..65],
     )
 }
 
@@ -608,6 +614,7 @@ mod tests {
                 marshalling::udt_decode::PASS_NAME,
                 marshalling::udt_encode::PASS_NAME,
                 marshalling::field_type::PASS_NAME,
+                interproc::struct_arg::PASS_NAME,
                 marshalling::option_unwrap::PASS_NAME,
                 marshalling::key_construction::PASS_NAME,
                 marshalling::dead_store::PASS_NAME,

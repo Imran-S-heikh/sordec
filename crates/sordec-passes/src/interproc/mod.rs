@@ -18,9 +18,11 @@
 pub mod const_return;
 pub mod inline;
 pub mod specialize;
+pub mod struct_arg;
 pub mod wide_promote;
 
 pub use const_return::ConstReturnPass;
 pub use inline::WrapperInlinePass;
 pub use specialize::SpecializePass;
+pub use struct_arg::StructArgPass;
 pub use wide_promote::WideReturnPromotePass;
