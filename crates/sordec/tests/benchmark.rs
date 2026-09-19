@@ -380,7 +380,7 @@ fn overall_band(name: &str) -> (f64, f64) {
     match name {
         "hello-add" => (0.99, 1.00),
         "token-v22" => (0.83, 0.87),
-        "token-v23" => (0.74, 0.78),
+        "token-v23" => (0.75, 0.79),
         "token-v23-stripped" => (0.27, 0.31),
         "timelock" => (0.80, 0.84),
         "dex-liquidity-pool" => (0.73, 0.77),

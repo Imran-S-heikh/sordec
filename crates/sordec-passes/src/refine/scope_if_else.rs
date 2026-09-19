@@ -106,9 +106,15 @@ fn rewrite(region: Region, n: &mut i64) -> Region {
         Region::Scope { out, body } => {
             let body = rewrite(*body, n);
             match recover(out, body) {
-                Ok(spliced) => {
+                Ok(Recovered::Inlined(spliced)) => {
                     *n += 1;
                     spliced
+                }
+                // More guards still name the label, so the scope stays and
+                // the next pass over it takes the next one.
+                Ok(Recovered::Kept(body)) => {
+                    *n += 1;
+                    Region::Scope { out, body: Box::new(body) }
                 }
                 Err(body) => Region::Scope {
                     out,
@@ -151,12 +157,25 @@ fn rewrite(region: Region, n: &mut i64) -> Region {
     }
 }
 
+/// What one recovery did to the scope it was handed.
+enum Recovered {
+    /// The last break is gone, so the scope is gone with it.
+    Inlined(Region),
+    /// A guard became an `else`, but other guards still name the label.
+    Kept(Region),
+}
+
 /// Turn `Scope{out}{ P.., If(c){ T… Break out }, R.. }` into
 /// `P.., If(c){ T… } else { R.. }`, or hand the body back in `Err`.
-fn recover(out: BlockId, body: Region) -> Result<Region, Region> {
-    // Exactly one exit names the label; the rewrite must consume it and
-    // leave the scope deletable.
-    if count_breaks_to(out, &body) != 1 || redeclares(out, &body) {
+///
+/// Several guards may name one label — `read_allowance` breaks twice out
+/// of the same scope, once per `if` the source wrote. Each is taken on
+/// its own pass: the tail after a guard becomes that guard's `else`, and
+/// any later guard rides along inside it, still enclosed by the same
+/// scope. The scope goes when the last break does.
+fn recover(out: BlockId, body: Region) -> Result<Recovered, Region> {
+    let breaks = count_breaks_to(out, &body);
+    if breaks == 0 || redeclares(out, &body) {
         return Err(body);
     }
     let Region::Sequence(items) = body else {
@@ -192,12 +211,17 @@ fn recover(out: BlockId, body: Region) -> Result<Region, Region> {
     items.push(rebuilt);
     let spliced = seq(items);
 
+    if breaks > 1 {
+        // The scope stays, so the exits it still holds are still enclosed
+        // by it; only its own body changed shape.
+        return Ok(Recovered::Kept(spliced));
+    }
     // The label is gone, so every remaining exit must find its own
     // construct one level up.
     if !breaks_stay_enclosed(&spliced, &mut HashSet::new()) {
         return Err(spliced);
     }
-    Ok(spliced)
+    Ok(Recovered::Inlined(spliced))
 }
 
 /// An else-less `If` whose `then` arm ends in a `Break` to `out`.
@@ -330,9 +354,12 @@ mod tests {
         assert_eq!(run(region).1, 0);
     }
 
+    /// Several guards may name one label. Each is taken on its own pass:
+    /// the tail becomes this guard's `else` and carries the later exits
+    /// along inside it, still enclosed by the same scope. The scope goes
+    /// when the last break does, so the intermediate step keeps it.
     #[test]
-    fn a_second_break_to_the_label_blocks_the_rewrite() {
-        // The scope would survive the rewrite, so it buys nothing.
+    fn a_second_break_to_the_label_is_taken_one_guard_at_a_time() {
         let region = Region::Scope {
             out: bb(7),
             body: Box::new(Region::Sequence(vec![
@@ -345,7 +372,16 @@ mod tests {
                 Region::Basic(bb(21)),
             ])),
         };
-        assert_eq!(run(region).1, 0);
+        let (out, n) = run(region);
+        assert_eq!(n, 1, "the first guard became an else");
+        let Region::Scope { body, .. } = out else {
+            panic!("the scope stays while a break still names it");
+        };
+        let mut two_armed = 0;
+        body.for_each_node(|node| {
+            two_armed += usize::from(matches!(node, Region::If { else_region: Some(_), .. }));
+        });
+        assert_eq!(two_armed, 1, "the guard is now an if/else");
     }
 
     #[test]
