@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.8057355427311068,
-  "aggregate_overall_with_behavior": 0.8057355427311068,
+  "aggregate_overall": 0.8076747799644617,
+  "aggregate_overall_with_behavior": 0.8076747799644617,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -406,13 +406,13 @@
         "interface": {
           "checked": true,
           "notes": [
-            "entrypoints 0.0000  precision=0.0000 recall=0.0000 (13 original, 13 reconstructed)",
-            "entrypoints missing: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn decimals, fn mint, … (+5)",
-            "entrypoints extra: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn decimals, fn mint, … (+5)",
+            "entrypoints 0.0769  precision=0.0769 recall=0.0769 (13 original, 13 reconstructed)",
+            "entrypoints missing: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn mint, fn name, … (+4)",
+            "entrypoints extra: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn mint, fn name, … (+4)",
             "types 0.0000  precision=n/a recall=0.0000 (4 original, 0 reconstructed)",
             "types missing: type AllowanceDataKey, type AllowanceValue, type DataKey, type SetAdmin"
           ],
-          "score": 0.0,
+          "score": 0.038461538461538464,
           "weight": 0.3
         },
         "semantic": {
@@ -444,7 +444,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.3133004844776897,
+      "overall": 0.3268751451111739,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,

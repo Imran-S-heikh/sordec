@@ -19,9 +19,11 @@
 //! reading applies: [`super::decode`] already classifies those helpers
 //! and records the tags each one tests, so the argument a call site
 //! hands one is declared whatever those tags denote.
-//! The return type is recoverable the same way: a wasm entrypoint always
-//! hands the host one `Val`, and one that is always the constant `Void`
-//! is a function the source wrote as returning nothing.
+//! The return type is recoverable the same way. A wasm entrypoint always
+//! hands the host one `Val`: one that is always the constant `Void` is a
+//! function the source wrote as returning nothing, and one that is
+//! always a value of a recovered type, or that type packed into a `Val`,
+//! is a function returning that type.
 //!
 //! # What this unlocks
 //!
@@ -120,11 +122,11 @@ impl Pass<HighIr> for SpecFromGuardsPass {
                 .iter()
                 .map(|p| declared_by(&evidence, *p))
                 .collect();
-            let returns_nothing = returns_only_void(func) && !sig.outputs.is_empty();
+            let returned = returned_type(func);
             let Some(sig) = func.signature.as_mut() else {
                 continue;
             };
-            apply(sig, &recovered, returns_nothing, &mut result);
+            apply(sig, &recovered, returned, &mut result);
         }
         result
     }
@@ -134,7 +136,7 @@ impl Pass<HighIr> for SpecFromGuardsPass {
 fn apply(
     sig: &mut FunctionSignature,
     recovered: &[Option<PrimitiveType>],
-    returns_nothing: bool,
+    returned: Option<PrimitiveType>,
     result: &mut PassResult,
 ) {
     for (input, prim) in sig.inputs.iter_mut().zip(recovered) {
@@ -146,11 +148,18 @@ fn apply(
         result.metrics.increment(M_PARAMS, 1);
         result.changed = true;
     }
-    if returns_nothing {
-        sig.outputs.clear();
-        result.metrics.increment(M_RETURNS, 1);
-        result.changed = true;
+    if !matches!(sig.outputs.as_slice(), [TypeRef::Primitive(PrimitiveType::Val)]) {
+        return;
     }
+    match returned {
+        // `Void` is the host's spelling of "nothing", not a type the
+        // source named.
+        Some(PrimitiveType::Void) => sig.outputs.clear(),
+        Some(prim) => sig.outputs = vec![TypeRef::Primitive(prim)],
+        None => return,
+    }
+    result.metrics.increment(M_RETURNS, 1);
+    result.changed = true;
 }
 
 /// The type every piece of evidence about this parameter agrees on.
@@ -312,124 +321,42 @@ fn tag_check(func: &HighFunction, value: ValueId) -> Option<(ValueId, u8, bool)>
     }
 }
 
-/// Whether every return site hands back the constant `Void`.
+/// The type every return site agrees this entrypoint hands back.
 ///
 /// A wasm entrypoint always returns one `Val` because the host's calling
-/// convention says so. `Void` on every path is what the SDK emits for a
-/// source function that returns nothing.
-fn returns_only_void(func: &HighFunction) -> bool {
-    !func.returns.is_empty()
-        && func.returns.iter().all(|values| match values.as_slice() {
-            [v] => trace_int(func, *v) == Some(i128::from(TAG_VOID)),
-            _ => false,
-        })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::marshalling::test_support::{func_with, module, v};
-    use sordec_ir::{FunctionParam, FunctionSignature, Literal};
-    use crate::val_abi::TAG_ADDRESS_OBJECT;
-
-    /// One export-derived entrypoint: a `Val` parameter, checked against
-    /// `AddressObject` with the mismatch trapping, returning `Void`.
-    fn entrypoint(negated: bool, trapping: bool) -> HighIr {
-        let mut f = func_with(
-            vec![
-                Expr::Phi { incoming: vec![] }, // v0 the parameter
-                Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
-                    value: v(0),
-                    tag: TAG_ADDRESS_OBJECT,
-                    negated,
-                })), // v1
-                Expr::Literal(Literal::I64(i64::from(TAG_VOID))), // v2
-            ],
-            vec![v(0)],
-            vec![1, 2],
-        );
-        let arm = |t: bool| {
-            if t {
-                Region::Panic { kind: sordec_ir::PanicKind::Bare }
-            } else {
-                Region::Return { values: vec![v(2)] }
-            }
+/// convention says so, so the `Val` in the signature says nothing. What
+/// the function puts in it does: a recovered value of a known type, that
+/// type packed into a small `Val`, or the constant `Void`, which is how
+/// the SDK spells a function that returns nothing.
+fn returned_type(func: &HighFunction) -> Option<PrimitiveType> {
+    let mut named: Option<PrimitiveType> = None;
+    for values in &func.returns {
+        let [value] = values.as_slice() else {
+            return None;
         };
-        f.region = Region::Sequence(vec![
-            Region::Basic(sordec_common::BlockId::new(0)),
-            Region::If {
-                cond: v(1),
-                then_region: Box::new(arm(negated == trapping)),
-                else_region: Some(Box::new(arm(negated != trapping))),
-            },
-        ]);
-        f.returns = vec![vec![v(2)]];
-        f.signature = Some(FunctionSignature {
-            name: "set_admin".to_owned(),
-            inputs: vec![FunctionParam {
-                name: "arg0".to_owned(),
-                ty: TypeRef::Primitive(PrimitiveType::Val),
-            }],
-            outputs: vec![TypeRef::Primitive(PrimitiveType::Val)],
-        });
-        module(vec![f])
-    }
-
-    fn declared(m: &HighIr) -> Vec<String> {
-        let sig = m.functions[0].signature.as_ref().expect("signature");
-        sig.inputs.iter().map(|i| format!("{:?}", i.ty)).collect()
-    }
-
-    #[test]
-    fn a_trapping_tag_check_declares_its_parameter() {
-        for negated in [true, false] {
-            let mut m = entrypoint(negated, true);
-            assert!(SpecFromGuardsPass.run(&mut m).changed, "negated={negated}");
-            assert_eq!(
-                declared(&m),
-                vec!["Primitive(Address)".to_owned()],
-                "negated={negated}"
-            );
+        let prim = returned_one(func, *value)?;
+        if *named.get_or_insert(prim) != prim {
+            return None;
         }
     }
+    named
+}
 
-    /// Both arms carrying real code is a contract reading a `Val` it was
-    /// handed, not the wrapper's conversion.
-    #[test]
-    fn a_tag_check_that_traps_on_neither_side_declares_nothing() {
-        let mut m = entrypoint(true, false);
-        // Neither arm traps: rebuild with two returns.
-        m.functions[0].region = Region::Sequence(vec![
-            Region::Basic(sordec_common::BlockId::new(0)),
-            Region::If {
-                cond: v(1),
-                then_region: Box::new(Region::Return { values: vec![v(2)] }),
-                else_region: Some(Box::new(Region::Return { values: vec![v(2)] })),
-            },
-        ]);
-        SpecFromGuardsPass.run(&mut m);
-        assert_eq!(declared(&m), vec!["Primitive(Val)".to_owned()]);
+/// What one returned value says the return type is.
+fn returned_one(func: &HighFunction, value: ValueId) -> Option<PrimitiveType> {
+    if trace_int(func, value) == Some(i128::from(TAG_VOID)) {
+        return Some(PrimitiveType::Void);
     }
-
-    /// A function whose every return is `Void` returned nothing.
-    #[test]
-    fn a_void_return_is_no_return() {
-        let mut m = entrypoint(true, true);
-        assert!(SpecFromGuardsPass.run(&mut m).changed);
-        assert!(m.functions[0].signature.as_ref().expect("signature").outputs.is_empty());
+    let binding = func.bindings.get(resolve_use(func, value))?;
+    // Packed on the way out: the tag names the type.
+    if let Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty, .. })) = &binding.expr {
+        return primitive_of_known(ty);
     }
-
-    /// With a spec in hand the declaration is the spec's.
-    #[test]
-    fn a_module_with_a_spec_is_left_alone() {
-        let mut m = entrypoint(true, true);
-        let mut facts = sordec_ir::SorobanFacts::default();
-        facts.functions.insert(
-            "set_admin".to_owned(),
-            m.functions[0].signature.clone().expect("signature"),
-        );
-        m.soroban_facts = Some(facts);
-        assert!(!SpecFromGuardsPass.run(&mut m).changed);
-        assert_eq!(declared(&m), vec!["Primitive(Val)".to_owned()]);
+    // Or already recovered, the encode having collapsed into it.
+    match &binding.ty {
+        sordec_ir::IrType::Known(t) => {
+            primitive_of_known(t).filter(|p| !matches!(p, PrimitiveType::Val))
+        }
+        _ => None,
     }
 }

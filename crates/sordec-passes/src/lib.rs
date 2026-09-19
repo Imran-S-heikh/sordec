@@ -203,6 +203,8 @@ pub const ENUM_KEY_AFTER_INLINE: &str = "enum-key-after-inline";
 pub const PANIC_RECOVER_AFTER_RECOVERY: &str = "panic-recover-after-recovery";
 /// Name of the polarity re-run inside the elision group.
 pub const POLARITY_AFTER_ELISION: &str = "polarity-after-elision";
+/// Name of the declared-type recovery re-run after the elision group.
+pub const SPEC_FROM_GUARDS_AFTER_ELISION: &str = "spec-from-guards-after-elision";
 
 /// Build the default high-IR pattern-recovery pipeline.
 ///
@@ -549,6 +551,15 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the `if`/`else` it compiled from, so each arm can be the
             // `Ok`/`Err` it is.
             Box::new(SelectReturnPass),
+            // Again, on settled IR. A return whose encode has collapsed
+            // now *is* the value, so its type names the return type; the
+            // first run saw only the helper call. Parameters were already
+            // recovered up there, where the gates could still use them.
+            Box::new(pass::Rerun::new(
+                SpecFromGuardsPass,
+                SPEC_FROM_GUARDS_AFTER_ELISION,
+                &[],
+            )),
             Box::new(UnrecognizedScanPass),
             // General type propagation — runs once the recognizers have
             // planted their host-call/val result types, flowing them
