@@ -56,13 +56,14 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             let v = ctx.value_ref(*args.first()?);
             let arg = |i: usize| args.get(i).map(|a| ctx.value_ref(*a));
             match kind {
-                // `Len`, `Get` and the pushes are deliberately absent.
-                // These operations take and return *encoded* `Val`s, and
-                // the compiler compares them encoded: `len() > 10` is
-                // `vec_len(v) > (11 << 32) - 1`. Spelling the chain
-                // without decoding both sides would read as the source's
-                // own bound and be wrong by a factor of 2^32. They need
-                // the packed-compare recognizer first.
+                // `Len` is safe because the packed-compare recognizer
+                // decodes the bound it is compared against: `len() > 10`
+                // arrives as `vec_len(v) > (11 << 32) - 1` and is rewritten
+                // to `> 10` before this runs. `Get` and the pushes are
+                // still absent — their operands are encoded `Val`s with no
+                // such recognizer, and a chain that reads like the source
+                // while being wrong by 2^32 is worse than a hole.
+                VecOpKind::Len => Some(parse_quote!(#v.len())),
                 VecOpKind::FirstIndexOf => {
                     let x = arg(1)?;
                     Some(parse_quote!(#v.first_index_of(&#x)))

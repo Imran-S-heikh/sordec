@@ -321,8 +321,58 @@ fn try_oriented(
         // ordered operators map onto a *different* payload operator (see
         // the module docs) and nothing witnesses them.
         BinaryOp::Lt if side == ConstSide::Rhs => try_ordered(func, cmp, value, const_id, bits),
+        BinaryOp::Gt if side == ConstSide::Rhs => try_ordered_gt(func, value, const_id, bits),
         _ => None,
     }
+}
+
+/// Shape D — `p > (k << 32) - 1`, which is `payload > k - 1`.
+///
+/// rustc writes a `>` bound this way rather than as `>= k << 32`, because
+/// wasm has no unsigned `>=` against an immediate it would rather spell.
+/// `x > (k << 32) - 1` is `x >= k << 32` on unsigned, and `>= k` on the
+/// payload is `> k - 1`, so the operator is kept and only the bound moves.
+///
+/// `dex`'s `if claimants.len() > 10` is the witness: `vec_len` returns a
+/// packed `U32Val` and the bound is `(11 << 32) - 1`.
+///
+/// Same unsigned reading as [`try_ordered`], and the same guard against a
+/// constant whose bit pattern is negative as an `i64`.
+fn try_ordered_gt(
+    func: &HighFunction,
+    value: ValueId,
+    const_id: ValueId,
+    bits: u64,
+) -> Option<Site> {
+    // Every low bit set, so that incrementing leaves a clean major field.
+    if bits == u64::MAX || (bits + 1) & !val_abi::MAJOR_MASK != 0 {
+        return None;
+    }
+    let k = u32::try_from((bits + 1) >> val_abi::MAJOR_SHIFT).ok()?;
+    // `k == 0` cannot happen once the increment is clean, and `payload > 0`
+    // would be spelled `!= 0`; either way there is nothing to rewrite.
+    if k == 0 {
+        return None;
+    }
+    if (bits as i64) < 0 {
+        return None;
+    }
+    u32val_producer(func, value)?;
+    Some(Site {
+        metric: M_ORDERED,
+        rewrites: vec![Rewrite {
+            id: const_id,
+            expr: Expr::Literal(Literal::U32(k - 1)),
+            ty: Some(IrType::Known(KnownType::U32)),
+            source: ProvenanceSource::SdkPattern,
+            note: format!(
+                "val-packed-compare: `> ({k} << {shift}) - 1` on a packed U32Val is `> {}` on                  its payload (reads the wasm comparison as unsigned, which holds for every                  payload below 2^31)",
+                k - 1,
+                shift = val_abi::MAJOR_SHIFT
+            ),
+            metric: M_ORDERED,
+        }],
+    })
 }
 
 /// Shape A — `(p & MAJOR_MASK) {==,!=} k << 32`.
