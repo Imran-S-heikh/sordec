@@ -18,6 +18,8 @@ pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> Categ
     let recon = bag(&extract::extract(reconstructed));
     let orig = bag(&extract::extract(original));
 
+    trace_facts(&recon, &orig);
+
     let recon_total: usize = recon.values().sum();
     let orig_total: usize = orig.values().sum();
 
@@ -42,6 +44,29 @@ pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> Categ
         score = score.with_note(note);
     }
     score
+}
+
+/// The two fact multisets, printed when `SORDEC_SCORE_FACTS` is set.
+///
+/// The report names which keys are over- and under-recovered but not by
+/// how much, and a multiset comparison turns on the counts: one storage
+/// read inlined into four callers reads as four facts against the
+/// source's one. Companion to `SORDEC_SCORE_STREAMS` in
+/// [`crate::structure`].
+#[allow(clippy::print_stderr)]
+fn trace_facts(recon: &Multiset, orig: &Multiset) {
+    if std::env::var_os("SORDEC_SCORE_FACTS").is_none() {
+        return;
+    }
+    let mut keys: Vec<&String> = recon.keys().chain(orig.keys()).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    eprintln!("[facts] ours orig  key");
+    for key in keys {
+        let (r, o) = (recon.get(key).unwrap_or(&0), orig.get(key).unwrap_or(&0));
+        let mark = if r == o { ' ' } else { '*' };
+        eprintln!("{mark} {r:>4} {o:>4}  {key}");
+    }
 }
 
 /// Build a multiset of fact keys.

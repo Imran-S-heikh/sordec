@@ -566,6 +566,21 @@ fn classify_tag_check(
             val_abi::tag_name(*tag).unwrap_or("?")
         ));
     }
+    // A cross-contract call's result carries the same licence, one
+    // boundary further out. `#[contractclient]` generates a method per
+    // entrypoint whose body is `T::try_from_val(env, &res).unwrap()` on
+    // the raw `Val` the host returned — this check. The reconstruction
+    // emits `Client::new(&e, &addr).transfer(…)`, which regenerates it,
+    // and the tag is where the method's declared `T` comes from.
+    if invokes_contract(func, value)
+        && let Some(named) = val_abi::tag_payload_type(*tag)
+    {
+        return Ok(format!(
+            "tag check ({}) on a cross-contract call's result: the generated client method \
+             returns {named:?}, and its `try_from_val` regenerates it",
+            val_abi::tag_name(*tag).unwrap_or("?")
+        ));
+    }
     let declared = declared_param_type(func, value).ok_or(DECLINED_TAG_NOT_PARAM)?;
     // `tag_admits`, not `==`: a `BytesN<N>` parameter rides in a plain
     // `BytesObject`, and a `Vec<Address>` in a plain `VecObject` — the
@@ -668,6 +683,16 @@ fn reads_storage(func: &HighFunction, value: ValueId) -> bool {
     matches!(
         func.bindings.get(resolve_use(func, value)).map(|b| &b.expr),
         Some(Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. })))
+    )
+}
+
+/// Whether `value` is what a cross-contract call returned.
+fn invokes_contract(func: &HighFunction, value: ValueId) -> bool {
+    matches!(
+        func.bindings.get(resolve_use(func, value)).map(|b| &b.expr),
+        Some(Expr::Semantic(SemanticOp::Known(
+            KnownOp::InvokeContract { .. } | KnownOp::TryInvokeContract { .. }
+        )))
     )
 }
 
