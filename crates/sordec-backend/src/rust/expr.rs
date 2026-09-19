@@ -34,6 +34,33 @@ fn variant_path(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<syn::Path>
     Some(parse_quote!(#owner::#variant))
 }
 
+/// `value` as a suffix-free integer literal, when it is an integer
+/// constant and `against` carries a known integer type to infer from.
+fn unsuffixed(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common::ValueId) -> Option<syn::Expr> {
+    let other = ctx.func.bindings.get(ctx.fold_target(against))?;
+    if !matches!(
+        other.ty,
+        IrType::Known(
+            KnownType::I32 | KnownType::I64 | KnownType::U32 | KnownType::U64 | KnownType::U128 | KnownType::I128
+        ) | IrType::Inferred(
+            KnownType::I32 | KnownType::I64 | KnownType::U32 | KnownType::U64 | KnownType::U128 | KnownType::I128
+        )
+    ) {
+        return None;
+    }
+    let binding = ctx.func.bindings.get(ctx.fold_target(value))?;
+    let n: i128 = match &binding.expr {
+        Expr::Literal(Literal::I32(n)) => i128::from(*n),
+        Expr::Literal(Literal::I64(n)) => i128::from(*n),
+        Expr::Literal(Literal::U32(n)) => i128::from(*n),
+        Expr::Literal(Literal::U64(n)) => i128::from(*n),
+        _ => return None,
+    };
+    let lit = proc_macro2::Literal::i128_unsuffixed(n);
+    let rendered: syn::Expr = parse_quote!(#lit);
+    Some(if n < 0 { parse_quote!((#rendered)) } else { rendered })
+}
+
 /// The right-hand side expression for one binding.
 pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
     match &binding.expr {
@@ -46,7 +73,22 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             unary_expr(*op, ctx.value_ref(*value), ctx.is_boolean(*value))
         }
         Expr::Binary { op, lhs, rhs } => {
-            binary_expr(*op, ctx.value_ref(*lhs), ctx.value_ref(*rhs))
+            // A constant compared against a typed operand prints without
+            // its suffix and takes the type from the comparison, which is
+            // where Rust gets it too. The lowering has to pick a
+            // signedness to record a `i64.const`'s bits; against a `u64`
+            // that choice would not compile, and it was never a claim
+            // about the value.
+            let (l, r) = match op {
+                BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt
+                | BinaryOp::Ge => (unsuffixed(ctx, *lhs, *rhs), unsuffixed(ctx, *rhs, *lhs)),
+                _ => (None, None),
+            };
+            binary_expr(
+                *op,
+                l.unwrap_or_else(|| ctx.value_ref(*lhs)),
+                r.unwrap_or_else(|| ctx.value_ref(*rhs)),
+            )
         }
         Expr::Call { target, args } => {
             let path = callee_path(ctx.high, *target);

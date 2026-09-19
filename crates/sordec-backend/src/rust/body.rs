@@ -324,8 +324,19 @@ impl<'a> FnCtx<'a> {
         matches!(
             self.func.bindings.get(vid).map(|b| &b.ty),
             Some(
-                IrType::Known(KnownType::I32 | KnownType::I64)
-                    | IrType::Inferred(KnownType::I32 | KnownType::I64)
+                IrType::Known(
+                    KnownType::I32
+                        | KnownType::I64
+                        | KnownType::U32
+                        | KnownType::U64
+                        | KnownType::Bool
+                ) | IrType::Inferred(
+                    KnownType::I32
+                        | KnownType::I64
+                        | KnownType::U32
+                        | KnownType::U64
+                        | KnownType::Bool
+                )
             )
         )
     }
