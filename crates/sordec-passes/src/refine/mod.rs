@@ -49,6 +49,7 @@ mod trap_call;
 mod trap_inline;
 mod trivial_phi;
 mod width_fold;
+mod wide_compare;
 mod wide_zero;
 
 pub use and_merge::AndMergePass;
@@ -72,6 +73,8 @@ pub(crate) use const_branch::PASS_NAME as CONST_BRANCH_PASS_NAME;
 #[cfg(test)]
 pub(crate) use trivial_phi::PASS_NAME as TRIVIAL_PHI_PASS_NAME;
 #[cfg(test)]
+pub(crate) use wide_compare::PASS_NAME as WIDE_COMPARE_PASS_NAME;
+#[cfg(test)]
 pub(crate) use wide_zero::PASS_NAME as WIDE_ZERO_PASS_NAME;
 #[cfg(test)]
 pub(crate) use width_fold::PASS_NAME as WIDTH_FOLD_PASS_NAME;
@@ -87,6 +90,7 @@ pub use switch_dedup::SwitchDedupPass;
 pub use trap_call::TrapCallInlinePass;
 pub use trivial_phi::TrivialPhiPass;
 pub use width_fold::WidthFoldPass;
+pub use wide_compare::WideComparePass;
 pub use wide_zero::WideZeroPass;
 pub(crate) use trap_call::pure_traps;
 pub use trap_inline::TrapInlinePass;

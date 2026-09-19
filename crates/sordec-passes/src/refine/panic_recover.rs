@@ -334,12 +334,43 @@ fn is_division_guard(func: &HighFunction, cond: ValueId) -> bool {
     if divisors.is_empty() {
         return false;
     }
-    let Some(Expr::Unary { op: UnaryOp::Eqz, value }) =
-        func.bindings.get(resolve_use(func, cond)).map(|b| &b.expr)
-    else {
+    let Some(expr) = func.bindings.get(resolve_use(func, cond)).map(|b| &b.expr) else {
         return false;
     };
-    let tested = resolve_use(func, *value);
+    match expr {
+        // `d == 0`, however the compiler spelled it.
+        Expr::Unary { op: UnaryOp::Eqz, value } => zero_test(func, *value, &numerators, &divisors),
+        Expr::Binary { op: BinaryOp::Eq, lhs, rhs } => {
+            if let Some(other) = against(func, *lhs, *rhs, 0) {
+                zero_test(func, other, &numerators, &divisors)
+            } else if let Some(other) = against(func, *lhs, *rhs, -1) {
+                // `(lo(d) & hi(d)) == -1` is `d == -1`, the other half of
+                // the `MIN / -1` pair.
+                all_ones(func, other, &divisors)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The operand compared against the constant `want`, if one is.
+fn against(func: &HighFunction, lhs: ValueId, rhs: ValueId, want: i128) -> Option<ValueId> {
+    [(lhs, rhs), (rhs, lhs)]
+        .into_iter()
+        .find_map(|(value, konst)| (trace_int(func, konst) == Some(want)).then_some(value))
+}
+
+/// Whether testing this value against zero is one of the two checks: the
+/// divisor being zero, or the numerator being `i128::MIN`.
+fn zero_test(
+    func: &HighFunction,
+    value: ValueId,
+    numerators: &[ValueId],
+    divisors: &[ValueId],
+) -> bool {
+    let tested = resolve_use(func, value);
     if divisors.contains(&tested) {
         return true;
     }
@@ -353,6 +384,21 @@ fn is_division_guard(func: &HighFunction, cond: ValueId) -> bool {
         limb_of(func, low, UnaryOp::WideLo)
             .zip(min_xor(func, high))
             .is_some_and(|(a, b)| a == b && numerators.contains(&a))
+    })
+}
+
+/// Whether this is `lo(d) & hi(d)` for a divisor `d` — all ones in both
+/// halves is `d == -1`.
+fn all_ones(func: &HighFunction, value: ValueId, divisors: &[ValueId]) -> bool {
+    let Some(Expr::Binary { op: BinaryOp::BitAnd, lhs, rhs }) =
+        func.bindings.get(resolve_use(func, value)).map(|b| &b.expr)
+    else {
+        return false;
+    };
+    [(*lhs, *rhs), (*rhs, *lhs)].into_iter().any(|(low, high)| {
+        limb_of(func, low, UnaryOp::WideLo)
+            .zip(limb_of(func, high, UnaryOp::WideHi))
+            .is_some_and(|(a, b)| a == b && divisors.contains(&a))
     })
 }
 
@@ -724,6 +770,87 @@ mod tests {
         };
         let result = PanicRecoverPass.run(&mut ir);
         (ir.functions.pop().expect("one function"), result)
+    }
+
+    /// `q = n / d`, with `n` and `d` built from their halves so the
+    /// guards have something to name. `cond` is the guard condition under
+    /// test, at v10.
+    fn division_with_guard(cond: Expr) -> HighFunction {
+        let bindings = vec![
+            binding(0, Expr::Phi { incoming: vec![] }), // n
+            binding(1, Expr::Phi { incoming: vec![] }), // d
+            binding(2, Expr::Unary { op: UnaryOp::WideLo, value: v(0) }),
+            binding(3, Expr::Unary { op: UnaryOp::WideHi, value: v(0) }),
+            binding(4, Expr::Unary { op: UnaryOp::WideLo, value: v(1) }),
+            binding(5, Expr::Unary { op: UnaryOp::WideHi, value: v(1) }),
+            binding(6, Expr::Literal(Literal::I64(i64::MIN))),
+            binding(7, Expr::Literal(Literal::I64(-1))),
+            binding(8, Expr::Binary { op: BinaryOp::BitXor, lhs: v(3), rhs: v(6) }),
+            binding(9, Expr::Binary { op: BinaryOp::BitAnd, lhs: v(4), rhs: v(5) }),
+            binding(10, cond),
+            binding(11, Expr::Binary { op: BinaryOp::Div, lhs: v(0), rhs: v(1) }),
+        ];
+        func_of(
+            bindings,
+            Region::Sequence(vec![Region::Basic(bb(0)), guard(10, Region::Unreachable)]),
+        )
+    }
+
+    fn kind_of(func: HighFunction) -> PanicKind {
+        let (func, _) = run_pass(func);
+        let mut found = PanicKind::Bare;
+        func.region.for_each_node(|node| {
+            if let Region::Panic { kind } = node {
+                found = *kind;
+            }
+        });
+        found
+    }
+
+    /// `d == 0` in front of `n / d`.
+    #[test]
+    fn a_divisor_zero_test_is_the_divisions_own_guard() {
+        let kind = kind_of(division_with_guard(Expr::Unary { op: UnaryOp::Eqz, value: v(1) }));
+        assert_eq!(kind, PanicKind::DivisionGuard);
+    }
+
+    /// `(lo(d) & hi(d)) == -1` is `d == -1`, the other half of the pair.
+    #[test]
+    fn a_divisor_minus_one_test_is_too() {
+        let kind = kind_of(division_with_guard(Expr::Binary {
+            op: BinaryOp::Eq,
+            lhs: v(9),
+            rhs: v(7),
+        }));
+        assert_eq!(kind, PanicKind::DivisionGuard);
+    }
+
+    /// `lo(n) | (hi(n) ^ i64::MIN) == 0` is `n == i128::MIN`.
+    #[test]
+    fn a_numerator_min_test_is_too() {
+        let bindings_cond =
+            Expr::Binary { op: BinaryOp::BitOr, lhs: v(2), rhs: v(8) };
+        let mut func = division_with_guard(bindings_cond);
+        // Wrap it in the `eqz` the guard actually tests.
+        let id = ValueId::from_index(func.bindings.len() as u32);
+        func.bindings.push(binding(
+            IrId::index(id),
+            Expr::Unary { op: UnaryOp::Eqz, value: v(10) },
+        ));
+        func.blocks.get_mut(bb(0)).unwrap().bindings.push(id);
+        func.region = Region::Sequence(vec![
+            Region::Basic(bb(0)),
+            guard(IrId::index(id), Region::Unreachable),
+        ]);
+        assert_eq!(kind_of(func), PanicKind::DivisionGuard);
+    }
+
+    /// The same shape with no division in the function names nothing.
+    #[test]
+    fn a_zero_test_without_a_division_stays_bare() {
+        let mut func = division_with_guard(Expr::Unary { op: UnaryOp::Eqz, value: v(1) });
+        func.bindings.get_mut(v(11)).unwrap().expr = Expr::Phi { incoming: vec![] };
+        assert_eq!(kind_of(func), PanicKind::Bare);
     }
 
     fn guard(cond: u32, then: Region) -> Region {

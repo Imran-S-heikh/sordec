@@ -107,7 +107,7 @@ pub use refine::{
     AndMergePass, ConstBranchFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
     OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass, SelectReturnPass,
     SwitchDedupPass,
-    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WideZeroPass, WidthFoldPass,
+    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WideComparePass, WideZeroPass, WidthFoldPass,
 };
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringCensusPass, StructuringStatsPass};
@@ -398,6 +398,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // With the halves owned, the OR tree that tests a 128-bit
             // value against zero can be read as that test.
             Box::new(WideZeroPass),
+            // And the lexicographic comparison of two values' halves,
+            // which is where the borrow check on a 128-bit subtraction
+            // hides. Before the panic re-classification below, which is
+            // what reads it.
+            Box::new(WideComparePass),
             Box::new(WrapperInlinePass),
             // A pasted body carries the facts its helper had, and a helper
             // called with different durabilities or keys had none: the
@@ -529,7 +534,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..63],
+        vec![1..7, 31..64],
     )
 }
 
@@ -590,6 +595,7 @@ mod tests {
                 interproc::const_return::PASS_NAME,
                 interproc::wide_promote::PASS_NAME,
                 refine::WIDE_ZERO_PASS_NAME,
+                refine::WIDE_COMPARE_PASS_NAME,
                 interproc::inline::PASS_NAME,
                 CONST_PROP_AFTER_INLINE,
                 TTL_AFTER_INLINE,

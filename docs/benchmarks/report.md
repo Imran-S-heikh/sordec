@@ -11,10 +11,10 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | token-v23 | 0.7289 | 0.7500 | 0.5783 | 0.8333 | n/a |
 | token-v23-stripped | 0.2853 | 0.0000 | 0.2104 | 0.6329 | n/a |
 | timelock | 0.8166 | 1.0000 | 0.5833 | 0.8276 | n/a |
-| dex-liquidity-pool | 0.7397 | 1.0000 | 0.5049 | 0.6750 | n/a |
+| dex-liquidity-pool | 0.7453 | 1.0000 | 0.5239 | 0.6750 | n/a |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | n/a |
-| **aggregate (mean, AST)** | **0.7696** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.7696** | | | | |
+| **aggregate (mean, AST)** | **0.7704** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.7704** | | | | |
 
 ## Per-fixture detail
 
@@ -56,7 +56,7 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 ### dex-liquidity-pool
 
 - **interface** 1.0000 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (6 original, 6 reconstructed) — types 1.0000  precision=1.0000 recall=1.0000 (1 original, 1 reconstructed)
-- **structure** 0.5049 — 6 entrypoints (0 unreconstructed, 1 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.3600 recall=0.7826 (23 original tokens, 50 reconstructed) — bloat 2.2x, dice ceiling ~0.6301 — low-similarity: balance_shares(0.00), deposit(0.36), swap(0.70), withdraw(0.46)
+- **structure** 0.5239 — 6 entrypoints (0 unreconstructed, 1 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.3830 recall=0.7826 (23 original tokens, 47 reconstructed) — bloat 2.0x, dice ceiling ~0.6571 — low-similarity: balance_shares(0.00), deposit(0.37), swap(0.70), withdraw(0.55)
 - **semantic** 0.6750 — precision=0.6923 recall=0.6585 (41 original facts, 39 reconstructed) — under-recovered: panic:bare, xcall:transfer — over-recovered: ledger:current_contract_address, storage:set:instance:DataKey::ReserveA, storage:set:instance:DataKey::ReserveB, storage:set:instance:DataKey::TotalShares, storage:set:persistent:DataKey::Shares
 - **behavior** n/a — behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`
 
