@@ -25,7 +25,10 @@ use std::collections::{HashMap, HashSet};
 use syn::parse_quote;
 
 use sordec_common::{BlockId, IrId, ValueId};
-use sordec_ir::{Expr, HighFunction, HighIr, IrType, KnownType, Region, TypeRegistry};
+use sordec_ir::{
+    Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Region, SemanticOp,
+    TypeRegistry,
+};
 
 use crate::rust::expr;
 use crate::rust::fold::Fold;
@@ -470,11 +473,35 @@ impl<'a> FnCtx<'a> {
                     // them.
                     let ty = self.value_type(vid);
                     out.push(parse_quote!(let #name: #ty = #value;));
+                } else if Self::reads_a_recovered_type(binding) {
+                    // `Storage::get` is generic in its payload, so nothing
+                    // at the use site pins it when the value only flows
+                    // into field accesses — `let b = …get(&k).unwrap();
+                    // b.amount` is `type annotations needed`. This is the
+                    // narrow case the broad experiment in the branch above
+                    // was not: the type came from the contract's own spec,
+                    // and the call genuinely cannot be inferred without it.
+                    let ty = self.value_type(vid);
+                    out.push(parse_quote!(let #name: #ty = #value;));
                 } else {
                     out.push(parse_quote!(let #name = #value;));
                 }
             }
         }
+    }
+
+    /// A generic SDK read whose payload type came from the contract's
+    /// declared types. Only a `UserDefined` type qualifies: it is one the
+    /// reconstruction also declares, so naming it cannot conflict with
+    /// what rustc would have inferred.
+    fn reads_a_recovered_type(binding: &Binding) -> bool {
+        matches!(
+            binding.ty,
+            IrType::Known(KnownType::UserDefined(_)) | IrType::Inferred(KnownType::UserDefined(_))
+        ) && matches!(
+            binding.expr,
+            Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. }))
+        )
     }
 
     /// Whether an emitted value is one of the hole policy's `todo!(…)`

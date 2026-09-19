@@ -132,10 +132,14 @@ fn token_v23_emits_soroban_idioms() {
     let src = emit_rust(&common::build_high(common::TOKEN_V23)).expect("emits");
 
     // Storage across all three tiers, keyed by the recovered enum variants.
-    assert!(src.contains("e.storage().persistent().get(&DataKey::Balance"), "persistent get:\n{src}");
-    assert!(src.contains("e.storage().instance().get(&DataKey::Admin"), "instance get:\n{src}");
-    assert!(src.contains("e.storage().temporary().get(&DataKey::Allowance"), "temporary get:\n{src}");
-    assert!(src.contains(".set(&DataKey::"), "a keyed set:\n{src}");
+    // Matched with the whitespace removed: a chain long enough to need a
+    // type annotation is wrapped across lines by the formatter, and where
+    // the line breaks fall is not what this test is about.
+    let flat: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(flat.contains("e.storage().persistent().get(&DataKey::Balance"), "persistent get:\n{src}");
+    assert!(flat.contains("e.storage().instance().get(&DataKey::Admin"), "instance get:\n{src}");
+    assert!(flat.contains("e.storage().temporary().get(&DataKey::Allowance"), "temporary get:\n{src}");
+    assert!(flat.contains(".set(&DataKey::"), "a keyed set:\n{src}");
     // Auth, events, ledger context.
     assert!(src.contains(".require_auth()"), "require_auth:\n{src}");
     // R1: topics are a tuple. A single topic must render the 1-tuple
