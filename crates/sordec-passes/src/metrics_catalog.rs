@@ -404,6 +404,8 @@ pub const MARSHALLING_TYPED_READS: &str = "marshalling_typed_reads";
 pub const MARSHALLING_BOOL_CODECS: &str = "marshalling_bool_codecs";
 /// Derived struct encodes folded back into the struct literal.
 pub const MARSHALLING_UDT_ENCODES: &str = "marshalling_udt_encodes";
+/// Argument vectors of fully-resolved cross-contract calls, retired.
+pub const MARSHALLING_CLIENT_ARG_VECS: &str = "marshalling_client_arg_vecs";
 /// Struct-field decodes folded into the field's declared type.
 pub const MARSHALLING_FIELD_TYPES: &str = "marshalling_field_types";
 /// Entrypoint parameters whose declared type was read off the wrapper's
@@ -782,6 +784,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_BOOL_CODECS,
         MARSHALLING_UDT_ENCODES,
         MARSHALLING_FIELD_TYPES,
+        MARSHALLING_CLIENT_ARG_VECS,
         MARSHALLING_SPEC_PARAMS,
         MARSHALLING_SPEC_RETURNS,
         MARSHALLING_ENUM_DISCRIMINANTS,

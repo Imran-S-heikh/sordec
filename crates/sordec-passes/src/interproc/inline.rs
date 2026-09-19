@@ -243,17 +243,28 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
     Some(Wrapper { id: func.id, params: func.params.clone(), items, ret })
 }
 
-/// Whether `func` performs a storage operation on a key it builds itself
-/// rather than receives — the author's accessor, not the SDK's generic
-/// helper. See the module docs.
+/// Whether `func` is a body worth keeping shared: one the source wrote
+/// and calls from several places, rather than a helper rustc left out of
+/// line. See the module docs.
 ///
-/// The key *value* is what separates them. The SDK's `Storage::extend_ttl`
-/// receives the key and converts it, so its key value is computed from a
-/// parameter. An accessor names its key: `DataKey::TokenA`, or
-/// `DataKey::Shares(user)` whose payload is an argument but whose
-/// construction is the accessor's own — by the time this runs, the
-/// converter that built it has been elided and the key value is a
-/// constant.
+/// Two ways to be one, and the second is the general form of the first.
+///
+/// A **storage accessor** is told apart from the SDK's generic helper by
+/// the key *value*. `Storage::extend_ttl` receives its key and converts
+/// it, so the value is computed from a parameter. An accessor names its
+/// key: `DataKey::TokenA`, or `DataKey::Shares(user)` whose payload is an
+/// argument but whose construction is the accessor's own — by the time
+/// this runs, the converter that built it has been elided and the key
+/// value is a constant.
+///
+/// A body that performs a **cross-contract call** is kept for the same
+/// reason, without needing a key to reason about: copying it into every
+/// caller states once per caller what the contract does once. Only this
+/// one other operation, and measured rather than assumed — extending it
+/// to events and authorization cost token-v22 0.8605 -> 0.8333 of
+/// semantic, because those really are written per call site and the
+/// helper holding them really was rustc's. A single caller has nothing
+/// to duplicate and is inlined as before.
 fn is_accessor(func: &HighFunction) -> bool {
     use sordec_ir::{KnownOp, SemanticOp};
     emission_order(func).into_iter().any(|id| {
@@ -265,6 +276,9 @@ fn is_accessor(func: &HighFunction) -> bool {
                 | KnownOp::StorageExtendTtl { key, .. }
                 | KnownOp::StorageHas { key, probe: false, .. },
             ))) => *key,
+            Some(Expr::Semantic(SemanticOp::Known(
+                KnownOp::InvokeContract { .. } | KnownOp::TryInvokeContract { .. },
+            ))) => return true,
             _ => return false,
         };
         !reads_a_param(func, key, 0)

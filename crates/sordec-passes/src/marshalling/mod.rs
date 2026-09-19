@@ -53,6 +53,7 @@
 //! because each strictly reduces the number of live marshalling bindings.
 
 pub mod bool_codec;
+pub mod client_args;
 pub mod decode;
 pub mod enum_discriminant;
 pub mod enum_encode;
@@ -77,6 +78,7 @@ pub mod wide_codec;
 pub mod wide_return;
 
 pub use bool_codec::BoolCodecPass;
+pub use client_args::ClientArgVecPass;
 pub use dead_store::DeadFrameStorePass;
 pub use decode::ValDecodeCollapsePass;
 pub use enum_discriminant::EnumDiscriminantPass;

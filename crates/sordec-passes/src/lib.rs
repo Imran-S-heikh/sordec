@@ -96,7 +96,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    BoolCodecPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    BoolCodecPass, ClientArgVecPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -509,6 +509,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // group because eliding the converter can leave its frame slot
             // dead, which is what `FrameElisionPass` below then collects.
             Box::new(KeyConstructionElisionPass),
+            // The same, one host call along: a cross-contract call's
+            // argument vector, once every element of it is recovered.
+            // The slab it was built from goes with it, because the
+            // stores are then unread and `DeadFrameStorePass` is next.
+            Box::new(ClientArgVecPass),
             // A store into a private frame that nothing loads back is the
             // last reader of a frame pointer the bracket elision below
             // needs unread.
@@ -580,7 +585,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 32..72],
+        vec![1..7, 32..73],
     )
 }
 
@@ -662,6 +667,7 @@ mod tests {
                 marshalling::enum_encode::PASS_NAME,
                 marshalling::option_unwrap::PASS_NAME,
                 marshalling::key_construction::PASS_NAME,
+                marshalling::client_args::PASS_NAME,
                 marshalling::dead_store::PASS_NAME,
                 marshalling::frame::PASS_NAME,
                 arith::wide_fold::PASS_NAME,
