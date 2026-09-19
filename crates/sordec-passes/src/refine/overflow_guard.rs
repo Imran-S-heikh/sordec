@@ -185,13 +185,65 @@ fn strip(region: Region, elided: &mut i64, inert: &HashSet<BlockId>) -> Region {
 /// Blocks that compute nothing anyone reads: no bindings at all, or only
 /// pure ones the rest of the function has stopped reading. Dropping the
 /// branch that reaches such a block drops nothing.
-fn inert_blocks(func: &HighFunction) -> HashSet<BlockId> {
+fn inert_blocks(func: &mut HighFunction) -> HashSet<BlockId> {
     let order = crate::marshalling::sret::emission_order(func);
     let dead = crate::dataflow::dead_residue(func, &order);
-    func.blocks
+    let candidates: HashSet<BlockId> = func
+        .blocks
         .iter()
         .filter(|(_, block)| block.bindings.iter().all(|v| dead.contains(v)))
         .map(|(id, _)| id)
+        .collect();
+    // Everything those blocks define is about to lose its definition, so
+    // a dead binding still *naming* one has to let go first: the IR
+    // validator does not know which reads are dead, and a dangling name
+    // is a broken invariant however unreachable the reader.
+    let doomed: HashSet<sordec_common::ValueId> = func
+        .blocks
+        .iter()
+        .filter(|(id, _)| candidates.contains(id))
+        .flat_map(|(_, block)| block.bindings.iter().copied())
+        .collect();
+    let dangling: Vec<sordec_common::ValueId> = func
+        .bindings
+        .iter()
+        .filter(|(id, _)| dead.contains(id) && !doomed.contains(id))
+        .filter(|(_, b)| {
+            let mut names = false;
+            b.expr.for_each_value_use(|u| names |= doomed.contains(&u));
+            names
+        })
+        .map(|(id, _)| id)
+        .collect();
+    for id in dangling {
+        if let Some(b) = func.bindings.get_mut(id) {
+            b.expr = sordec_ir::Expr::Literal(sordec_ir::Literal::Unit);
+            b.add_provenance(sordec_common::Provenance::new(
+                PASS_NAME,
+                sordec_common::ProvenanceSource::DataFlow,
+                "named a value in a block the guard removal is about to drop",
+            ));
+        }
+    }
+    // Named from outside the candidates. Bindings *inside* them name each
+    // other freely — that is what a block is — and they leave together.
+    let mut named: HashSet<sordec_common::ValueId> = HashSet::new();
+    for (id, b) in func.bindings.iter() {
+        if doomed.contains(&id) {
+            continue;
+        }
+        b.expr.for_each_value_use(|u| {
+            named.insert(u);
+        });
+    }
+    func.region.for_each_value_use(|u| {
+        named.insert(u);
+    });
+    candidates
+        .into_iter()
+        .filter(|id| {
+            func.blocks.get(*id).is_some_and(|b| b.bindings.iter().all(|v| !named.contains(v)))
+        })
         .collect()
 }
 

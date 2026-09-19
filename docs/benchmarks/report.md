@@ -10,11 +10,11 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | token-v22 | 0.8823 | 0.9286 | 0.8531 | 0.8605 | n/a |
 | token-v23 | 0.7953 | 0.7500 | 0.8042 | 0.8333 | n/a |
 | token-v23-stripped | 0.2909 | 0.0000 | 0.2294 | 0.6329 | n/a |
-| timelock | 0.8271 | 1.0000 | 0.6190 | 0.8276 | n/a |
+| timelock | 0.8411 | 1.0000 | 0.6667 | 0.8276 | n/a |
 | dex-liquidity-pool | 0.7525 | 1.0000 | 0.5486 | 0.6750 | n/a |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
-| **aggregate (mean, AST)** | **0.7926** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.7926** | | | | |
+| **aggregate (mean, AST)** | **0.7946** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.7946** | | | | |
 
 ## Per-fixture detail
 
@@ -49,9 +49,9 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 ### timelock
 
 - **interface** 1.0000 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (2 original, 2 reconstructed) — types 1.0000  precision=1.0000 recall=1.0000 (4 original, 4 reconstructed)
-- **structure** 0.6190 — 2 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.4545 recall=1.0000 (5 original tokens, 11 reconstructed) — bloat 2.2x, dice ceiling ~0.6250 — low-similarity: claim(0.67), deposit(0.57)
+- **structure** 0.6667 — 2 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.5000 recall=1.0000 (5 original tokens, 10 reconstructed) — bloat 2.0x, dice ceiling ~0.6667 — low-similarity: claim(0.67), deposit(0.67)
 - **semantic** 0.8276 — precision=1.0000 recall=0.7059 (17 original facts, 12 reconstructed) — under-recovered: panic:bare, xcall:transfer
-- **behavior** n/a — behavior unavailable: crate does not build: error[E0382]: borrow of moved value: `e`
+- **behavior** n/a — behavior unavailable: both modules build and load, but no entrypoint could be driven — 0 of 2 entrypoints drivable (skipped — claim: parameter `claimant` is an Address, which needs a value constructed against a live host; deposit: parameter `from` is an Address, which needs a value constructed against a live host)
 
 ### dex-liquidity-pool
 
