@@ -124,6 +124,15 @@ impl Liveness {
     pub(crate) fn is_unused(&self, vid: ValueId) -> bool {
         !self.uses.contains_key(&vid)
     }
+
+    /// How many times the emitted body reads a value.
+    ///
+    /// Asked when handing a value to a call: one read is this call and
+    /// the value can be moved, more than one and moving it would take it
+    /// away from a reader that is still to come.
+    pub(crate) fn reads(&self, vid: ValueId) -> u32 {
+        self.uses.get(&vid).copied().unwrap_or(0)
+    }
 }
 
 /// Whether an unread binding must still be emitted, as a bare statement,

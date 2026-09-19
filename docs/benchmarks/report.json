@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.820409643496388,
-  "aggregate_overall_with_behavior": 0.820409643496388,
+  "aggregate_overall": 0.8240470577665154,
+  "aggregate_overall_with_behavior": 0.8240470577665154,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -122,12 +122,12 @@
         "structure": {
           "checked": true,
           "notes": [
-            "6 entrypoints (0 unreconstructed, 1 without control flow)",
+            "6 entrypoints (0 unreconstructed, 0 without control flow)",
             "ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.4722 recall=0.7391 (23 original tokens, 36 reconstructed) — bloat 1.6x, dice ceiling ~0.7797",
-            "low-similarity: balance_shares(0.00), deposit(0.42), swap(0.71)"
+            "control flow: precision=0.4878 recall=0.8696 (23 original tokens, 41 reconstructed) — bloat 1.8x, dice ceiling ~0.7188",
+            "low-similarity: deposit(0.43), get_rsrvs(0.00), swap(0.67)"
           ],
-          "score": 0.5969821719499138,
+          "score": 0.6835526315789474,
           "weight": 0.25
         }
       },
@@ -138,7 +138,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 6 entrypoints, 1 types recovered"
       ],
-      "overall": 0.7667594623382099,
+      "overall": 0.7922213622291021,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
@@ -233,7 +233,7 @@
         "behavior": {
           "checked": false,
           "notes": [
-            "behavior unavailable: crate does not build: error[E0382]: use of moved value: `token`"
+            "behavior unavailable: both modules build and load, but no entrypoint could be driven — 0 of 2 entrypoints drivable (skipped — claim: parameter `claimant` is an Address, which needs a value constructed against a live host; deposit: parameter `from` is an Address, which needs a value constructed against a live host)"
           ],
           "score": 0.0,
           "weight": 0.15

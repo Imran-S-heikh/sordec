@@ -392,6 +392,28 @@ fn overall_band(name: &str) -> (f64, f64) {
     //
     // token-v22 structure 0.8615 -> 0.9063, token-v23 0.8123 -> 0.8565.
     // Aggregate 0.7988 -> 0.8025. Held-out mean unchanged at 0.7090.
+    // Re-centred 2026-09-20 — call arguments the caller still needs.
+    //
+    // Every emitted helper takes its arguments by value, which is what
+    // the wasm says, but Rust reads that as a move: a caller that uses
+    // the value again no longer owns it, and the crate does not build.
+    // Cloning at the call site, where the value is read more than once
+    // and its type is not `Copy`, is what the source avoids by taking
+    // `&Env` and `&Address` in its helpers.
+    //
+    // **timelock now builds and loads.** Its behaviour still cannot be
+    // measured, for a different reason: the differential driver cannot
+    // construct an `Address` argument against a live host, so 0 of its
+    // 2 entrypoints are drivable.
+    //
+    // dex 0.7668 -> 0.7922 (structure 0.5970 -> 0.6836), and that part
+    // is only half earned. A `.clone()` anywhere in a file pulls the
+    // derived `Clone` impl's `match` into every closure that reaches it
+    // — the scorer edge recorded in `plan/NOTES.md`, which until now
+    // cost us because the *original* clones and we did not. Emitting
+    // the clones the code needs happens to line the two sides up.
+    // Aggregate 0.8204 -> 0.8240.
+    //
     // Re-centred 2026-09-20 — the conversions a proven type licenses.
     //
     // A recognizer that proved a host result's type from the ABI has
@@ -443,7 +465,7 @@ fn overall_band(name: &str) -> (f64, f64) {
         "token-v23" => (0.79, 0.83),
         "token-v23-stripped" => (0.29, 0.33),
         "timelock" => (0.92, 0.96),
-        "dex-liquidity-pool" => (0.75, 0.79),
+        "dex-liquidity-pool" => (0.77, 0.81),
         "attestation" => (0.98, 1.0),
         _ => (0.00, 1.00),
     }

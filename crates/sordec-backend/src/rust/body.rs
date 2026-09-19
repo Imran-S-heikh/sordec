@@ -212,6 +212,53 @@ impl<'a> FnCtx<'a> {
     /// Render a `ValueId` as an expression, via the one naming authority:
     /// a rename reads as what it renames, a literal prints in place (see
     /// [`Fold`]).
+    /// One argument of an internal call: the value, cloned when handing
+    /// it over would move something the caller still reads.
+    ///
+    /// Every emitted helper takes its arguments by value, which is what
+    /// the wasm says — the SDK's handle types are passed as one machine
+    /// word — but Rust reads that as a move, and a caller that uses the
+    /// value again after the call no longer owns it. rustc reports it as
+    /// `use of moved value` and the crate does not build. The source
+    /// avoids it by taking `&Env` and `&Address` in its helpers; a clone
+    /// gets the same program without having to decide, per parameter,
+    /// which side of the boundary a reference would sit on.
+    ///
+    /// Only where it is needed and only where it is safe: a value read
+    /// once is read by this call and moves freely, a `Copy` type never
+    /// moves at all, and a value whose type we never recovered is left
+    /// alone — `todo!()` has no type for a method to resolve against.
+    pub(crate) fn arg_ref(&self, vid: ValueId) -> syn::Expr {
+        let rendered = self.value_ref(vid);
+        if !self.moved_away(vid) {
+            return rendered;
+        }
+        parse_quote!(#rendered.clone())
+    }
+
+    /// The `Env` as an internal call's leading argument.
+    ///
+    /// Always cloned: it is the one value every helper takes and every
+    /// caller goes on using, so the question [`Self::arg_ref`] asks has
+    /// the same answer every time.
+    pub(crate) fn env_arg(&self) -> syn::Expr {
+        let e = self.env();
+        parse_quote!(#e.clone())
+    }
+
+    /// Whether handing this value to a call would move it away from a
+    /// reader that still needs it.
+    fn moved_away(&self, vid: ValueId) -> bool {
+        let target = self.fold.target(vid);
+        if self.liveness.reads(target) <= 1 {
+            return false;
+        }
+        matches!(
+            self.func.bindings.get(target).map(|b| &b.ty),
+            Some(IrType::Known(t) | IrType::Inferred(t)) if !is_copy(t)
+        )
+    }
+
     /// What a reference to `vid` names after renames are followed.
     pub(crate) fn fold_target(&self, vid: ValueId) -> ValueId {
         self.fold.target(vid)
@@ -785,6 +832,32 @@ impl EscapeAnalysis {
     }
 }
 
+/// Whether a recovered type is `Copy`, so handing it to a call is not a
+/// move.
+///
+/// The scalars and `Val` are; every SDK handle type carries an `Env`
+/// beside its host handle and is `Clone` only. A composite or
+/// user-defined type is a `#[contracttype]`, which derives `Clone`.
+fn is_copy(ty: &KnownType) -> bool {
+    matches!(
+        ty,
+        KnownType::Bool
+            | KnownType::Unit
+            | KnownType::U32
+            | KnownType::I32
+            | KnownType::U64
+            | KnownType::I64
+            | KnownType::U128
+            | KnownType::I128
+            | KnownType::U256
+            | KnownType::I256
+            | KnownType::Timepoint
+            | KnownType::Duration
+            | KnownType::Error
+            | KnownType::Val
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,3 +906,4 @@ mod tests {
         assert!(a.finish().is_empty());
     }
 }
+

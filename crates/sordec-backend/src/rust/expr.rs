@@ -160,8 +160,8 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             let path = callee_path(ctx.high, *target);
             // Every emitted function takes `Env` as its leading parameter,
             // so every internal call threads it as the first argument.
-            let env = ctx.env();
-            let a: Vec<syn::Expr> = args.iter().map(|v| ctx.value_ref(*v)).collect();
+            let env = ctx.env_arg();
+            let a: Vec<syn::Expr> = args.iter().map(|v| ctx.arg_ref(*v)).collect();
             parse_quote!(#path(#env, #(#a),*))
         }
         // A recovered Soroban op renders as its idiomatic method chain when

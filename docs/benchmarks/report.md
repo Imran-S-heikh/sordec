@@ -11,10 +11,10 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | token-v23 | 0.8117 | 0.7500 | 0.8598 | 0.8333 | n/a |
 | token-v23-stripped | 0.3273 | 0.0385 | 0.3071 | 0.6329 | n/a |
 | timelock | 0.9391 | 1.0000 | 1.0000 | 0.8276 | n/a |
-| dex-liquidity-pool | 0.7668 | 1.0000 | 0.5970 | 0.6750 | n/a |
+| dex-liquidity-pool | 0.7922 | 1.0000 | 0.6836 | 0.6750 | n/a |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
-| **aggregate (mean, AST)** | **0.8204** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.8204** | | | | |
+| **aggregate (mean, AST)** | **0.8240** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.8240** | | | | |
 
 ## Per-fixture detail
 
@@ -51,12 +51,12 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 - **interface** 1.0000 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (2 original, 2 reconstructed) — types 1.0000  precision=1.0000 recall=1.0000 (4 original, 4 reconstructed)
 - **structure** 1.0000 — 2 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=1.0000 recall=1.0000 (5 original tokens, 5 reconstructed) — bloat 1.0x, dice ceiling ~1.0000
 - **semantic** 0.8276 — precision=1.0000 recall=0.7059 (17 original facts, 12 reconstructed) — under-recovered: panic:bare, xcall:transfer
-- **behavior** n/a — behavior unavailable: crate does not build: error[E0382]: use of moved value: `token`
+- **behavior** n/a — behavior unavailable: both modules build and load, but no entrypoint could be driven — 0 of 2 entrypoints drivable (skipped — claim: parameter `claimant` is an Address, which needs a value constructed against a live host; deposit: parameter `from` is an Address, which needs a value constructed against a live host)
 
 ### dex-liquidity-pool
 
 - **interface** 1.0000 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (6 original, 6 reconstructed) — types 1.0000  precision=1.0000 recall=1.0000 (1 original, 1 reconstructed)
-- **structure** 0.5970 — 6 entrypoints (0 unreconstructed, 1 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.4722 recall=0.7391 (23 original tokens, 36 reconstructed) — bloat 1.6x, dice ceiling ~0.7797 — low-similarity: balance_shares(0.00), deposit(0.42), swap(0.71)
+- **structure** 0.6836 — 6 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.4878 recall=0.8696 (23 original tokens, 41 reconstructed) — bloat 1.8x, dice ceiling ~0.7188 — low-similarity: deposit(0.43), get_rsrvs(0.00), swap(0.67)
 - **semantic** 0.6750 — precision=0.6923 recall=0.6585 (41 original facts, 39 reconstructed) — under-recovered: panic:bare, xcall:transfer — over-recovered: ledger:current_contract_address, storage:set:instance:DataKey::ReserveA, storage:set:instance:DataKey::ReserveB, storage:set:instance:DataKey::TotalShares, storage:set:persistent:DataKey::Shares
 - **behavior** n/a — behavior unavailable: crate does not build: error[E0308]: mismatched types
 
