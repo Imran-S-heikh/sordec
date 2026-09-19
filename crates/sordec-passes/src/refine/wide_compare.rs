@@ -151,13 +151,24 @@ fn against_zero(func: &HighFunction, expr: &Expr) -> Option<(BinaryOp, ValueId)>
     if half_of(func, hi, UnaryOp::WideHi)? != a || trace_int(func, bound) != Some(0) {
         return None;
     }
-    // And the tie case asks the unsigned question of the low half.
-    let low = match op {
-        BinaryOp::Le => is_zero(func, on_equal),
-        BinaryOp::Gt => is_nonzero(func, on_equal),
-        _ => None,
-    }?;
-    (half_of(func, low, UnaryOp::WideLo)? == a).then_some((op, a))
+    // And the tie case asks the unsigned question of the low half. What
+    // it asks decides the whole predicate, not the fallback's operator:
+    // `hi < 0` with `lo == 0` beneath it is `<= 0`, because the tie case
+    // is where equality lives.
+    let (low, whole) = match op {
+        BinaryOp::Lt => match (is_zero(func, on_equal), is_nonzero(func, on_equal)) {
+            (Some(v), _) => (v, BinaryOp::Le),
+            (_, Some(v)) => (v, BinaryOp::Lt),
+            _ => return None,
+        },
+        BinaryOp::Gt => match (is_nonzero(func, on_equal), is_zero(func, on_equal)) {
+            (Some(v), _) => (v, BinaryOp::Gt),
+            (_, Some(v)) => (v, BinaryOp::Ge),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (half_of(func, low, UnaryOp::WideLo)? == a).then_some((whole, a))
 }
 
 /// The value a `x == 0` test names, however it is spelled.

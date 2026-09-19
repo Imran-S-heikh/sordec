@@ -424,6 +424,8 @@ pub const MARSHALLING_ENUM_ENCODES: &str = "marshalling_enum_encodes";
 pub const INTERPROC_WIDE_PARAMS: &str = "interproc_wide_params";
 /// 128-bit sums and differences recovered from their limbs.
 pub const REFINE_WIDE_ARITH: &str = "refine_wide_arith";
+/// Half-merges given a merge of the whole value.
+pub const REFINE_WIDE_PHIS: &str = "refine_wide_phis";
 /// Merges only one value still reached, retired to renames of it.
 pub const REFINE_TRIVIAL_PHIS: &str = "refine_trivial_phis";
 /// `U32Val` encodes whose folded addend was recovered as arithmetic, and
@@ -783,6 +785,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         REFINE_WIDE_ZERO_TESTS,
         REFINE_WIDE_COMPARES,
         REFINE_WIDE_ARITH,
+        REFINE_WIDE_PHIS,
         REFINE_TRIVIAL_PHIS,
         MARSHALLING_FOLDED_ENCODES,
         REFINE_WIDTH_FOLDS,

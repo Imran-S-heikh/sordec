@@ -110,7 +110,7 @@ pub use refine::{
     AndMergePass, ConstBranchFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
     OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass, SelectReturnPass,
     SwitchDedupPass,
-    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WideArithPass, WideComparePass, WideZeroPass, WidthFoldPass,
+    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WideArithPass, WideComparePass, WidePhiPass, WideZeroPass, WidthFoldPass,
 };
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringCensusPass, StructuringStatsPass};
@@ -408,6 +408,8 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // The sum or difference rustc wrote out limb by limb, before
             // the promotions that need a whole value to hand over.
             Box::new(WideArithPass),
+            // And the halves a branch merged separately.
+            Box::new(WidePhiPass),
             Box::new(WideZeroPass),
             // And the lexicographic comparison of two values' halves,
             // which is where the borrow check on a 128-bit subtraction
@@ -563,7 +565,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..70],
+        vec![1..7, 31..71],
     )
 }
 
@@ -625,6 +627,7 @@ mod tests {
                 interproc::wide_promote::PASS_NAME,
                 interproc::wide_param::PASS_NAME,
                 refine::WIDE_ARITH_PASS_NAME,
+                refine::WIDE_PHI_PASS_NAME,
                 refine::WIDE_ZERO_PASS_NAME,
                 refine::WIDE_COMPARE_PASS_NAME,
                 interproc::inline::PASS_NAME,
