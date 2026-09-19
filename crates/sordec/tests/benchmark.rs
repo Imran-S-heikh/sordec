@@ -382,7 +382,7 @@ fn overall_band(name: &str) -> (f64, f64) {
         "token-v22" => (0.86, 0.90),
         "token-v23" => (0.78, 0.82),
         "token-v23-stripped" => (0.27, 0.31),
-        "timelock" => (0.80, 0.84),
+        "timelock" => (0.81, 0.85),
         "dex-liquidity-pool" => (0.73, 0.77),
         "attestation" => (0.98, 1.0),
         _ => (0.00, 1.00),

@@ -567,11 +567,13 @@ fn classify_tag_check(
         ));
     }
     let declared = declared_param_type(func, value).ok_or(DECLINED_TAG_NOT_PARAM)?;
-    // `tag_carries`, not `==`: a `BytesN<N>` parameter rides in a plain
-    // `BytesObject`, so the tag denotes `Bytes` while the declaration says
-    // `BytesN(N)` and an equality test would report a disagreement that
-    // does not exist.
-    if !val_abi::tag_carries(*tag, &declared) {
+    // `tag_admits`, not `==`: a `BytesN<N>` parameter rides in a plain
+    // `BytesObject`, and a `Vec<Address>` in a plain `VecObject` — the
+    // element type is not in the tag, and the wasm never checks it here.
+    // An equality test would report disagreements that do not exist. The
+    // same relation a struct field's check uses, for the same reason: the
+    // regenerated `try_from_val` is what checks the rest.
+    if !val_abi::tag_admits(*tag, &declared) {
         return Err(DECLINED_TAG_MISMATCH);
     }
     Ok(format!(
