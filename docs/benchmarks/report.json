@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.7987920314934741,
-  "aggregate_overall_with_behavior": 0.7987920314934741,
+  "aggregate_overall": 0.8025285938691019,
+  "aggregate_overall_with_behavior": 0.8025285938691019,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -317,10 +317,9 @@
           "notes": [
             "13 entrypoints (0 unreconstructed, 4 without control flow)",
             "ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.7273 recall=0.9697 (33 original tokens, 44 reconstructed) — bloat 1.3x, dice ceiling ~0.8571",
-            "low-similarity: approve(0.57)"
+            "control flow: precision=0.7500 recall=1.0000 (33 original tokens, 44 reconstructed) — bloat 1.3x, dice ceiling ~0.8571"
           ],
-          "score": 0.8615253581107241,
+          "score": 0.9062795199380564,
           "weight": 0.25
         }
       },
@@ -331,7 +330,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 3 types recovered"
       ],
-      "overall": 0.8848144740974476,
+      "overall": 0.8979774628701924,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
@@ -373,10 +372,10 @@
           "notes": [
             "13 entrypoints (0 unreconstructed, 4 without control flow)",
             "ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.6038 recall=0.9697 (33 original tokens, 53 reconstructed) — bloat 1.6x, dice ceiling ~0.7674",
-            "low-similarity: approve(0.57), transfer(0.41), transfer_from(0.74)"
+            "control flow: precision=0.6226 recall=1.0000 (33 original tokens, 53 reconstructed) — bloat 1.6x, dice ceiling ~0.7674",
+            "low-similarity: transfer(0.41)"
           ],
-          "score": 0.812284933801005,
+          "score": 0.856460956513613,
           "weight": 0.25
         }
       },
@@ -387,7 +386,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.7977308628826484,
+      "overall": 0.8107238107392978,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,

@@ -377,10 +377,25 @@ fn overall_band(name: &str) -> (f64, f64) {
     // breaks were never the bulk — the `if`s are (68 emitted against the
     // source's 10 on token-v23). Corpus `cargo check` 238 -> 236, gate
     // unchanged at 2/7, behaviour 1.0000 on both measured fixtures.
+    // Re-centred 2026-09-19 — 128-bit operands the function never named.
+    //
+    // A difference over four loose registers (a balance loaded out of
+    // storage, an amount arriving in two parameters) is still a
+    // difference: the borrow names the two low limbs in operand order,
+    // so the pairing is read off the pattern and each pair is joined
+    // into the operand it is the halves of. That reaches the whole
+    // chain behind it — a helper can take the value instead of two
+    // registers, the comparison on it stops being a `select` over
+    // unrelated registers, and the guard it feeds recovers its polarity.
+    // A sum still needs operands the function already names, because
+    // its carry compares the result and leaves the pairing open.
+    //
+    // token-v22 structure 0.8615 -> 0.9063, token-v23 0.8123 -> 0.8565.
+    // Aggregate 0.7988 -> 0.8025. Held-out mean unchanged at 0.7090.
     match name {
         "hello-add" => (0.99, 1.00),
-        "token-v22" => (0.86, 0.90),
-        "token-v23" => (0.78, 0.82),
+        "token-v22" => (0.88, 0.92),
+        "token-v23" => (0.79, 0.83),
         "token-v23-stripped" => (0.27, 0.31),
         "timelock" => (0.84, 0.88),
         "dex-liquidity-pool" => (0.73, 0.77),

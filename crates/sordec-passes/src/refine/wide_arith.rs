@@ -25,6 +25,23 @@
 //! rewrite names that value and leaves each limb naming its own half of
 //! it, so every reader sees what it saw.
 //!
+//! # Operands the function never named
+//!
+//! Often neither operand is a whole either: a balance is loaded out of
+//! storage as two registers, an amount arrives in two parameters, and
+//! nothing in the function ever puts them together. For a **difference**
+//! the borrow settles it — `lo(a) <u lo(b)` names the two low limbs in
+//! operand order, so which low limb goes with which high one is read off
+//! the pattern rather than assumed, and each pair is joined into the
+//! operand it is the halves of.
+//!
+//! A **sum** gets no such help: its carry compares the result against
+//! one of the lows, and addition is symmetric in its low limbs, so a
+//! loose pair could be split either way. Both splits give the same sum
+//! and different operands, and naming the wrong two is naming values the
+//! source never had — so a sum still requires operands the function
+//! already names.
+//!
 //! # Gates
 //!
 //! - **Both limbs of both operands**, and the same two values throughout.
@@ -33,6 +50,10 @@
 //!   makes this some other arithmetic.
 //! - **The carry is zero-extended.** That is how a 1-bit flag becomes a
 //!   limb, and anything else in that position is a value, not a carry.
+//! - **A limb pairs with a limb of its own kind.** Half of one value
+//!   beside half of another, or beside a loose register, is not a pair.
+//! - **The operands are in hand before the first limb**, which is where
+//!   the recovered value has to be named.
 
 use sordec_common::{IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownType, UnaryOp};
@@ -53,8 +74,40 @@ struct Found {
     lo: ValueId,
     hi: ValueId,
     op: BinaryOp,
-    a: ValueId,
-    b: ValueId,
+    a: Side,
+    b: Side,
+}
+
+/// One operand of a recovered 128-bit operation.
+///
+/// Sometimes the function already names the value and the limbs are its
+/// halves. Sometimes — a pair loaded out of storage, a pair arriving in
+/// two registers — the limbs are all there is, and the value is their
+/// join. Both are operands; only the second has to be built.
+#[derive(Clone, Copy)]
+enum Side {
+    /// Both limbs are already halves of a value the function names.
+    Whole(ValueId),
+    /// Two loose registers; the value is their join.
+    Loose { lo: ValueId, hi: ValueId },
+}
+
+impl Side {
+    /// Whether `value` is this operand's low limb.
+    fn has_lo(&self, func: &HighFunction, value: ValueId) -> bool {
+        match self {
+            Side::Whole(w) => half_of(func, value, UnaryOp::WideLo) == Some(*w),
+            Side::Loose { lo, .. } => resolve_use(func, value) == *lo,
+        }
+    }
+
+    /// The values that must already be in hand to build this operand.
+    fn needs(&self) -> [Option<ValueId>; 2] {
+        match self {
+            Side::Whole(w) => [Some(*w), None],
+            Side::Loose { lo, hi } => [Some(*lo), Some(*hi)],
+        }
+    }
 }
 
 impl Pass<HighIr> for WideArithPass {
@@ -73,28 +126,70 @@ impl Pass<HighIr> for WideArithPass {
                     ProvenanceSource::DataFlow,
                     "the 128-bit value these two limbs compute",
                 );
-                let whole = ValueId::from_index(func.bindings.len() as u32);
-                func.bindings.push(Binding::new(
-                    whole,
-                    IrType::Inferred(KnownType::I128),
-                    Expr::Binary { op: f.op, lhs: f.a, rhs: f.b },
-                    note.clone(),
-                ));
                 // Before whichever limb the schedule reaches first: the
                 // other one reads this value too, and rustc is free to
                 // compute the high limb before the low.
                 let order = crate::marshalling::sret::emission_order(func);
-                let first = [f.lo, f.hi]
+                let at = |v: ValueId| order.iter().position(|o| *o == v);
+                let Some((first_pos, first)) = [f.lo, f.hi]
                     .into_iter()
-                    .filter_map(|v| order.iter().position(|o| *o == v).map(|p| (p, v)))
+                    .filter_map(|v| at(v).map(|p| (p, v)))
                     .min()
-                    .map(|(_, v)| v);
-                if let Some(first) = first {
-                    for (_, block) in func.blocks.iter_mut() {
-                        if let Some(pos) = block.bindings.iter().position(|v| *v == first) {
-                            block.bindings.insert(pos, whole);
-                            break;
+                else {
+                    continue;
+                };
+                // Everything the operands are built from has to be in
+                // hand by then. An operand computed between the two
+                // limbs cannot be named before the first of them, and
+                // naming it there anyway is a use before its definition.
+                // (Nothing in the schedule is a parameter, and a
+                // parameter is always in hand.)
+                if [f.a, f.b]
+                    .iter()
+                    .flat_map(Side::needs)
+                    .flatten()
+                    .any(|v| at(v).is_some_and(|p| p >= first_pos))
+                {
+                    continue;
+                }
+                let operand = |func: &mut HighFunction, side: Side| match side {
+                    Side::Whole(v) => v,
+                    Side::Loose { lo, hi } => {
+                        let joined = ValueId::from_index(func.bindings.len() as u32);
+                        func.bindings.push(Binding::new(
+                            joined,
+                            IrType::Inferred(KnownType::I128),
+                            Expr::WideJoin { lo, hi },
+                            Provenance::new(
+                                PASS_NAME,
+                                ProvenanceSource::DataFlow,
+                                "the operand these two limbs are the halves of",
+                            ),
+                        ));
+                        joined
+                    }
+                };
+                let base = ValueId::from_index(func.bindings.len() as u32);
+                let (lhs, rhs) = (operand(func, f.a), operand(func, f.b));
+                let whole = ValueId::from_index(func.bindings.len() as u32);
+                func.bindings.push(Binding::new(
+                    whole,
+                    IrType::Inferred(KnownType::I128),
+                    Expr::Binary { op: f.op, lhs, rhs },
+                    note.clone(),
+                ));
+                // Reverse order, because each insertion pushes the last
+                // one right: the joins end up ahead of the value that
+                // reads them.
+                let fresh: Vec<ValueId> = std::iter::once(whole)
+                    .chain([rhs, lhs].into_iter().filter(|v| *v >= base))
+                    .collect();
+                for (_, block) in func.blocks.iter_mut() {
+                    if let Some(pos) = block.bindings.iter().position(|v| *v == first) {
+                        for v in &fresh {
+                            block.bindings.insert(pos, *v);
                         }
+                        break;
                     }
                 }
                 for (id, op) in [(f.lo, UnaryOp::WideLo), (f.hi, UnaryOp::WideHi)] {
@@ -132,39 +227,64 @@ fn limbs(func: &HighFunction, hi: ValueId, expr: &Expr) -> Option<Found> {
     if inner != op {
         return None;
     }
-    let (a, b) = (
-        half_of(func, *hi_a, UnaryOp::WideHi)?,
-        half_of(func, *hi_b, UnaryOp::WideHi)?,
-    );
+    let (hi_a, hi_b) = (resolve_use(func, *hi_a), resolve_use(func, *hi_b));
     // The carry: the low limbs' unsigned comparison.
     let Expr::Binary { op: BinaryOp::Lt, lhs: c_l, rhs: c_r } =
         &func.bindings.get(resolve_use(func, carry))?.expr
     else {
         return None;
     };
-    // And the low limb itself, computed from the same two values.
+    let (c_l, c_r) = (resolve_use(func, *c_l), resolve_use(func, *c_r));
+    // For a difference the borrow compares the operands' low limbs, in
+    // operand order — so it says which low limb goes with which high
+    // one, and the pair is an operand whether or not the function
+    // already names it. For a sum the carry compares the *result*
+    // against one of the lows, which leaves the pairing open: addition
+    // is symmetric in its low limbs, so a loose pair could be split
+    // either way and name two values the source never had. There, only
+    // an operand the function already names is admitted.
+    let (a, b) = match op {
+        BinaryOp::Sub => (paired(func, c_l, hi_a)?, paired(func, c_r, hi_b)?),
+        _ => (
+            Side::Whole(half_of(func, hi_a, UnaryOp::WideHi)?),
+            Side::Whole(half_of(func, hi_b, UnaryOp::WideHi)?),
+        ),
+    };
+    // And the low limb itself, computed from the same two operands.
     let lo = func.bindings.iter().find_map(|(id, bind)| {
         let Expr::Binary { op: low_op, lhs, rhs } = &bind.expr else {
             return None;
         };
-        (low_op == op
-            && half_of(func, *lhs, UnaryOp::WideLo) == Some(a)
-            && half_of(func, *rhs, UnaryOp::WideLo) == Some(b))
-        .then_some(id)
+        (low_op == op && a.has_lo(func, *lhs) && b.has_lo(func, *rhs)).then_some(id)
     })?;
-    // For a difference the carry compares the operands' low limbs; for a
-    // sum it compares the result against one of them.
-    let borrow_ok = match op {
-        BinaryOp::Sub => {
-            half_of(func, *c_l, UnaryOp::WideLo) == Some(a)
-                && half_of(func, *c_r, UnaryOp::WideLo) == Some(b)
-        }
+    let carry_ok = match op {
+        BinaryOp::Sub => true,
         _ => {
-            resolve_use(func, *c_l) == lo
-                && [a, b].contains(&half_of(func, *c_r, UnaryOp::WideLo).unwrap_or(*c_r))
+            c_l == lo
+                && [a, b]
+                    .iter()
+                    .any(|side| side.has_lo(func, c_r) || matches!(side, Side::Whole(w) if *w == c_r))
         }
     };
-    borrow_ok.then_some(Found { lo, hi, op: *op, a, b })
+    carry_ok.then_some(Found { lo, hi, op: *op, a, b })
+}
+
+/// The operand a low and a high limb are the two halves of.
+///
+/// Either the function already names it and both limbs are its halves,
+/// or neither limb is anyone's half and the operand is their join. A
+/// limb belonging to one value paired with a limb belonging to another
+/// — or to nothing — is not a pair, and joining across it would invent
+/// an operand.
+fn paired(func: &HighFunction, lo: ValueId, hi: ValueId) -> Option<Side> {
+    match (
+        half_of(func, lo, UnaryOp::WideLo),
+        half_of(func, hi, UnaryOp::WideHi),
+    ) {
+        (Some(from_lo), Some(from_hi)) if from_lo == from_hi => Some(Side::Whole(from_lo)),
+        (None, None) => Some(Side::Loose { lo, hi }),
+        _ => None,
+    }
 }
 
 /// The flag behind a zero-extension, which is how a carry becomes a limb.
@@ -180,5 +300,85 @@ fn half_of(func: &HighFunction, value: ValueId, want: UnaryOp) -> Option<ValueId
     match &func.bindings.get(resolve_use(func, value))?.expr {
         Expr::Unary { op, value } if *op == want => Some(resolve_use(func, *value)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::marshalling::test_support::{func_with, module, v};
+
+    /// A difference whose operands the function never named: four loose
+    /// registers, the borrow pairing them up.
+    ///
+    /// ```text
+    /// v4 = v0 - v2                    v9  = join(v0, v1)
+    /// v5 = v0 <u v2                   v10 = join(v2, v3)
+    /// v6 = v1 - v3              →     v11 = v9 - v10
+    /// v8 = v6 - extend(v5)            v4  = wide_lo(v11), v8 = wide_hi(v11)
+    /// ```
+    fn loose(op: BinaryOp, carry_lhs: u32) -> HighIr {
+        module(vec![func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                              // v0 lo a
+                Expr::Phi { incoming: vec![] },                              // v1 hi a
+                Expr::Phi { incoming: vec![] },                              // v2 lo b
+                Expr::Phi { incoming: vec![] },                              // v3 hi b
+                Expr::Binary { op, lhs: v(0), rhs: v(2) },                   // v4 low
+                Expr::Binary { op: BinaryOp::Lt, lhs: v(carry_lhs), rhs: v(2) }, // v5 carry
+                Expr::Binary { op, lhs: v(1), rhs: v(3) },                   // v6
+                Expr::Unary { op: UnaryOp::ExtendU32, value: v(5) },         // v7
+                Expr::Binary { op, lhs: v(6), rhs: v(7) },                   // v8 high
+            ],
+            vec![v(0), v(1), v(2), v(3)],
+            vec![4, 5, 6, 7, 8],
+        )])
+    }
+
+    #[test]
+    fn a_difference_over_loose_limbs_joins_its_operands() {
+        let mut m = loose(BinaryOp::Sub, 0);
+        assert!(WideArithPass.run(&mut m).changed);
+        let f = &m.functions[0];
+        let Expr::Unary { op: UnaryOp::WideLo, value: whole } = f.bindings.get(v(4)).unwrap().expr
+        else {
+            panic!("the low limb names its half");
+        };
+        assert!(matches!(
+            f.bindings.get(v(8)).unwrap().expr,
+            Expr::Unary { op: UnaryOp::WideHi, value } if value == whole
+        ));
+        let Expr::Binary { op: BinaryOp::Sub, lhs, rhs } = f.bindings.get(whole).unwrap().expr
+        else {
+            panic!("the whole is the difference");
+        };
+        assert!(matches!(
+            f.bindings.get(lhs).unwrap().expr,
+            Expr::WideJoin { lo, hi } if lo == v(0) && hi == v(1)
+        ));
+        assert!(matches!(
+            f.bindings.get(rhs).unwrap().expr,
+            Expr::WideJoin { lo, hi } if lo == v(2) && hi == v(3)
+        ));
+        // The joins are named before the value that reads them.
+        let sched = &f.blocks.get(sordec_common::BlockId::from_index(0)).unwrap().bindings;
+        let at = |x: ValueId| sched.iter().position(|s| *s == x).unwrap();
+        assert!(at(lhs) < at(whole) && at(rhs) < at(whole));
+        assert!(at(whole) < at(v(4)));
+    }
+
+    /// A sum's carry compares the result, not the operands, so it says
+    /// nothing about which low limb belongs to which high one.
+    #[test]
+    fn a_sum_over_loose_limbs_is_left_alone() {
+        let mut m = loose(BinaryOp::Add, 4);
+        assert!(!WideArithPass.run(&mut m).changed);
+    }
+
+    #[test]
+    fn the_pass_is_idempotent() {
+        let mut m = loose(BinaryOp::Sub, 0);
+        assert!(WideArithPass.run(&mut m).changed);
+        assert!(!WideArithPass.run(&mut m).changed);
     }
 }
