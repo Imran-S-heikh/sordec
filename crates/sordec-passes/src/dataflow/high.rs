@@ -15,7 +15,7 @@
 use sordec_common::{IrId, ValueId};
 use std::collections::HashSet;
 
-use sordec_ir::{Expr, HighFunction, Literal};
+use sordec_ir::{Expr, HighFunction, Literal, UnaryOp};
 
 /// Default chase depth for [`trace_literal`] / [`resolve_use`].
 ///
@@ -59,11 +59,39 @@ pub fn trace_literal(func: &HighFunction, value: ValueId) -> Option<Literal> {
 /// integer literal.
 #[must_use]
 pub fn trace_int(func: &HighFunction, value: ValueId) -> Option<i128> {
-    match trace_literal(func, value)? {
-        Literal::I32(n) => Some(i128::from(n)),
-        Literal::I64(n) => Some(i128::from(n)),
-        Literal::U32(n) => Some(i128::from(n)),
-        Literal::U64(n) => Some(i128::from(n)),
+    trace_int_through(func, value, 0)
+}
+
+/// As [`trace_int`], also seeing through the named integer width moves.
+///
+/// `i32.wrap_i64` and the two `i64.extend_i32` forms are how a constant
+/// crosses between a 32- and a 64-bit register, and the compiler emits
+/// them freely — a discriminant stored as `i64` and read back as `i32` is
+/// the common case. Narrowing a known constant gives a known constant, so
+/// a caller asking "is this a constant, and which one" should not lose it
+/// at a width move.
+fn trace_int_through(func: &HighFunction, value: ValueId, depth: u32) -> Option<i128> {
+    const MAX_DEPTH: u32 = 4;
+    let terminal = resolve_use(func, value);
+    if (terminal.index() as usize) >= func.bindings.len() {
+        return None;
+    }
+    match &func.bindings.get(terminal)?.expr {
+        Expr::Literal(Literal::I32(n)) => Some(i128::from(*n)),
+        Expr::Literal(Literal::I64(n)) => Some(i128::from(*n)),
+        Expr::Literal(Literal::U32(n)) => Some(i128::from(*n)),
+        Expr::Literal(Literal::U64(n)) => Some(i128::from(*n)),
+        Expr::Unary { op, value } if depth < MAX_DEPTH => {
+            let inner = trace_int_through(func, *value, depth + 1)?;
+            // The low 32 bits, two's complement, read as the width move
+            // names them.
+            let low = inner as u64 as u32;
+            match op {
+                UnaryOp::Wrap32 | UnaryOp::ExtendS32 => Some(i128::from(low as i32)),
+                UnaryOp::ExtendU32 => Some(i128::from(low)),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }

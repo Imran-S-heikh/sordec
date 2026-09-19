@@ -85,7 +85,7 @@ pub use host_calls::{catalog_size, resolve as resolve_host_call, HostCall, CATAL
 pub use arith::{I128BuiltinPass, WideFoldPass};
 pub use attribution::SdkAttributionPass;
 pub use recognizers::symbol_encoder::SymbolEncoderPass;
-pub use interproc::{SpecializePass, WrapperInlinePass};
+pub use interproc::{ConstReturnPass, SpecializePass, WrapperInlinePass};
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use memory::{
@@ -375,6 +375,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // elision because a wrapped `Storage::has` is the call that
             // pass cannot see through; inside the group because inlining
             // a wrapper exposes its frame and guards to the passes above.
+            // A derived conversion's `Result` discriminant is a constant
+            // the caller cannot see. Naming it at the call site lets the
+            // constant-branch fold at the top of the group delete the
+            // unwrap it guards. Beside the inliner: both are what let a
+            // caller see through a helper it does not inline.
+            Box::new(ConstReturnPass),
             Box::new(WrapperInlinePass),
             // A pasted body carries the facts its helper had, and a helper
             // called with different durabilities or keys had none: the
@@ -506,7 +512,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..59],
+        vec![1..7, 31..60],
     )
 }
 
@@ -563,6 +569,7 @@ mod tests {
                 refine::WIDTH_FOLD_PASS_NAME,
                 refine::OVERFLOW_GUARD_PASS_NAME,
                 marshalling::guard::PASS_NAME,
+                interproc::const_return::PASS_NAME,
                 interproc::inline::PASS_NAME,
                 CONST_PROP_AFTER_INLINE,
                 TTL_AFTER_INLINE,

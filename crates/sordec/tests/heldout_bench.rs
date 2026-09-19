@@ -15,6 +15,15 @@
 //!   cargo test -p sordec --test heldout_bench -- --ignored --nocapture
 //! ```
 //!
+//! Build the set with `tools/build_heldout.sh`. Keep it outside any
+//! temporary directory — it costs a clone and 25 wasm builds to recreate,
+//! and the canonical spot is `~/.cache/sordec-heldout`:
+//!
+//! ```bash
+//! git clone --depth 1 https://github.com/stellar/soroban-examples ~/.cache/soroban-examples
+//! tools/build_heldout.sh ~/.cache/soroban-examples ~/.cache/sordec-heldout
+//! ```
+//!
 //! Scoring runs inside `cargo test` for the same reason `benchmark.rs` does:
 //! the macro-expanded basis needs `cargo expand`, which only resolves in
 //! cargo's environment. A decompile that fails or panics is reported, never

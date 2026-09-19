@@ -220,7 +220,10 @@ fn int_value(func: &HighFunction, value: sordec_common::ValueId, depth: u32) -> 
                 _ => None,
             }
         }
-        _ => None,
+        // Anything else is constant only if the tracer says so — which
+        // includes a named width move of one, the form a discriminant
+        // written as `i64` and read back as `i32` arrives in.
+        _ => trace_int(func, id),
     }
 }
 

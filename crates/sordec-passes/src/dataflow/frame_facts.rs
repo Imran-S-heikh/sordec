@@ -367,9 +367,15 @@ fn walk_facts(
 /// Straight-line code — blocks, sequences, transfers and scopes with no
 /// way out but the bottom — runs every store it holds, so it is scanned.
 /// Anything else may leave part of its body unrun on the way to the query:
-/// a branch takes one arm, a `break` skips the rest of its scope, a loop
-/// may run zero times. What such a region stores cannot be relied on, and
-/// if it may write at all, nothing from before it can either.
+/// a `break` skips the rest of its scope, a loop may run zero times. What
+/// such a region stores cannot be relied on, and if it may write at all,
+/// nothing from before it can either.
+///
+/// A branch is the exception worth making. Exactly one arm runs, so what
+/// a slot holds afterwards is what *every* arm leaves there — the meet of
+/// the arms. That is what lets a caller see the discriminant a derived
+/// conversion writes down both sides of a branch, and with it the unwrap
+/// the discriminant guards.
 fn pass_over(func: &HighFunction, region: &Region, base: ValueId, facts: &mut FrameFacts) {
     if is_straight_line(region) {
         region.for_each_node(|node| {
@@ -382,9 +388,66 @@ fn pass_over(func: &HighFunction, region: &Region, base: ValueId, facts: &mut Fr
                 }
             }
         });
-    } else if region_may_write(func, region) {
-        facts.kill_all();
+        return;
     }
+    // Only arms that are themselves straight-line. Recursing into nested
+    // branches would meet 2^depth paths for one query, and this runs per
+    // load inside a fixpoint; the shape this exists for — a short arm
+    // holding a store or two — is straight-line anyway.
+    let arms: Vec<&Region> = match region {
+        Region::If { then_region, else_region: Some(other), .. } => vec![then_region, other],
+        Region::Switch { arms, default, .. } => {
+            arms.iter().map(|a| &a.body).chain(std::iter::once(&**default)).collect()
+        }
+        _ => Vec::new(),
+    };
+    if arms.is_empty() || !arms.iter().all(|arm| is_straight_line(arm)) {
+        if region_may_write(func, region) {
+            facts.kill_all();
+        }
+        return;
+    }
+    let mut merged: Option<FrameFacts> = None;
+    for arm in arms {
+        let mut path = facts.clone();
+        pass_over(func, arm, base, &mut path);
+        merged = Some(match merged {
+            Some(so_far) => meet(func, &so_far, &path),
+            None => path,
+        });
+    }
+    *facts = merged.unwrap_or_default();
+}
+
+/// The slots two paths agree on.
+///
+/// Agreement is either the same SSA value — which, being read on both
+/// paths, is defined before the branch — or the same constant written
+/// twice. Two stores of equal constants from different bindings are the
+/// case the derived conversions produce: each arm calls its own copy of
+/// the helper and each returns the same `Ok`. Anything else is dropped,
+/// so a slot one arm writes and the other does not disappears, which is
+/// what a slot whose value depends on the path has to do.
+fn meet(func: &HighFunction, a: &FrameFacts, b: &FrameFacts) -> FrameFacts {
+    let other: BTreeMap<u32, SlotFact> = b.iter().collect();
+    let mut out = FrameFacts::default();
+    for (offset, fact) in a.iter() {
+        let Some(their) = other.get(&offset) else {
+            continue;
+        };
+        if their.width != fact.width {
+            continue;
+        }
+        let same = their.value == fact.value
+            || matches!(
+                (trace_int(func, fact.value), trace_int(func, their.value)),
+                (Some(x), Some(y)) if x == y
+            );
+        if same {
+            out.record(offset, fact.width, fact.value);
+        }
+    }
+    out
 }
 
 /// Whether every path into `region` runs all of it, top to bottom.
@@ -537,6 +600,50 @@ mod tests {
     fn facts(func: &HighFunction, at: u32, base: u32) -> FrameFacts {
         let block_id = block_containing(func, v(at)).expect("query binding scheduled");
         facts_before(func, func.blocks.get(block_id).unwrap(), v(at), v(base))
+    }
+
+    /// A branch whose arms each store to `fp+0`: `same` decides whether
+    /// they store equal constants. Blocks: bb0 setup, bb1 then, bb2 else,
+    /// bb3 the join where the query sits.
+    fn branching(same: bool) -> HighFunction {
+        let mut f = func_with_block(vec![
+            Expr::Phi { incoming: vec![] },                 // v0 base
+            Expr::Literal(Literal::I64(0)),                 // v1
+            Expr::Literal(Literal::I64(if same { 0 } else { 5 })), // v2
+            store(0, 1, 0, MemWidth::W8),                   // v3 then
+            store(0, 2, 0, MemWidth::W8),                   // v4 else
+            Expr::Literal(Literal::I64(9)),                 // v5 the query point
+        ]);
+        let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
+        for (i, bindings) in [vec![], vec![v(3)], vec![v(4)], vec![v(5)]].into_iter().enumerate() {
+            blocks.push(HighBlock { id: BlockId::from_index(i as u32), bindings });
+        }
+        f.blocks = blocks;
+        f.region = Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::If {
+                cond: v(0),
+                then_region: Box::new(Region::Basic(BlockId::from_index(1))),
+                else_region: Some(Box::new(Region::Basic(BlockId::from_index(2)))),
+            },
+            Region::Basic(BlockId::from_index(3)),
+        ]);
+        f
+    }
+
+    /// Both arms store the same constant, so the slot holds it after the
+    /// branch however it was taken.
+    #[test]
+    fn a_slot_both_arms_agree_on_survives_the_join() {
+        let f = branching(true);
+        assert_eq!(facts_at(&f, v(5), v(0)).value_at(0, MemWidth::W8), Some(v(1)));
+    }
+
+    /// Arms that disagree leave nothing knowable there.
+    #[test]
+    fn a_slot_the_arms_disagree_on_does_not() {
+        let f = branching(false);
+        assert_eq!(facts_at(&f, v(5), v(0)).value_at(0, MemWidth::W8), None);
     }
 
     // --- the corpus shape ---

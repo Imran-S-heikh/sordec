@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.7647331613864943,
-  "aggregate_overall_with_behavior": 0.7647331613864943,
+  "aggregate_overall": 0.7684923048426746,
+  "aggregate_overall_with_behavior": 0.7684923048426746,
   "behavior_measured_fixtures": 0,
   "fixtures": {
     "attestation": {
@@ -193,10 +193,10 @@
           "notes": [
             "2 entrypoints (0 unreconstructed, 0 without control flow)",
             "ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.3333 recall=1.0000 (5 original tokens, 15 reconstructed) — bloat 3.0x, dice ceiling ~0.5000",
-            "low-similarity: claim(0.56), deposit(0.44)"
+            "control flow: precision=0.4167 recall=1.0000 (5 original tokens, 12 reconstructed) — bloat 2.4x, dice ceiling ~0.5882",
+            "low-similarity: claim(0.67), deposit(0.50)"
           ],
-          "score": 0.5027417027417027,
+          "score": 0.5833333333333333,
           "weight": 0.25
         }
       },
@@ -207,7 +207,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 2 entrypoints, 4 types recovered"
       ],
-      "overall": 0.7928956326522248,
+      "overall": 0.8165990534144691,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
@@ -305,10 +305,10 @@
           "notes": [
             "13 entrypoints (0 unreconstructed, 3 without control flow)",
             "ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.4079 recall=0.9394 (33 original tokens, 76 reconstructed) — bloat 2.3x, dice ceiling ~0.6055",
-            "low-similarity: allowance(0.00), approve(0.64), burn_from(0.66), mint(0.70), set_admin(0.00), transfer(0.34), transfer_from(0.58)"
+            "control flow: precision=0.4133 recall=0.9394 (33 original tokens, 75 reconstructed) — bloat 2.3x, dice ceiling ~0.6111",
+            "low-similarity: allowance(0.00), approve(0.72), burn_from(0.66), mint(0.70), set_admin(0.00), transfer(0.34), transfer_from(0.58)"
           ],
-          "score": 0.5706548870793987,
+          "score": 0.5783215537460654,
           "weight": 0.25
         }
       },
@@ -319,7 +319,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.7266632020821759,
+      "overall": 0.7289181040429603,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
@@ -362,10 +362,10 @@
           "notes": [
             "13 entrypoints (0 unreconstructed, 0 without control flow)",
             "ambiguous names (2 original, 0 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.1618 recall=1.0000 (33 original tokens, 204 reconstructed) — bloat 6.2x, dice ceiling ~0.2785",
-            "low-similarity: __constructor(0.20), allowance(0.20), approve(0.30), balance(0.26), burn(0.37), burn_from(0.46), decimals(0.00), mint(0.28), … (+5)"
+            "control flow: precision=0.1626 recall=1.0000 (33 original tokens, 203 reconstructed) — bloat 6.2x, dice ceiling ~0.2797",
+            "low-similarity: __constructor(0.20), allowance(0.20), approve(0.31), balance(0.26), burn(0.37), burn_from(0.46), decimals(0.00), mint(0.28), … (+5)"
           ],
-          "score": 0.2091653766703671,
+          "score": 0.2103746936691578,
           "weight": 0.25
         }
       },
@@ -376,7 +376,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.2848997198695421,
+      "overall": 0.2852554013397746,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,
