@@ -145,11 +145,42 @@ fn literal_at(
 /// The value behind a field's `Val` encode. A field whose type is already
 /// a `Val` — an object handle — is stored as itself and comes back
 /// unchanged.
+///
+/// A `u64` has two encodings, one for values that fit beside the tag and
+/// one that allocates an object, and rustc picks between them with a
+/// branch whose arms merge. Both arms encode the same number, so the merge
+/// is that number's encoding and the field is the number — which is what
+/// the struct declares it to hold. The derive picks the form again when
+/// the reconstruction writes the literal.
 fn encoded_value(func: &HighFunction, slot: ValueId) -> ValueId {
-    let value = resolve_use(func, slot);
+    strip(func, resolve_use(func, slot), 0)
+}
+
+fn strip(func: &HighFunction, value: ValueId, depth: u32) -> ValueId {
+    const MAX_DEPTH: u32 = 3;
+    if depth > MAX_DEPTH {
+        return value;
+    }
+    let next = |v: ValueId| strip(func, resolve_use(func, v), depth + 1);
     match func.bindings.get(value).map(|b| &b.expr) {
-        Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { value, .. }))) => {
-            resolve_use(func, *value)
+        Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { value, .. }))) => next(*value),
+        Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValObject {
+            kind:
+                sordec_ir::ValObjectKind::ObjFromU64
+                | sordec_ir::ValObjectKind::ObjFromI64
+                | sordec_ir::ValObjectKind::TimepointObjFromU64
+                | sordec_ir::ValObjectKind::DurationObjFromU64,
+            args,
+        }))) if args.len() == 1 => next(args[0]),
+        // The small/object choice: every arm encodes the same number.
+        Some(Expr::Phi { incoming }) if !incoming.is_empty() => {
+            let mut arms = incoming.iter().map(|(_, v)| next(*v));
+            let first = arms.next().unwrap_or(value);
+            if arms.all(|v| v == first) && first != value {
+                first
+            } else {
+                value
+            }
         }
         _ => value,
     }
