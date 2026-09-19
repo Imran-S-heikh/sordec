@@ -1020,20 +1020,25 @@ fn dump_hir_structures_token_transfer_into_labeled_scopes() {
 fn dump_hir_recovers_guard_clauses_with_inline_traps() {
     // The W6 payoff shape (D1 + D2), typed by W7's D8: a guard is a
     // flat, else-less `if` whose body is the inlined trap — now named
-    // as the tag-checked unwrap it is. The muxed-address tag guard in
-    // token `transfer` is the canonical instance.
+    // as the tag-checked unwrap it is.
+    //
+    // Read on the *stripped* build, and that is the point. On a
+    // contract that ships `contractspecv0` this shape no longer
+    // survives anywhere: the declared type licenses relocating the trap
+    // into the derived conversion, which is what the marshalling
+    // elisions are for. What is left here is the token-metadata struct
+    // decode, whose `#[contracttype]` cannot be named without the spec
+    // — so the guard stays raw, exactly where the evidence to retire it
+    // is missing.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
-        .args(["dump-hir", TOKEN_V23])
+        .args(["dump-hir", TOKEN_V23_STRIPPED])
         .assert()
         .success()
-        // The guard condition is now a recognized `ValTagCheck`, and
-        // recognizer-touched bindings keep their own line, so the guard reads
-        // over two lines instead of one folded condition. Both halves are
-        // asserted: the named check, and the else-less `if` whose body is the
-        // trap D8 typed.
+        // Both halves: the named check, and the else-less `if` whose
+        // body is the trap D8 typed.
         .stdout(predicate::str::contains(
-            "= !has_tag(v1, AddressObject)  ;; SdkPattern: val-tag-check AddressObject (negated)",
+            "= !has_tag(v12, MapObject)  ;; SdkPattern: val-tag-check MapObject (negated)",
         ))
         .stdout(predicate::str::contains(
             "panic!()  ;; unwrap: tag-checked trap",
@@ -1055,9 +1060,14 @@ fn dump_hir_flattens_timelock_claim_guard_cascade() {
         .stdout(predicate::str::contains(
             "= !has_tag(v2, AddressObject)  ;; SdkPattern: val-tag-check AddressObject (negated)",
         ))
-        .stdout(predicate::str::contains(
-            "panic!()  ;; unwrap: tag-checked trap",
-        ))
+        // The traps the cascade used to end in are gone, every one of
+        // them relocated into derived code the reconstruction re-emits:
+        // the argument conversions into `#[contractimpl]`, the ledger
+        // timestamp's two-form unpack into the SDK accessor's own
+        // `unwrap`, and the transfer's result check into the generated
+        // client. `dump_hir_recovers_guard_clauses_with_inline_traps`
+        // reads the shape on the stripped build, where it survives.
+        .stdout(predicate::str::contains("unwrap: tag-checked trap").not())
         // Both discriminant checks are collapsed with the struct decodes
         // now: the `ClaimableBalance` unpack names its fields, and the
         // `TimeBound` decode helper's `Result` niche test goes with it.

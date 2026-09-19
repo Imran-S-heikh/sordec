@@ -566,6 +566,23 @@ fn classify_tag_check(
             val_abi::tag_name(*tag).unwrap_or("?")
         ));
     }
+    // A host result the recognizers *proved* a type for carries the
+    // licence too. `get_ledger_timestamp` returns a `U64Val`, and the
+    // SDK's `Ledger::timestamp()` is declared `-> u64` and unwraps the
+    // conversion — so the reconstruction emitting `e.ledger().timestamp()`
+    // regenerates this check. Only `Known`: an `Inferred` type is our
+    // own guess, and a guess cannot licence deleting a trap. A result
+    // typed as the ABI's bare `Val` fails `tag_admits` for every tag,
+    // so the operation alone still licenses nothing.
+    if let Some(proven) = proven_type(func, value)
+        && val_abi::tag_admits(*tag, &proven)
+    {
+        return Ok(format!(
+            "tag check ({}) on a host result proven to be {proven:?}: the SDK accessor is \
+             declared at that type and unwraps the conversion",
+            val_abi::tag_name(*tag).unwrap_or("?")
+        ));
+    }
     // A cross-contract call's result carries the same licence, one
     // boundary further out. `#[contractclient]` generates a method per
     // entrypoint whose body is `T::try_from_val(env, &res).unwrap()` on
@@ -684,6 +701,21 @@ fn reads_storage(func: &HighFunction, value: ValueId) -> bool {
         func.bindings.get(resolve_use(func, value)).map(|b| &b.expr),
         Some(Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. })))
     )
+}
+
+/// The type a recognizer proved for a host operation's result.
+///
+/// `Known` only, and only on a host operation: an inferred type is our
+/// own reasoning, and a trap may not be relocated on the strength of it.
+fn proven_type(func: &HighFunction, value: ValueId) -> Option<KnownType> {
+    let binding = func.bindings.get(resolve_use(func, value))?;
+    if !matches!(binding.expr, Expr::Semantic(SemanticOp::Known(_))) {
+        return None;
+    }
+    match &binding.ty {
+        sordec_ir::IrType::Known(t) => Some(t.clone()),
+        _ => None,
+    }
 }
 
 /// Whether `value` is what a cross-contract call returned.

@@ -8,13 +8,13 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 |---|---|---|---|---|---|
 | hello-add | 1.0000 | 1.0000 | 0.0000 | 0.0000 | 1.0000 |
 | token-v22 | 0.8980 | 0.9286 | 0.9063 | 0.8605 | n/a |
-| token-v23 | 0.8107 | 0.7500 | 0.8565 | 0.8333 | n/a |
-| token-v23-stripped | 0.3269 | 0.0385 | 0.3057 | 0.6329 | n/a |
-| timelock | 0.9024 | 1.0000 | 0.8750 | 0.8276 | n/a |
+| token-v23 | 0.8117 | 0.7500 | 0.8598 | 0.8333 | n/a |
+| token-v23-stripped | 0.3273 | 0.0385 | 0.3071 | 0.6329 | n/a |
+| timelock | 0.9391 | 1.0000 | 1.0000 | 0.8276 | n/a |
 | dex-liquidity-pool | 0.7668 | 1.0000 | 0.5970 | 0.6750 | n/a |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
-| **aggregate (mean, AST)** | **0.8150** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.8150** | | | | |
+| **aggregate (mean, AST)** | **0.8204** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.8204** | | | | |
 
 ## Per-fixture detail
 
@@ -35,21 +35,21 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 ### token-v23
 
 - **interface** 0.7500 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.5000  precision=0.3333 recall=1.0000 (4 original, 12 reconstructed) — types extra: type Approve, type Burn, type Clawback, type Mint, type MintWithAmountOnly, type TokenMetadata, type Transfer, type TransferWithAmountOnly
-- **structure** 0.8565 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.6226 recall=1.0000 (33 original tokens, 53 reconstructed) — bloat 1.6x, dice ceiling ~0.7674 — low-similarity: transfer(0.41)
+- **structure** 0.8598 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.6346 recall=1.0000 (33 original tokens, 52 reconstructed) — bloat 1.6x, dice ceiling ~0.7765 — low-similarity: transfer(0.44)
 - **semantic** 0.8333 — precision=0.8537 recall=0.8140 (43 original facts, 41 reconstructed) — under-recovered: event, panic:bare, storage:get:temporary:DataKey::Allowance — over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?
 - **behavior** n/a — behavior unavailable: crate does not build: error[E0308]: mismatched types
 
 ### token-v23-stripped
 
 - **interface** 0.0385 — entrypoints 0.0769  precision=0.0769 recall=0.0769 (13 original, 13 reconstructed) — entrypoints missing: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn mint, fn name, … (+4) — entrypoints extra: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn mint, fn name, … (+4) — types 0.0000  precision=n/a recall=0.0000 (4 original, 0 reconstructed) — types missing: type AllowanceDataKey, type AllowanceValue, type DataKey, type SetAdmin
-- **structure** 0.3057 — 13 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (2 original, 0 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.2324 recall=1.0000 (33 original tokens, 142 reconstructed) — bloat 4.3x, dice ceiling ~0.3771 — low-similarity: __constructor(0.33), allowance(0.29), approve(0.54), balance(0.33), burn(0.51), burn_from(0.59), decimals(0.00), mint(0.50), … (+5)
+- **structure** 0.3071 — 13 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (2 original, 0 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.2340 recall=1.0000 (33 original tokens, 141 reconstructed) — bloat 4.3x, dice ceiling ~0.3793 — low-similarity: __constructor(0.33), allowance(0.29), approve(0.54), balance(0.33), burn(0.51), burn_from(0.59), decimals(0.00), mint(0.50), … (+5)
 - **semantic** 0.6329 — precision=0.6944 recall=0.5814 (43 original facts, 36 reconstructed) — under-recovered: event, panic:bare, panic:unwrap, storage:extend_ttl:persistent:DataKey::Balance, storage:extend_ttl:temporary:DataKey::Allowance, storage:get:instance:DataKey::Admin, storage:get:persistent:DataKey::Balance, storage:get:temporary:DataKey::Allowance, … (+3) — over-recovered: storage:extend_ttl:persistent:?, storage:extend_ttl:temporary:?, storage:get:instance:?, storage:get:persistent:?, storage:get:temporary:?, storage:set:instance:?, storage:set:persistent:?, storage:set:temporary:?
 - **behavior** n/a — behavior unavailable: samples/contracts/token-v23-stripped/token-v23-stripped.wasm has no `contractenvmetav0` section, so the host cannot load it and it cannot serve as a behaviour oracle
 
 ### timelock
 
 - **interface** 1.0000 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (2 original, 2 reconstructed) — types 1.0000  precision=1.0000 recall=1.0000 (4 original, 4 reconstructed)
-- **structure** 0.8750 — 2 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.7143 recall=1.0000 (5 original tokens, 7 reconstructed) — bloat 1.4x, dice ceiling ~0.8333
+- **structure** 1.0000 — 2 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=1.0000 recall=1.0000 (5 original tokens, 5 reconstructed) — bloat 1.0x, dice ceiling ~1.0000
 - **semantic** 0.8276 — precision=1.0000 recall=0.7059 (17 original facts, 12 reconstructed) — under-recovered: panic:bare, xcall:transfer
 - **behavior** n/a — behavior unavailable: crate does not build: error[E0382]: use of moved value: `token`
 
