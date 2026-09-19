@@ -62,7 +62,9 @@
 use sordec_common::{
     Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, Provenance, ProvenanceSource, ValueId,
 };
-use sordec_ir::{Expr, HighFunction, HighIr, KnownOp, Literal, MemoryImage, SemanticOp};
+use sordec_ir::{
+    Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MemoryImage, SemanticOp,
+};
 
 use crate::dataflow::trace_int;
 use crate::pass::{Pass, PassResult};
@@ -159,6 +161,16 @@ impl Pass<HighIr> for SymbolEncoderPass {
             for (id, index) in &fold.projections {
                 let Some(binding) = func.bindings.get_mut(*id) else {
                     continue;
+                };
+                // The value is a `Symbol` — say so here rather than leave
+                // it to inference, which runs after the elision group and
+                // so after the parameter evidence that reads these types
+                // has been gathered. A helper taking this symbol is
+                // otherwise typed by its body as taking a bare `Val`, and
+                // the reconstruction does not compile.
+                binding.ty = match index {
+                    0 => IrType::Known(KnownType::I64),
+                    _ => IrType::Known(KnownType::Symbol),
                 };
                 binding.expr = match index {
                     0 => Expr::Literal(Literal::I64(0)),
