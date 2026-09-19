@@ -55,6 +55,7 @@
 pub mod bool_codec;
 pub mod decode;
 pub mod enum_discriminant;
+pub mod enum_encode;
 pub mod field_type;
 pub mod encode;
 pub mod frame;
@@ -78,6 +79,7 @@ pub use bool_codec::BoolCodecPass;
 pub use dead_store::DeadFrameStorePass;
 pub use decode::ValDecodeCollapsePass;
 pub use enum_discriminant::EnumDiscriminantPass;
+pub use enum_encode::EnumEncodePass;
 pub use field_type::FieldTypePass;
 pub use encode::ValEncodeCollapsePass;
 pub use folded_encode::FoldedEncodePass;

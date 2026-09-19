@@ -438,13 +438,17 @@ fn meet(func: &HighFunction, a: &FrameFacts, b: &FrameFacts) -> FrameFacts {
         if their.width != fact.width {
             continue;
         }
-        let same = their.value == fact.value
+        // The same SSA value, once renames are followed: a value both
+        // arms store is read on both paths, so it is defined before the
+        // branch and still in scope after it.
+        let (ours, theirs) = (resolve_use(func, fact.value), resolve_use(func, their.value));
+        let same = ours == theirs
             || matches!(
-                (trace_int(func, fact.value), trace_int(func, their.value)),
+                (trace_int(func, ours), trace_int(func, theirs)),
                 (Some(x), Some(y)) if x == y
             );
         if same {
-            out.record(offset, fact.width, fact.value);
+            out.record(offset, fact.width, ours);
         }
     }
     out
