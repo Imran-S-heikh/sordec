@@ -49,6 +49,7 @@ mod trap_call;
 mod trap_inline;
 mod trivial_phi;
 mod width_fold;
+mod wide;
 mod wide_arith;
 mod wide_compare;
 mod wide_phi;

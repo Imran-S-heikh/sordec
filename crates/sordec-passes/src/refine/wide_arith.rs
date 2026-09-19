@@ -58,6 +58,7 @@
 use sordec_common::{IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownType, UnaryOp};
 
+use super::wide::{Side, available_before, half_of, materialize, paired};
 use crate::dataflow::resolve_use;
 use crate::metrics_catalog::REFINE_WIDE_ARITH as M_ARITH;
 use crate::pass::{Pass, PassResult};
@@ -76,38 +77,6 @@ struct Found {
     op: BinaryOp,
     a: Side,
     b: Side,
-}
-
-/// One operand of a recovered 128-bit operation.
-///
-/// Sometimes the function already names the value and the limbs are its
-/// halves. Sometimes — a pair loaded out of storage, a pair arriving in
-/// two registers — the limbs are all there is, and the value is their
-/// join. Both are operands; only the second has to be built.
-#[derive(Clone, Copy)]
-enum Side {
-    /// Both limbs are already halves of a value the function names.
-    Whole(ValueId),
-    /// Two loose registers; the value is their join.
-    Loose { lo: ValueId, hi: ValueId },
-}
-
-impl Side {
-    /// Whether `value` is this operand's low limb.
-    fn has_lo(&self, func: &HighFunction, value: ValueId) -> bool {
-        match self {
-            Side::Whole(w) => half_of(func, value, UnaryOp::WideLo) == Some(*w),
-            Side::Loose { lo, .. } => resolve_use(func, value) == *lo,
-        }
-    }
-
-    /// The values that must already be in hand to build this operand.
-    fn needs(&self) -> [Option<ValueId>; 2] {
-        match self {
-            Side::Whole(w) => [Some(*w), None],
-            Side::Loose { lo, hi } => [Some(*lo), Some(*hi)],
-        }
-    }
 }
 
 impl Pass<HighIr> for WideArithPass {
@@ -144,33 +113,12 @@ impl Pass<HighIr> for WideArithPass {
                 // naming it there anyway is a use before its definition.
                 // (Nothing in the schedule is a parameter, and a
                 // parameter is always in hand.)
-                if [f.a, f.b]
-                    .iter()
-                    .flat_map(Side::needs)
-                    .flatten()
-                    .any(|v| at(v).is_some_and(|p| p >= first_pos))
-                {
+                if !available_before(&order, &[f.a, f.b], first_pos) {
                     continue;
                 }
-                let operand = |func: &mut HighFunction, side: Side| match side {
-                    Side::Whole(v) => v,
-                    Side::Loose { lo, hi } => {
-                        let joined = ValueId::from_index(func.bindings.len() as u32);
-                        func.bindings.push(Binding::new(
-                            joined,
-                            IrType::Inferred(KnownType::I128),
-                            Expr::WideJoin { lo, hi },
-                            Provenance::new(
-                                PASS_NAME,
-                                ProvenanceSource::DataFlow,
-                                "the operand these two limbs are the halves of",
-                            ),
-                        ));
-                        joined
-                    }
-                };
                 let base = ValueId::from_index(func.bindings.len() as u32);
-                let (lhs, rhs) = (operand(func, f.a), operand(func, f.b));
+                let lhs = materialize(func, f.a, PASS_NAME);
+                let rhs = materialize(func, f.b, PASS_NAME);
                 let whole = ValueId::from_index(func.bindings.len() as u32);
                 func.bindings.push(Binding::new(
                     whole,
@@ -269,36 +217,10 @@ fn limbs(func: &HighFunction, hi: ValueId, expr: &Expr) -> Option<Found> {
     carry_ok.then_some(Found { lo, hi, op: *op, a, b })
 }
 
-/// The operand a low and a high limb are the two halves of.
-///
-/// Either the function already names it and both limbs are its halves,
-/// or neither limb is anyone's half and the operand is their join. A
-/// limb belonging to one value paired with a limb belonging to another
-/// — or to nothing — is not a pair, and joining across it would invent
-/// an operand.
-fn paired(func: &HighFunction, lo: ValueId, hi: ValueId) -> Option<Side> {
-    match (
-        half_of(func, lo, UnaryOp::WideLo),
-        half_of(func, hi, UnaryOp::WideHi),
-    ) {
-        (Some(from_lo), Some(from_hi)) if from_lo == from_hi => Some(Side::Whole(from_lo)),
-        (None, None) => Some(Side::Loose { lo, hi }),
-        _ => None,
-    }
-}
-
 /// The flag behind a zero-extension, which is how a carry becomes a limb.
 fn zero_extended(func: &HighFunction, value: ValueId) -> Option<ValueId> {
     match &func.bindings.get(resolve_use(func, value))?.expr {
         Expr::Unary { op: UnaryOp::ExtendU32, value } => Some(resolve_use(func, *value)),
-        _ => None,
-    }
-}
-
-/// The value this is the named half of.
-fn half_of(func: &HighFunction, value: ValueId, want: UnaryOp) -> Option<ValueId> {
-    match &func.bindings.get(resolve_use(func, value))?.expr {
-        Expr::Unary { op, value } if *op == want => Some(resolve_use(func, *value)),
         _ => None,
     }
 }

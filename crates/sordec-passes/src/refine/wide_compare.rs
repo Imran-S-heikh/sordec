@@ -28,6 +28,7 @@
 use sordec_common::{IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{BinaryOp, Expr, HighFunction, HighIr, IrType, KnownType, UnaryOp, WasmOpcodeKind};
 
+use super::wide::{Side, available_before, half_of, materialize, paired};
 use crate::dataflow::{resolve_use, trace_int};
 use crate::metrics_catalog::REFINE_WIDE_COMPARES as M_COMPARES;
 use crate::pass::{Pass, PassResult};
@@ -52,32 +53,57 @@ impl Pass<HighIr> for WideComparePass {
                 .iter()
                 .filter_map(|(id, b)| {
                     comparison(func, &b.expr)
-                        .or_else(|| against_zero(func, &b.expr).map(|(op, a)| (op, a, zero_sentinel())))
+                        .or_else(|| against_zero(func, &b.expr))
                         .map(|c| (id, c))
                 })
                 .collect();
-            for (id, (op, lhs, mut rhs)) in found {
-                // The zero side is not a value the function had; make one
-                // at the width the comparison is really at.
-                if rhs == zero_sentinel() {
-                    rhs = ValueId::from_index(func.bindings.len() as u32);
-                    func.bindings.push(sordec_ir::Binding::new(
-                        rhs,
-                        IrType::Inferred(KnownType::I128),
-                        Expr::Literal(sordec_ir::Literal::I64(0)),
-                        Provenance::new(PASS_NAME, ProvenanceSource::DataFlow, "the zero it is compared against"),
-                    ));
-                    for (_, block) in func.blocks.iter_mut() {
-                        if let Some(pos) = block.bindings.iter().position(|v| *v == id) {
-                            block.bindings.insert(pos, rhs);
-                            break;
+            for (id, (op, a, b)) in found {
+                // The operands have to be nameable where the comparison
+                // is; a limb computed after it is not one of its halves.
+                let order = crate::marshalling::sret::emission_order(func);
+                let Some(pos) = order.iter().position(|o| *o == id) else {
+                    continue;
+                };
+                let sides: Vec<Side> = std::iter::once(a).chain(b).collect();
+                if !available_before(&order, &sides, pos) {
+                    continue;
+                }
+                let base = ValueId::from_index(func.bindings.len() as u32);
+                let lhs = materialize(func, a, PASS_NAME);
+                // The zero side is not a value the function had; make
+                // one at the width the comparison is really at.
+                let rhs = match b {
+                    Some(side) => materialize(func, side, PASS_NAME),
+                    None => {
+                        let zero = ValueId::from_index(func.bindings.len() as u32);
+                        func.bindings.push(sordec_ir::Binding::new(
+                            zero,
+                            IrType::Inferred(KnownType::I128),
+                            Expr::Literal(sordec_ir::Literal::I64(0)),
+                            Provenance::new(
+                                PASS_NAME,
+                                ProvenanceSource::DataFlow,
+                                "the zero it is compared against",
+                            ),
+                        ));
+                        zero
+                    }
+                };
+                // Reverse order, because each insertion pushes the last
+                // one right: the operands end up ahead of the test.
+                let fresh: Vec<ValueId> = [rhs, lhs].into_iter().filter(|v| *v >= base).collect();
+                for (_, block) in func.blocks.iter_mut() {
+                    if let Some(at) = block.bindings.iter().position(|v| *v == id) {
+                        for v in &fresh {
+                            block.bindings.insert(at, *v);
                         }
+                        break;
                     }
                 }
-                if let Some(b) = func.bindings.get_mut(id) {
-                    b.expr = Expr::Binary { op, lhs, rhs };
-                    b.ty = IrType::Inferred(KnownType::Bool);
-                    b.add_provenance(Provenance::new(
+                if let Some(bind) = func.bindings.get_mut(id) {
+                    bind.expr = Expr::Binary { op, lhs, rhs };
+                    bind.ty = IrType::Inferred(KnownType::Bool);
+                    bind.add_provenance(Provenance::new(
                         PASS_NAME,
                         ProvenanceSource::DataFlow,
                         "the halves compared lexicographically: the comparison",
@@ -92,7 +118,7 @@ impl Pass<HighIr> for WideComparePass {
 }
 
 /// The comparison a `select` over two values' halves performs.
-fn comparison(func: &HighFunction, expr: &Expr) -> Option<(BinaryOp, ValueId, ValueId)> {
+fn comparison(func: &HighFunction, expr: &Expr) -> Option<(BinaryOp, Side, Option<Side>)> {
     let Expr::Unknown { op_kind: WasmOpcodeKind::Select, args, .. } = expr else {
         return None;
     };
@@ -103,27 +129,24 @@ fn comparison(func: &HighFunction, expr: &Expr) -> Option<(BinaryOp, ValueId, Va
     let (BinaryOp::Eq, hi_l, hi_r) = compare_of(func, *tie)? else {
         return None;
     };
-    let (a, b) = (half_of(func, hi_l, UnaryOp::WideHi)?, half_of(func, hi_r, UnaryOp::WideHi)?);
     // The fallback compares those same high halves...
     let (high_op, fb_l, fb_r) = compare_of(func, *otherwise)?;
     if (fb_l, fb_r) != (hi_l, hi_r) || !ordering(high_op) {
         return None;
     }
-    // ...and the tie-break case compares the low halves the same way.
+    // ...and the tie-break case compares the low halves the same way,
+    // in the same operand order. That order is what pairs each low limb
+    // with its own high one, so both operands are named even when the
+    // function itself never put either pair together.
     let (low_op, lo_l, lo_r) = compare_of(func, *on_equal)?;
-    if low_op != high_op
-        || half_of(func, lo_l, UnaryOp::WideLo)? != a
-        || half_of(func, lo_r, UnaryOp::WideLo)? != b
-    {
+    if low_op != high_op {
         return None;
     }
-    Some((high_op, a, b))
-}
-
-/// Sentinel for "the right-hand side is the constant zero, which the
-/// function does not yet have a binding for".
-fn zero_sentinel() -> ValueId {
-    ValueId::from_index(u32::MAX)
+    Some((
+        high_op,
+        paired(func, lo_l, hi_l)?,
+        Some(paired(func, lo_r, hi_r)?),
+    ))
 }
 
 /// The comparison against zero a `select` over one value's halves makes.
@@ -136,7 +159,7 @@ fn zero_sentinel() -> ValueId {
 /// select(lo(a) == 0, hi(a) <  0, hi(a) == 0)   →  a <= 0
 /// select(lo(a) != 0, hi(a) >  0, hi(a) == 0)   →  a >  0
 /// ```
-fn against_zero(func: &HighFunction, expr: &Expr) -> Option<(BinaryOp, ValueId)> {
+fn against_zero(func: &HighFunction, expr: &Expr) -> Option<(BinaryOp, Side, Option<Side>)> {
     let Expr::Unknown { op_kind: WasmOpcodeKind::Select, args, .. } = expr else {
         return None;
     };
@@ -145,10 +168,10 @@ fn against_zero(func: &HighFunction, expr: &Expr) -> Option<(BinaryOp, ValueId)>
     };
     let (on_equal, otherwise, tie) = (*on_equal, *otherwise, *tie);
     // The tie-break: the high half is zero.
-    let a = is_zero(func, tie).and_then(|v| half_of(func, v, UnaryOp::WideHi))?;
-    // The fallback orders the same high half against zero.
-    let (op, hi, bound) = compare_of(func, otherwise)?;
-    if half_of(func, hi, UnaryOp::WideHi)? != a || trace_int(func, bound) != Some(0) {
+    let hi = is_zero(func, tie)?;
+    // The fallback orders that same high half against zero.
+    let (op, again, bound) = compare_of(func, otherwise)?;
+    if !same_limb(func, again, hi, UnaryOp::WideHi) || trace_int(func, bound) != Some(0) {
         return None;
     }
     // And the tie case asks the unsigned question of the low half. What
@@ -168,7 +191,17 @@ fn against_zero(func: &HighFunction, expr: &Expr) -> Option<(BinaryOp, ValueId)>
         },
         _ => return None,
     };
-    (half_of(func, low, UnaryOp::WideLo)? == a).then_some((whole, a))
+    Some((whole, paired(func, low, hi)?, None))
+}
+
+/// Whether two values are the same limb: the same register, or two
+/// registers naming the same half of one value.
+fn same_limb(func: &HighFunction, x: ValueId, y: ValueId, want: UnaryOp) -> bool {
+    resolve_use(func, x) == resolve_use(func, y)
+        || matches!(
+            (half_of(func, x, want), half_of(func, y, want)),
+            (Some(a), Some(b)) if a == b
+        )
 }
 
 /// The value a `x == 0` test names, however it is spelled.
@@ -208,14 +241,6 @@ fn compare_of(func: &HighFunction, value: ValueId) -> Option<(BinaryOp, ValueId,
         {
             Some((*op, resolve_use(func, *lhs), resolve_use(func, *rhs)))
         }
-        _ => None,
-    }
-}
-
-/// The value this is the named half of.
-fn half_of(func: &HighFunction, value: ValueId, want: UnaryOp) -> Option<ValueId> {
-    match &func.bindings.get(resolve_use(func, value))?.expr {
-        Expr::Unary { op, value } if *op == want => Some(resolve_use(func, *value)),
         _ => None,
     }
 }
