@@ -74,7 +74,7 @@ use std::collections::{HashMap, HashSet};
 use sordec_common::{FuncId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
     BinaryOp, CompositeType, Expr, FunctionSignature, HighFunction, HighIr, IrType, KnownOp,
-    KnownType, Literal, PrimitiveType, SemanticOp, TypeRef, UnaryOp, ValObjectKind,
+    KnownType, Literal, PrimitiveType, SemanticOp, TypeRef, UnaryOp, ValObjectKind, WasmOpcodeKind,
 };
 
 use crate::dataflow::{resolve_use, HighUseIndex};
@@ -428,6 +428,15 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
         Expr::Unary { op, value } => unary_result(*op, types.get(value)),
         Expr::Binary { op, lhs, rhs } => binary_result(*op, types.get(lhs), types.get(rhs)),
         Expr::Phi { incoming } => phi_join(incoming, types),
+        // A `select` is a value, whatever the lowering could not name it
+        // as: it yields one of its two arms, so when they agree on a type
+        // it has that type. Without this the binding is untyped, the
+        // emitter cannot annotate the hole it renders, and the `let` falls
+        // back to `()` — which nothing can be compared with.
+        Expr::Unknown { op_kind: WasmOpcodeKind::Select, args, .. } if args.len() == 3 => {
+            let (a, b) = (base_of(types.get(&args[0]))?, base_of(types.get(&args[1]))?);
+            (a == b).then_some(IrType::Inferred(a))
+        }
         // Two limbs read as one integer. `i128` is the guess only because
         // it is what Soroban contracts overwhelmingly use; a recognizer
         // that knows the value is a `u128` plants `Known` and wins.

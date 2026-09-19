@@ -1,17 +1,51 @@
 {
   "aggregate_overall": 0.7713665199290232,
   "aggregate_overall_with_behavior": 0.7713665199290232,
-  "behavior_measured_fixtures": 0,
+  "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
       "basis_profile": "rfp-default",
+      "behavior": {
+        "b_side": {
+          "kind": "reconstruction"
+        },
+        "entrypoints_driven": 2,
+        "entrypoints_total": 6,
+        "notes": [
+          "2 of 6 entrypoints drivable (skipped — attest: parameter `signer` is a Bytes value, which needs a value constructed against a live host; check: parameter `message` is a Bytes value, which needs a value constructed against a live host; digest: parameter `message` is a Bytes value, which needs a value constructed against a live host; digest_keccak: parameter `message` is a Bytes value, which needs a value constructed against a live host)"
+        ],
+        "score": 1.0,
+        "trivial_agreements": 4,
+        "tuples": [
+          {
+            "exercised": 20,
+            "matched": 20,
+            "name": "return"
+          },
+          {
+            "exercised": 0,
+            "matched": 0,
+            "name": "events"
+          },
+          {
+            "exercised": 0,
+            "matched": 0,
+            "name": "auth"
+          },
+          {
+            "exercised": 0,
+            "matched": 0,
+            "name": "storage"
+          }
+        ]
+      },
       "categories": {
         "behavior": {
-          "checked": false,
+          "checked": true,
           "notes": [
-            "behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`"
+            "differential execution over 2 of 6 entrypoints"
           ],
-          "score": 0.0,
+          "score": 1.0,
           "weight": 0.15
         },
         "interface": {
@@ -61,7 +95,7 @@
         "behavior": {
           "checked": false,
           "notes": [
-            "behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`"
+            "behavior unavailable: crate does not build: error[E0308]: mismatched types"
           ],
           "score": 0.0,
           "weight": 0.15
@@ -112,13 +146,47 @@
     },
     "hello-add": {
       "basis_profile": "rfp-default",
+      "behavior": {
+        "b_side": {
+          "kind": "reconstruction"
+        },
+        "entrypoints_driven": 1,
+        "entrypoints_total": 1,
+        "notes": [
+          "1 of 1 entrypoints drivable"
+        ],
+        "score": 1.0,
+        "trivial_agreements": 3,
+        "tuples": [
+          {
+            "exercised": 9,
+            "matched": 9,
+            "name": "return"
+          },
+          {
+            "exercised": 0,
+            "matched": 0,
+            "name": "events"
+          },
+          {
+            "exercised": 0,
+            "matched": 0,
+            "name": "auth"
+          },
+          {
+            "exercised": 0,
+            "matched": 0,
+            "name": "storage"
+          }
+        ]
+      },
       "categories": {
         "behavior": {
-          "checked": false,
+          "checked": true,
           "notes": [
-            "behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`"
+            "differential execution over 1 of 1 entrypoints"
           ],
-          "score": 0.0,
+          "score": 1.0,
           "weight": 0.15
         },
         "interface": {
@@ -165,7 +233,7 @@
         "behavior": {
           "checked": false,
           "notes": [
-            "behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`"
+            "behavior unavailable: crate does not build: error[E0277]: can't compare `()` with `i64`"
           ],
           "score": 0.0,
           "weight": 0.15
@@ -219,7 +287,7 @@
         "behavior": {
           "checked": false,
           "notes": [
-            "behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`"
+            "behavior unavailable: crate does not build: error[E0308]: mismatched types"
           ],
           "score": 0.0,
           "weight": 0.15
@@ -275,7 +343,7 @@
         "behavior": {
           "checked": false,
           "notes": [
-            "behavior unavailable: crate does not build: error: failed to download `jiff-tzdb v0.1.8`"
+            "behavior unavailable: crate does not build: error[E0308]: mismatched types"
           ],
           "score": 0.0,
           "weight": 0.15
