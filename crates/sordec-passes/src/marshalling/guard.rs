@@ -376,7 +376,7 @@ fn report_declines(declines: &[&'static str], result: &mut crate::pass::PassResu
 /// Precomputed so [`is_trap`] can be a pure function of the region tree
 /// plus this set: `strip` rebuilds `func.region` by value and cannot hold
 /// a borrow of `func` at the same time.
-pub(super) fn empty_blocks(func: &HighFunction) -> HashSet<BlockId> {
+pub(crate) fn empty_blocks(func: &HighFunction) -> HashSet<BlockId> {
     func.blocks
         .iter()
         .filter(|(_, block)| block.bindings.is_empty())

@@ -200,6 +200,8 @@ pub const TTL_AFTER_INLINE: &str = "ttl-after-inline";
 pub const ENUM_KEY_AFTER_INLINE: &str = "enum-key-after-inline";
 /// Name of the panic-recovery re-run inside the elision group.
 pub const PANIC_RECOVER_AFTER_RECOVERY: &str = "panic-recover-after-recovery";
+/// Name of the polarity re-run inside the elision group.
+pub const POLARITY_AFTER_ELISION: &str = "polarity-after-elision";
 
 /// Build the default high-IR pattern-recovery pipeline.
 ///
@@ -523,6 +525,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // probe, which only exists as an `if` once this pair has run,
             // and the elisions after it need the next iteration to see the
             // result.
+            // Again, now that the elisions have emptied arms. A guard
+            // whose trap moved into derived code leaves `if c {} else {E}`,
+            // which is the one-armed branch the source wrote with the
+            // opposite polarity — and the pair below reads the result.
+            Box::new(pass::Rerun::new(PolarityPass, POLARITY_AFTER_ELISION, &[])),
             Box::new(ScopeFallthroughPass),
             Box::new(ScopeIfElsePass),
             // After the group, on settled IR: a returned `select` becomes
@@ -549,7 +556,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 31..67],
+        vec![1..7, 31..68],
     )
 }
 
@@ -631,6 +638,7 @@ mod tests {
                 marshalling::dead_store::PASS_NAME,
                 marshalling::frame::PASS_NAME,
                 arith::wide_fold::PASS_NAME,
+                POLARITY_AFTER_ELISION,
                 refine::SCOPE_FALLTHROUGH_PASS_NAME,
                 refine::SCOPE_IF_ELSE_PASS_NAME,
             ],

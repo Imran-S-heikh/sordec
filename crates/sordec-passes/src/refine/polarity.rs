@@ -29,6 +29,18 @@ use super::{debug_validate, is_bare_exit};
 use crate::dataflow::{InlineClass, InlinePlan, InlineSite};
 use crate::pass::{Pass, PassResult};
 
+/// Whether an arm does nothing at all, so the branch is really one-armed
+/// with the opposite polarity.
+fn empty_arm(region: &Region, inert: &std::collections::HashSet<sordec_common::BlockId>) -> bool {
+    match region {
+        Region::Sequence(items) => items.iter().all(|i| empty_arm(i, inert)),
+        Region::Basic(b) => inert.contains(b),
+        // A fall-through that assigns no block parameter.
+        Region::Transfer { transfer, .. } => transfer.is_empty(),
+        _ => false,
+    }
+}
+
 /// Unique pipeline name of this pass.
 pub const PASS_NAME: &str = "refine-polarity";
 
@@ -54,8 +66,9 @@ impl Pass<HighIr> for PolarityPass {
             // use count (same reader, same operands), so the plan stays
             // accurate across the walk.
             let plan = InlinePlan::build(func);
+            let inert = crate::marshalling::guard::empty_blocks(func);
             let mut region = std::mem::replace(&mut func.region, Region::Unreachable);
-            flipped += normalize(&mut region, &mut func.bindings, &plan);
+            flipped += normalize(&mut region, &mut func.bindings, &plan, &inert);
             func.region = region;
         }
         if flipped > 0 {
@@ -74,25 +87,48 @@ fn normalize(
     region: &mut Region,
     bindings: &mut Arena<ValueId, Binding>,
     plan: &InlinePlan,
+    inert: &std::collections::HashSet<sordec_common::BlockId>,
 ) -> i64 {
     match region {
         Region::Sequence(items) => items
             .iter_mut()
-            .map(|item| normalize(item, bindings, plan))
+            .map(|item| normalize(item, bindings, plan, inert))
             .sum(),
         Region::Scope { out: _, body } | Region::Loop { body, .. } => {
-            normalize(body, bindings, plan)
+            normalize(body, bindings, plan, inert)
         }
         Region::If {
             cond,
             then_region,
             else_region,
         } => {
-            let mut flips = normalize(then_region, bindings, plan);
-            let Some(else_region) = else_region else {
+            let mut flips = normalize(then_region, bindings, plan, inert);
+            let Some(inner) = else_region else {
                 return flips;
             };
-            flips += normalize(else_region, bindings, plan);
+            flips += normalize(inner, bindings, plan, inert);
+
+            // An arm the elisions emptied. `if c {} else { E }` does what
+            // `if !c { E }` does, and the source wrote the one-armed form
+            // — this is the shape a guard leaves behind once its trap is
+            // relocated into the derived code that regenerates it. Two
+            // arms where the source has one share no token with it.
+            // An `else` that does nothing is not an arm. Dropping it is
+            // free — no condition to invert, no reader to disturb.
+            if empty_arm(inner, inert) && !empty_arm(then_region, inert) {
+                *else_region = None;
+                return flips + 1;
+            }
+            if empty_arm(then_region, inert)
+                && matches!(plan.class(*cond), InlineClass::Inline(InlineSite::RegionUse))
+                && invert_comparator(bindings, *cond)
+            {
+                let recovered = std::mem::replace(&mut **inner, Region::Sequence(Vec::new()));
+                **then_region = recovered;
+                *else_region = None;
+                return flips + 1;
+            }
+            let else_region = inner;
 
             // Non-canonical guard: bare exit in the else, content in
             // the then. Flip when the condition is ours alone to
@@ -112,9 +148,9 @@ fn normalize(
         }
         Region::Switch { arms, default, .. } => {
             arms.iter_mut()
-                .map(|arm| normalize(&mut arm.body, bindings, plan))
+                .map(|arm| normalize(&mut arm.body, bindings, plan, inert))
                 .sum::<i64>()
-                + normalize(default, bindings, plan)
+                + normalize(default, bindings, plan, inert)
         }
         Region::Basic(_)
         | Region::Break { .. }
