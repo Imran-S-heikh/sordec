@@ -391,6 +391,16 @@ fn backward(
                     changed |= improve(types, ev, *rhs, IrType::Inferred(base));
                 }
             }
+            // A join's limbs are the two 64-bit halves of one value —
+            // that is what the construct means, so it types them
+            // whatever produced them. Without it a limb the pipeline
+            // never recovered is emitted as an untyped `todo!()`, which
+            // Rust reads as `()`, and the cast the join renders does not
+            // compile.
+            Expr::WideJoin { lo, hi } => {
+                changed |= improve(types, ev, *lo, IrType::Inferred(KnownType::I64));
+                changed |= improve(types, ev, *hi, IrType::Inferred(KnownType::I64));
+            }
             // Comparison: the two operands share one type (the result is
             // `bool`, handled forward). Logical types compare
             // (`addr == addr`), so this is not gated on `is_numeric`.
