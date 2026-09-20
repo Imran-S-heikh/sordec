@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.916256947419473,
-  "aggregate_overall_with_behavior": 0.916256947419473,
+  "aggregate_overall": 0.9291666636983312,
+  "aggregate_overall_with_behavior": 0.9291666636983312,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -400,14 +400,14 @@
         "interface": {
           "checked": true,
           "notes": [
-            "entrypoints 0.7692  precision=0.7692 recall=0.7692 (13 original, 13 reconstructed)",
-            "entrypoints missing: fn name, fn symbol, fn transfer",
-            "entrypoints extra: fn name, fn symbol, fn transfer",
+            "entrypoints 0.9231  precision=0.9231 recall=0.9231 (13 original, 13 reconstructed)",
+            "entrypoints missing: fn transfer",
+            "entrypoints extra: fn transfer",
             "types 0.2857  precision=0.3333 recall=0.2500 (4 original, 3 reconstructed)",
             "types missing: type SetAdmin, type struct{from:Address,spender:Address}, type union{Allowance(AllowanceDataKey),Balance(Address),State(Address),Admin}",
             "types extra: type struct{decimal:u32,name:String,symbol:String}, type union{Allowance(Val,Val),Balance(Val),State(Val),Admin}"
           ],
-          "score": 0.5274725274725275,
+          "score": 0.6043956043956045,
           "weight": 0.3
         },
         "semantic": {
@@ -422,12 +422,12 @@
         "structure": {
           "checked": true,
           "notes": [
-            "13 entrypoints (0 unreconstructed, 1 without control flow)",
+            "13 entrypoints (0 unreconstructed, 4 without control flow)",
             "ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.4925 recall=1.0000 (33 original tokens, 67 reconstructed) — bloat 2.0x, dice ceiling ~0.6600",
-            "low-similarity: decimals(0.00), name(0.00), symbol(0.00), transfer(0.44)"
+            "control flow: precision=0.6346 recall=1.0000 (33 original tokens, 52 reconstructed) — bloat 1.6x, dice ceiling ~0.7765",
+            "low-similarity: transfer(0.44)"
           ],
-          "score": 0.6448306653873992,
+          "score": 0.8597742205165323,
           "weight": 0.25
         }
       },
@@ -438,7 +438,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.7035539448941607,
+      "overall": 0.7939219588461682,
       "passed": false,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,

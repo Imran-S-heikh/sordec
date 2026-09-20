@@ -9,12 +9,12 @@ Scorer `score-2.1.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | hello-add | 1.0000 | 1.0000 | 0.0000 | 0.0000 | 1.0000 |
 | token-v22 | 0.9220 | 0.9286 | 0.9063 | 0.9286 | n/a |
 | token-v23 | 0.8453 | 0.7500 | 0.8598 | 0.9286 | n/a |
-| token-v23-stripped | 0.7036 | 0.5275 | 0.6448 | 0.9286 | n/a |
+| token-v23-stripped | 0.7939 | 0.6044 | 0.8598 | 0.9286 | n/a |
 | timelock | 1.0000 | 1.0000 | 1.0000 | 1.0000 | n/a |
 | dex-liquidity-pool | 0.9429 | 1.0000 | 0.8059 | 1.0000 | n/a |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
-| **aggregate (mean, AST)** | **0.9163** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.9163** | | | | |
+| **aggregate (mean, AST)** | **0.9292** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.9292** | | | | |
 
 ## Per-fixture detail
 
@@ -41,8 +41,8 @@ Scorer `score-2.1.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 
 ### token-v23-stripped
 
-- **interface** 0.5275 — entrypoints 0.7692  precision=0.7692 recall=0.7692 (13 original, 13 reconstructed) — entrypoints missing: fn name, fn symbol, fn transfer — entrypoints extra: fn name, fn symbol, fn transfer — types 0.2857  precision=0.3333 recall=0.2500 (4 original, 3 reconstructed) — types missing: type SetAdmin, type struct{from:Address,spender:Address}, type union{Allowance(AllowanceDataKey),Balance(Address),State(Address),Admin} — types extra: type struct{decimal:u32,name:String,symbol:String}, type union{Allowance(Val,Val),Balance(Val),State(Val),Admin}
-- **structure** 0.6448 — 13 entrypoints (0 unreconstructed, 1 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.4925 recall=1.0000 (33 original tokens, 67 reconstructed) — bloat 2.0x, dice ceiling ~0.6600 — low-similarity: decimals(0.00), name(0.00), symbol(0.00), transfer(0.44)
+- **interface** 0.6044 — entrypoints 0.9231  precision=0.9231 recall=0.9231 (13 original, 13 reconstructed) — entrypoints missing: fn transfer — entrypoints extra: fn transfer — types 0.2857  precision=0.3333 recall=0.2500 (4 original, 3 reconstructed) — types missing: type SetAdmin, type struct{from:Address,spender:Address}, type union{Allowance(AllowanceDataKey),Balance(Address),State(Address),Admin} — types extra: type struct{decimal:u32,name:String,symbol:String}, type union{Allowance(Val,Val),Balance(Val),State(Val),Admin}
+- **structure** 0.8598 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.6346 recall=1.0000 (33 original tokens, 52 reconstructed) — bloat 1.6x, dice ceiling ~0.7765 — low-similarity: transfer(0.44)
 - **semantic** 0.9286 — precision=0.8667 recall=1.0000 (13 original facts, 15 reconstructed) — over-recovered: storage:get:instance:?, storage:set:instance:?
 - **behavior** n/a — behavior unavailable: samples/contracts/token-v23-stripped/token-v23-stripped.wasm has no `contractenvmetav0` section, so the host cannot load it and it cannot serve as a behaviour oracle
 

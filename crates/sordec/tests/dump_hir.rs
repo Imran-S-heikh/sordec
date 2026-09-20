@@ -1017,32 +1017,30 @@ fn dump_hir_structures_token_transfer_into_labeled_scopes() {
 }
 
 #[test]
-fn dump_hir_recovers_guard_clauses_with_inline_traps() {
-    // The W6 payoff shape (D1 + D2), typed by W7's D8: a guard is a
-    // flat, else-less `if` whose body is the inlined trap — now named
-    // as the tag-checked unwrap it is.
+fn every_tag_checked_conversion_is_relocated() {
+    // Was `dump_hir_recovers_guard_clauses_with_inline_traps`, which
+    // pinned the W6 payoff shape: a guard rendered as a flat, else-less
+    // `if` whose body is the inlined trap, typed by D8 as the
+    // tag-checked unwrap it is.
     //
-    // Read on the *stripped* build, and that is the point. On a
-    // contract that ships `contractspecv0` this shape no longer
-    // survives anywhere: the declared type licenses relocating the trap
-    // into the derived conversion, which is what the marshalling
-    // elisions are for. What is left here is the token-metadata struct
-    // decode, whose `#[contracttype]` cannot be named without the spec
-    // — so the guard stays raw, exactly where the evidence to retire it
-    // is missing.
-    Command::cargo_bin("sordec")
-        .expect("sordec binary builds")
-        .args(["dump-hir", TOKEN_V23_STRIPPED])
-        .assert()
-        .success()
-        // Both halves: the named check, and the else-less `if` whose
-        // body is the trap D8 typed.
-        .stdout(predicate::str::contains(
-            "= !has_tag(v12, MapObject)  ;; SdkPattern: val-tag-check MapObject (negated)",
-        ))
-        .stdout(predicate::str::contains(
-            "panic!()  ;; unwrap: tag-checked trap",
-        ));
+    // That shape no longer occurs on any corpus fixture. Every argument,
+    // field and host-result conversion is now licensed by a type — from
+    // `contractspecv0` where there is one, and from the contract's own
+    // derived converters where there is not — so each trap is relocated
+    // into the derived code the reconstruction re-emits.
+    //
+    // Asserting the absence alone would pass vacuously if `dump-hir`
+    // broke, so both halves are checked: the checks are still
+    // *recognized*, and no trap is left standing on one.
+    for wasm in [TOKEN_V22, TOKEN_V23, TOKEN_V23_STRIPPED, TIMELOCK, DEX] {
+        Command::cargo_bin("sordec")
+            .expect("sordec binary builds")
+            .args(["dump-hir", wasm])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("SdkPattern: val-tag-check"))
+            .stdout(predicate::str::contains("unwrap: tag-checked trap").not());
+    }
 }
 
 #[test]

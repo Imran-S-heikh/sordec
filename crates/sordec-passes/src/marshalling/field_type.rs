@@ -16,9 +16,11 @@
 //! type is what the source did, and the decode is the derive regenerating
 //! itself — the same relocation argument as every other elision here.
 //!
-//! Only a field whose declared type is a small scalar qualifies. A field
-//! holding an object — an `Address`, a `Vec`, a nested struct — is not
-//! decoded by this instruction, and its own recognizers own it.
+//! Every field is read at its declared type. Only the *decode* is
+//! scalar-only: a field holding an object — an `Address`, a `Vec`, a
+//! nested struct — is not decoded by this instruction, and its own
+//! recognizers own it. They need the type to do so, which is why the
+//! typing is not gated the same way.
 
 use sordec_common::{Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, SemanticOp, StructDef};
@@ -59,8 +61,13 @@ impl Pass<HighIr> for FieldTypePass {
                     let Expr::Field { base, field } = &b.expr else {
                         return None;
                     };
-                    let ty = declared(func, &structs, *base, field)?;
-                    small(&ty).then_some((id, ty))
+                    // Typed whatever the declaration says. Only the
+                    // *decode* below is scalar-only: reading a field at
+                    // its declared type is right for an `Address` or a
+                    // `String` too, and it is what lets the recognizers
+                    // that own those — the tag-guard elision in
+                    // particular — see a type rather than a bare `Val`.
+                    Some((id, declared(func, &structs, *base, field)?))
                 })
                 .filter(|(id, ty)| func.bindings.get(*id).is_some_and(|b| b.ty != IrType::Known(ty.clone())))
                 .collect();

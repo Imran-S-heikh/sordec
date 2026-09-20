@@ -422,6 +422,25 @@ fn overall_band(name: &str) -> (f64, f64) {
     // in the binary. structure 0.6220 -> 0.6448, the fixture 0.4199 ->
     // 0.4266, aggregate 0.8353 -> 0.8362.
     //
+    // 2026-09-20 — a field is read at the type its struct declares.
+    //
+    // `field_type` typed a field access only when the declared type was
+    // a small scalar, because only those have a decode for it to fold.
+    // But typing and folding are different jobs: an `Address` or
+    // `String` field is not decoded by that instruction, and the
+    // recognizers that *do* own it — the tag-guard elision above all —
+    // need a type rather than a bare `Val` to act on.
+    //
+    // It went unnoticed while every struct came from a spec, because
+    // there the declaration reaches the binding another way. On a
+    // stripped build the struct is recovered mid-pipeline, so the field
+    // accesses were left untyped and their conversions stayed.
+    //
+    // token-v23-stripped structure 0.6448 -> 0.8598 (its three metadata
+    // accessors were the worst entrypoints on the board), interface
+    // 0.5275 -> 0.6044 as `name` and `symbol` recover `String` returns,
+    // the fixture 0.7036 -> 0.7939. Aggregate 0.9163 -> 0.9292.
+    //
     // Also score-2.1.0 — how many times a fact is written down.
     //
     // *Which* operations a contract performs is compiled into it.
@@ -672,7 +691,7 @@ fn overall_band(name: &str) -> (f64, f64) {
         "hello-add" => (0.99, 1.00),
         "token-v22" => (0.90, 0.94),
         "token-v23" => (0.83, 0.87),
-        "token-v23-stripped" => (0.68, 0.72),
+        "token-v23-stripped" => (0.77, 0.81),
         "timelock" => (0.98, 1.00),
         "dex-liquidity-pool" => (0.92, 0.96),
         "attestation" => (0.98, 1.0),
