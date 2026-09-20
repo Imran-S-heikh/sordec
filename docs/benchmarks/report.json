@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.8926911851815066,
-  "aggregate_overall_with_behavior": 0.8926911851815066,
+  "aggregate_overall": 0.8998940663339675,
+  "aggregate_overall_with_behavior": 0.8998940663339675,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -408,11 +408,11 @@
             "entrypoints 0.7692  precision=0.7692 recall=0.7692 (13 original, 13 reconstructed)",
             "entrypoints missing: fn name, fn symbol, fn transfer",
             "entrypoints extra: fn name, fn symbol, fn transfer",
-            "types 0.0000  precision=0.0000 recall=0.0000 (4 original, 3 reconstructed)",
-            "types missing: type AllowanceDataKey, type AllowanceValue, type DataKey, type SetAdmin",
-            "types extra: type Record, type Record1, type StorageKey"
+            "types 0.2857  precision=0.3333 recall=0.2500 (4 original, 3 reconstructed)",
+            "types missing: type SetAdmin, type struct{from:Address,spender:Address}, type union{Allowance(AllowanceDataKey),Balance(Address),State(Address),Admin}",
+            "types extra: type struct{decimal:u32,name:String,symbol:String}, type union{Allowance(Val,Val),Balance(Val),State(Val),Admin}"
           ],
-          "score": 0.38461538461538464,
+          "score": 0.5274725274725275,
           "weight": 0.3
         },
         "semantic": {
@@ -444,7 +444,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.6497270087142835,
+      "overall": 0.7001471767815102,
       "passed": false,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,

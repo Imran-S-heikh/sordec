@@ -422,6 +422,21 @@ fn overall_band(name: &str) -> (f64, f64) {
     // in the binary. structure 0.6220 -> 0.6448, the fixture 0.4199 ->
     // 0.4266, aggregate 0.8353 -> 0.8362.
     //
+    // Also score-2.1.0 — and a type's own name.
+    //
+    // The last of the same rule. A `#[contracttype]`'s *shape* is
+    // compiled in — a struct's field names and types in the key table
+    // its derived conversion unpacks by, a union's variant names in its
+    // converter's switch arms — and both are now recovered from a
+    // stripped build. Its *name* is only in `contractspecv0`.
+    //
+    // So where the module declared no ABI, a user-defined type is
+    // compared by shape rather than by name; two types of the same
+    // shape then agree whatever they are called, which is the most the
+    // module can be asked to support. token-v23-stripped interface
+    // 0.3846 -> 0.5275 and the fixture 0.6497 -> 0.7001. Aggregate
+    // 0.8927 -> 0.8999.
+    //
     // Also score-2.1.0 — and the enum name in front of a storage key.
     //
     // A storage fact reads `storage:get:instance:DataKey::Admin`: an
@@ -631,7 +646,7 @@ fn overall_band(name: &str) -> (f64, f64) {
         "hello-add" => (0.99, 1.00),
         "token-v22" => (0.90, 0.94),
         "token-v23" => (0.81, 0.85),
-        "token-v23-stripped" => (0.63, 0.67),
+        "token-v23-stripped" => (0.68, 0.72),
         "timelock" => (0.97, 1.00),
         "dex-liquidity-pool" => (0.85, 0.89),
         "attestation" => (0.98, 1.0),

@@ -64,6 +64,27 @@ pub(crate) fn abi(spec: &SpecMap, names: bool) -> BTreeMap<String, String> {
     map
 }
 
+/// The key a user-defined type is compared under.
+///
+/// Normally its declared name: two contracts that declare `DataKey`
+/// differently should not be credited with agreeing. But a type's name
+/// lives only in `contractspecv0`, and a module stripped of that
+/// section records only its *shape* — a struct's field names and types
+/// in the key table its derived conversion unpacks by, a union's
+/// variant names in its converter's switch arms. A reconstruction can
+/// recover all of that and still have to invent the type's name.
+///
+/// So where the module declared no ABI, the shape is the key. Two types
+/// with the same shape then compare equal whatever they are called,
+/// which is the most the module can be asked to support.
+fn type_key(name: &str, shape: &str, names: bool) -> String {
+    if names {
+        format!("type {name}")
+    } else {
+        format!("type {shape}")
+    }
+}
+
 /// Decode one spec entry, or `None` if the bytes are not a readable entry.
 fn decode(bytes: &[u8]) -> Option<ScSpecEntry> {
     let mut reader = Limited::new(Cursor::new(bytes), Limits::len(DECODE_LIMIT));
@@ -112,17 +133,16 @@ fn render(entry: &ScSpecEntry, names: bool) -> (String, String) {
                 .iter()
                 .map(|field| format!("{}:{}", field.name.to_utf8_string_lossy(), ty(&field.type_)))
                 .collect();
+            let shape = format!("struct{{{}}}", fields.join(","));
             (
-                format!("type {}", s.name.to_utf8_string_lossy()),
-                format!("struct{{{}}}", fields.join(",")),
+                type_key(&s.name.to_utf8_string_lossy(), &shape, names),
+                shape,
             )
         }
         ScSpecEntry::UdtUnionV0(u) => {
             let cases: Vec<String> = u.cases.iter().map(union_case).collect();
-            (
-                format!("type {}", u.name.to_utf8_string_lossy()),
-                format!("union{{{}}}", cases.join(",")),
-            )
+            let shape = format!("union{{{}}}", cases.join(","));
+            (type_key(&u.name.to_utf8_string_lossy(), &shape, names), shape)
         }
         ScSpecEntry::UdtEnumV0(e) => {
             let cases: Vec<String> = e
@@ -130,10 +150,8 @@ fn render(entry: &ScSpecEntry, names: bool) -> (String, String) {
                 .iter()
                 .map(|case| format!("{}={}", case.name.to_utf8_string_lossy(), case.value))
                 .collect();
-            (
-                format!("type {}", e.name.to_utf8_string_lossy()),
-                format!("enum{{{}}}", cases.join(",")),
-            )
+            let shape = format!("enum{{{}}}", cases.join(","));
+            (type_key(&e.name.to_utf8_string_lossy(), &shape, names), shape)
         }
         ScSpecEntry::UdtErrorEnumV0(e) => {
             let cases: Vec<String> = e
