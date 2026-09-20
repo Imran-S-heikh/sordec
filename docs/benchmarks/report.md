@@ -9,12 +9,12 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | hello-add | 1.0000 | 1.0000 | 0.0000 | 0.0000 | 1.0000 |
 | token-v22 | 0.8980 | 0.9286 | 0.9063 | 0.8605 | n/a |
 | token-v23 | 0.8117 | 0.7500 | 0.8598 | 0.8333 | n/a |
-| token-v23-stripped | 0.4199 | 0.0385 | 0.6220 | 0.6329 | n/a |
+| token-v23-stripped | 0.4266 | 0.0385 | 0.6448 | 0.6329 | n/a |
 | timelock | 0.9391 | 1.0000 | 1.0000 | 0.8276 | n/a |
 | dex-liquidity-pool | 0.7783 | 1.0000 | 0.6362 | 0.6750 | n/a |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
-| **aggregate (mean, AST)** | **0.8353** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.8353** | | | | |
+| **aggregate (mean, AST)** | **0.8362** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.8362** | | | | |
 
 ## Per-fixture detail
 
@@ -42,7 +42,7 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 ### token-v23-stripped
 
 - **interface** 0.0385 — entrypoints 0.0769  precision=0.0769 recall=0.0769 (13 original, 13 reconstructed) — entrypoints missing: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn mint, fn name, … (+4) — entrypoints extra: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn mint, fn name, … (+4) — types 0.0000  precision=0.0000 recall=0.0000 (4 original, 3 reconstructed) — types missing: type AllowanceDataKey, type AllowanceValue, type DataKey, type SetAdmin — types extra: type Record, type Record1, type StorageKey
-- **structure** 0.6220 — 13 entrypoints (0 unreconstructed, 1 without control flow) — ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.4521 recall=1.0000 (33 original tokens, 73 reconstructed) — bloat 2.2x, dice ceiling ~0.6226 — low-similarity: decimals(0.00), name(0.00), symbol(0.00), transfer(0.44)
+- **structure** 0.6448 — 13 entrypoints (0 unreconstructed, 1 without control flow) — ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.4925 recall=1.0000 (33 original tokens, 67 reconstructed) — bloat 2.0x, dice ceiling ~0.6600 — low-similarity: decimals(0.00), name(0.00), symbol(0.00), transfer(0.44)
 - **semantic** 0.6329 — precision=0.6944 recall=0.5814 (43 original facts, 36 reconstructed) — under-recovered: event, panic:bare, panic:unwrap, storage:extend_ttl:persistent:DataKey::Balance, storage:extend_ttl:temporary:DataKey::Allowance, storage:get:instance:DataKey::Admin, storage:get:persistent:DataKey::Balance, storage:get:temporary:DataKey::Allowance, … (+3) — over-recovered: storage:extend_ttl:persistent:StorageKey::Balance, storage:extend_ttl:temporary:StorageKey::Allowance, storage:get:instance:?, storage:get:instance:StorageKey::Admin, storage:get:persistent:StorageKey::Balance, storage:get:temporary:StorageKey::Allowance, storage:set:instance:?, storage:set:instance:StorageKey::Admin, … (+2)
 - **behavior** n/a — behavior unavailable: samples/contracts/token-v23-stripped/token-v23-stripped.wasm has no `contractenvmetav0` section, so the host cannot load it and it cannot serve as a behaviour oracle
 

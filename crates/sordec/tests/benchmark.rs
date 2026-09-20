@@ -392,6 +392,24 @@ fn overall_band(name: &str) -> (f64, f64) {
     //
     // token-v22 structure 0.8615 -> 0.9063, token-v23 0.8123 -> 0.8565.
     // Aggregate 0.7988 -> 0.8025. Held-out mean unchanged at 0.7090.
+    // Amended same day — and its field *types*.
+    //
+    // A struct recovered from a key table starts with `Val` fields,
+    // because the table carries names and nothing else. The derived
+    // conversion then checks each field against the tag its declared
+    // type implies — the same evidence `#[contractimpl]` leaves for a
+    // parameter — so reading it back types the field, and `field_type`
+    // and `guard` can retire the check. Fields wide enough to need a
+    // decode helper are read from the helper, as parameters are.
+    //
+    //     Record  { decimal: u32, name: String, symbol: String }
+    //     Record1 { amount: i128, expiration_ledger: u32 }
+    //
+    // which are `TokenMetadata` and `AllowanceValue`, field for field,
+    // name and type. Only the type names are missing, and those are not
+    // in the binary. structure 0.6220 -> 0.6448, the fixture 0.4199 ->
+    // 0.4266, aggregate 0.8353 -> 0.8362.
+    //
     // Re-centred 2026-09-20 — the struct a stripped build still names.
     //
     // Same evidence as the union below, one derive along.

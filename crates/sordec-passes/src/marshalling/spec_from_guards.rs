@@ -19,6 +19,14 @@
 //! reading applies: [`super::decode`] already classifies those helpers
 //! and records the tags each one tests, so the argument a call site
 //! hands one is declared whatever those tags denote.
+//!
+//! A **struct field** is read the same way, once [`super::udt_decode`]
+//! has recovered the struct from its key table. The table gives the
+//! field names and nothing else, so each field starts as a `Val`; the
+//! derived conversion then checks it against the tag its declared type
+//! implies, exactly as `#[contractimpl]` does for a parameter. Reading
+//! that back is what lets [`super::field_type`] and [`super::guard`]
+//! retire the check.
 //! The return type is recoverable the same way. A wasm entrypoint always
 //! hands the host one `Val`: one that is always the constant `Void` is a
 //! function the source wrote as returning nothing, and one that is
@@ -56,16 +64,21 @@
 
 use std::collections::HashMap;
 
-use sordec_common::{FuncId, ValueId};
+use std::collections::BTreeMap;
+
+use sordec_common::{FuncId, TypeId, ValueId};
 use sordec_ir::{
-    Expr, FunctionSignature, HighFunction, HighIr, KnownOp, KnownType, PrimitiveType, Region,
-    SemanticOp, TypeRef,
+    Expr, FunctionSignature, HighFunction, HighIr, IrType, KnownOp, KnownType, PrimitiveType,
+    Region, SemanticOp, TypeRef,
 };
 
 use super::decode::{self, DecodeHelper};
 use super::wide_codec;
 use crate::dataflow::{resolve_use, trace_int};
-use crate::metrics_catalog::{MARSHALLING_SPEC_PARAMS as M_PARAMS, MARSHALLING_SPEC_RETURNS as M_RETURNS};
+use crate::metrics_catalog::{
+    MARSHALLING_SPEC_FIELDS as M_FIELDS, MARSHALLING_SPEC_PARAMS as M_PARAMS,
+    MARSHALLING_SPEC_RETURNS as M_RETURNS,
+};
 use crate::pass::{Pass, PassResult};
 use crate::type_infer::primitive_of_known;
 use crate::val_abi::{tag_payload_type, TAG_VOID};
@@ -107,6 +120,25 @@ impl Pass<HighIr> for SpecFromGuardsPass {
             .iter()
             .filter_map(|f| wide_codec::decoded_wide_type(f).map(|t| (f.id, t)))
             .collect();
+        // The registry is shared, and what it learns here is what the
+        // per-function walk below reads types out of.
+        for (id, field, prim) in field_types(ir, &helpers, &wide) {
+            let Some(facts) = ir.soroban_facts.as_mut() else {
+                continue;
+            };
+            let Some(def) = facts.types.structs.iter_mut().find(|s| s.id == id) else {
+                continue;
+            };
+            let Some(slot) = def.fields.iter_mut().find(|f| f.name == field) else {
+                continue;
+            };
+            if !matches!(slot.ty, TypeRef::Unknown(_)) {
+                continue;
+            }
+            slot.ty = TypeRef::Primitive(prim);
+            result.metrics.increment(M_FIELDS, 1);
+            result.changed = true;
+        }
         for func in &mut ir.functions {
             let Some(sig) = func.signature.as_ref() else {
                 continue;
@@ -129,6 +161,55 @@ impl Pass<HighIr> for SpecFromGuardsPass {
             apply(sig, &recovered, returned, &mut result);
         }
         result
+    }
+}
+
+/// What every conversion check on a recovered struct's field says its
+/// type is: `(the struct, the field, the type)`.
+///
+/// Only fields still declared `Unknown`, which is what a struct
+/// recovered from its key table starts with — a declared field has a
+/// declaration, and a check cannot overrule one.
+fn field_types(
+    ir: &HighIr,
+    helpers: &HashMap<FuncId, DecodeHelper>,
+    wide: &HashMap<FuncId, (usize, KnownType)>,
+) -> Vec<(TypeId, String, PrimitiveType)> {
+    let mut seen: BTreeMap<(TypeId, String), Option<KnownType>> = BTreeMap::new();
+    for func in &ir.functions {
+        let mut evidence = conversion_checks(func);
+        // A field wide enough to need a helper is decoded by one, just
+        // as a parameter is.
+        evidence.extend(decoded_arguments(func, helpers));
+        evidence.extend(wide_arguments(func, wide));
+        for (value, ty) in evidence {
+            let Some((id, field)) = field_of(func, value) else {
+                continue;
+            };
+            let slot = seen.entry((id, field)).or_insert_with(|| Some(ty.clone()));
+            // One declared type per field, as for a parameter.
+            if slot.as_ref() != Some(&ty) {
+                *slot = None;
+            }
+        }
+    }
+    seen.into_iter()
+        .filter_map(|((id, field), ty)| Some((id, field, primitive_of_known(&ty?)?)))
+        .collect()
+}
+
+/// The struct and field name a value is an access of, when the struct is
+/// one the registry knows.
+fn field_of(func: &HighFunction, value: ValueId) -> Option<(TypeId, String)> {
+    let Expr::Field { base, field } = &func.bindings.get(value)?.expr else {
+        return None;
+    };
+    let base = func.bindings.get(resolve_use(func, *base))?;
+    match &base.ty {
+        IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => {
+            Some((*id, field.clone()))
+        }
+        _ => None,
     }
 }
 

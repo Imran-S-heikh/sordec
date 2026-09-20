@@ -421,6 +421,9 @@ pub const MARSHALLING_FIELD_TYPES: &str = "marshalling_field_types";
 /// Entrypoint parameters whose declared type was read off the wrapper's
 /// own conversion check, where the module carries no spec section.
 pub const MARSHALLING_SPEC_PARAMS: &str = "marshalling_spec_params";
+/// Struct fields whose declared type was read off the derived
+/// conversion's own check, where the module carries no spec section.
+pub const MARSHALLING_SPEC_FIELDS: &str = "marshalling_spec_fields";
 /// Entrypoints recovered as returning nothing, because every return site
 /// hands back the constant `Void`.
 pub const MARSHALLING_SPEC_RETURNS: &str = "marshalling_spec_returns";
@@ -800,6 +803,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_UDT_STRUCTS_SYNTHESIZED,
         REFINE_WIDE_SELECTS,
         MARSHALLING_SPEC_PARAMS,
+        MARSHALLING_SPEC_FIELDS,
         MARSHALLING_SPEC_RETURNS,
         MARSHALLING_ENUM_DISCRIMINANTS,
         MARSHALLING_ENUM_ENCODES,

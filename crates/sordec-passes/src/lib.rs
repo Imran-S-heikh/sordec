@@ -205,6 +205,9 @@ pub const PANIC_RECOVER_AFTER_RECOVERY: &str = "panic-recover-after-recovery";
 pub const POLARITY_AFTER_ELISION: &str = "polarity-after-elision";
 /// Name of the declared-type recovery re-run after the elision group.
 pub const SPEC_FROM_GUARDS_AFTER_ELISION: &str = "spec-from-guards-after-elision";
+/// Name of the declared-type recovery re-run inside the elision group,
+/// where a struct recovered from its key table first has fields to type.
+pub const SPEC_FROM_GUARDS_ON_FIELDS: &str = "spec-from-guards-on-fields";
 
 /// Build the default high-IR pattern-recovery pipeline.
 ///
@@ -491,6 +494,14 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // A recovered struct's fields, at the types it declares: the
             // decode each one arrives through is the derive's. After both
             // UDT passes, which are what name the struct.
+            // A struct recovered from a key table starts with `Val`
+            // fields; the derived conversion's own checks say what they
+            // are, and the pass below is what needs to know.
+            Box::new(pass::Rerun::new(
+                SpecFromGuardsPass,
+                SPEC_FROM_GUARDS_ON_FIELDS,
+                &[],
+            )),
             Box::new(FieldTypePass),
             // A struct too big for a register is passed by reference, and
             // the callee's own key table says which slot is which field.
@@ -592,7 +603,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 32..75],
+        vec![1..7, 32..76],
     )
 }
 
@@ -670,6 +681,7 @@ mod tests {
                 marshalling::option_default::PASS_NAME,
                 marshalling::udt_decode::PASS_NAME,
                 marshalling::udt_encode::PASS_NAME,
+                SPEC_FROM_GUARDS_ON_FIELDS,
                 marshalling::field_type::PASS_NAME,
                 interproc::struct_arg::PASS_NAME,
                 marshalling::enum_discriminant::PASS_NAME,
