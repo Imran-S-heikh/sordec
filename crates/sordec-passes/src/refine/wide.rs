@@ -54,19 +54,28 @@ impl Side {
 
 /// The operand a low and a high limb are the two halves of.
 ///
-/// Either the function already names it and both limbs are its halves,
-/// or neither limb is anyone's half and the operand is their join. A
-/// limb belonging to one value beside a limb belonging to another — or
-/// to nothing — is not a pair, and joining across it would invent an
-/// operand out of two unrelated registers.
+/// The caller has already established that these two *are* a pair —
+/// that is what its own pattern proves. This only decides what to call
+/// the operand.
+///
+/// When both limbs are halves of one value the function already names
+/// it. Otherwise the operand is their join, including where only one of
+/// them happens to be some other value's half: rustc computes a limb
+/// once and reads it from wherever it is, so a low limb that is also
+/// `wide_lo(x)` says nothing against the pairing the caller proved.
+///
+/// The one rejection is two limbs belonging to two *different* named
+/// values. That is not a conservative choice about naming — it is the
+/// pattern disagreeing with itself, and the right answer is to decline.
 pub(crate) fn paired(func: &HighFunction, lo: ValueId, hi: ValueId) -> Option<Side> {
     match (
         half_of(func, lo, UnaryOp::WideLo),
         half_of(func, hi, UnaryOp::WideHi),
     ) {
-        (Some(from_lo), Some(from_hi)) if from_lo == from_hi => Some(Side::Whole(from_lo)),
-        (None, None) => Some(Side::Loose { lo, hi }),
-        _ => None,
+        (Some(from_lo), Some(from_hi)) => {
+            (from_lo == from_hi).then_some(Side::Whole(from_lo))
+        }
+        _ => Some(Side::Loose { lo, hi }),
     }
 }
 
