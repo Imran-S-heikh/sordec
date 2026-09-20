@@ -218,6 +218,7 @@ fn is_effectful(expr: &Expr) -> bool {
         | Expr::WideJoin { .. }
         | Expr::Field { .. }
         | Expr::Struct { .. }
+        | Expr::Select { .. }
         | Expr::Variant { .. } => false,
     }
 }

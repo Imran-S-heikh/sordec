@@ -11,10 +11,10 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | token-v23 | 0.8117 | 0.7500 | 0.8598 | 0.8333 | n/a |
 | token-v23-stripped | 0.3273 | 0.0385 | 0.3071 | 0.6329 | n/a |
 | timelock | 0.9391 | 1.0000 | 1.0000 | 0.8276 | n/a |
-| dex-liquidity-pool | 0.7736 | 1.0000 | 0.6203 | 0.6750 | n/a |
+| dex-liquidity-pool | 0.7783 | 1.0000 | 0.6362 | 0.6750 | n/a |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
-| **aggregate (mean, AST)** | **0.8214** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.8214** | | | | |
+| **aggregate (mean, AST)** | **0.8221** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.8221** | | | | |
 
 ## Per-fixture detail
 
@@ -56,7 +56,7 @@ Scorer `score-2.0.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 ### dex-liquidity-pool
 
 - **interface** 1.0000 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (6 original, 6 reconstructed) — types 1.0000  precision=1.0000 recall=1.0000 (1 original, 1 reconstructed)
-- **structure** 0.6203 — 6 entrypoints (0 unreconstructed, 1 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.4872 recall=0.8261 (23 original tokens, 39 reconstructed) — bloat 1.7x, dice ceiling ~0.7419 — low-similarity: balance_shares(0.00), deposit(0.43), swap(0.67)
+- **structure** 0.6362 — 6 entrypoints (0 unreconstructed, 1 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.5000 recall=0.9130 (23 original tokens, 42 reconstructed) — bloat 1.8x, dice ceiling ~0.7077 — low-similarity: balance_shares(0.00), deposit(0.40)
 - **semantic** 0.6750 — precision=0.6923 recall=0.6585 (41 original facts, 39 reconstructed) — under-recovered: panic:bare, xcall:transfer — over-recovered: ledger:current_contract_address, storage:set:instance:DataKey::ReserveA, storage:set:instance:DataKey::ReserveB, storage:set:instance:DataKey::TotalShares, storage:set:persistent:DataKey::Shares
 - **behavior** n/a — behavior unavailable: crate does not build: error[E0308]: mismatched types
 

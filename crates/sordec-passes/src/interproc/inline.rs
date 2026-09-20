@@ -341,6 +341,7 @@ fn copyable(expr: &Expr, this: FuncId) -> bool {
         | Expr::WideJoin { .. }
         | Expr::Field { .. }
         | Expr::Struct { .. }
+        | Expr::Select { .. }
         | Expr::Variant { .. }
         | Expr::Semantic(_) => true,
         Expr::Call { target, .. } => *target != this,

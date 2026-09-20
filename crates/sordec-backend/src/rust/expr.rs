@@ -199,6 +199,15 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
         // The construction side: `Name { field: value, .. }`. The struct is
         // named by the binding's type, so a value whose type the registry
         // cannot name has no literal to print.
+        // The `if`/`else` the source wrote, which the compiler computed
+        // both arms of. Rendered as the expression it is — parenthesized
+        // nowhere, because `syn` prints an `if` in expression position
+        // correctly and a `let` binding is where these land.
+        Expr::Select { cond, if_true, if_false } => {
+            let c = ctx.value_ref(*cond);
+            let (t, f) = (ctx.value_ref(*if_true), ctx.value_ref(*if_false));
+            parse_quote!(if #c { #t } else { #f })
+        }
         Expr::Struct { fields } => {
             let name = match &binding.ty {
                 IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => {

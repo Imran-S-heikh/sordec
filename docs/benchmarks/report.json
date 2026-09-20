@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.8213878361831453,
-  "aggregate_overall_with_behavior": 0.8213878361831453,
+  "aggregate_overall": 0.8220555308608742,
+  "aggregate_overall_with_behavior": 0.8220555308608742,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -124,10 +124,10 @@
           "notes": [
             "6 entrypoints (0 unreconstructed, 1 without control flow)",
             "ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.4872 recall=0.8261 (23 original tokens, 39 reconstructed) — bloat 1.7x, dice ceiling ~0.7419",
-            "low-similarity: balance_shares(0.00), deposit(0.43), swap(0.67)"
+            "control flow: precision=0.5000 recall=0.9130 (23 original tokens, 42 reconstructed) — bloat 1.8x, dice ceiling ~0.7077",
+            "low-similarity: balance_shares(0.00), deposit(0.40)"
           ],
-          "score": 0.6202631578947368,
+          "score": 0.6361542912246867,
           "weight": 0.25
         }
       },
@@ -138,7 +138,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 6 entrypoints, 1 types recovered"
       ],
-      "overall": 0.7736068111455107,
+      "overall": 0.7782806738896136,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,

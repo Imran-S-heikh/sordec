@@ -769,6 +769,9 @@ pub fn expr_effects(expr: &Expr) -> Effects {
         | Expr::WideJoin { .. }
         | Expr::Field { .. }
         | Expr::Struct { .. }
+        // A choice between two values already computed: the arms'
+        // effects are theirs, accounted where they are.
+        | Expr::Select { .. }
         | Expr::Variant { .. } => Effects::PURE,
         // All lowered unary operators are total (the trapping float→int
         // truncations never lower to `Unary`; they stay

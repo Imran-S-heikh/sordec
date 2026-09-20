@@ -110,7 +110,7 @@ pub use refine::{
     AndMergePass, ConstBranchFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
     OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass, SelectReturnPass,
     SwitchDedupPass,
-    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WideArithPass, WideComparePass, WidePhiPass, WideZeroPass, WidthFoldPass,
+    TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WideArithPass, WideComparePass, WidePhiPass, WideSelectPass, WideZeroPass, WidthFoldPass,
 };
 pub use sordec_common::LiftDiagnostics;
 pub use structuring::{structure, StructureError, StructuringCensusPass, StructuringStatsPass};
@@ -422,6 +422,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // hides. Before the panic re-classification below, which is
             // what reads it.
             Box::new(WideComparePass),
+            // A choice between two wide values, which wasm spells as one
+            // `select` per limb. After the comparison, because the
+            // condition is often one of those it has just recovered.
+            Box::new(WideSelectPass),
             Box::new(WrapperInlinePass),
             // A pasted body carries the facts its helper had, and a helper
             // called with different durabilities or keys had none: the
@@ -588,7 +592,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 32..74],
+        vec![1..7, 32..75],
     )
 }
 
@@ -653,6 +657,7 @@ mod tests {
                 refine::WIDE_PHI_PASS_NAME,
                 refine::WIDE_ZERO_PASS_NAME,
                 refine::WIDE_COMPARE_PASS_NAME,
+                refine::WIDE_SELECT_PASS_NAME,
                 interproc::inline::PASS_NAME,
                 CONST_PROP_AFTER_INLINE,
                 TTL_AFTER_INLINE,

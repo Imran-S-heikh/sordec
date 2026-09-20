@@ -53,6 +53,7 @@ mod wide;
 mod wide_arith;
 mod wide_compare;
 mod wide_phi;
+mod wide_select;
 mod wide_zero;
 
 pub use and_merge::AndMergePass;
@@ -80,6 +81,8 @@ pub(crate) use wide_arith::PASS_NAME as WIDE_ARITH_PASS_NAME;
 #[cfg(test)]
 pub(crate) use wide_compare::PASS_NAME as WIDE_COMPARE_PASS_NAME;
 #[cfg(test)]
+pub(crate) use wide_select::PASS_NAME as WIDE_SELECT_PASS_NAME;
+#[cfg(test)]
 pub(crate) use wide_phi::PASS_NAME as WIDE_PHI_PASS_NAME;
 #[cfg(test)]
 pub(crate) use wide_zero::PASS_NAME as WIDE_ZERO_PASS_NAME;
@@ -99,6 +102,7 @@ pub use trivial_phi::TrivialPhiPass;
 pub use width_fold::WidthFoldPass;
 pub use wide_arith::WideArithPass;
 pub use wide_compare::WideComparePass;
+pub use wide_select::WideSelectPass;
 pub use wide_phi::WidePhiPass;
 pub use wide_zero::WideZeroPass;
 pub(crate) use trap_call::pure_traps;

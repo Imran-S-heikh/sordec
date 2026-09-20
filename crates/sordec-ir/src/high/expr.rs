@@ -98,6 +98,24 @@ pub enum Expr {
         fields: Vec<(String, ValueId)>,
     },
 
+    /// A value chosen between two, by a condition — what the source
+    /// wrote as an `if`/`else` expression and the compiler computed both
+    /// arms of.
+    ///
+    /// Distinct from a [`Region::If`](crate::Region::If) with a merge:
+    /// there is no branch here, and there was none in the wasm either —
+    /// LLVM picks with `select` when both arms are cheap. Recovering the
+    /// choice as an expression says what the source said without
+    /// claiming a control-flow edge the binary does not have.
+    Select {
+        /// The condition, a boolean.
+        cond: ValueId,
+        /// The value taken when the condition holds.
+        if_true: ValueId,
+        /// The value taken otherwise.
+        if_false: ValueId,
+    },
+
     /// One variant of a `#[contracttype]` enum, named. The enum is named
     /// by the binding's type, as for [`Expr::Struct`], so a variant of a
     /// type the registry cannot name has nothing to print.
@@ -259,6 +277,11 @@ impl Expr {
                     f(*value);
                 }
             }
+            Expr::Select { cond, if_true, if_false } => {
+                f(*cond);
+                f(*if_true);
+                f(*if_false);
+            }
             Expr::Variant { name: _ } => {}
             Expr::IndirectCall {
                 table: _,
@@ -329,6 +352,11 @@ impl Expr {
                 for (_, value) in fields {
                     f(value);
                 }
+            }
+            Expr::Select { cond, if_true, if_false } => {
+                f(cond);
+                f(if_true);
+                f(if_false);
             }
             Expr::Variant { name: _ } => {}
             Expr::Unary { op: _, value } => f(value),

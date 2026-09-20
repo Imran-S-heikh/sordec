@@ -736,6 +736,13 @@ fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Resu
         }
         Expr::Field { base, field } => write!(out, "{}.{field}", ctx.operand(*base)),
         Expr::Variant { name } => write!(out, "::{name}"),
+        Expr::Select { cond, if_true, if_false } => write!(
+            out,
+            "if {} {{ {} }} else {{ {} }}",
+            ctx.operand(*cond),
+            ctx.operand(*if_true),
+            ctx.operand(*if_false)
+        ),
         Expr::Struct { fields } => {
             let items: Vec<String> =
                 fields.iter().map(|(f, v)| format!("{f}: {}", ctx.operand(*v))).collect();
