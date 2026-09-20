@@ -136,6 +136,15 @@ fn golden_calibration_vector_is_stable() {
     // one was not: 1/2. A category is neither penalized nor credited for
     // control flow the contract does not have.
     //
+    // Amended in the same release: semantic compares fact *presence*,
+    // not multiplicity (0.5714 -> 0.6000, overall 0.6664 -> 0.6765).
+    // Which operations a contract performs is compiled into it; how
+    // many times each is written out is the compiler's decision, since
+    // it inlines a helper into its callers or outlines repeats into
+    // one. In this vector the reconstruction swapped a storage tier on
+    // `transfer`, so it still loses both of those facts — what it stops
+    // losing is the second copy of the wrong one.
+    //
     // Re-frozen 2026-09-20 for **score-2.1.0**, and this one is a
     // version bump rather than a re-freeze: the rule it lands is that a
     // fact whose only evidence the compiler deletes is dropped from
@@ -167,6 +176,6 @@ fn golden_calibration_vector_is_stable() {
     // is precisely why it was split into its own change.
     assert_close(report.categories.interface.score, 0.900000, "interface");
     assert_close(report.categories.structure.score, 0.500000, "structure");
-    assert_close(report.categories.semantic.score, 0.571429, "semantic");
-    assert_close(report.overall, 0.666387, "overall");
+    assert_close(report.categories.semantic.score, 0.600000, "semantic");
+    assert_close(report.overall, 0.676471, "overall");
 }

@@ -24,6 +24,23 @@ pub(crate) fn evaluate(
 
     trace_facts(&recon, &orig);
 
+    // Presence, not multiplicity. *Which* operations a contract performs
+    // is compiled into it; *how many times each one is written out* is
+    // not, because rustc inlines a helper into its callers or outlines
+    // repeated code into one, and the author's choice leaves no trace.
+    // Measured both directions on one contract: dex's transfer helper
+    // appears once in the binary against four call sites in the source,
+    // while its reserve setter appears four times against one — and the
+    // two helpers are structurally identical, so nothing distinguishes
+    // them. Counting occurrences therefore scores the compiler's
+    // decisions.
+    //
+    // It is also what `structure` already refuses to measure on the same
+    // artifact: "merging five helpers into one entrypoint body, or
+    // splitting one into five, compares equal". Two categories reading
+    // one binary should not disagree about whether decomposition counts.
+    let (recon, orig) = (presence(&recon), presence(&orig));
+
     let recon_total: usize = recon.values().sum();
     let orig_total: usize = orig.values().sum();
 
@@ -71,6 +88,12 @@ fn trace_facts(recon: &Multiset, orig: &Multiset) {
         let mark = if r == o { ' ' } else { '*' };
         eprintln!("{mark} {r:>4} {o:>4}  {key}");
     }
+}
+
+/// The same keys with every count at one — the set, as a multiset, so
+/// the precision/recall arithmetic below is unchanged.
+fn presence(facts: &Multiset) -> Multiset {
+    facts.keys().map(|k| (k.clone(), 1)).collect()
 }
 
 /// Build a multiset of fact keys.

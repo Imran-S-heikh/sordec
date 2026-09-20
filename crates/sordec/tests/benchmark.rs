@@ -422,6 +422,32 @@ fn overall_band(name: &str) -> (f64, f64) {
     // in the binary. structure 0.6220 -> 0.6448, the fixture 0.4199 ->
     // 0.4266, aggregate 0.8353 -> 0.8362.
     //
+    // Also score-2.1.0 — how many times a fact is written down.
+    //
+    // *Which* operations a contract performs is compiled into it.
+    // *How many times each one is written out* is not: rustc inlines a
+    // helper into its callers or outlines repeated code into one, and
+    // the author's choice leaves no trace. Measured both directions on
+    // one contract — dex's transfer helper appears once in the binary
+    // against four call sites in the source, its reserve setter four
+    // times against one, and the two helpers are structurally
+    // identical. Counting occurrences scored the compiler's decisions.
+    //
+    // It is also what `structure` already refuses to measure on the
+    // same artifact ("merging five helpers into one entrypoint body, or
+    // splitting one into five, compares equal"), so the two categories
+    // now agree about whether decomposition counts.
+    //
+    // Every fixture gains: timelock 0.9600 -> 1.0000 semantic and
+    // **1.0000 overall**, dex 0.7826 -> 1.0000, token-v23 0.8861 ->
+    // 0.9286, token-v22 0.9136 -> 0.9286, stripped 0.9189 -> 0.9286.
+    // Aggregate 0.8999 -> 0.9163 — the first run over the 0.90 bar.
+    //
+    // The golden vector moves only a little (0.5714 -> 0.6000): its
+    // reconstruction swapped a storage tier, so it still loses both of
+    // those facts and only stops losing the second copy of the wrong
+    // one.
+    //
     // Also score-2.1.0 — and a type's own name.
     //
     // The last of the same rule. A `#[contracttype]`'s *shape* is
@@ -645,10 +671,10 @@ fn overall_band(name: &str) -> (f64, f64) {
     match name {
         "hello-add" => (0.99, 1.00),
         "token-v22" => (0.90, 0.94),
-        "token-v23" => (0.81, 0.85),
+        "token-v23" => (0.83, 0.87),
         "token-v23-stripped" => (0.68, 0.72),
-        "timelock" => (0.97, 1.00),
-        "dex-liquidity-pool" => (0.85, 0.89),
+        "timelock" => (0.98, 1.00),
+        "dex-liquidity-pool" => (0.92, 0.96),
         "attestation" => (0.98, 1.0),
         _ => (0.00, 1.00),
     }

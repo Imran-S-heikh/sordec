@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.8998940663339675,
-  "aggregate_overall_with_behavior": 0.8998940663339675,
+  "aggregate_overall": 0.916256947419473,
+  "aggregate_overall_with_behavior": 0.916256947419473,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -60,7 +60,7 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=1.0000 recall=1.0000 (5 original facts, 5 reconstructed)"
+            "precision=1.0000 recall=1.0000 (4 original facts, 4 reconstructed)"
           ],
           "score": 1.0,
           "weight": 0.3
@@ -112,11 +112,9 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=0.6923 recall=0.9000 (30 original facts, 39 reconstructed)",
-            "under-recovered: xcall:transfer",
-            "over-recovered: ledger:current_contract_address, storage:set:instance:DataKey::ReserveA, storage:set:instance:DataKey::ReserveB, storage:set:instance:DataKey::TotalShares, storage:set:persistent:DataKey::Shares"
+            "precision=1.0000 recall=1.0000 (17 original facts, 17 reconstructed)"
           ],
-          "score": 0.7826086956521738,
+          "score": 1.0,
           "weight": 0.3
         },
         "structure": {
@@ -138,8 +136,8 @@
       "notes": [
         "basis: macro-expanded — original ABI: 6 entrypoints, 1 types recovered"
       ],
-      "overall": 0.8661916139453492,
-      "passed": false,
+      "overall": 0.9429179566563467,
+      "passed": true,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
@@ -250,10 +248,9 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=1.0000 recall=0.9231 (13 original facts, 12 reconstructed)",
-            "under-recovered: xcall:transfer"
+            "precision=1.0000 recall=1.0000 (10 original facts, 10 reconstructed)"
           ],
-          "score": 0.9600000000000001,
+          "score": 1.0,
           "weight": 0.3
         },
         "structure": {
@@ -274,7 +271,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 2 entrypoints, 4 types recovered"
       ],
-      "overall": 0.9858823529411764,
+      "overall": 1.0,
       "passed": true,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,
@@ -304,11 +301,10 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=0.8605 recall=0.9737 (38 original facts, 43 reconstructed)",
-            "under-recovered: storage:get:temporary:DataKey::Allowance",
-            "over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?"
+            "precision=0.8667 recall=1.0000 (13 original facts, 15 reconstructed)",
+            "over-recovered: storage:get:instance:?, storage:set:instance:?"
           ],
-          "score": 0.9135802469135803,
+          "score": 0.9285714285714286,
           "weight": 0.3
         },
         "structure": {
@@ -329,7 +325,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 3 types recovered"
       ],
-      "overall": 0.9167239795647255,
+      "overall": 0.9220149848557307,
       "passed": true,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,
@@ -359,11 +355,10 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=0.8537 recall=0.9211 (38 original facts, 41 reconstructed)",
-            "under-recovered: event, storage:get:temporary:DataKey::Allowance",
-            "over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?"
+            "precision=0.8667 recall=1.0000 (13 original facts, 15 reconstructed)",
+            "over-recovered: storage:get:instance:?, storage:set:instance:?"
           ],
-          "score": 0.8860759493670887,
+          "score": 0.9285714285714286,
           "weight": 0.3
         },
         "structure": {
@@ -385,7 +380,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.8303133411050114,
+      "overall": 0.8453117455300725,
       "passed": false,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,
@@ -418,11 +413,10 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=0.9444 recall=0.8947 (38 original facts, 36 reconstructed)",
-            "under-recovered: event, panic:unwrap, storage:get:temporary:Allowance",
+            "precision=0.8667 recall=1.0000 (13 original facts, 15 reconstructed)",
             "over-recovered: storage:get:instance:?, storage:set:instance:?"
           ],
-          "score": 0.918918918918919,
+          "score": 0.9285714285714286,
           "weight": 0.3
         },
         "structure": {
@@ -444,7 +438,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.7001471767815102,
+      "overall": 0.7035539448941607,
       "passed": false,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,
