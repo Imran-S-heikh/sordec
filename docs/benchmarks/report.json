@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.8804268199759647,
-  "aggregate_overall_with_behavior": 0.8804268199759647,
+  "aggregate_overall": 0.8926911851815066,
+  "aggregate_overall_with_behavior": 0.8926911851815066,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -418,11 +418,11 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=0.6944 recall=0.6579 (38 original facts, 36 reconstructed)",
-            "under-recovered: event, panic:unwrap, storage:extend_ttl:persistent:DataKey::Balance, storage:extend_ttl:temporary:DataKey::Allowance, storage:get:instance:DataKey::Admin, storage:get:persistent:DataKey::Balance, storage:get:temporary:DataKey::Allowance, storage:set:instance:DataKey::Admin, … (+2)",
-            "over-recovered: storage:extend_ttl:persistent:StorageKey::Balance, storage:extend_ttl:temporary:StorageKey::Allowance, storage:get:instance:?, storage:get:instance:StorageKey::Admin, storage:get:persistent:StorageKey::Balance, storage:get:temporary:StorageKey::Allowance, storage:set:instance:?, storage:set:instance:StorageKey::Admin, … (+2)"
+            "precision=0.9444 recall=0.8947 (38 original facts, 36 reconstructed)",
+            "under-recovered: event, panic:unwrap, storage:get:temporary:Allowance",
+            "over-recovered: storage:get:instance:?, storage:set:instance:?"
           ],
-          "score": 0.6756756756756757,
+          "score": 0.918918918918919,
           "weight": 0.3
         },
         "structure": {
@@ -444,7 +444,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.5638764522754915,
+      "overall": 0.6497270087142835,
       "passed": false,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,

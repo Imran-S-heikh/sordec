@@ -422,6 +422,26 @@ fn overall_band(name: &str) -> (f64, f64) {
     // in the binary. structure 0.6220 -> 0.6448, the fixture 0.4199 ->
     // 0.4266, aggregate 0.8353 -> 0.8362.
     //
+    // Also score-2.1.0 — and the enum name in front of a storage key.
+    //
+    // A storage fact reads `storage:get:instance:DataKey::Admin`: an
+    // enum's name and one of its variants. The variant is compiled in —
+    // it is the rodata symbol the derived converter builds, and the
+    // recovery above reads it back exactly. The enum's own name is only
+    // in `contractspecv0`.
+    //
+    // So on the stripped build every storage fact was counted twice
+    // wrong, once as a miss and once as a false positive, on nothing but
+    // the synthesized qualifier:
+    //
+    //     ours   storage:set:temporary:StorageKey::Allowance
+    //     theirs storage:set:temporary:DataKey::Allowance
+    //
+    // Nine such pairs. Dropped from both sides where the module
+    // declared no ABI, leaving what the module does record: which
+    // variant, at which tier, under which operation. semantic 0.6757 ->
+    // 0.9189, the fixture 0.5639 -> 0.6497, aggregate 0.8804 -> 0.8927.
+    //
     // Also score-2.1.0 — a name that is nowhere in the module.
     //
     // On the spec basis a signature's value is `name:type` per
@@ -611,7 +631,7 @@ fn overall_band(name: &str) -> (f64, f64) {
         "hello-add" => (0.99, 1.00),
         "token-v22" => (0.90, 0.94),
         "token-v23" => (0.81, 0.85),
-        "token-v23-stripped" => (0.54, 0.58),
+        "token-v23-stripped" => (0.63, 0.67),
         "timelock" => (0.97, 1.00),
         "dex-liquidity-pool" => (0.85, 0.89),
         "attestation" => (0.98, 1.0),

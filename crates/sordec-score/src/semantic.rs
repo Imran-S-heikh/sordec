@@ -14,9 +14,13 @@ use crate::report::CategoryScore;
 use crate::simil::{self, Multiset};
 
 /// Score the semantic category.
-pub(crate) fn evaluate(reconstructed: &syn::File, original: &syn::File) -> CategoryScore {
-    let recon = bag(&extract::extract(reconstructed));
-    let orig = bag(&extract::extract(original));
+pub(crate) fn evaluate(
+    reconstructed: &syn::File,
+    original: &syn::File,
+    type_names: bool,
+) -> CategoryScore {
+    let recon = bag(&extract::extract(reconstructed), type_names);
+    let orig = bag(&extract::extract(original), type_names);
 
     trace_facts(&recon, &orig);
 
@@ -70,13 +74,13 @@ fn trace_facts(recon: &Multiset, orig: &Multiset) {
 }
 
 /// Build a multiset of fact keys.
-fn bag(facts: &[SemanticFact]) -> Multiset {
+fn bag(facts: &[SemanticFact], type_names: bool) -> Multiset {
     // Facts whose only evidence the compiler deletes are dropped from
     // both sides — see [`SemanticFact::is_recoverable`].
     let keys: Vec<String> = facts
         .iter()
         .filter(|f| f.is_recoverable())
-        .map(SemanticFact::key)
+        .map(|f| f.key_with(type_names))
         .collect();
     simil::multiset(&keys)
 }
@@ -144,7 +148,7 @@ mod tests {
     #[test]
     fn identical_semantics_score_one() {
         let f = file(CONTRACT);
-        assert!((evaluate(&f, &f).score - 1.0).abs() < 1e-9);
+        assert!((evaluate(&f, &f, true).score - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -160,7 +164,7 @@ mod tests {
             }
             "#,
         );
-        assert!(evaluate(&recon, &orig).score < 1.0);
+        assert!(evaluate(&recon, &orig, true).score < 1.0);
     }
 
     #[test]
@@ -177,7 +181,7 @@ mod tests {
             }
             "#,
         );
-        assert!(evaluate(&recon, &orig).score < 1.0);
+        assert!(evaluate(&recon, &orig, true).score < 1.0);
     }
 
     #[test]
@@ -193,7 +197,7 @@ mod tests {
             }
             "#,
         );
-        assert!(evaluate(&recon, &orig).score < 1.0);
+        assert!(evaluate(&recon, &orig, true).score < 1.0);
     }
 
     #[test]
@@ -202,7 +206,7 @@ mod tests {
         // recovered because there was nothing to recover — unmeasurable,
         // not perfect. This is the hello-add fixture's shape.
         let f = file("fn helper(a: u32) -> u32 { a + 1 }");
-        let score = evaluate(&f, &f);
+        let score = evaluate(&f, &f, true);
         assert!(!score.checked, "a 0-fact comparison must not be checked");
         assert_ne!(score.score, 1.0);
     }
@@ -214,7 +218,7 @@ mod tests {
         // stays checked — inventing facts is a measurable failure.
         let orig = file("fn helper(a: u32) -> u32 { a + 1 }");
         let recon = file(CONTRACT);
-        let score = evaluate(&recon, &orig);
+        let score = evaluate(&recon, &orig, true);
         assert!(score.checked, "invented facts are measurable");
         assert_eq!(score.score, 0.0);
         let note = score.notes.first().expect("a summary note");

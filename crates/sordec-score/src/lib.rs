@@ -311,7 +311,7 @@ fn assemble(sources: &Sources, gate: CompilationGate, opts: &ScoreOptions) -> Sc
     let (recon, orig) = sources.pair(basis.structure);
     let structure = structure::evaluate(recon, orig, sources.spec_for(basis.structure));
     let (recon, orig) = sources.pair(basis.semantic);
-    let semantic = semantic::evaluate(recon, orig);
+    let semantic = semantic::evaluate(recon, orig, opts.abi_declared);
 
     // Injected, not computed: behavior needs a Soroban host, and this crate does not
     // touch wasm. `category()` is also where the self-scoring guard lives — a

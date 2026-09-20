@@ -331,7 +331,7 @@ mod tests {
 
     fn facts_of(src: &str) -> Vec<String> {
         let file: syn::File = syn::parse_str(src).expect("source parses");
-        let mut keys: Vec<String> = extract(&file).iter().map(SemanticFact::key).collect();
+        let mut keys: Vec<String> = extract(&file).iter().map(|f| f.key_with(true)).collect();
         keys.sort();
         keys
     }

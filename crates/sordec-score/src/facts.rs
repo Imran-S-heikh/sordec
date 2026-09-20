@@ -4,7 +4,7 @@
 //! Soroban operation, deliberately mirroring the pipeline's `KnownOp`
 //! categories (`sordec-ir`'s `high::semantic`) so a source-side fact
 //! multiset is comparable with what the recognizers recover. Facts are
-//! compared by their [`SemanticFact::key`] — a canonical string — so two
+//! compared by their [`SemanticFact::key_with`] — a canonical string — so two
 //! facts are "the same" exactly when their keys are equal. Storage facts
 //! carry their tier and (when resolvable) their key path, so a swapped tier
 //! or an unrecovered storage key is a real semantic miss.
@@ -182,13 +182,34 @@ pub(crate) enum LedgerKind {
 impl SemanticFact {
     /// The canonical comparison key for this fact. Equal keys mean equal
     /// facts for precision/recall.
-    pub(crate) fn key(&self) -> String {
+    /// The comparison key, optionally without the *type* half of a
+    /// storage key's name.
+    ///
+    /// A storage key reads `DataKey::Admin`: an enum's name and one of
+    /// its variants. The variant is compiled into the contract — it is
+    /// the rodata symbol the derived converter builds — but the enum's
+    /// own name lives only in `contractspecv0`. Strip that section and
+    /// the name is nowhere in the module, so a reconstruction has to
+    /// synthesize one, and every storage fact it recovers perfectly
+    /// then reads as both a miss and a false positive against the
+    /// original's.
+    ///
+    /// `type_names: false` drops the qualifier from **both** sides, so
+    /// the comparison is on what the module actually records: which
+    /// variant, at which tier, under which operation. Callers pass it
+    /// when the module declared no ABI; see `ScoreOptions::abi_declared`.
+    pub(crate) fn key_with(&self, type_names: bool) -> String {
         match self {
             SemanticFact::Storage { op, tier, key } => format!(
                 "storage:{}:{}:{}",
                 op.token(),
                 tier.token(),
-                key.as_deref().unwrap_or("?")
+                match key.as_deref() {
+                    None => "?",
+                    Some(k) if type_names => k,
+                    // `DataKey::Allowance` -> `Allowance`.
+                    Some(k) => k.rsplit("::").next().unwrap_or(k),
+                }
             ),
             SemanticFact::Auth(kind) => format!("auth:{}", kind.token()),
             SemanticFact::Event => "event".to_string(),
