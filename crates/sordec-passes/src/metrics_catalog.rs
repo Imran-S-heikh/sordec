@@ -60,6 +60,9 @@ pub const ENUM_KEY_NAMED: &str = "enum_key_named";
 pub const ENUM_KEY_UNRESOLVED: &str = "enum_key_unresolved";
 /// Enum-key constructor sites matched (payload-carrying variants).
 pub const ENUM_KEY_CTOR_MATCHED: &str = "enum_key_ctor_matched";
+/// Unions recovered from their own derived converter, where the module
+/// carries no `contractspecv0` to declare them.
+pub const ENUM_KEY_UNIONS_SYNTHESIZED: &str = "enum_key_unions_synthesized";
 
 // ---------------------------------------------------------------------
 // Function specialization (undoing rustc's identical-code folding)
@@ -682,6 +685,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         ENUM_KEY_NAMED,
         ENUM_KEY_UNRESOLVED,
         ENUM_KEY_CTOR_MATCHED,
+        ENUM_KEY_UNIONS_SYNTHESIZED,
         TTL_RESOLVED,
         TTL_UNRESOLVED,
         INVOKE_CONTRACT,

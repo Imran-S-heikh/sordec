@@ -392,6 +392,31 @@ fn overall_band(name: &str) -> (f64, f64) {
     //
     // token-v22 structure 0.8615 -> 0.9063, token-v23 0.8123 -> 0.8565.
     // Aggregate 0.7988 -> 0.8025. Held-out mean unchanged at 0.7090.
+    // Re-centred 2026-09-20 — the union a stripped build still names.
+    //
+    // `enum_key`'s registry gate wanted "exactly one `contractspecv0`
+    // union whose case-name set equals the constructed text set", and
+    // said that without a spec it recognizes nothing. Most of what it
+    // wanted is still in the code: `#[contracttype]` compiles a union's
+    // variant names into the converter as rodata symbols, one per switch
+    // arm, and the arm's case value is the discriminant — so the names
+    // *and* their declaration order are readable. token-v23-stripped
+    // gives back
+    //
+    //     enum StorageKey { Allowance(Val, Val), Balance(Val),
+    //                       State(Val), Admin }
+    //
+    // against a source that declares `DataKey { Allowance(..),
+    // Balance(Address), State(Address), Admin }`. Every variant, in
+    // order. What is not in the binary is the type's own name and its
+    // field types, and neither is invented.
+    //
+    // With the key resolved, `key_construction` elides the converter it
+    // was keeping alive in ten of thirteen entrypoint closures:
+    // structure 0.3071 -> 0.4870, holes 251 -> 199, overall 0.3273 ->
+    // 0.3802. Held-out structure 0.2395 -> 0.2511. Aggregate 0.8221 ->
+    // 0.8296.
+    //
     // Amended same day — the `Env` a helper is handed is borrowed.
     //
     // Cloning it at every call site compiled, but it is not what the
@@ -475,7 +500,7 @@ fn overall_band(name: &str) -> (f64, f64) {
         "hello-add" => (0.99, 1.00),
         "token-v22" => (0.88, 0.92),
         "token-v23" => (0.79, 0.83),
-        "token-v23-stripped" => (0.29, 0.33),
+        "token-v23-stripped" => (0.36, 0.40),
         "timelock" => (0.92, 0.96),
         "dex-liquidity-pool" => (0.77, 0.81),
         "attestation" => (0.98, 1.0),

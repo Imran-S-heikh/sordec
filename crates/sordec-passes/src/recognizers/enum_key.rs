@@ -53,14 +53,15 @@
 //! guard: its domain is already-`Known` storage ops with
 //! `resolved_key: None`. Idempotent — a filled slot no longer matches.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use sordec_common::{
-    Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, ProvenanceSource, ValueId,
+    Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, ProvenanceSource, TypeId,
+    UnknownReason, ValueId,
 };
 use sordec_ir::{
-    CompositeType, EnumKey, Expr, HighFunction, HighIr, KnownOp, MemWidth, PrimitiveType,
-    SemanticOp, TypeRef, TypeRegistry,
+    CompositeType, EnumKey, Expr, HighFunction, HighIr, KnownOp, MemWidth, PrimitiveType, Region,
+    SemanticOp, SorobanFacts, SwitchArm, TypeRef, TypeRegistry, UnionCase, UnionDef,
 };
 
 use super::symbols::{unique_union_index_by_cases, valid_symbol_text};
@@ -82,11 +83,13 @@ const M_CTOR_MATCHED: &str = "enum_key_ctor_matched";
 /// Constructor-shaped keys that stayed honestly unnamed (the
 /// remaining-work signal).
 const M_UNRESOLVED: &str = "enum_key_unresolved";
+/// Unions recovered from their own converter, for a module with no spec.
+const M_SYNTHESIZED: &str = "enum_key_unions_synthesized";
 
 /// The counters that record something this pass newly resolved — what a
 /// re-run may report without recounting the first run's misses or its
 /// per-run constructor census.
-pub(crate) const RESOLUTION_COUNTERS: &[&str] = &[M_KEY_NAMED];
+pub(crate) const RESOLUTION_COUNTERS: &[&str] = &[M_KEY_NAMED, M_SYNTHESIZED];
 
 /// Nesting cap for locating the `SymbolNew` op behind a wrapper call
 /// (the SDK's `Symbol::new` sits one or two tiny helpers deep).
@@ -154,14 +157,21 @@ impl Pass<HighIr> for EnumKeyPass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
 
-        // Gate 2 precondition: no spec section (stripped builds) or no
-        // unions → nothing can be named; stay silent and honest.
+        // Gate 2 precondition: a union registry to match against. With
+        // no spec section there is none — but most of one is still in
+        // the code, because `#[contracttype]` compiles the variant names
+        // into the converter. Recover it, or stay silent as before.
         let has_unions = ir
             .soroban_facts
             .as_ref()
             .is_some_and(|f| !f.types.unions.is_empty());
         if !has_unions {
-            return result;
+            let recovered = synthesize_unions(ir);
+            if recovered == 0 {
+                return result;
+            }
+            result.metrics.increment(M_SYNTHESIZED, recovered);
+            result.changed = true;
         }
 
         // Phase A — read-only scan.
@@ -760,37 +770,8 @@ fn summarize_ctor(ir: &HighIr, target: FuncId) -> Option<CtorSummary> {
     // symbol-wrapper callsites with locally-constant rodata slices.
     let mut texts: BTreeSet<String> = BTreeSet::new();
     for (_, binding) in func.bindings.iter() {
-        match &binding.expr {
-            Expr::Call { target: g, args } => {
-                let Some((pos_param, len_param)) = wrapper_symbol_params(ir, *g, WRAPPER_DEPTH)
-                else {
-                    // A wrapper the specializer has already pinned: its
-                    // `(pos, len)` are literals inside the copy, so the
-                    // symbol is a constant of the callee, not of this
-                    // call site.
-                    if let Some(text) = wrapper_constant_symbol(ir, *g, WRAPPER_DEPTH) {
-                        texts.insert(text);
-                    }
-                    continue;
-                };
-                let (Some(pos_arg), Some(len_arg)) = (args.get(pos_param), args.get(len_param))
-                else {
-                    continue;
-                };
-                if let Some(text) = read_symbol_text(ir, func, *pos_arg, *len_arg) {
-                    texts.insert(text);
-                }
-            }
-            // The inlined shape: a directly-recognized SymbolNew.
-            Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { lm_pos, len, resolved })) => {
-                if let Some(text) = resolved
-                    .clone()
-                    .or_else(|| read_symbol_text(ir, func, *lm_pos, *len))
-                {
-                    texts.insert(text);
-                }
-            }
-            _ => {}
+        if let Some(text) = symbol_text_of(ir, func, &binding.expr) {
+            texts.insert(text);
         }
     }
     if texts.is_empty() {
@@ -840,6 +821,181 @@ fn dispatch_param(func: &HighFunction) -> Option<usize> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------
+// Recovering the union itself, where the module carries no spec
+// ---------------------------------------------------------------------
+
+/// Name given to a union recovered from its converter.
+///
+/// Nothing in the binary names the *type* — only its variants, which the
+/// converter builds from rodata. A synthesized name says what was proved
+/// (this is the type the contract's storage keys are built from) without
+/// claiming an identifier the author may never have written. `DataKey`
+/// is the conventional one and would score better against most sources;
+/// that is exactly why it is not used.
+const SYNTHESIZED_UNION: &str = "StorageKey";
+
+/// Recover a `#[contracttype]` union from each derived converter, for a
+/// module that carries no `contractspecv0`.
+///
+/// The spec is the only thing gate 2 needs that a stripped build lacks,
+/// and most of it is still in the code: `#[contracttype]` compiles a
+/// union's variant *names* into the converter as rodata symbols, one per
+/// switch arm, and the arm's own case value is the discriminant. So the
+/// name and the declaration order are both readable. What is not
+/// readable is the type's own name, which is synthesized.
+///
+/// Returns how many unions were recovered.
+fn synthesize_unions(ir: &mut HighIr) -> i64 {
+    let recovered: Vec<Vec<(String, usize)>> = ir
+        .functions
+        .iter()
+        .filter_map(|f| union_from_ctor(ir, f))
+        .collect();
+    if recovered.is_empty() {
+        return 0;
+    }
+    let facts = ir.soroban_facts.get_or_insert_with(SorobanFacts::default);
+    let base = facts.types.unions.len() as u32;
+    for (i, cases) in recovered.iter().enumerate() {
+        let next = base + i as u32;
+        let name = if i == 0 {
+            SYNTHESIZED_UNION.to_owned()
+        } else {
+            format!("{SYNTHESIZED_UNION}{i}")
+        };
+        facts.types.unions.push(UnionDef {
+            id: TypeId::from_index(next),
+            name,
+            cases: cases
+                .iter()
+                .map(|(case, fields)| UnionCase {
+                    name: case.clone(),
+                    fields: (0..*fields)
+                        .map(|_| TypeRef::Unknown(UnknownReason::InsufficientEvidence))
+                        .collect(),
+                })
+                .collect(),
+        });
+    }
+    recovered.len() as i64
+}
+
+/// The variants one converter builds, in discriminant order, each with
+/// the number of payload words its arm reads back.
+///
+/// The shape is a switch on the discriminant with one arm per variant.
+/// rustc gives the last variant the `default` arm and lets it fall
+/// through the switch, so that arm's construction sits *after* it in the
+/// enclosing sequence rather than inside it.
+fn union_from_ctor(ir: &HighIr, func: &HighFunction) -> Option<Vec<(String, usize)>> {
+    if func.signature.is_some() {
+        return None;
+    }
+    let (arms, default, tail) = dispatch_of(&func.region)?;
+    let mut by_disc: BTreeMap<u32, (String, usize)> = BTreeMap::new();
+    for arm in arms {
+        // One selector per arm: a variant is one discriminant.
+        let [case] = arm.cases.as_slice() else {
+            return None;
+        };
+        let built = built_by(ir, func, &[&arm.body])?;
+        if by_disc.insert(*case, built).is_some() {
+            return None;
+        }
+    }
+    // The default's construction is its own body plus whatever the
+    // switch falls through into.
+    let mut fallthrough: Vec<&Region> = vec![default];
+    fallthrough.extend(tail);
+    let built = built_by(ir, func, &fallthrough)?;
+    let missing = (0..=u32::try_from(arms.len()).ok()?).find(|d| !by_disc.contains_key(d))?;
+    by_disc.insert(missing, built);
+
+    // Exactly `0..n`, and no two variants sharing a name.
+    let cases: Vec<(String, usize)> = by_disc.into_values().collect();
+    let names: BTreeSet<&String> = cases.iter().map(|(n, _)| n).collect();
+    (names.len() == cases.len() && cases.len() > 1).then_some(cases)
+}
+
+/// The switch a converter dispatches on: its arms, its default, and the
+/// regions the default falls through into.
+fn dispatch_of(region: &Region) -> Option<(&[SwitchArm], &Region, Vec<&Region>)> {
+    match region {
+        Region::Sequence(items) => {
+            for (i, item) in items.iter().enumerate() {
+                if let Region::Switch { arms, default, .. } = item {
+                    return Some((arms, default, items[i + 1..].iter().collect()));
+                }
+                if let Some(found) = dispatch_of(item) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Region::Scope { body, .. } | Region::Loop { body, .. } => dispatch_of(body),
+        Region::Switch { arms, default, .. } => Some((arms, default, Vec::new())),
+        _ => None,
+    }
+}
+
+/// The one variant name a set of regions builds, and how many payload
+/// words it reads back out of the key's frame.
+///
+/// A variant with fields reads them from the slab the caller filled; one
+/// without reads nothing, which is what tells the two apart when no spec
+/// declares either.
+fn built_by(ir: &HighIr, func: &HighFunction, regions: &[&Region]) -> Option<(String, usize)> {
+    let mut text: Option<String> = None;
+    let mut loads = 0usize;
+    for region in regions {
+        region.for_each_node(|node| {
+            let Region::Basic(b) = node else { return };
+            let Some(block) = func.blocks.get(*b) else { return };
+            for id in &block.bindings {
+                let Some(binding) = func.bindings.get(*id) else {
+                    continue;
+                };
+                if matches!(binding.expr, Expr::Load { .. }) {
+                    loads += 1;
+                }
+                if let Some(found) = symbol_text_of(ir, func, &binding.expr) {
+                    // Two names in one arm is not one variant.
+                    if text.replace(found).is_some() {
+                        text = None;
+                    }
+                }
+            }
+        });
+    }
+    Some((text?, loads))
+}
+
+/// The variant text one binding constructs, when it constructs one.
+///
+/// Two spellings: a call into the SDK's symbol wrapper whose `(pos,
+/// len)` are locally constant, and the inlined `SymbolNew` the
+/// specializer leaves behind.
+fn symbol_text_of(ir: &HighIr, func: &HighFunction, expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Call { target: g, args } => {
+            let Some((pos_param, len_param)) = wrapper_symbol_params(ir, *g, WRAPPER_DEPTH) else {
+                // A wrapper the specializer has already pinned: its
+                // `(pos, len)` are literals inside the copy, so the
+                // symbol is a constant of the callee, not of this call
+                // site.
+                return wrapper_constant_symbol(ir, *g, WRAPPER_DEPTH);
+            };
+            let (pos_arg, len_arg) = (args.get(pos_param)?, args.get(len_param)?);
+            read_symbol_text(ir, func, *pos_arg, *len_arg)
+        }
+        Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { lm_pos, len, resolved })) => {
+            resolved.clone().or_else(|| read_symbol_text(ir, func, *lm_pos, *len))
+        }
+        _ => None,
+    }
 }
 
 /// Resolve a `(pos, len)` pair at a callsite to symbol text in rodata.

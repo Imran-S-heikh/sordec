@@ -130,13 +130,24 @@ fn coverage_matrix_prints_and_holds_invariants() {
     // W1 evidence: the spec-bearing tokens name enum storage keys.
     assert!(count("token-v22", mc::ENUM_KEY_NAMED) >= 1, "v22 enum-key");
     assert!(count("token-v23", mc::ENUM_KEY_NAMED) >= 1, "v23 enum-key");
-    // The stripped token has no spec section → no enum-key naming, but
-    // it still attempts (and soundly declines) some — the F-ratio miss.
-    assert_eq!(
-        count("token-v23-stripped", mc::ENUM_KEY_NAMED),
-        0,
-        "stripped must not name keys"
+    // The stripped token has no spec section, and names keys anyway:
+    // `#[contracttype]` compiles a union's variant names into its
+    // converter as rodata symbols, one per switch arm, so the union is
+    // recovered from the code and the keys are named against that. The
+    // spec-bearing tokens must not take that path — they have a
+    // declaration, and a body may not overrule one.
+    assert!(
+        count("token-v23-stripped", mc::ENUM_KEY_UNIONS_SYNTHESIZED) >= 1,
+        "stripped recovers its union from the converter"
     );
+    assert!(count("token-v23-stripped", mc::ENUM_KEY_NAMED) >= 1, "stripped enum-key");
+    for spec_bearing in ["token-v22", "token-v23", "timelock", "dex-liquidity-pool"] {
+        assert_eq!(
+            count(spec_bearing, mc::ENUM_KEY_UNIONS_SYNTHESIZED),
+            0,
+            "{spec_bearing} declares its unions; nothing may be synthesized"
+        );
+    }
 
     // W2 evidence: dex + timelock type cross-contract calls against SEP-41,
     // and recover call arity (the F5 "typed" numerator).
