@@ -422,6 +422,30 @@ fn overall_band(name: &str) -> (f64, f64) {
     // in the binary. structure 0.6220 -> 0.6448, the fixture 0.4199 ->
     // 0.4266, aggregate 0.8353 -> 0.8362.
     //
+    // 2026-09-20 — the overflow check rustc writes the other way round.
+    //
+    // For a *signed* `+`/`-` there is no carry to test, so rustc emits
+    // the sign-mask test — and that test reads "no overflow", which puts
+    // the work in the taken arm and the trap on the fall-through:
+    //
+    //     if ((a^b) & (a^r)) >= 0 { …; return }
+    //     panic!()
+    //
+    // `panic_recover` only ever classified a trap sitting *inside* an
+    // arm, so this one stayed `Bare` and `overflow_guard` had nothing to
+    // act on. Both halves now read the inverted spelling, and only that
+    // one: the classification still turns on the condition being one
+    // arithmetic binding's own mask, which a contract's comparison is
+    // not.
+    //
+    // Same relocation argument as the rest of that pass — the emitted
+    // manifest pins `overflow-checks = true` and rustc regenerates the
+    // check from `a - b`. hello-add's behaviour score is the live test
+    // of it and stays 1.0000.
+    //
+    // token-v22 structure 0.9063 -> 0.9724, token-v23 and
+    // token-v23-stripped 0.8598 -> 0.9069. Aggregate 0.9292 -> 0.9359.
+    //
     // 2026-09-20 — a field is read at the type its struct declares.
     //
     // `field_type` typed a field access only when the declared type was
@@ -689,9 +713,9 @@ fn overall_band(name: &str) -> (f64, f64) {
     // than changed here, because changing it raises our own number.
     match name {
         "hello-add" => (0.99, 1.00),
-        "token-v22" => (0.90, 0.94),
-        "token-v23" => (0.83, 0.87),
-        "token-v23-stripped" => (0.77, 0.81),
+        "token-v22" => (0.92, 0.96),
+        "token-v23" => (0.84, 0.88),
+        "token-v23-stripped" => (0.79, 0.83),
         "timelock" => (0.98, 1.00),
         "dex-liquidity-pool" => (0.92, 0.96),
         "attestation" => (0.98, 1.0),

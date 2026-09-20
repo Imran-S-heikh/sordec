@@ -7,14 +7,14 @@ Scorer `score-2.1.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | fixture | overall (AST) | interface | structure | semantic | behavior |
 |---|---|---|---|---|---|
 | hello-add | 1.0000 | 1.0000 | 0.0000 | 0.0000 | 1.0000 |
-| token-v22 | 0.9220 | 0.9286 | 0.9063 | 0.9286 | n/a |
-| token-v23 | 0.8453 | 0.7500 | 0.8598 | 0.9286 | n/a |
-| token-v23-stripped | 0.7939 | 0.6044 | 0.8598 | 0.9286 | n/a |
+| token-v22 | 0.9415 | 0.9286 | 0.9724 | 0.9286 | n/a |
+| token-v23 | 0.8592 | 0.7500 | 0.9069 | 0.9286 | n/a |
+| token-v23-stripped | 0.8078 | 0.6044 | 0.9069 | 0.9286 | n/a |
 | timelock | 1.0000 | 1.0000 | 1.0000 | 1.0000 | n/a |
 | dex-liquidity-pool | 0.9429 | 1.0000 | 0.8059 | 1.0000 | n/a |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
-| **aggregate (mean, AST)** | **0.9292** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.9292** | | | | |
+| **aggregate (mean, AST)** | **0.9359** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.9359** | | | | |
 
 ## Per-fixture detail
 
@@ -28,21 +28,21 @@ Scorer `score-2.1.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 ### token-v22
 
 - **interface** 0.9286 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.8571  precision=0.7500 recall=1.0000 (3 original, 4 reconstructed) — types extra: type TokenMetadata
-- **structure** 0.9063 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.7500 recall=1.0000 (33 original tokens, 44 reconstructed) — bloat 1.3x, dice ceiling ~0.8571
+- **structure** 0.9724 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.9167 recall=1.0000 (33 original tokens, 36 reconstructed) — bloat 1.1x, dice ceiling ~0.9565
 - **semantic** 0.9286 — precision=0.8667 recall=1.0000 (13 original facts, 15 reconstructed) — over-recovered: storage:get:instance:?, storage:set:instance:?
 - **behavior** n/a — behavior unavailable: crate does not build: error[E0308]: mismatched types
 
 ### token-v23
 
 - **interface** 0.7500 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.5000  precision=0.3333 recall=1.0000 (4 original, 12 reconstructed) — types extra: type Approve, type Burn, type Clawback, type Mint, type MintWithAmountOnly, type TokenMetadata, type Transfer, type TransferWithAmountOnly
-- **structure** 0.8598 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (1 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.6346 recall=1.0000 (33 original tokens, 52 reconstructed) — bloat 1.6x, dice ceiling ~0.7765 — low-similarity: transfer(0.44)
+- **structure** 0.9069 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (1 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.7500 recall=1.0000 (33 original tokens, 44 reconstructed) — bloat 1.3x, dice ceiling ~0.8571 — low-similarity: transfer(0.50)
 - **semantic** 0.9286 — precision=0.8667 recall=1.0000 (13 original facts, 15 reconstructed) — over-recovered: storage:get:instance:?, storage:set:instance:?
 - **behavior** n/a — behavior unavailable: crate does not build: error[E0308]: mismatched types
 
 ### token-v23-stripped
 
 - **interface** 0.6044 — entrypoints 0.9231  precision=0.9231 recall=0.9231 (13 original, 13 reconstructed) — entrypoints missing: fn transfer — entrypoints extra: fn transfer — types 0.2857  precision=0.3333 recall=0.2500 (4 original, 3 reconstructed) — types missing: type SetAdmin, type struct{from:Address,spender:Address}, type union{Allowance(AllowanceDataKey),Balance(Address),State(Address),Admin} — types extra: type struct{decimal:u32,name:String,symbol:String}, type union{Allowance(Val,Val),Balance(Val),State(Val),Admin}
-- **structure** 0.8598 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.6346 recall=1.0000 (33 original tokens, 52 reconstructed) — bloat 1.6x, dice ceiling ~0.7765 — low-similarity: transfer(0.44)
+- **structure** 0.9069 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.7500 recall=1.0000 (33 original tokens, 44 reconstructed) — bloat 1.3x, dice ceiling ~0.8571 — low-similarity: transfer(0.50)
 - **semantic** 0.9286 — precision=0.8667 recall=1.0000 (13 original facts, 15 reconstructed) — over-recovered: storage:get:instance:?, storage:set:instance:?
 - **behavior** n/a — behavior unavailable: samples/contracts/token-v23-stripped/token-v23-stripped.wasm has no `contractenvmetav0` section, so the host cannot load it and it cannot serve as a behaviour oracle
 

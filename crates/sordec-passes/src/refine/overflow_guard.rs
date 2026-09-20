@@ -119,7 +119,25 @@ fn func_prefix(func: &HighFunction) -> String {
 fn strip(region: Region, elided: &mut i64, inert: &HashSet<BlockId>) -> Region {
     match region {
         Region::Sequence(items) => {
-            seq(items.into_iter().map(|item| strip(item, elided, inert)).collect())
+            let items: Vec<Region> =
+                items.into_iter().map(|item| strip(item, elided, inert)).collect();
+            // The inverted spelling: `if no_overflow { work; return }`
+            // followed by the trap. rustc writes a *signed* `+`/`-` this
+            // way round, because the sign-mask test reads "no overflow"
+            // rather than "overflow". Dropping the guard leaves the
+            // work, which is the expression the source wrote — and
+            // `overflow-checks = true` puts the trap back.
+            if let Some(i) = inverted_guard(&items) {
+                let mut kept = items;
+                let mut tail = kept.split_off(i).into_iter();
+                let Some(Region::If { then_region, .. }) = tail.next() else {
+                    unreachable!("inverted_guard found an If at i");
+                };
+                kept.push(*then_region);
+                *elided += 1;
+                return seq(kept);
+            }
+            seq(items)
         }
         Region::Scope { out, body } => Region::Scope {
             out,
@@ -258,6 +276,22 @@ fn empty(region: &Region, inert: &HashSet<BlockId>) -> bool {
         Region::Transfer { transfer, .. } => transfer.is_empty(),
         _ => false,
     }
+}
+
+/// Where an else-less guard sits immediately before an overflow trap:
+/// `[…, if no_overflow { work; return }, panic!()]`.
+///
+/// The trap's classification is the licence — [`super::panic_recover`]
+/// names it `ArithOverflow` only when the condition is one arithmetic
+/// binding's own sign-mask test, which a contract's own comparison is
+/// not.
+fn inverted_guard(items: &[Region]) -> Option<usize> {
+    let last = items.len().checked_sub(1)?;
+    if !matches!(items[last], Region::Panic { kind: PanicKind::ArithOverflow }) {
+        return None;
+    }
+    let guard = last.checked_sub(1)?;
+    matches!(items[guard], Region::If { else_region: None, .. }).then_some(guard)
 }
 
 /// A guard arm that does nothing but reach the overflow panic.

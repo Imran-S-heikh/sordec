@@ -136,8 +136,17 @@ fn recover(
                 && matches!(items.last(), Some(Region::Unreachable))
                 && !panics_with_error(&items[..items.len() - 1], func);
             if tail_is_trap {
+                // The guard that skips it can name it. `if ok { …;
+                // return } panic!()` puts the trap on the `!ok` path,
+                // which is how rustc writes a *signed* overflow check —
+                // the sign-mask test reads "no overflow" and the
+                // fall-through is the trap.
+                let kind = items[..items.len() - 1]
+                    .last()
+                    .and_then(|prev| inverted_guard_kind(prev, func))
+                    .unwrap_or(PanicKind::Bare);
                 *items.last_mut().expect("checked non-empty") =
-                    typed_panic(PanicKind::Bare, None, func_id, stats, result);
+                    typed_panic(kind, None, func_id, stats, result);
             }
             Region::Sequence(items)
         }
@@ -449,6 +458,30 @@ fn classify_other(cond: ValueId, func: &HighFunction) -> PanicKind {
             rhs,
         } if is_overflow_test(func, *lhs, *rhs) => PanicKind::ArithOverflow,
         _ => PanicKind::Bare,
+    }
+}
+
+/// The kind a trailing trap takes from the guard that skips past it.
+///
+/// Only the overflow classification is read this way round, and only
+/// off a comparison rustc does not write in the other direction: the
+/// sign-mask test for a signed `+`/`-`, whose "no overflow" reading
+/// guards the work and leaves the trap to fall through. Anything else
+/// stays `Bare`, which is what a trailing trap was before.
+fn inverted_guard_kind(prev: &Region, func: &HighFunction) -> Option<PanicKind> {
+    let Region::If { cond, then_region, else_region: None } = prev else {
+        return None;
+    };
+    if !super::is_terminating(then_region) {
+        return None;
+    }
+    match &func.bindings.get(resolve_use(func, *cond))?.expr {
+        Expr::Binary { op: BinaryOp::Ge | BinaryOp::Le, lhs, rhs }
+            if is_overflow_test(func, *lhs, *rhs) =>
+        {
+            Some(PanicKind::ArithOverflow)
+        }
+        _ => None,
     }
 }
 
