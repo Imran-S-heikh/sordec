@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.8296124668076844,
-  "aggregate_overall_with_behavior": 0.8296124668076844,
+  "aggregate_overall": 0.8352872726953052,
+  "aggregate_overall_with_behavior": 0.8352872726953052,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -408,9 +408,9 @@
             "entrypoints 0.0769  precision=0.0769 recall=0.0769 (13 original, 13 reconstructed)",
             "entrypoints missing: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn mint, fn name, … (+4)",
             "entrypoints extra: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn mint, fn name, … (+4)",
-            "types 0.0000  precision=0.0000 recall=0.0000 (4 original, 1 reconstructed)",
+            "types 0.0000  precision=0.0000 recall=0.0000 (4 original, 3 reconstructed)",
             "types missing: type AllowanceDataKey, type AllowanceValue, type DataKey, type SetAdmin",
-            "types extra: type StorageKey"
+            "types extra: type Record, type Record1, type StorageKey"
           ],
           "score": 0.038461538461538464,
           "weight": 0.3
@@ -428,12 +428,12 @@
         "structure": {
           "checked": true,
           "notes": [
-            "13 entrypoints (0 unreconstructed, 0 without control flow)",
-            "ambiguous names (2 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.3367 recall=1.0000 (33 original tokens, 98 reconstructed) — bloat 3.0x, dice ceiling ~0.5038",
-            "low-similarity: allowance(0.41), burn(0.69), burn_from(0.66), decimals(0.00), name(0.00), set_admin(0.00), symbol(0.00), transfer(0.41), … (+1)"
+            "13 entrypoints (0 unreconstructed, 1 without control flow)",
+            "ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound",
+            "control flow: precision=0.4521 recall=1.0000 (33 original tokens, 73 reconstructed) — bloat 2.2x, dice ceiling ~0.6226",
+            "low-similarity: decimals(0.00), name(0.00), symbol(0.00), transfer(0.44)"
           ],
-          "score": 0.4869738592072317,
+          "score": 0.6220342393326065,
           "weight": 0.25
         }
       },
@@ -444,7 +444,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.38018275771975113,
+      "overall": 0.4199063989330966,
       "passed": false,
       "scorer_version": "score-2.0.0",
       "threshold": 0.9,

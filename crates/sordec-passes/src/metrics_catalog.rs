@@ -409,6 +409,9 @@ pub const MARSHALLING_BOOL_CODECS: &str = "marshalling_bool_codecs";
 pub const MARSHALLING_UDT_ENCODES: &str = "marshalling_udt_encodes";
 /// Pairs of limb selects read back as one 128-bit choice.
 pub const REFINE_WIDE_SELECTS: &str = "refine_wide_selects";
+/// Structs recovered from their own key table, where the module carries
+/// no `contractspecv0` to declare them.
+pub const MARSHALLING_UDT_STRUCTS_SYNTHESIZED: &str = "marshalling_udt_structs_synthesized";
 /// Two-form scalar unpacks folded into the value they unpack.
 pub const MARSHALLING_SCALAR_DECODES: &str = "marshalling_scalar_decodes";
 /// Argument vectors of fully-resolved cross-contract calls, retired.
@@ -794,6 +797,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_FIELD_TYPES,
         MARSHALLING_CLIENT_ARG_VECS,
         MARSHALLING_SCALAR_DECODES,
+        MARSHALLING_UDT_STRUCTS_SYNTHESIZED,
         REFINE_WIDE_SELECTS,
         MARSHALLING_SPEC_PARAMS,
         MARSHALLING_SPEC_RETURNS,

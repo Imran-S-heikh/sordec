@@ -43,10 +43,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use sordec_common::{FuncId, TypeId, ValueId};
+use sordec_common::{FuncId, IrId, TypeId, UnknownReason, ValueId};
 use sordec_ir::{
     Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MapOpKind, SemanticOp,
-    StructDef, UnionDef, WasmOpcodeKind,
+    SorobanFacts, StructDef, StructField, TypeRef, UnionDef, WasmOpcodeKind,
 };
 
 use super::{apply_elisions, metrics, sret, Elision};
@@ -71,13 +71,20 @@ impl Pass<HighIr> for UdtDecodePass {
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
-        let Some(facts) = ir.soroban_facts.as_ref() else {
-            return result;
-        };
-        let structs: Vec<StructDef> = facts.types.structs.clone();
-        if structs.is_empty() {
-            return result;
+        // With no spec there is nothing to match a key table against —
+        // but the key table is itself most of the declaration, so
+        // recover one. A module that declares its structs is left alone:
+        // it has said what they are.
+        if !ir.soroban_facts.as_ref().is_some_and(|f| !f.types.structs.is_empty()) {
+            let recovered = synthesize_structs(ir);
+            if recovered == 0 {
+                return result;
+            }
+            result.metrics.increment(metrics::UDT_STRUCTS_SYNTHESIZED, recovered);
+            result.changed = true;
         }
+        let facts = ir.soroban_facts.as_ref().expect("synthesized above or already present");
+        let structs: Vec<StructDef> = facts.types.structs.clone();
         let memory = ir.memory.clone();
         // What each helper's callers pass for each parameter, when every
         // caller agrees on a struct type. A helper decoding a field of a
@@ -467,6 +474,80 @@ pub(crate) fn read_keys(memory: &sordec_ir::MemoryImage, pos: u32, len: u32) -> 
         keys.push(text.to_owned());
     }
     Some(keys)
+}
+
+// ---------------------------------------------------------------------
+// Recovering the struct itself, where the module carries no spec
+// ---------------------------------------------------------------------
+
+/// Name given to a struct recovered from its own key table.
+///
+/// The key table names every *field*; nothing names the type. A
+/// synthesized name says that much and no more — the alternative is to
+/// guess an identifier from the storage key the value happens to be
+/// filed under, which is a different thing from recovering it.
+const SYNTHESIZED_STRUCT: &str = "Record";
+
+/// Recover a `#[contracttype]` struct from each derived unpack, for a
+/// module that carries no `contractspecv0`.
+///
+/// The key table is already the thing this pass matches a declaration
+/// against — `#[contracttype]` writes the field names into rodata so the
+/// derived `TryFromVal` can unpack a map by them. With a spec the table
+/// only has to *identify* a declared struct; without one it is the
+/// declaration, minus the type's name and its field types.
+///
+/// Returns how many structs were recovered.
+fn synthesize_structs(ir: &mut HighIr) -> i64 {
+    let mut tables: Vec<Vec<String>> = Vec::new();
+    for func in &ir.functions {
+        for (_, binding) in func.bindings.iter() {
+            let Expr::Semantic(SemanticOp::Known(KnownOp::MapOp {
+                kind: MapOpKind::UnpackToLinearMemory,
+                args,
+            })) = &binding.expr
+            else {
+                continue;
+            };
+            let Some((_, keys_pos, _, len)) = unpack_operands(func, args) else {
+                continue;
+            };
+            let Some(keys) = read_keys(&ir.memory, keys_pos, len) else {
+                continue;
+            };
+            // A field set is a field set: two unpacks of the same struct
+            // read the same table, and one struct is what they name.
+            if keys.len() > 1 && !tables.contains(&keys) {
+                tables.push(keys);
+            }
+        }
+    }
+    if tables.is_empty() {
+        return 0;
+    }
+    let facts = ir.soroban_facts.get_or_insert_with(SorobanFacts::default);
+    let base = facts.types.structs.len() as u32
+        + facts.types.unions.len() as u32
+        + facts.types.enums.len() as u32;
+    for (i, keys) in tables.iter().enumerate() {
+        let name = if i == 0 {
+            SYNTHESIZED_STRUCT.to_owned()
+        } else {
+            format!("{SYNTHESIZED_STRUCT}{i}")
+        };
+        facts.types.structs.push(StructDef {
+            id: TypeId::from_index(base + i as u32),
+            name,
+            fields: keys
+                .iter()
+                .map(|field| StructField {
+                    name: field.clone(),
+                    ty: TypeRef::Unknown(UnknownReason::InsufficientEvidence),
+                })
+                .collect(),
+        });
+    }
+    tables.len() as i64
 }
 
 /// The one declared struct whose field names are exactly `keys`.

@@ -392,6 +392,25 @@ fn overall_band(name: &str) -> (f64, f64) {
     //
     // token-v22 structure 0.8615 -> 0.9063, token-v23 0.8123 -> 0.8565.
     // Aggregate 0.7988 -> 0.8025. Held-out mean unchanged at 0.7090.
+    // Re-centred 2026-09-20 — the struct a stripped build still names.
+    //
+    // Same evidence as the union below, one derive along.
+    // `#[contracttype]` writes a struct's *field* names into rodata as
+    // the key table its derived `TryFromVal` unpacks a map by, and
+    // `udt_decode` was already reading that table — it only wanted a
+    // declared struct to match it against. Without a spec the table is
+    // the declaration, minus the type's name and its field types.
+    //
+    // token-v23-stripped gives back `Record { decimal, name, symbol }`
+    // and `Record1 { amount, expiration_ledger }`, which are its
+    // `TokenMetadata` and `AllowanceValue`, fields and order exact.
+    //
+    // The three metadata accessors were its worst entrypoints — thirteen
+    // emitted tokens each against sources with none, because the real
+    // accessors live in `soroban_token_sdk` and the scorer never opens
+    // it. structure 0.4870 -> 0.6220, holes 199 -> 129, the fixture
+    // 0.3802 -> 0.4199. Aggregate 0.8296 -> 0.8353.
+    //
     // Re-centred 2026-09-20 — the union a stripped build still names.
     //
     // `enum_key`'s registry gate wanted "exactly one `contractspecv0`
@@ -500,7 +519,7 @@ fn overall_band(name: &str) -> (f64, f64) {
         "hello-add" => (0.99, 1.00),
         "token-v22" => (0.88, 0.92),
         "token-v23" => (0.79, 0.83),
-        "token-v23-stripped" => (0.36, 0.40),
+        "token-v23-stripped" => (0.40, 0.44),
         "timelock" => (0.92, 0.96),
         "dex-liquidity-pool" => (0.77, 0.81),
         "attestation" => (0.98, 1.0),
