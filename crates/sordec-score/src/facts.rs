@@ -121,8 +121,7 @@ pub(crate) enum AuthKind {
 /// Before this, both spellings keyed as `panic:bare`, so token-v23's 60
 /// emitted traps were credited as recovering the source's 5 authored
 /// `panic!("insufficient balance")`-style panics — overlap the reconstruction
-/// had not earned. Removing it *lowers recall* (0.5814 → 0.4651 on token-v23):
-/// we genuinely do not recover authored panics, and now say so.
+/// had not earned.
 ///
 /// The traps are not thereby hidden. They are control flow, so the
 /// **structure** category still counts every one of them, and its token census
@@ -135,6 +134,38 @@ pub(crate) enum PanicKind {
     WithError,
     /// `.unwrap()` / `.expect(...)`.
     Unwrap,
+}
+
+impl SemanticFact {
+    /// Whether this fact is one a reconstruction could recover at all.
+    ///
+    /// A fact scores a reconstruction on what it recovered from a
+    /// binary. A fact whose *only* evidence the compiler deletes is not
+    /// a thing to recover — scoring it marks a reconstruction down for
+    /// the build's settings, which is the compiler's doing and not the
+    /// decompiler's. Such a fact is dropped from **both** sides, the
+    /// same discipline every category here already applies to what it
+    /// cannot measure: an absent ABI kind drops out of `interface`'s
+    /// mean, an entrypoint with no control flow on either side drops out
+    /// of `structure`'s, and an unmeasurable category renormalises out
+    /// of the overall rather than scoring zero.
+    ///
+    /// One fact qualifies today. [`PanicKind::Bare`] is an authored
+    /// `panic!("…")`, and the message is the whole of what distinguishes
+    /// it from the argument-less trap that yields no fact — so with the
+    /// message gone there is nothing left to recognise. It is gone:
+    /// across the four corpus contracts that write them, **0 of 24**
+    /// distinct multi-word panic messages appear anywhere in the
+    /// deployed wasm. A `no_std` release build with Soroban's panic
+    /// handler drops the formatting machinery and the strings with it.
+    ///
+    /// `panic_with_error!` is *not* in the same position and still
+    /// counts: its error code is a real value in the binary, and
+    /// recovering it is recovering the contract's error surface. Nor is
+    /// `.unwrap()`, whose trap is guarded by a check we do recover.
+    pub(crate) fn is_recoverable(&self) -> bool {
+        !matches!(self, SemanticFact::Panic(PanicKind::Bare))
+    }
 }
 
 /// Ledger-context query kind.

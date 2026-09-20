@@ -99,7 +99,7 @@ fn assert_close(actual: f64, expected: f64, label: &str) {
 #[test]
 fn scorer_version_is_frozen() {
     assert_eq!(
-        SCORER_VERSION, "score-2.0.0",
+        SCORER_VERSION, "score-2.1.0",
         "SCORER_VERSION changed — update the golden vector below to match"
     );
 }
@@ -113,7 +113,7 @@ fn golden_calibration_vector_is_stable() {
     };
     let report = score_str(GOLDEN_RECONSTRUCTED, GOLDEN_ORIGINAL, &opts).expect("score");
 
-    assert_eq!(report.scorer_version, "score-2.0.0");
+    assert_eq!(report.scorer_version, "score-2.1.0");
     assert_eq!(report.weights_profile, "rfp-default");
     // Re-frozen 2026-07-27 for score-2.0.0, when T11 split the ABI F1 into
     // entrypoints and types. Hand-checkable: interface drops `admin`, so
@@ -136,8 +136,25 @@ fn golden_calibration_vector_is_stable() {
     // one was not: 1/2. A category is neither penalized nor credited for
     // control flow the contract does not have.
     //
-    // No SCORER_VERSION bump: `score-2.0.0` is the in-progress rebuild
-    // version and the convention through T9/T10/T11 is to re-freeze this
+    // Re-frozen 2026-09-20 for **score-2.1.0**, and this one is a
+    // version bump rather than a re-freeze: the rule it lands is that a
+    // fact whose only evidence the compiler deletes is dropped from
+    // *both* sides rather than scored as a miss. Semantic 0.6250 ->
+    // 0.5714, overall 0.6853 -> 0.6664 — the number goes **down** here,
+    // because this vector's panic was one of the two facts the
+    // reconstruction got right, and dropping a matched fact from both
+    // sides costs a reconstruction that had recovered it.
+    //
+    // That direction is worth keeping in view. The rule is not leniency:
+    // it removes a fact from the comparison whichever way it was going,
+    // and on the corpus it happens to help because there we miss these
+    // and here we match one. See `SemanticFact::is_recoverable` for what
+    // qualifies and the measurement behind it (0 of 24 authored panic
+    // messages survive into the deployed wasm).
+    //
+    // Earlier: no SCORER_VERSION bump through T9/T10/T11, because
+    // `score-2.0.0` was the in-progress rebuild version and the
+    // convention was to re-freeze this
     // vector as the definition lands, not to bump per task.
     //
     // T19 (compilation -> gate, behavior takes the category slot) deliberately
@@ -150,6 +167,6 @@ fn golden_calibration_vector_is_stable() {
     // is precisely why it was split into its own change.
     assert_close(report.categories.interface.score, 0.900000, "interface");
     assert_close(report.categories.structure.score, 0.500000, "structure");
-    assert_close(report.categories.semantic.score, 0.625000, "semantic");
-    assert_close(report.overall, 0.685294, "overall");
+    assert_close(report.categories.semantic.score, 0.571429, "semantic");
+    assert_close(report.overall, 0.666387, "overall");
 }

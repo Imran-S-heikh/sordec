@@ -71,7 +71,13 @@ fn trace_facts(recon: &Multiset, orig: &Multiset) {
 
 /// Build a multiset of fact keys.
 fn bag(facts: &[SemanticFact]) -> Multiset {
-    let keys: Vec<String> = facts.iter().map(SemanticFact::key).collect();
+    // Facts whose only evidence the compiler deletes are dropped from
+    // both sides — see [`SemanticFact::is_recoverable`].
+    let keys: Vec<String> = facts
+        .iter()
+        .filter(|f| f.is_recoverable())
+        .map(SemanticFact::key)
+        .collect();
     simil::multiset(&keys)
 }
 

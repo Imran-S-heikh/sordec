@@ -38,7 +38,7 @@ use crate::metrics;
 /// A custom weights profile is recorded per-report in
 /// [`ScoreReport::weights_profile`], not by this string. Stamped into every
 /// [`ScoreReport`].
-pub const SCORER_VERSION: &str = "score-2.0.0";
+pub const SCORER_VERSION: &str = "score-2.1.0";
 
 /// One category's contribution to the overall score.
 ///

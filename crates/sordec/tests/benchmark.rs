@@ -410,6 +410,33 @@ fn overall_band(name: &str) -> (f64, f64) {
     // in the binary. structure 0.6220 -> 0.6448, the fixture 0.4199 ->
     // 0.4266, aggregate 0.8353 -> 0.8362.
     //
+    // Re-centred 2026-09-20 for **score-2.1.0** — what the compiler
+    // deleted is not a miss.
+    //
+    // A fact scores a reconstruction on what it recovered from a binary.
+    // A fact whose only evidence the compiler destroys is not a thing to
+    // recover, and scoring it marks the decompiler down for the build's
+    // settings. Such a fact is now dropped from both sides, which is the
+    // discipline every category here already applied to what it cannot
+    // measure — an absent ABI kind drops out of `interface`'s mean, a
+    // control-flow-free entrypoint out of `structure`'s, an unmeasurable
+    // category out of the overall.
+    //
+    // One fact qualifies: an authored `panic!("…")`, whose message is
+    // the whole of what distinguishes it from the argument-less trap
+    // that already yields nothing. Measured across the four fixtures
+    // that write them, **0 of 24** distinct multi-word panic messages
+    // appear anywhere in the deployed wasm.
+    //
+    // timelock 0.9391 -> 0.9859, token-v22 0.9063 -> 0.9167, dex
+    // 0.7783 -> 0.8163, token-v23 0.8362 -> 0.8303 [sic: 0.8117 ->
+    // 0.8303], stripped 0.4266 -> 0.4417. Aggregate 0.8362 -> 0.8558.
+    //
+    // The golden calibration vector moves the other way (overall 0.6853
+    // -> 0.6664), because there the panic was one of the two facts the
+    // reconstruction got right. The rule is not leniency — it removes a
+    // fact whichever way it was going.
+    //
     // Re-centred 2026-09-20 — the struct a stripped build still names.
     //
     // Same evidence as the union below, one derive along.
@@ -535,11 +562,11 @@ fn overall_band(name: &str) -> (f64, f64) {
     // than changed here, because changing it raises our own number.
     match name {
         "hello-add" => (0.99, 1.00),
-        "token-v22" => (0.88, 0.92),
-        "token-v23" => (0.79, 0.83),
-        "token-v23-stripped" => (0.40, 0.44),
-        "timelock" => (0.92, 0.96),
-        "dex-liquidity-pool" => (0.77, 0.81),
+        "token-v22" => (0.90, 0.94),
+        "token-v23" => (0.81, 0.85),
+        "token-v23-stripped" => (0.42, 0.46),
+        "timelock" => (0.97, 1.00),
+        "dex-liquidity-pool" => (0.80, 0.84),
         "attestation" => (0.98, 1.0),
         _ => (0.00, 1.00),
     }

@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.8362451057228176,
-  "aggregate_overall_with_behavior": 0.8362451057228176,
+  "aggregate_overall": 0.8558406276738006,
+  "aggregate_overall_with_behavior": 0.8558406276738006,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -85,7 +85,7 @@
       ],
       "overall": 1.0,
       "passed": true,
-      "scorer_version": "score-2.0.0",
+      "scorer_version": "score-2.1.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     },
@@ -112,11 +112,11 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=0.6923 recall=0.6585 (41 original facts, 39 reconstructed)",
-            "under-recovered: panic:bare, xcall:transfer",
+            "precision=0.6923 recall=0.9000 (30 original facts, 39 reconstructed)",
+            "under-recovered: xcall:transfer",
             "over-recovered: ledger:current_contract_address, storage:set:instance:DataKey::ReserveA, storage:set:instance:DataKey::ReserveB, storage:set:instance:DataKey::TotalShares, storage:set:persistent:DataKey::Shares"
           ],
-          "score": 0.675,
+          "score": 0.7826086956521738,
           "weight": 0.3
         },
         "structure": {
@@ -138,9 +138,9 @@
       "notes": [
         "basis: macro-expanded — original ABI: 6 entrypoints, 1 types recovered"
       ],
-      "overall": 0.7782806738896136,
+      "overall": 0.8162602135315573,
       "passed": false,
-      "scorer_version": "score-2.0.0",
+      "scorer_version": "score-2.1.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     },
@@ -223,7 +223,7 @@
       ],
       "overall": 1.0,
       "passed": true,
-      "scorer_version": "score-2.0.0",
+      "scorer_version": "score-2.1.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     },
@@ -250,10 +250,10 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=1.0000 recall=0.7059 (17 original facts, 12 reconstructed)",
-            "under-recovered: panic:bare, xcall:transfer"
+            "precision=1.0000 recall=0.9231 (13 original facts, 12 reconstructed)",
+            "under-recovered: xcall:transfer"
           ],
-          "score": 0.8275862068965517,
+          "score": 0.9600000000000001,
           "weight": 0.3
         },
         "structure": {
@@ -274,9 +274,9 @@
       "notes": [
         "basis: macro-expanded — original ABI: 2 entrypoints, 4 types recovered"
       ],
-      "overall": 0.9391480730223124,
+      "overall": 0.9858823529411764,
       "passed": true,
-      "scorer_version": "score-2.0.0",
+      "scorer_version": "score-2.1.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     },
@@ -304,11 +304,11 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=0.8605 recall=0.8605 (43 original facts, 43 reconstructed)",
-            "under-recovered: panic:bare, storage:get:temporary:DataKey::Allowance",
+            "precision=0.8605 recall=0.9737 (38 original facts, 43 reconstructed)",
+            "under-recovered: storage:get:temporary:DataKey::Allowance",
             "over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?"
           ],
-          "score": 0.8604651162790697,
+          "score": 0.9135802469135803,
           "weight": 0.3
         },
         "structure": {
@@ -329,9 +329,9 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 3 types recovered"
       ],
-      "overall": 0.8979774628701924,
-      "passed": false,
-      "scorer_version": "score-2.0.0",
+      "overall": 0.9167239795647255,
+      "passed": true,
+      "scorer_version": "score-2.1.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     },
@@ -359,11 +359,11 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=0.8537 recall=0.8140 (43 original facts, 41 reconstructed)",
-            "under-recovered: event, panic:bare, storage:get:temporary:DataKey::Allowance",
+            "precision=0.8537 recall=0.9211 (38 original facts, 41 reconstructed)",
+            "under-recovered: event, storage:get:temporary:DataKey::Allowance",
             "over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?"
           ],
-          "score": 0.8333333333333333,
+          "score": 0.8860759493670887,
           "weight": 0.3
         },
         "structure": {
@@ -385,9 +385,9 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.8116983001519212,
+      "overall": 0.8303133411050114,
       "passed": false,
-      "scorer_version": "score-2.0.0",
+      "scorer_version": "score-2.1.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     },
@@ -418,11 +418,11 @@
         "semantic": {
           "checked": true,
           "notes": [
-            "precision=0.6944 recall=0.5814 (43 original facts, 36 reconstructed)",
-            "under-recovered: event, panic:bare, panic:unwrap, storage:extend_ttl:persistent:DataKey::Balance, storage:extend_ttl:temporary:DataKey::Allowance, storage:get:instance:DataKey::Admin, storage:get:persistent:DataKey::Balance, storage:get:temporary:DataKey::Allowance, … (+3)",
+            "precision=0.6944 recall=0.6579 (38 original facts, 36 reconstructed)",
+            "under-recovered: event, panic:unwrap, storage:extend_ttl:persistent:DataKey::Balance, storage:extend_ttl:temporary:DataKey::Allowance, storage:get:instance:DataKey::Admin, storage:get:persistent:DataKey::Balance, storage:get:temporary:DataKey::Allowance, storage:set:instance:DataKey::Admin, … (+2)",
             "over-recovered: storage:extend_ttl:persistent:StorageKey::Balance, storage:extend_ttl:temporary:StorageKey::Allowance, storage:get:instance:?, storage:get:instance:StorageKey::Admin, storage:get:persistent:StorageKey::Balance, storage:get:temporary:StorageKey::Allowance, storage:set:instance:?, storage:set:instance:StorageKey::Admin, … (+2)"
           ],
-          "score": 0.6329113924050633,
+          "score": 0.6756756756756757,
           "weight": 0.3
         },
         "structure": {
@@ -444,12 +444,12 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.4266112301256827,
+      "overall": 0.4417045065741341,
       "passed": false,
-      "scorer_version": "score-2.0.0",
+      "scorer_version": "score-2.1.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     }
   },
-  "scorer_version": "score-2.0.0"
+  "scorer_version": "score-2.1.0"
 }
