@@ -72,8 +72,14 @@ struct Measured {
 /// One definition, because the report also has to re-run the aggregator to
 /// derive its AST-only figure ([`ast_only_overall`]) and a second copy of the
 /// weights or basis would let the two disagree silently.
-fn score_options(behavior: BehaviorInput) -> ScoreOptions {
-    ScoreOptions { threshold: 0.9, check_compile: false, behavior, ..Default::default() }
+fn score_options(behavior: BehaviorInput, abi_declared: bool) -> ScoreOptions {
+    ScoreOptions {
+        threshold: 0.9,
+        check_compile: false,
+        behavior,
+        abi_declared,
+        ..Default::default()
+    }
 }
 
 /// Decompile a fixture in-memory and score the reconstruction against its
@@ -131,7 +137,13 @@ fn measure_wasm(
         None => BehaviorInput::NotRequested,
     };
 
-    let opts = score_options(behavior);
+    // Whether the module declared its own ABI is a fact about the wasm,
+    // and the scorer never reads wasm. Without `contractspecv0` there
+    // are no parameter names in the module at all, so comparing them
+    // would mark the reconstruction down for the build's settings.
+    let abi_declared = sordec_frontend::parse(wasm)
+        .is_ok_and(|p| p.soroban_facts.is_some_and(|f| !f.functions.is_empty()));
+    let opts = score_options(behavior, abi_declared);
     let report =
         score_paths(&src, &base.join("source/src"), &opts).map_err(|e| format!("score: {e}"));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -180,7 +192,7 @@ fn measure_all_with_behavior() -> Vec<Measured> {
 /// AST-only number is comparable with every measurement in this file's history
 /// and with the committed bands, and the other is what the metric says today.
 fn ast_only_overall(report: &ScoreReport) -> f64 {
-    let opts = score_options(BehaviorInput::NotRequested);
+    let opts = score_options(BehaviorInput::NotRequested, true);
     ScoreReport::aggregate(
         sordec_score::Categories {
             behavior: CategoryScore::unchecked("excluded from the AST-only aggregate"),
@@ -410,6 +422,27 @@ fn overall_band(name: &str) -> (f64, f64) {
     // in the binary. structure 0.6220 -> 0.6448, the fixture 0.4199 ->
     // 0.4266, aggregate 0.8353 -> 0.8362.
     //
+    // Also score-2.1.0 — a name that is nowhere in the module.
+    //
+    // On the spec basis a signature's value is `name:type` per
+    // parameter, and `contractspecv0` is the only place a parameter name
+    // is recorded. A build that strips it leaves names nowhere in the
+    // module, so a reconstruction cannot recover them however good it
+    // is. The scorer is now told whether the module declared an ABI —
+    // the caller read the wasm and knows — and where it did not, reads
+    // parameter types alone, which is what `interface`'s own docs call
+    // the reliable identity and what its source-basis extractor always
+    // did.
+    //
+    // This fires on exactly one fixture, which is the test of it: every
+    // other contract here ships a spec, so its names *are* recoverable
+    // and still count. token-v23-stripped interface 0.0385 -> 0.3846 —
+    // eleven of its thirteen entrypoints had every type right and were
+    // scoring zero on `arg0` against `new_admin`. Its types stay at 0,
+    // because a recovered struct's own *name* is missing too and that
+    // is a separate thing. The fixture 0.4417 -> 0.5639, aggregate
+    // 0.8630 -> 0.8804.
+    //
     // Also score-2.1.0 — a `#[derive]`d body is the compiler's code.
     //
     // The same rule, in `structure`. The closure walker followed a
@@ -578,7 +611,7 @@ fn overall_band(name: &str) -> (f64, f64) {
         "hello-add" => (0.99, 1.00),
         "token-v22" => (0.90, 0.94),
         "token-v23" => (0.81, 0.85),
-        "token-v23-stripped" => (0.42, 0.46),
+        "token-v23-stripped" => (0.54, 0.58),
         "timelock" => (0.97, 1.00),
         "dex-liquidity-pool" => (0.85, 0.89),
         "attestation" => (0.98, 1.0),

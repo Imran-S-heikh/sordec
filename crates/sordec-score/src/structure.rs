@@ -148,7 +148,8 @@ pub(crate) fn evaluate(
     spec: Option<(&spec::SpecMap, &spec::SpecMap)>,
 ) -> CategoryScore {
     let abi = match spec {
-        Some((_, orig_spec)) => spec::abi(orig_spec),
+        // Structure reads only the `"fn "` keys, so names never enter it.
+        Some((_, orig_spec)) => spec::abi(orig_spec, true),
         None => interface::extract(original),
     };
     // Both extractors namespace entrypoints `"fn name"` (see `spec::render`).
@@ -942,7 +943,7 @@ mod tests {
             );
             let graph = CallGraph::build(&out.file);
 
-            let entrypoints: Vec<String> = spec::abi(&out.spec)
+            let entrypoints: Vec<String> = spec::abi(&out.spec, true)
                 .keys()
                 .filter_map(|key| key.strip_prefix("fn "))
                 .map(str::to_owned)

@@ -101,6 +101,23 @@ pub struct ScoreOptions {
     /// Defaults to [`BehaviorInput::NotRequested`], which reports the category
     /// `unchecked` so it renormalises out of the mean rather than scoring zero.
     pub behavior: BehaviorInput,
+    /// Whether the binary under test declared its own ABI — a
+    /// `contractspecv0` section.
+    ///
+    /// Injected for the same reason as [`Self::behavior`]: it is a fact
+    /// about the wasm, and this crate never touches wasm. The caller
+    /// that read the module knows, and the default assumes it did, so
+    /// nothing changes unless a caller says otherwise.
+    ///
+    /// It matters because `contractspecv0` is the only place a
+    /// parameter's *name* is recorded. A build that strips it leaves
+    /// names nowhere in the module, so a reconstruction cannot recover
+    /// them however good it is — and comparing them would mark it down
+    /// for the build's settings. Set `false` and the interface
+    /// comparison reads parameter types alone, which is what
+    /// the interface extractor documents as the reliable identity and
+    /// what its source-basis half has always done.
+    pub abi_declared: bool,
 }
 
 impl Default for ScoreOptions {
@@ -111,6 +128,7 @@ impl Default for ScoreOptions {
             weights: WeightProfile::rfp_default(),
             basis: BasisProfile::rfp_default(),
             behavior: BehaviorInput::NotRequested,
+            abi_declared: true,
         }
     }
 }
@@ -288,7 +306,8 @@ impl Sources {
 fn assemble(sources: &Sources, gate: CompilationGate, opts: &ScoreOptions) -> ScoreReport {
     let basis = &opts.basis;
     let (recon, orig) = sources.pair(basis.interface);
-    let interface = interface::evaluate(recon, orig, sources.spec_for(basis.interface));
+    let interface =
+        interface::evaluate(recon, orig, sources.spec_for(basis.interface), opts.abi_declared);
     let (recon, orig) = sources.pair(basis.structure);
     let structure = structure::evaluate(recon, orig, sources.spec_for(basis.structure));
     let (recon, orig) = sources.pair(basis.semantic);

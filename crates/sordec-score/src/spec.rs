@@ -52,13 +52,13 @@ const DECODE_LIMIT: usize = 64 * 1024;
 /// Entries that fail to decode are skipped rather than fatal: a spec we cannot
 /// read is a measurement gap, not a scoring failure, and dropping it is
 /// visible as a recall miss rather than a panic.
-pub(crate) fn abi(spec: &SpecMap) -> BTreeMap<String, String> {
+pub(crate) fn abi(spec: &SpecMap, names: bool) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     for bytes in spec.values() {
         let Some(entry) = decode(bytes) else {
             continue;
         };
-        let (key, value) = render(&entry);
+        let (key, value) = render(&entry, names);
         map.insert(key, value);
     }
     map
@@ -78,13 +78,22 @@ fn decode(bytes: &[u8]) -> Option<ScSpecEntry> {
 /// Deliberately exhaustive with no catch-all: a spec entry kind added by a
 /// future `stellar-xdr` should be a compile error demanding a decision, not a
 /// silently dropped item that reads as a recall miss.
-fn render(entry: &ScSpecEntry) -> (String, String) {
+fn render(entry: &ScSpecEntry, names: bool) -> (String, String) {
     match entry {
         ScSpecEntry::FunctionV0(f) => {
             let params: Vec<String> = f
                 .inputs
                 .iter()
-                .map(|input| format!("{}:{}", input.name.to_utf8_string_lossy(), ty(&input.type_)))
+                .map(|input| {
+                    // A parameter's name lives only in `contractspecv0`.
+                    // Where the module under test carried none, it is
+                    // not a thing a reconstruction could have recovered.
+                    if names {
+                        format!("{}:{}", input.name.to_utf8_string_lossy(), ty(&input.type_))
+                    } else {
+                        ty(&input.type_)
+                    }
+                })
                 .collect();
             let outputs: Vec<String> = f.outputs.iter().map(ty).collect();
             let ret = match outputs.len() {
@@ -266,7 +275,7 @@ mod tests {
             .iter()
             .map(|(key, entry)| ((*key).to_owned(), encode(entry)))
             .collect();
-        abi(&map)
+        abi(&map, true)
     }
 
     #[test]
@@ -381,7 +390,7 @@ mod tests {
             "transfer".to_owned(),
             encode(&function("", "", ScSpecTypeDef::Address)),
         );
-        let out = abi(&map);
+        let out = abi(&map, true);
         assert_eq!(out.len(), 1, "the readable entry still scores: {out:?}");
         assert!(out.contains_key("fn transfer"));
     }

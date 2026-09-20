@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.8629736848757709,
-  "aggregate_overall_with_behavior": 0.8629736848757709,
+  "aggregate_overall": 0.8804268199759647,
+  "aggregate_overall_with_behavior": 0.8804268199759647,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -405,14 +405,14 @@
         "interface": {
           "checked": true,
           "notes": [
-            "entrypoints 0.0769  precision=0.0769 recall=0.0769 (13 original, 13 reconstructed)",
-            "entrypoints missing: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn mint, fn name, … (+4)",
-            "entrypoints extra: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn mint, fn name, … (+4)",
+            "entrypoints 0.7692  precision=0.7692 recall=0.7692 (13 original, 13 reconstructed)",
+            "entrypoints missing: fn name, fn symbol, fn transfer",
+            "entrypoints extra: fn name, fn symbol, fn transfer",
             "types 0.0000  precision=0.0000 recall=0.0000 (4 original, 3 reconstructed)",
             "types missing: type AllowanceDataKey, type AllowanceValue, type DataKey, type SetAdmin",
             "types extra: type Record, type Record1, type StorageKey"
           ],
-          "score": 0.038461538461538464,
+          "score": 0.38461538461538464,
           "weight": 0.3
         },
         "semantic": {
@@ -444,7 +444,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.4417045065741341,
+      "overall": 0.5638764522754915,
       "passed": false,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,

@@ -936,6 +936,20 @@ fn run_coverage(args: &CoverageArgs) -> u8 {
     EXIT_OK
 }
 
+/// Whether a wasm module declares its own ABI (`contractspecv0`).
+///
+/// A module that does not carries no parameter names anywhere, so they
+/// are not something a reconstruction could have recovered; the scorer
+/// is told so and compares parameter types alone. Unreadable bytes
+/// answer "it did", which is the stricter reading.
+fn declares_abi(wasm: &std::path::Path) -> bool {
+    let Ok(bytes) = std::fs::read(wasm) else {
+        return true;
+    };
+    sordec_frontend::parse(&bytes)
+        .is_ok_and(|p| p.soroban_facts.is_some_and(|f| !f.functions.is_empty()))
+}
+
 fn run_score(args: &ScoreArgs) -> u8 {
     // 1. Load + score. The loader reads both inputs (a `.rs` file or a
     //    source directory); an I/O failure gets the dedicated exit code so
@@ -959,6 +973,11 @@ fn run_score(args: &ScoreArgs) -> u8 {
             None => sordec_score::BehaviorInput::NotRequested,
             Some(original_wasm) => behavior::measure(&args.reconstructed, original_wasm),
         },
+        // Only a module can say whether it declared its own ABI, and
+        // the only module this command is ever given is the behaviour
+        // oracle. Without one, assume it did: that is the common case
+        // and the stricter reading.
+        abi_declared: args.behavior.as_ref().is_none_or(|wasm| declares_abi(wasm)),
     };
     let report = match sordec_score::score_paths(&args.reconstructed, &args.original, &opts) {
         Ok(report) => report,
