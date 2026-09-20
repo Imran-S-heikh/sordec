@@ -82,6 +82,16 @@ impl<'a> CallGraph<'a> {
     fn collect_item(&mut self, item: &'a Item, owner: Option<&str>) {
         match item {
             Item::Fn(f) => self.insert(owner, &f.sig.ident, &f.block),
+            // A `#[derive]`d impl is the compiler's code, not the
+            // contract's: `#[automatically_derived]` is rustc's own
+            // marker for it. Its body is generated identically on both
+            // sides from the same `#[derive]`, so walking into it
+            // measures the derive rather than the reconstruction —
+            // and it is reached asymmetrically, because a `.clone()`
+            // on an SDK handle compiles to nothing and so cannot be
+            // recovered from the binary. Excluded for the same reason
+            // `super::glue` excludes the macro scaffolding around it.
+            Item::Impl(imp) if canon::attr_named(&imp.attrs, "automatically_derived") => {}
             Item::Impl(imp) => {
                 let owner = canon::normalize_type(&imp.self_ty);
                 for impl_item in &imp.items {

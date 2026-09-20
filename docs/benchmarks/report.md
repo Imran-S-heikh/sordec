@@ -11,10 +11,10 @@ Scorer `score-2.1.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | token-v23 | 0.8303 | 0.7500 | 0.8598 | 0.8861 | n/a |
 | token-v23-stripped | 0.4417 | 0.0385 | 0.6448 | 0.6757 | n/a |
 | timelock | 0.9859 | 1.0000 | 1.0000 | 0.9600 | n/a |
-| dex-liquidity-pool | 0.8163 | 1.0000 | 0.6362 | 0.7826 | n/a |
+| dex-liquidity-pool | 0.8662 | 1.0000 | 0.8059 | 0.7826 | n/a |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
-| **aggregate (mean, AST)** | **0.8558** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.8558** | | | | |
+| **aggregate (mean, AST)** | **0.8630** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.8630** | | | | |
 
 ## Per-fixture detail
 
@@ -28,35 +28,35 @@ Scorer `score-2.1.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 ### token-v22
 
 - **interface** 0.9286 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.8571  precision=0.7500 recall=1.0000 (3 original, 4 reconstructed) — types extra: type TokenMetadata
-- **structure** 0.9063 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.7500 recall=1.0000 (33 original tokens, 44 reconstructed) — bloat 1.3x, dice ceiling ~0.8571
+- **structure** 0.9063 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.7500 recall=1.0000 (33 original tokens, 44 reconstructed) — bloat 1.3x, dice ceiling ~0.8571
 - **semantic** 0.9136 — precision=0.8605 recall=0.9737 (38 original facts, 43 reconstructed) — under-recovered: storage:get:temporary:DataKey::Allowance — over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?
 - **behavior** n/a — behavior unavailable: crate does not build: error[E0308]: mismatched types
 
 ### token-v23
 
 - **interface** 0.7500 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.5000  precision=0.3333 recall=1.0000 (4 original, 12 reconstructed) — types extra: type Approve, type Burn, type Clawback, type Mint, type MintWithAmountOnly, type TokenMetadata, type Transfer, type TransferWithAmountOnly
-- **structure** 0.8598 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.6346 recall=1.0000 (33 original tokens, 52 reconstructed) — bloat 1.6x, dice ceiling ~0.7765 — low-similarity: transfer(0.44)
+- **structure** 0.8598 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (1 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.6346 recall=1.0000 (33 original tokens, 52 reconstructed) — bloat 1.6x, dice ceiling ~0.7765 — low-similarity: transfer(0.44)
 - **semantic** 0.8861 — precision=0.8537 recall=0.9211 (38 original facts, 41 reconstructed) — under-recovered: event, storage:get:temporary:DataKey::Allowance — over-recovered: panic:unwrap, storage:get:instance:?, storage:set:instance:?
 - **behavior** n/a — behavior unavailable: crate does not build: error[E0308]: mismatched types
 
 ### token-v23-stripped
 
 - **interface** 0.0385 — entrypoints 0.0769  precision=0.0769 recall=0.0769 (13 original, 13 reconstructed) — entrypoints missing: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn mint, fn name, … (+4) — entrypoints extra: fn __constructor, fn allowance, fn approve, fn balance, fn burn, fn burn_from, fn mint, fn name, … (+4) — types 0.0000  precision=0.0000 recall=0.0000 (4 original, 3 reconstructed) — types missing: type AllowanceDataKey, type AllowanceValue, type DataKey, type SetAdmin — types extra: type Record, type Record1, type StorageKey
-- **structure** 0.6448 — 13 entrypoints (0 unreconstructed, 1 without control flow) — ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.4925 recall=1.0000 (33 original tokens, 67 reconstructed) — bloat 2.0x, dice ceiling ~0.6600 — low-similarity: decimals(0.00), name(0.00), symbol(0.00), transfer(0.44)
+- **structure** 0.6448 — 13 entrypoints (0 unreconstructed, 1 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.4925 recall=1.0000 (33 original tokens, 67 reconstructed) — bloat 2.0x, dice ceiling ~0.6600 — low-similarity: decimals(0.00), name(0.00), symbol(0.00), transfer(0.44)
 - **semantic** 0.6757 — precision=0.6944 recall=0.6579 (38 original facts, 36 reconstructed) — under-recovered: event, panic:unwrap, storage:extend_ttl:persistent:DataKey::Balance, storage:extend_ttl:temporary:DataKey::Allowance, storage:get:instance:DataKey::Admin, storage:get:persistent:DataKey::Balance, storage:get:temporary:DataKey::Allowance, storage:set:instance:DataKey::Admin, … (+2) — over-recovered: storage:extend_ttl:persistent:StorageKey::Balance, storage:extend_ttl:temporary:StorageKey::Allowance, storage:get:instance:?, storage:get:instance:StorageKey::Admin, storage:get:persistent:StorageKey::Balance, storage:get:temporary:StorageKey::Allowance, storage:set:instance:?, storage:set:instance:StorageKey::Admin, … (+2)
 - **behavior** n/a — behavior unavailable: samples/contracts/token-v23-stripped/token-v23-stripped.wasm has no `contractenvmetav0` section, so the host cannot load it and it cannot serve as a behaviour oracle
 
 ### timelock
 
 - **interface** 1.0000 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (2 original, 2 reconstructed) — types 1.0000  precision=1.0000 recall=1.0000 (4 original, 4 reconstructed)
-- **structure** 1.0000 — 2 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=1.0000 recall=1.0000 (5 original tokens, 5 reconstructed) — bloat 1.0x, dice ceiling ~1.0000
+- **structure** 1.0000 — 2 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=1.0000 recall=1.0000 (5 original tokens, 5 reconstructed) — bloat 1.0x, dice ceiling ~1.0000
 - **semantic** 0.9600 — precision=1.0000 recall=0.9231 (13 original facts, 12 reconstructed) — under-recovered: xcall:transfer
 - **behavior** n/a — behavior unavailable: both modules build and load, but no entrypoint could be driven — 0 of 2 entrypoints drivable (skipped — claim: parameter `claimant` is an Address, which needs a value constructed against a live host; deposit: parameter `from` is an Address, which needs a value constructed against a live host)
 
 ### dex-liquidity-pool
 
 - **interface** 1.0000 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (6 original, 6 reconstructed) — types 1.0000  precision=1.0000 recall=1.0000 (1 original, 1 reconstructed)
-- **structure** 0.6362 — 6 entrypoints (0 unreconstructed, 1 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.5000 recall=0.9130 (23 original tokens, 42 reconstructed) — bloat 1.8x, dice ceiling ~0.7077 — low-similarity: balance_shares(0.00), deposit(0.40)
+- **structure** 0.8059 — 6 entrypoints (0 unreconstructed, 2 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.4872 recall=0.9500 (20 original tokens, 39 reconstructed) — bloat 1.9x, dice ceiling ~0.6780 — low-similarity: deposit(0.40)
 - **semantic** 0.7826 — precision=0.6923 recall=0.9000 (30 original facts, 39 reconstructed) — under-recovered: xcall:transfer — over-recovered: ledger:current_contract_address, storage:set:instance:DataKey::ReserveA, storage:set:instance:DataKey::ReserveB, storage:set:instance:DataKey::TotalShares, storage:set:persistent:DataKey::Shares
 - **behavior** n/a — behavior unavailable: crate does not build: error[E0308]: mismatched types
 

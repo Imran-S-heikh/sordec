@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.8558406276738006,
-  "aggregate_overall_with_behavior": 0.8558406276738006,
+  "aggregate_overall": 0.8629736848757709,
+  "aggregate_overall_with_behavior": 0.8629736848757709,
   "behavior_measured_fixtures": 2,
   "fixtures": {
     "attestation": {
@@ -122,12 +122,12 @@
         "structure": {
           "checked": true,
           "notes": [
-            "6 entrypoints (0 unreconstructed, 1 without control flow)",
+            "6 entrypoints (0 unreconstructed, 2 without control flow)",
             "ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.5000 recall=0.9130 (23 original tokens, 42 reconstructed) — bloat 1.8x, dice ceiling ~0.7077",
-            "low-similarity: balance_shares(0.00), deposit(0.40)"
+            "control flow: precision=0.4872 recall=0.9500 (20 original tokens, 39 reconstructed) — bloat 1.9x, dice ceiling ~0.6780",
+            "low-similarity: deposit(0.40)"
           ],
-          "score": 0.6361542912246867,
+          "score": 0.805921052631579,
           "weight": 0.25
         }
       },
@@ -138,7 +138,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 6 entrypoints, 1 types recovered"
       ],
-      "overall": 0.8162602135315573,
+      "overall": 0.8661916139453492,
       "passed": false,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,
@@ -260,7 +260,7 @@
           "checked": true,
           "notes": [
             "2 entrypoints (0 unreconstructed, 0 without control flow)",
-            "ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound",
+            "ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
             "control flow: precision=1.0000 recall=1.0000 (5 original tokens, 5 reconstructed) — bloat 1.0x, dice ceiling ~1.0000"
           ],
           "score": 1.0,
@@ -315,7 +315,7 @@
           "checked": true,
           "notes": [
             "13 entrypoints (0 unreconstructed, 4 without control flow)",
-            "ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound",
+            "ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
             "control flow: precision=0.7500 recall=1.0000 (33 original tokens, 44 reconstructed) — bloat 1.3x, dice ceiling ~0.8571"
           ],
           "score": 0.9062795199380564,
@@ -370,7 +370,7 @@
           "checked": true,
           "notes": [
             "13 entrypoints (0 unreconstructed, 4 without control flow)",
-            "ambiguous names (2 original, 3 reconstructed) — their call edges are dropped, so this is a lower bound",
+            "ambiguous names (1 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound",
             "control flow: precision=0.6346 recall=1.0000 (33 original tokens, 52 reconstructed) — bloat 1.6x, dice ceiling ~0.7765",
             "low-similarity: transfer(0.44)"
           ],
@@ -429,7 +429,7 @@
           "checked": true,
           "notes": [
             "13 entrypoints (0 unreconstructed, 1 without control flow)",
-            "ambiguous names (2 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound",
+            "ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
             "control flow: precision=0.4925 recall=1.0000 (33 original tokens, 67 reconstructed) — bloat 2.0x, dice ceiling ~0.6600",
             "low-similarity: decimals(0.00), name(0.00), symbol(0.00), transfer(0.44)"
           ],

@@ -410,6 +410,20 @@ fn overall_band(name: &str) -> (f64, f64) {
     // in the binary. structure 0.6220 -> 0.6448, the fixture 0.4199 ->
     // 0.4266, aggregate 0.8353 -> 0.8362.
     //
+    // Also score-2.1.0 — a `#[derive]`d body is the compiler's code.
+    //
+    // The same rule, in `structure`. The closure walker followed a
+    // `.clone()` edge into the `#[automatically_derived] impl Clone`
+    // rustc writes for a `#[contracttype]` enum, and counted that
+    // derive's `match` as the entrypoint's own control flow. Both sides
+    // generate it identically from the same `#[derive]`, and it is
+    // reached asymmetrically, because cloning an SDK handle compiles to
+    // nothing and so cannot be recovered from a binary.
+    //
+    // Excluded on both sides, by rustc's own marker. dex structure
+    // 0.6362 -> 0.8059 and the fixture 0.8163 -> 0.8662; nothing else
+    // moves, because nothing else clones. Aggregate 0.8558 -> 0.8630.
+    //
     // Re-centred 2026-09-20 for **score-2.1.0** — what the compiler
     // deleted is not a miss.
     //
@@ -566,7 +580,7 @@ fn overall_band(name: &str) -> (f64, f64) {
         "token-v23" => (0.81, 0.85),
         "token-v23-stripped" => (0.42, 0.46),
         "timelock" => (0.97, 1.00),
-        "dex-liquidity-pool" => (0.80, 0.84),
+        "dex-liquidity-pool" => (0.85, 0.89),
         "attestation" => (0.98, 1.0),
         _ => (0.00, 1.00),
     }
