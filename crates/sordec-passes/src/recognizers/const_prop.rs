@@ -53,7 +53,7 @@ use sordec_ir::{
 use super::{apply_rewrites, Rewrite};
 use crate::dataflow::{resolve_use, CallIndex, Resolver};
 use crate::pass::{Pass, PassResult};
-use crate::val_abi::{decode_small_symbol, TAG_VOID};
+use crate::val_abi::{decode_small_symbol, decode_u32val, MINOR_BITS, TAG_BITS, TAG_VOID};
 
 /// Pass name — also the provenance `pass` field for every rewrite.
 pub const PASS_NAME: &str = "const-prop";
@@ -121,26 +121,27 @@ impl Pass<HighIr> for ConstPropPass {
                     }
                     Upgrade::NotATarget => {}
                 }
-                // Storage-key naming: collect every tag-14 symbol literal
+                // Storage-key naming: collect every constant literal
                 // reachable through the key operand (across phis, helper
-                // params, and helper returns), and rename each once.
+                // params, and helper returns), and rename each once. Two
+                // decodes, both strict, tried in order — a tag-14
+                // `SymbolSmall` (`symbol_short!("ADMIN")`-class) and a
+                // tag-4 `U32Val`.
                 if let Some(key) = storage_key_of(op) {
                     let mut sites = Vec::new();
                     let mut visited = HashSet::new();
                     collect_literal_sites(ir, &calls, func.id, key, &mut sites, &mut visited, 0);
                     for (site_fn, site_id, bits) in sites {
-                        let Some(text) = decode_small_symbol(bits) else {
+                        let Some((expr, ty, what)) = decode_key_literal(bits) else {
                             continue;
                         };
                         if named_keys.insert((site_fn, site_id)) {
                             planned.entry(site_fn).or_default().push(Rewrite {
                                 id: site_id,
-                                expr: Expr::Literal(Literal::Symbol(text.clone())),
-                                ty: Some(IrType::Known(KnownType::Symbol)),
+                                expr,
+                                ty: Some(ty),
                                 source: ProvenanceSource::DataFlow,
-                                note: format!(
-                                    "const-prop key symbol {text:?} (decoded SymbolSmall 0x{bits:x})"
-                                ),
+                                note: format!("const-prop key {what} (decoded 0x{bits:x})"),
                                 metric: M_KEY_NAMED,
                             });
                         }
@@ -348,6 +349,50 @@ fn storage_key_of(op: &KnownOp) -> Option<ValueId> {
         | KnownOp::StorageExtendTtlV2 { key, .. } => Some(*key),
         _ => None,
     }
+}
+
+/// Decode raw `Val` bits sitting in a storage-key position into the
+/// literal that key really is, with the type to stamp on it.
+///
+/// The key position is ABI-typed `Val`, so bits reaching it are a tagged
+/// Soroban value and never a plain integer — rendering them as one is
+/// what produced `e.storage().instance().get(&25769803780i64)` for what
+/// the source wrote as a `u32`-valued key. Two constant forms are
+/// recognized:
+///
+/// - **tag 14, `SymbolSmall`** — `symbol_short!("ADMIN")`-class keys,
+///   whose text is packed into the body.
+/// - **tag 4, `U32Val`** — what a `#[repr(u32)]` enum with a hand-written
+///   `TryFromVal` doing `(*v as u32).into()` compiles to (Phoenix's
+///   `DataKey`). The *name* is unrecoverable — no `contractspecv0` union,
+///   no rodata symbol, nothing in the binary carries it — but the
+///   discriminant is right here, and `&6u32` is both honest and
+///   type-correct where `&25769803780i64` was neither.
+///
+/// Both decodes are strict, because this drives a *rename*. The `U32Val`
+/// arm additionally requires a zero minor field: [`decode_u32val`]
+/// documents that invariant but does not check it, and a rename is the
+/// wrong place to assume it. Anything else is left alone — an unnamed key
+/// is a fact we did not prove, which is the honest rendering.
+fn decode_key_literal(bits: u64) -> Option<(Expr, IrType, String)> {
+    if let Some(text) = decode_small_symbol(bits) {
+        let note = format!("symbol {text:?} (SymbolSmall)");
+        return Some((
+            Expr::Literal(Literal::Symbol(text)),
+            IrType::Known(KnownType::Symbol),
+            note,
+        ));
+    }
+    let minor = (bits >> TAG_BITS) & ((1u64 << MINOR_BITS) - 1);
+    if minor != 0 {
+        return None;
+    }
+    let n = decode_u32val(bits)?;
+    Some((
+        Expr::Literal(Literal::U32(n)),
+        IrType::Known(KnownType::U32),
+        format!("u32 {n} (U32Val)"),
+    ))
 }
 
 /// The stored value operand of a `StorageSet`, else `None`.
@@ -1087,6 +1132,74 @@ mod tests {
         // Provenance preserves the original bits.
         let note = &key_binding.latest_provenance().note;
         assert!(note.contains("0x"), "note: {note}");
+    }
+
+    /// A `#[repr(u32)]` enum with a hand-written `TryFromVal` doing
+    /// `(*v as u32).into()` reaches storage as a tag-4 `U32Val`, not as a
+    /// symbol or a spec'd union. Phoenix's `DataKey::MaxVestingComplexity`
+    /// (= 6) is `0x6_0000_0004`, and rendering it as `25769803780i64` is
+    /// not merely ugly: `i64` marshals to an `I64Small` `Val`, a
+    /// *different* key than `U32Val(6)`, so the reconstruction would read
+    /// and write the wrong storage slot. The variant name is gone from the
+    /// binary, but the discriminant is not.
+    #[test]
+    fn storage_key_literal_renamed_to_u32() {
+        let mut ir = module(vec![func(
+            0,
+            None,
+            0,
+            vec![
+                i64c(0x6_0000_0004),
+                i64c(2),
+                Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+                    tier: StorageTier::Known(KnownTier::Instance),
+                    durability: v(1),
+                    key: v(0),
+                    resolved_key: None,
+                    missing: sordec_ir::Missing::Option,
+                })),
+            ],
+        )]);
+        let result = run(&mut ir);
+        assert!(result.changed);
+        assert_eq!(result.metrics.get(M_KEY_NAMED), Some(1));
+        let key_binding = ir.function(f(0)).unwrap().bindings.get(v(0)).unwrap();
+        match &key_binding.expr {
+            Expr::Literal(Literal::U32(n)) => assert_eq!(*n, 6),
+            other => panic!("expected U32 literal, got {other:?}"),
+        }
+        assert_eq!(key_binding.ty, IrType::Known(sordec_ir::KnownType::U32));
+    }
+
+    /// The `U32Val` arm is strict where [`decode_u32val`] is not: a
+    /// non-zero minor field is not a canonical `U32Val`, and a rename is
+    /// the wrong place to assume the invariant holds. Left alone, an
+    /// unproven key stays unnamed — which is the honest rendering.
+    #[test]
+    fn storage_key_with_nonzero_minor_is_not_renamed() {
+        let mut ir = module(vec![func(
+            0,
+            None,
+            0,
+            vec![
+                i64c(0x6_0000_0104),
+                i64c(2),
+                Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+                    tier: StorageTier::Known(KnownTier::Instance),
+                    durability: v(1),
+                    key: v(0),
+                    resolved_key: None,
+                    missing: sordec_ir::Missing::Option,
+                })),
+            ],
+        )]);
+        run(&mut ir);
+        let key_binding = ir.function(f(0)).unwrap().bindings.get(v(0)).unwrap();
+        assert!(
+            matches!(key_binding.expr, Expr::Literal(Literal::I64(_))),
+            "expected the raw literal untouched, got {:?}",
+            key_binding.expr
+        );
     }
 
     #[test]
