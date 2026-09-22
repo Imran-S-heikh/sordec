@@ -457,15 +457,37 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
     }
 }
 
-/// Join the incoming edges of a phi: `Inferred(T)` when every resolved edge
-/// agrees on base `T`, else `None` (arms disagree — honestly `Unknown`).
+/// Join the incoming edges of a phi: `Inferred(T)` when every *resolved*
+/// edge agrees on base `T`, else `None` (arms disagree — honestly
+/// `Unknown`).
+///
+/// An unresolved edge is **skipped, not fatal**. Bailing on the first
+/// `Unknown` is the wrong lattice join: it lets one unrecovered arm
+/// discard what every other arm proved, and a phi is exactly where arms
+/// are unequally recovered. Measured on `phoenix-vesting`, 24 phis had a
+/// `Known` incoming type and still came out `Unknown` for this reason —
+/// nine of them `Known:I64`, ten `Known:I32`.
+///
+/// Leaving them `Unknown` is not the neutral choice it looks like,
+/// because a slot must still be *declared* something: the Rust backend's
+/// [`HolePolicy::unknown_type`] stands in `soroban_sdk::Val`, so the
+/// binding is emitted as `let mut v160: Val;` and every
+/// `v160 = 0i64;` assigning into it fails to compile. The choice is not
+/// between guessing and not guessing — it is between the backend guessing
+/// `Val` with no evidence and this join naming the type the resolved arms
+/// actually carry.
+///
+/// The result stays `Inferred`, never `Known`: it is propagated from the
+/// arms, and a recognizer that proves the type still outranks it.
 fn phi_join(
     incoming: &[(sordec_common::BlockId, ValueId)],
     types: &HashMap<ValueId, IrType>,
 ) -> Option<IrType> {
     let mut agreed: Option<KnownType> = None;
     for (_, value) in incoming {
-        let base = base_of(types.get(value))?;
+        let Some(base) = base_of(types.get(value)) else {
+            continue; // unrecovered arm: no evidence, not counter-evidence
+        };
         match &agreed {
             None => agreed = Some(base),
             Some(prev) if *prev == base => {}
@@ -1138,9 +1160,26 @@ mod tests {
             phi_join(&[(BlockId::from_index(0), a), (BlockId::from_index(1), c)], &types),
             None
         );
-        // An unresolved arm → None (wait for it).
+        // An unresolved arm is skipped, not fatal: it carries no evidence,
+        // so it cannot outvote an arm that carries some. Waiting for it
+        // instead is what left 24 phis on `phoenix-vesting` untyped with a
+        // `Known` arm in hand, and an untyped slot is not neutral — the
+        // backend declares it `Val` and the assignments stop compiling. A
+        // later conflict still reverts the id to `Unknown` for good, via
+        // `Evidence::conflicted`, so the fixpoint is unaffected.
         assert_eq!(
             phi_join(&[(BlockId::from_index(0), a), (BlockId::from_index(1), ValueId::from_index(9))], &types),
+            Some(IrType::Inferred(KnownType::U64))
+        );
+        // No resolved arm at all → still nothing to say.
+        assert_eq!(
+            phi_join(
+                &[
+                    (BlockId::from_index(0), ValueId::from_index(8)),
+                    (BlockId::from_index(1), ValueId::from_index(9))
+                ],
+                &types
+            ),
             None
         );
     }
