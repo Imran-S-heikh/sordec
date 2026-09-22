@@ -38,8 +38,21 @@ fn variant_path(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<syn::Path>
 /// constant and `against` carries a known integer type to infer from.
 fn unsuffixed(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common::ValueId) -> Option<syn::Expr> {
     let other = ctx.func.bindings.get(ctx.fold_target(against))?;
+    unsuffixed_against(ctx, value, &other.ty)
+}
+
+/// `value` as a suffix-free integer literal, inferred against a type
+/// rather than against another value in this function.
+///
+/// The call-argument case needs this form: the type to match lives on the
+/// *callee's* parameter, in another function's bindings entirely.
+fn unsuffixed_against(
+    ctx: &FnCtx,
+    value: sordec_common::ValueId,
+    against: &IrType,
+) -> Option<syn::Expr> {
     if !matches!(
-        other.ty,
+        *against,
         IrType::Known(
             KnownType::I32 | KnownType::I64 | KnownType::U32 | KnownType::U64 | KnownType::U128 | KnownType::I128
         ) | IrType::Inferred(
@@ -61,7 +74,7 @@ fn unsuffixed(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common
     // what they hold — an encoded `Val` against a decoded bound, say —
     // and dropping the suffix would turn a type error into a range error
     // without making either side more true.
-    let fits = match base_of(&other.ty) {
+    let fits = match base_of(against) {
         Some(KnownType::I32) => i32::try_from(n).is_ok(),
         Some(KnownType::U32) => u32::try_from(n).is_ok(),
         Some(KnownType::I64) => i64::try_from(n).is_ok(),
@@ -161,7 +174,26 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             // Every emitted function takes `Env` as its leading parameter,
             // so every internal call threads it as the first argument.
             let env = ctx.env_borrow();
-            let a: Vec<syn::Expr> = args.iter().map(|v| ctx.arg_ref(*v)).collect();
+            // A constant argument takes the *callee's* parameter type, not
+            // the width of the wasm word it was loaded as. Both sides of a
+            // helper call come from the same module, so a mismatch here is
+            // ours: the parameter is typed by whatever proved it (a rodata
+            // position and length are `u32` by the host ABI) while the
+            // argument literal is still the raw `i32` the const carried,
+            // which rustc reports as "arguments to this function are
+            // incorrect". Rendering the constant without a suffix lets it
+            // take the parameter's type, and the range check in
+            // `unsuffixed_against` keeps a genuine disagreement visible
+            // rather than converting it into a silent wrap.
+            let a: Vec<syn::Expr> = args
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    callee_param_type(ctx, *target, i)
+                        .and_then(|ty| unsuffixed_against(ctx, *v, &ty))
+                        .unwrap_or_else(|| ctx.arg_ref(*v))
+                })
+                .collect();
             parse_quote!(#path(#env, #(#a),*))
         }
         // A recovered Soroban op renders as its idiomatic method chain when
@@ -247,6 +279,17 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             ctx.policy.unknown_expr(&format!("unrecovered {op_kind:?}"))
         }
     }
+}
+
+/// The declared type of `target`'s parameter at position `index`.
+///
+/// `None` whenever the callee, the parameter or its binding cannot be
+/// resolved — an argument then renders exactly as it did before, which is
+/// the honest fallback for a call we cannot line up.
+fn callee_param_type(ctx: &FnCtx, target: FuncId, index: usize) -> Option<IrType> {
+    let callee = ctx.high.function(target)?;
+    let param = *callee.params.get(index)?;
+    Some(callee.bindings.get(param)?.ty.clone())
 }
 
 /// The call path for a target function: a `contractspecv0` function is a
