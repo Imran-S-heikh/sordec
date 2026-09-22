@@ -394,6 +394,45 @@ impl<'a> FnCtx<'a> {
         )
     }
 
+    /// A branch condition, as Rust spells it.
+    ///
+    /// Wasm's `if`/`br_if` branch when the operand is **nonzero**, and the
+    /// IR records that faithfully: the condition is whatever integer the
+    /// test was applied to. Rust has no such coercion, so a condition that
+    /// is not already `bool` needs the comparison written out —
+    /// `let v31 = v29 & 1i32; if v31 {}` is rustc's `expected bool, found
+    /// i32`, and the low-bit mask is the shape it most often takes.
+    ///
+    /// This is a language-surface adaptation, not a repair: nothing in the
+    /// IR is wrong, the two languages simply spell the same test
+    /// differently. Only machine integers are adapted. A condition still
+    /// typed `Unknown` renders as `Val`, and `Val != 0` is not true either
+    /// — inventing a comparison there would assert a shape we have not
+    /// recovered, so it is left alone to fail visibly.
+    fn cond_ref(&self, vid: ValueId) -> syn::Expr {
+        let expr = self.value_ref(vid);
+        if self.is_machine_integer(vid) {
+            parse_quote!(#expr != 0)
+        } else {
+            expr
+        }
+    }
+
+    /// Whether a binding is an integer the wasm truth test was applied to
+    /// — `bool` deliberately excluded, being already a condition.
+    fn is_machine_integer(&self, vid: ValueId) -> bool {
+        matches!(
+            self.func.bindings.get(vid).map(|b| &b.ty),
+            Some(
+                IrType::Known(
+                    KnownType::I32 | KnownType::I64 | KnownType::U32 | KnownType::U64
+                ) | IrType::Inferred(
+                    KnownType::I32 | KnownType::I64 | KnownType::U32 | KnownType::U64
+                )
+            )
+        )
+    }
+
     /// The recovered type of a binding, degrading through the hole policy.
     fn value_type(&self, vid: ValueId) -> syn::Type {
         match self.func.bindings.get(vid) {
@@ -429,7 +468,7 @@ impl<'a> FnCtx<'a> {
                 then_region,
                 else_region,
             } => {
-                let c = self.value_ref(*cond);
+                let c = self.cond_ref(*cond);
                 let then_block = self.region_block(then_region);
                 out.push(match else_region {
                     Some(er) => {

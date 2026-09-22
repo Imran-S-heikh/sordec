@@ -251,6 +251,31 @@ fn every_fixture_emits_real_bodies() {
     }
 }
 
+/// Wasm's `if` branches on *nonzero*; Rust's demands a `bool`. A condition
+/// the IR recovered as a machine integer therefore has to have the
+/// comparison written out, or rustc answers `expected bool, found i32` —
+/// the shape it usually takes is the low-bit mask `let v = x & 1i32; if v`.
+///
+/// token-v23 is the corpus witness (one such branch). The other fixtures
+/// do not exercise it, which is why this asserts the emitted form rather
+/// than a count: the wasm truth test is a language difference, so no
+/// fixture should ever render a bare integer as a condition.
+#[test]
+fn an_integer_condition_is_compared_against_zero() {
+    let src = emit_rust(&common::build_high(common::TOKEN_V23)).expect("emits");
+    assert!(
+        src.contains("!= 0 {"),
+        "expected the wasm nonzero test spelled out as a Rust comparison\n---\n{src}"
+    );
+
+    // And it stays a condition, not a value: every fixture still parses.
+    for (name, wasm) in common::fixtures() {
+        let src = emit_rust(&common::build_high(wasm)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        syn::parse_file(&src)
+            .unwrap_or_else(|e| panic!("{name}: emitted Rust did not parse: {e}\n---\n{src}"));
+    }
+}
+
 /// S2b (D4.4): a `Result<T, Error>` entrypoint reconstructs its Ok/Err
 /// returns. attestation's `digest_keccak` recovers the error constant as
 /// `Error::EmptyMessage` and wraps the guard return as `Err(..)`; an
