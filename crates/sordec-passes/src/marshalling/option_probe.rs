@@ -59,7 +59,7 @@
 use std::collections::HashSet;
 
 use sordec_common::{FuncId, Provenance, ProvenanceSource, ValueId};
-use sordec_ir::{Expr, HighFunction, HighIr, KnownOp, KnownTier, SemanticOp, StorageTier};
+use sordec_ir::{Expr, HighFunction, HighIr, KnownOp, KnownTier, Literal, SemanticOp, StorageTier};
 
 use crate::pass::{Pass, PassResult};
 use crate::recognizers::wrappers::chase_value;
@@ -69,6 +69,58 @@ pub const PASS_NAME: &str = "option-probe";
 
 /// `has` calls proven to be the SDK's `Option` discriminant.
 const M_PROBES: &str = "storage_option_probe";
+
+
+/// Whether two key operands provably address the same storage slot.
+///
+/// SSA identity is the strong case and the common one, but rustc is under
+/// no obligation to share the constant between the probe and the read it
+/// guards. Measured on `phoenix-vesting`: of four probe sites, two feed
+/// both calls from one value and two materialise the key twice —
+/// `has(v6)` beside `get(v10)`, both the constant `U32Val(2)`. ValueId
+/// equality alone therefore missed half of them, and each miss cost three
+/// things at once: a `has` the source never wrote reported as a storage
+/// fact, the branch it guards left in the output, and the `get` left as an
+/// `Option` whose consumers then fail to type-check.
+///
+/// Comparing the *constants* stays inside this pass's standing rule that a
+/// pairing must be a fact about this code. Two literals with equal value
+/// address one slot — that is bit equality, strictly stronger than the
+/// "two keys that merely name the same variant" case the gate refuses,
+/// which is about separately *constructed* keys whose contents were never
+/// proven. A key that is not a constant is compared by identity exactly as
+/// before.
+fn same_key(func: &HighFunction, a: ValueId, b: ValueId) -> bool {
+    if a == b {
+        return true;
+    }
+    match (key_constant(func, a), key_constant(func, b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// A key operand's constant form, normalised so the integer widths the
+/// wasm happened to use cannot make one slot look like two.
+fn key_constant(func: &HighFunction, value: ValueId) -> Option<KeyConst> {
+    match &func.bindings.get(value)?.expr {
+        Expr::Literal(Literal::I32(n)) => Some(KeyConst::Int(i128::from(*n))),
+        Expr::Literal(Literal::I64(n)) => Some(KeyConst::Int(i128::from(*n))),
+        Expr::Literal(Literal::U32(n)) => Some(KeyConst::Int(i128::from(*n))),
+        Expr::Literal(Literal::U64(n)) => Some(KeyConst::Int(i128::from(*n))),
+        Expr::Literal(Literal::Symbol(s)) => Some(KeyConst::Symbol(s.clone())),
+        _ => None,
+    }
+}
+
+/// The comparable form of a constant key.
+#[derive(PartialEq)]
+enum KeyConst {
+    /// Any integer width, widened so `I32(2)` and `U32(2)` are one slot.
+    Int(i128),
+    /// A short symbol, compared by its text.
+    Symbol(String),
+}
 
 /// The SDK `Option`-probe recognizer. Stateless.
 #[derive(Debug, Default, Clone, Copy)]
@@ -89,7 +141,7 @@ impl Pass<HighIr> for OptionProbePass {
             for (key, tier) in get_keys(func) {
                 // Inlined: the probe is a sibling binding.
                 for (id, has_key, has_tier) in has_ops(func) {
-                    if has_key == key && has_tier == tier {
+                    if same_key(func, has_key, key) && has_tier == tier {
                         proven.insert((func.id, id));
                     }
                 }
@@ -101,7 +153,7 @@ impl Pass<HighIr> for OptionProbePass {
                     };
                     if !args
                         .iter()
-                        .any(|arg| chase_value(func, *arg) == key)
+                        .any(|arg| same_key(func, chase_value(func, *arg), key))
                     {
                         continue;
                     }
