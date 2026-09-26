@@ -133,25 +133,6 @@ pub(super) fn addresses_only_flow_to(
 /// exist to unblock it, which is the difference between a mood and a work
 /// item.
 ///
-/// The classification is per-callee behaviour, because that is what decides
-/// ownership: a callee that only writes through the pointer is
-/// [`super::sret`]'s to convert, one that only reads is
-/// [`super::argpromote`]'s, and one that hands the pointer onward belongs
-/// to neither yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FrameEscape {
-    /// Reached a callee that only stores through the pointer.
-    CallWriteOnly,
-    /// Reached a callee that only loads through it.
-    CallReadOnly,
-    /// Reached a callee that both reads and writes, forwards the pointer
-    /// onward, or that could not be resolved.
-    CallOpaque,
-    /// Left through something other than a call: stored as a value,
-    /// returned, or carried by a terminator.
-    Other,
-}
-
 /// What escaped, and whether it can be pinned to particular bytes.
 ///
 /// [`first_escape`] answers "did anything escape", which is all a
@@ -166,8 +147,29 @@ pub(super) enum FrameEscapes {
     /// compared against slot offsets directly.
     Bounded(Vec<(i64, i64)>),
     /// Something escaped that cannot be pinned to bytes, so no slot is safe.
-    /// Carries the classification for the census.
-    Unbounded(FrameEscape),
+    /// Carries why, for the census.
+    Unbounded(EscapeReason),
+}
+
+/// Why an escape could not be pinned to particular bytes.
+///
+/// The census reports these, and the point of the breakdown is that each
+/// one names a different piece of missing work rather than a mood.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum EscapeReason {
+    /// Left through something that is not a direct call at all: a host
+    /// import, a return, a terminator, or stored as a value.
+    NotACall,
+    /// A direct call whose callee could not be resolved, or which passed
+    /// the address in a position the callee has no parameter for.
+    CalleeUnresolved,
+    /// Inside the callee, an access through the pointer is not at a
+    /// constant offset from it — an indexed write, say. Bounding these
+    /// needs the index's range, which the IR does not carry.
+    OffsetNotConstant,
+    /// The pointer escapes the callee as well, so its footprint is
+    /// whatever the next callee does.
+    EscapesAgain,
 }
 
 /// Classify every escape of a frame address, bounding what can be bounded.
@@ -200,20 +202,19 @@ pub(super) fn frame_escapes(
                 // `canon_addr` cannot fold. Bounding those needs the encode
                 // recognised first; until then they decline as before.
                 let Some(target) = calls.target(op) else {
-                    return FrameEscapes::Unbounded(FrameEscape::Other);
+                    return FrameEscapes::Unbounded(EscapeReason::NotACall);
                 };
-                match callee_footprint(ir, target, args, addresses, func) {
-                    Some(bounded) => ranges.extend(bounded),
-                    None => {
-                        return FrameEscapes::Unbounded(classify_callee(
-                            ir, target, args, addresses,
-                        ))
-                    }
+                let mut seen = HashSet::new();
+                match callee_footprint(
+                    ir, calls, target, args, addresses, func, REACH_DEPTH, &mut seen,
+                ) {
+                    Ok(bounded) => ranges.extend(bounded),
+                    Err(why) => return FrameEscapes::Unbounded(why),
                 }
             }
             LiftedValueDef::Alias(from) | LiftedValueDef::PickOutput { from, .. } => {
                 if addresses.contains(from) {
-                    return FrameEscapes::Unbounded(FrameEscape::Other);
+                    return FrameEscapes::Unbounded(EscapeReason::NotACall);
                 }
             }
             LiftedValueDef::BlockParam { .. } => {}
@@ -228,7 +229,7 @@ pub(super) fn frame_escapes(
             escapes |= values.iter().any(|v| addresses.contains(v));
         }
         if escapes {
-            return FrameEscapes::Unbounded(FrameEscape::Other);
+            return FrameEscapes::Unbounded(EscapeReason::NotACall);
         }
     }
     if ranges.is_empty() {
@@ -238,75 +239,50 @@ pub(super) fn frame_escapes(
     }
 }
 
+/// How many call levels a footprint is followed through.
+///
+/// rustc's shadow-stack helpers nest a few deep — an entrypoint calls a
+/// converter which calls an accessor — and each level is one more function
+/// to read. The bound is what stops a pathological chain, not a tuning
+/// knob; a chain deeper than this declines, which is the same answer as
+/// before the recursion existed.
+const REACH_DEPTH: u32 = 8;
+
 /// The caller-relative ranges one call reaches through the frame addresses
-/// it was passed, or `None` when any of them cannot be bounded.
+/// it was passed, or why they cannot be bounded.
+#[allow(clippy::too_many_arguments)]
 fn callee_footprint(
     ir: &sordec_ir::LiftedIr,
+    calls: &super::calls::CallIndex,
     target: sordec_common::FuncId,
     args: &[ValueId],
     addresses: &HashSet<ValueId>,
     caller: &LiftedFunction,
-) -> Option<Vec<(i64, i64)>> {
-    let callee = ir.function(target)?;
-    let params = &ir.function(target)?.blocks.get(callee.entry)?.params;
+    depth: u32,
+    seen: &mut HashSet<sordec_common::FuncId>,
+) -> Result<Vec<(i64, i64)>, EscapeReason> {
+    let callee = ir.function(target).ok_or(EscapeReason::CalleeUnresolved)?;
+    let params = &callee
+        .blocks
+        .get(callee.entry)
+        .ok_or(EscapeReason::CalleeUnresolved)?
+        .params;
     let mut out = Vec::new();
     for (position, arg) in args.iter().enumerate() {
         if !addresses.contains(arg) {
             continue;
         }
-        let param = params.get(position).copied()?;
+        let param = params
+            .get(position)
+            .copied()
+            .ok_or(EscapeReason::CalleeUnresolved)?;
         // Where in *our* frame this argument points.
         let (_, delta) = canon_addr(caller, *arg);
-        out.extend(param_footprint(callee, param)?.shifted(i64::from(delta)));
+        out.extend(
+            param_footprint(ir, calls, callee, param, depth, seen)?.shifted(i64::from(delta)),
+        );
     }
-    Some(out)
-}
-
-/// How `target` uses whichever of its parameters received a frame address.
-fn classify_callee(
-    ir: &sordec_ir::LiftedIr,
-    target: sordec_common::FuncId,
-    args: &[ValueId],
-    addresses: &HashSet<ValueId>,
-) -> FrameEscape {
-    let Some(callee) = ir.function(target) else {
-        return FrameEscape::CallOpaque;
-    };
-    // Parameters live on the entry block, not the function.
-    let Some(params) = ir.function(target).and_then(|f| f.blocks.get(f.entry)) else {
-        return FrameEscape::CallOpaque;
-    };
-    let params = &params.params;
-    // Which parameter positions received an address. A call may pass the
-    // frame in more than one, and the buckets only differ if every one of
-    // them agrees, so disagreement is opaque.
-    let positions: Vec<usize> = args
-        .iter()
-        .enumerate()
-        .filter(|(_, a)| addresses.contains(a))
-        .map(|(i, _)| i)
-        .collect();
-
-    let mut saw_read = false;
-    let mut saw_write = false;
-    for position in positions {
-        let Some(param) = params.get(position).copied() else {
-            return FrameEscape::CallOpaque;
-        };
-        match param_usage(callee, param) {
-            Some((r, w)) => {
-                saw_read |= r;
-                saw_write |= w;
-            }
-            // Escapes again inside the callee.
-            None => return FrameEscape::CallOpaque,
-        }
-    }
-    match (saw_read, saw_write) {
-        (false, true) => FrameEscape::CallWriteOnly,
-        (true, false) => FrameEscape::CallReadOnly,
-        _ => FrameEscape::CallOpaque,
-    }
+    Ok(out)
 }
 
 /// The byte ranges a callee touches through a pointer parameter, measured
@@ -340,56 +316,52 @@ impl Footprint {
     }
 }
 
-/// Whether `param`'s address closure inside `callee` is only ever loaded
-/// from (`true, false`), only stored through (`false, true`), or both.
-/// `None` when it escapes the callee too.
-fn param_usage(callee: &LiftedFunction, param: ValueId) -> Option<(bool, bool)> {
-    let live: HashSet<ValueId> = callee.values.iter().map(|(id, _)| id).collect();
-    let addresses = address_closure(callee, param, &live);
-    let mut accessors = HashSet::new();
-    let (mut reads, mut writes) = (false, false);
-
-    for (_, block) in callee.blocks.iter() {
-        for &id in &block.instructions {
-            let Some(value) = callee.values.get(id) else {
-                continue;
-            };
-            let LiftedValueDef::Operator { op, args } = &value.def else {
-                continue;
-            };
-            let Some(shape) = access_shape(op) else { continue };
-            let Some(addr) = args.first() else { continue };
-            if !addresses.contains(addr) {
-                continue;
-            }
-            accessors.insert(id);
-            if shape.is_store {
-                writes = true;
-            } else {
-                reads = true;
-            }
-        }
-    }
-    if !addresses_only_flow_to(callee, &addresses, &accessors, &live) {
-        return None;
-    }
-    Some((reads, writes))
-}
-
-/// `param`'s footprint inside `callee`, or `None` when it cannot be bounded.
+/// `param`'s footprint inside `callee`, or why it cannot be bounded.
 ///
-/// Declines for the same reason [`param_usage`] does — the pointer escapes
-/// the callee as well — and for one more: an access whose address does not
+/// Follows the pointer through further calls, up to [`REACH_DEPTH`].
+///
+/// Declines when the pointer escapes the callee as well, and for one more
+/// reason of its own: an access whose address does not
 /// canonicalise to *this parameter* plus a constant. A pointer that arrives
 /// through a phi of two bases, or is computed by arithmetic
 /// [`canon_addr`] will not fold, has no offset we can name, and a footprint
 /// that silently omitted it would be a promise we cannot keep.
-fn param_footprint(callee: &LiftedFunction, param: ValueId) -> Option<Footprint> {
+fn param_footprint(
+    ir: &sordec_ir::LiftedIr,
+    calls: &super::calls::CallIndex,
+    callee: &LiftedFunction,
+    param: ValueId,
+    depth: u32,
+    seen: &mut HashSet<sordec_common::FuncId>,
+) -> Result<Footprint, EscapeReason> {
+    if depth == 0 {
+        return Err(EscapeReason::EscapesAgain);
+    }
+    // A cycle has no fixed point we can compute by descending, and a helper
+    // that reaches itself reaches whatever the recursion would have found.
+    if !seen.insert(callee.id) {
+        return Err(EscapeReason::EscapesAgain);
+    }
+    let result = param_footprint_inner(ir, calls, callee, param, depth, seen);
+    seen.remove(&callee.id);
+    result
+}
+
+fn param_footprint_inner(
+    ir: &sordec_ir::LiftedIr,
+    calls: &super::calls::CallIndex,
+    callee: &LiftedFunction,
+    param: ValueId,
+    depth: u32,
+    seen: &mut HashSet<sordec_common::FuncId>,
+) -> Result<Footprint, EscapeReason> {
     let live: HashSet<ValueId> = callee.values.iter().map(|(id, _)| id).collect();
     let addresses = address_closure(callee, param, &live);
+    let param_base = canon_addr(callee, param).0;
     let mut accessors = HashSet::new();
     let mut footprint = Footprint::default();
 
+    // What this function itself reads and writes through the pointer.
     for (_, block) in callee.blocks.iter() {
         for &id in &block.instructions {
             let Some(value) = callee.values.get(id) else {
@@ -405,16 +377,63 @@ fn param_footprint(callee: &LiftedFunction, param: ValueId) -> Option<Footprint>
             }
             accessors.insert(id);
             let (base, delta) = canon_addr(callee, *addr);
-            if base != canon_addr(callee, param).0 {
-                return None;
+            if base != param_base {
+                return Err(EscapeReason::OffsetNotConstant);
             }
             footprint.touch(i64::from(delta) + i64::from(shape.memarg_offset), shape.width);
         }
     }
-    if !addresses_only_flow_to(callee, &addresses, &accessors, &live) {
-        return None;
+
+    // And what it reaches by passing the pointer on. Descending here is the
+    // difference between "the callee forwards it, so we know nothing" and
+    // "the callee forwards it *to something that touches these bytes*" —
+    // measured as the single biggest reason frames were refused.
+    for (id, value) in callee.values.iter() {
+        if !live.contains(&id) || accessors.contains(&id) || addresses.contains(&id) {
+            continue;
+        }
+        match &value.def {
+            LiftedValueDef::Operator { op, args } => {
+                if !args.iter().any(|a| addresses.contains(a)) || is_global_set(op) {
+                    continue;
+                }
+                let Some(target) = calls.target(op) else {
+                    return Err(EscapeReason::NotACall);
+                };
+                for (start, end) in callee_footprint(
+                    ir,
+                    calls,
+                    target,
+                    args,
+                    &addresses,
+                    callee,
+                    depth - 1,
+                    seen,
+                )? {
+                    footprint.ranges.push((start, end));
+                }
+            }
+            LiftedValueDef::Alias(from) | LiftedValueDef::PickOutput { from, .. } => {
+                if addresses.contains(from) {
+                    return Err(EscapeReason::NotACall);
+                }
+            }
+            LiftedValueDef::BlockParam { .. } => {}
+        }
     }
-    Some(footprint)
+    for (_, block) in callee.blocks.iter() {
+        let mut escapes = false;
+        for_each_target(&block.terminator, |t| {
+            escapes |= t.args.iter().any(|a| addresses.contains(a));
+        });
+        if let LiftedTerminator::Return { values } = &block.terminator {
+            escapes |= values.iter().any(|v| addresses.contains(v));
+        }
+        if escapes {
+            return Err(EscapeReason::NotACall);
+        }
+    }
+    Ok(footprint)
 }
 
 fn is_global_set(op: &WasmOp) -> bool {

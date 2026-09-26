@@ -120,13 +120,14 @@ use sordec_ir::{
 };
 
 use super::frame::{self, canon_addr};
-use super::slots::{access_shape, address_closure, scheduled, FrameEscape, FrameEscapes};
+use super::slots::{access_shape, address_closure, scheduled, EscapeReason, FrameEscapes};
 use crate::dataflow::CfgFacts;
 use crate::declutter::for_each_target_mut;
 use crate::metrics_catalog::{
-    MEMORY_FRAME_DECLINED_OPAQUE, MEMORY_FRAME_DECLINED_OTHER, MEMORY_FRAME_DECLINED_OVERLAP,
-    MEMORY_FRAME_DECLINED_READ_ONLY, MEMORY_FRAME_DECLINED_WRITE_ONLY, MEMORY_LOADS_FORWARDED,
-    MEMORY_SLOTS_PROMOTED, MEMORY_STORES_REMOVED,
+    MEMORY_FRAME_DECLINED_ESCAPES_AGAIN, MEMORY_FRAME_DECLINED_NOT_A_CALL,
+    MEMORY_FRAME_DECLINED_OFFSET_NOT_CONST, MEMORY_FRAME_DECLINED_OPAQUE,
+    MEMORY_FRAME_DECLINED_OVERLAP, MEMORY_LOADS_FORWARDED, MEMORY_SLOTS_PROMOTED,
+    MEMORY_STORES_REMOVED,
 };
 use crate::pass::{Pass, PassResult};
 
@@ -243,7 +244,7 @@ impl Pass<LiftedIr> for SlotPromotionPass {
 /// re-running the analysis that produced it — and keeps the two from ever
 /// disagreeing about why a frame was refused.
 type EscapeMap =
-    std::collections::HashMap<sordec_common::FuncId, Result<Vec<(i64, i64)>, FrameEscape>>;
+    std::collections::HashMap<sordec_common::FuncId, Result<Vec<(i64, i64)>, EscapeReason>>;
 
 /// Bound every frame's escapes, over an immutable view of the module.
 ///
@@ -292,10 +293,10 @@ fn census(ir: &LiftedIr, result: &mut PassResult, escapes: &EscapeMap) {
             Some(Err(why)) => {
                 result.metrics.increment(
                     match why {
-                        FrameEscape::CallWriteOnly => MEMORY_FRAME_DECLINED_WRITE_ONLY,
-                        FrameEscape::CallReadOnly => MEMORY_FRAME_DECLINED_READ_ONLY,
-                        FrameEscape::CallOpaque => MEMORY_FRAME_DECLINED_OPAQUE,
-                        FrameEscape::Other => MEMORY_FRAME_DECLINED_OTHER,
+                        EscapeReason::NotACall => MEMORY_FRAME_DECLINED_NOT_A_CALL,
+                        EscapeReason::CalleeUnresolved => MEMORY_FRAME_DECLINED_OPAQUE,
+                        EscapeReason::OffsetNotConstant => MEMORY_FRAME_DECLINED_OFFSET_NOT_CONST,
+                        EscapeReason::EscapesAgain => MEMORY_FRAME_DECLINED_ESCAPES_AGAIN,
                     },
                     1,
                 );

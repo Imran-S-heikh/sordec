@@ -562,6 +562,21 @@ pub const MEMORY_SLOTS_PROMOTED: &str = "memory_slots_promoted";
 /// Frames declined because an address reached a callee that only writes
 /// through it — `sret`'s territory.
 pub const MEMORY_FRAME_DECLINED_WRITE_ONLY: &str = "memory_frame_declined_write_only";
+/// A frame declined because an address left it through something that is
+/// not a direct call: a host import, a return, a terminator, or stored as a
+/// value. A host import's linear-memory footprint *is* documented, but at
+/// the lifted layer its position argument is still the arithmetic that
+/// builds a `U32Val`, so the address arrives somewhere `canon_addr` cannot
+/// fold.
+pub const MEMORY_FRAME_DECLINED_NOT_A_CALL: &str = "memory_frame_declined_not_a_call";
+/// A frame declined because a callee's access through the pointer is not at
+/// a constant offset from it — an indexed store, say. Bounding these needs
+/// the index's range, which the IR does not carry.
+pub const MEMORY_FRAME_DECLINED_OFFSET_NOT_CONST: &str =
+    "memory_frame_declined_offset_not_const";
+/// A frame declined because the pointer escapes the callee as well, so its
+/// footprint is whatever the next callee does with it.
+pub const MEMORY_FRAME_DECLINED_ESCAPES_AGAIN: &str = "memory_frame_declined_escapes_again";
 
 // Why `sret` declined a candidate. The write-only frames above are its
 // territory; these say which of its own gates then refused, which is the

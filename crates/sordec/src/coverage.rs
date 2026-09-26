@@ -277,18 +277,21 @@ pub struct GuardCoverage {
 pub struct MemoryCoverage {
     /// Shadow-stack slots promoted from linear memory to SSA values.
     pub slots_promoted: i64,
-    /// Frames declined because an address reached a callee that only
-    /// writes through it — `memory::sret`'s territory.
-    pub declined_write_only: i64,
-    /// Frames declined because an address reached a callee that only reads
-    /// through it — `memory::argpromote`'s territory.
-    pub declined_read_only: i64,
-    /// Frames declined because an address reached a callee that both reads
-    /// and writes, forwards it onward, or could not be resolved.
+    /// Frames declined because an address left through something that is
+    /// not a direct call: a host import, a return, a terminator, or stored
+    /// as a value. A host import's linear-memory footprint is documented,
+    /// but at the lifted layer its position argument is still the
+    /// arithmetic that builds a `U32Val`.
+    pub declined_not_a_call: i64,
+    /// Frames declined because a callee's access through the pointer is not
+    /// at a constant offset from it — an indexed store, say.
+    pub declined_offset_not_const: i64,
+    /// Frames declined because the pointer escapes the callee as well, so
+    /// its footprint is whatever the next callee does with it.
+    pub declined_escapes_again: i64,
+    /// Frames declined because a callee, or the parameter an address landed
+    /// in, could not be resolved at all.
     pub declined_opaque: i64,
-    /// Frames declined for a non-call reason: stored as a value, returned,
-    /// or carried by a terminator.
-    pub declined_other: i64,
     /// Frames declined by a slot-layout gate rather than an escape:
     /// partial overlap, a width conflict, or a slot nothing writes.
     pub declined_layout: i64,
@@ -1199,22 +1202,22 @@ fn build_guards(t: &BTreeMap<&'static str, i64>) -> GuardCoverage {
 }
 
 fn build_memory(t: &BTreeMap<&'static str, i64>) -> MemoryCoverage {
-    let declined_write_only = metric(t, mc::MEMORY_FRAME_DECLINED_WRITE_ONLY);
-    let declined_read_only = metric(t, mc::MEMORY_FRAME_DECLINED_READ_ONLY);
+    let declined_not_a_call = metric(t, mc::MEMORY_FRAME_DECLINED_NOT_A_CALL);
+    let declined_offset_not_const = metric(t, mc::MEMORY_FRAME_DECLINED_OFFSET_NOT_CONST);
+    let declined_escapes_again = metric(t, mc::MEMORY_FRAME_DECLINED_ESCAPES_AGAIN);
     let declined_opaque = metric(t, mc::MEMORY_FRAME_DECLINED_OPAQUE);
-    let declined_other = metric(t, mc::MEMORY_FRAME_DECLINED_OTHER);
     let declined_layout = metric(t, mc::MEMORY_FRAME_DECLINED_OVERLAP);
     MemoryCoverage {
         slots_promoted: metric(t, mc::MEMORY_SLOTS_PROMOTED),
-        declined_write_only,
-        declined_read_only,
+        declined_not_a_call,
+        declined_offset_not_const,
+        declined_escapes_again,
         declined_opaque,
-        declined_other,
         declined_layout,
-        declined_total: declined_write_only
-            + declined_read_only
+        declined_total: declined_not_a_call
+            + declined_offset_not_const
+            + declined_escapes_again
             + declined_opaque
-            + declined_other
             + declined_layout,
         sret_converted: metric(t, mc::MEMORY_SRET_CONVERTED),
         sret_declined_path_dependent: metric(t, mc::MEMORY_SRET_DECLINED_PATH_DEPENDENT),
