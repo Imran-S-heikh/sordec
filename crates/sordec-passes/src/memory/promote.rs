@@ -263,7 +263,13 @@ fn escape_ranges(ir: &LiftedIr) -> EscapeMap {
         let addresses = address_closure(func, layout.base, &live);
         let accessors = accessors_of(func, &cfg, &addresses);
         let bounded = match super::slots::frame_escapes(
-            func, ir, &calls, &addresses, &accessors, &live,
+            func,
+            ir,
+            &calls,
+            layout.base,
+            &addresses,
+            &accessors,
+            &live,
         ) {
             FrameEscapes::Clean => Ok(Vec::new()),
             FrameEscapes::Bounded(ranges) => Ok(ranges),

@@ -177,30 +177,43 @@ pub(super) enum EscapeReason {
 /// The shape mirrors [`first_escape`] deliberately — the two must agree
 /// about what counts as an escape, or promotion and the census that explains
 /// it would tell different stories.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn frame_escapes(
     func: &LiftedFunction,
     ir: &sordec_ir::LiftedIr,
     calls: &super::calls::CallIndex,
+    base: ValueId,
     addresses: &HashSet<ValueId>,
     accessors: &HashSet<ValueId>,
     live: &HashSet<ValueId>,
 ) -> FrameEscapes {
     let mut ranges: Vec<(i64, i64)> = Vec::new();
+    let (tagged, chain) = tagged_pointers(func, addresses, base);
     for (id, value) in func.values.iter() {
-        if !live.contains(&id) || accessors.contains(&id) || addresses.contains(&id) {
+        if !live.contains(&id)
+            || accessors.contains(&id)
+            || addresses.contains(&id)
+            || chain.contains(&id)
+            || tagged.contains_key(&id)
+        {
             continue;
         }
         match &value.def {
             LiftedValueDef::Operator { op, args } => {
+                // A tagged pointer on its way to the host. Every
+                // linear-memory host function takes a `(pos, len)` pair and
+                // works forward from `pos`, so what it reaches is everything
+                // at or after the pointer — the length would only narrow
+                // that, and slots *before* the pointer are untouched either
+                // way. That is the whole gain: a frame whose tail is handed
+                // to `vec_new_from_linear_memory` still promotes its head.
+                if let Some(&offset) = args.iter().find_map(|a| tagged.get(a)) {
+                    ranges.push((offset, REACH_ONWARD));
+                    continue;
+                }
                 if !args.iter().any(|a| addresses.contains(a)) || is_global_set(op) {
                     continue;
                 }
-                // A host import is not necessarily unbounded — the catalog
-                // documents each one's linear-memory behaviour — but at this
-                // layer its position argument is still the raw arithmetic
-                // that builds a `U32Val`, so the address arrives somewhere
-                // `canon_addr` cannot fold. Bounding those needs the encode
-                // recognised first; until then they decline as before.
                 let Some(target) = calls.target(op) else {
                     return FrameEscapes::Unbounded(EscapeReason::NotACall);
                 };
@@ -236,6 +249,108 @@ pub(super) fn frame_escapes(
         FrameEscapes::Clean
     } else {
         FrameEscapes::Bounded(ranges)
+    }
+}
+
+/// Address-derived values that are a pointer *tagged* for the host, and the
+/// intermediate values of the chains that build them.
+///
+/// The first maps the tagged value to the pointer's offset from `base`; the
+/// second is every `extend`/`shl` on the way, which must not be mistaken for
+/// an escape in its own right.
+fn tagged_pointers(
+    func: &LiftedFunction,
+    addresses: &HashSet<ValueId>,
+    base: ValueId,
+) -> (std::collections::HashMap<ValueId, i64>, HashSet<ValueId>) {
+    let mut tagged = std::collections::HashMap::new();
+    let mut chain = HashSet::new();
+    for (id, _) in func.values.iter() {
+        let Some(inner) = u32val_encoded(func, id) else {
+            continue;
+        };
+        if !addresses.contains(&inner) {
+            continue;
+        }
+        let (canon_base, delta) = canon_addr(func, inner);
+        if canon_base != canon_addr(func, base).0 {
+            continue;
+        }
+        tagged.insert(id, i64::from(delta));
+        // The `shl` and the `extend` exist only to build this value.
+        if let Some((_, or_args)) = operator(func, id) {
+            for &a in or_args {
+                chain.insert(a);
+                if let Some((_, shl_args)) = operator(func, a) {
+                    for &b in shl_args {
+                        chain.insert(b);
+                    }
+                }
+            }
+        }
+    }
+    (tagged, chain)
+}
+
+/// An offset past the end of any shadow stack, standing in for "everything
+/// from here onward".
+///
+/// Real frames are tens of bytes; rustc's largest in this corpus is a few
+/// hundred. A sentinel is used rather than `i64::MAX` so that shifting a
+/// range into a caller's offsets cannot overflow.
+const REACH_ONWARD: i64 = 1 << 40;
+
+/// The `i32` a value tags as a `U32Val`, if that is what it is.
+///
+/// Soroban passes a linear-memory position to the host as a `U32Val`, which
+/// on wasm is exactly `(extend_i32_u(x) << 32) | 4` — tag 4 being
+/// `TAG_U32_VAL`. Recognising the shape is what lets a frame address reach
+/// a host call without the whole frame going opaque: the chain widens and
+/// tags the pointer, it does not move it.
+fn u32val_encoded(func: &LiftedFunction, value: ValueId) -> Option<ValueId> {
+    let (or_op, or_args) = operator(func, value)?;
+    if !matches!(or_op.0, waffle::Operator::I64Or) || or_args.len() != 2 {
+        return None;
+    }
+    // `| 4` in either position.
+    let (shifted, _) = or_args
+        .iter()
+        .copied()
+        .find(|&a| const_i64(func, a) != Some(4))
+        .zip(
+            or_args
+                .iter()
+                .copied()
+                .find(|&a| const_i64(func, a) == Some(4)),
+        )?;
+    let (shl_op, shl_args) = operator(func, shifted)?;
+    if !matches!(shl_op.0, waffle::Operator::I64Shl) || shl_args.len() != 2 {
+        return None;
+    }
+    if const_i64(func, shl_args[1]) != Some(32) {
+        return None;
+    }
+    let (ext_op, ext_args) = operator(func, shl_args[0])?;
+    if !matches!(ext_op.0, waffle::Operator::I64ExtendI32U) || ext_args.len() != 1 {
+        return None;
+    }
+    Some(ext_args[0])
+}
+
+/// The operator defining `value`, following alias tombstones.
+fn operator(func: &LiftedFunction, value: ValueId) -> Option<(&WasmOp, &[ValueId])> {
+    match &func.values.get(value)?.def {
+        LiftedValueDef::Operator { op, args } => Some((op, args)),
+        _ => None,
+    }
+}
+
+/// `value`'s constant, when it is an `i64.const` or an `i32.const`.
+fn const_i64(func: &LiftedFunction, value: ValueId) -> Option<i64> {
+    match operator(func, value)?.0 .0 {
+        waffle::Operator::I64Const { value } => Some(value as i64),
+        waffle::Operator::I32Const { value } => Some(i64::from(value as i32)),
+        _ => None,
     }
 }
 
@@ -312,7 +427,10 @@ impl Footprint {
     /// Shift every range into the caller's frame offsets. `delta` is the
     /// constant the caller added to the frame base before passing it.
     fn shifted(&self, delta: i64) -> Vec<(i64, i64)> {
-        self.ranges.iter().map(|(s, e)| (s + delta, e + delta)).collect()
+        self.ranges
+            .iter()
+            .map(|(s, e)| (s.saturating_add(delta), e.saturating_add(delta)))
+            .collect()
     }
 }
 
@@ -388,12 +506,24 @@ fn param_footprint_inner(
     // difference between "the callee forwards it, so we know nothing" and
     // "the callee forwards it *to something that touches these bytes*" —
     // measured as the single biggest reason frames were refused.
+    let (tagged, chain) = tagged_pointers(callee, &addresses, param);
     for (id, value) in callee.values.iter() {
-        if !live.contains(&id) || accessors.contains(&id) || addresses.contains(&id) {
+        if !live.contains(&id)
+            || accessors.contains(&id)
+            || addresses.contains(&id)
+            || chain.contains(&id)
+            || tagged.contains_key(&id)
+        {
             continue;
         }
         match &value.def {
             LiftedValueDef::Operator { op, args } => {
+                // As in `frame_escapes`: a tagged pointer handed to the host
+                // reaches everything at or after it.
+                if let Some(&offset) = args.iter().find_map(|a| tagged.get(a)) {
+                    footprint.ranges.push((offset, REACH_ONWARD));
+                    continue;
+                }
                 if !args.iter().any(|a| addresses.contains(a)) || is_global_set(op) {
                     continue;
                 }
