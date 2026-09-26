@@ -120,7 +120,7 @@ use sordec_ir::{
 };
 
 use super::frame::{self, canon_addr};
-use super::slots::{access_shape, address_closure, addresses_only_flow_to, scheduled};
+use super::slots::{access_shape, address_closure, scheduled, FrameEscape, FrameEscapes};
 use crate::dataflow::CfgFacts;
 use crate::declutter::for_each_target_mut;
 use crate::metrics_catalog::{
@@ -191,14 +191,22 @@ impl Pass<LiftedIr> for SlotPromotionPass {
         // is being rewritten. That costs one extra `discover` per declined
         // frame; the pass is not hot enough for that to matter, and the
         // alternative is threading the reasons through the rewrite.
-        census(ir, &mut result);
+        let escapes = escape_ranges(ir);
+        census(ir, &mut result, &escapes);
 
+        // Escape analysis is its own immutable phase, for the same reason
+        // the census is: bounding a callee's footprint means reading the
+        // *callee*, which cannot be borrowed while its caller is being
+        // rewritten. `None` here is a frame that declines wholesale.
         for func in &mut ir.functions {
             let Some(layout) = frame::detect(func) else {
                 continue;
             };
+            let Some(Ok(escaped)) = escapes.get(&func.id) else {
+                continue;
+            };
             let cfg = CfgFacts::build(func);
-            let Some(slots) = discover(func, layout.base, &cfg) else {
+            let Some(slots) = discover(func, layout.base, &cfg, escaped) else {
                 continue;
             };
             // Promotability is decided for *every* slot before any of them
@@ -228,34 +236,79 @@ impl Pass<LiftedIr> for SlotPromotionPass {
     }
 }
 
-/// Record why each frame this pass will not promote was declined.
+/// Escaped byte ranges per function, or the escape that made the frame
+/// decline wholesale.
 ///
-/// Only declines are counted. A promoted frame needs no explanation, and
-/// counting successes here as well would duplicate
-/// [`MEMORY_SLOTS_PROMOTED`].
-fn census(ir: &LiftedIr, result: &mut PassResult) {
+/// Carrying the reason is what lets the census explain an outcome without
+/// re-running the analysis that produced it — and keeps the two from ever
+/// disagreeing about why a frame was refused.
+type EscapeMap =
+    std::collections::HashMap<sordec_common::FuncId, Result<Vec<(i64, i64)>, FrameEscape>>;
+
+/// Bound every frame's escapes, over an immutable view of the module.
+///
+/// Separated from the rewrite because bounding a callee's footprint reads
+/// the callee, and the rewrite holds a mutable borrow of the caller. Only
+/// functions that have a detectable frame appear in the map.
+fn escape_ranges(ir: &LiftedIr) -> EscapeMap {
     let calls = super::calls::CallIndex::build(ir);
+    let mut out = EscapeMap::new();
     for func in &ir.functions {
         let Some(layout) = frame::detect(func) else {
             continue;
         };
         let cfg = CfgFacts::build(func);
-        if discover(func, layout.base, &cfg).is_some() {
-            continue;
-        }
         let live = scheduled(func, &cfg);
         let addresses = address_closure(func, layout.base, &live);
         let accessors = accessors_of(func, &cfg, &addresses);
-        let key = match super::slots::first_escape(func, ir, &calls, &addresses, &accessors, &live) {
-            Some(super::slots::FrameEscape::CallWriteOnly) => MEMORY_FRAME_DECLINED_WRITE_ONLY,
-            Some(super::slots::FrameEscape::CallReadOnly) => MEMORY_FRAME_DECLINED_READ_ONLY,
-            Some(super::slots::FrameEscape::CallOpaque) => MEMORY_FRAME_DECLINED_OPAQUE,
-            Some(super::slots::FrameEscape::Other) => MEMORY_FRAME_DECLINED_OTHER,
-            // Nothing escaped, so a later gate spoke: overlap, a width
-            // conflict, or a slot nothing writes.
-            None => MEMORY_FRAME_DECLINED_OVERLAP,
+        let bounded = match super::slots::frame_escapes(
+            func, ir, &calls, &addresses, &accessors, &live,
+        ) {
+            FrameEscapes::Clean => Ok(Vec::new()),
+            FrameEscapes::Bounded(ranges) => Ok(ranges),
+            FrameEscapes::Unbounded(why) => Err(why),
         };
-        result.metrics.increment(key, 1);
+        out.insert(func.id, bounded);
+    }
+    out
+}
+
+/// Record why each frame this pass will not promote was declined.
+///
+/// Only declines are counted. A promoted frame needs no explanation, and
+/// counting successes here as well would duplicate
+/// [`MEMORY_SLOTS_PROMOTED`].
+fn census(ir: &LiftedIr, result: &mut PassResult, escapes: &EscapeMap) {
+    for func in &ir.functions {
+        let Some(layout) = frame::detect(func) else {
+            continue;
+        };
+        let cfg = CfgFacts::build(func);
+        let escaped = match escapes.get(&func.id) {
+            Some(Ok(ranges)) => ranges.as_slice(),
+            // Wholesale decline: report the escape that caused it and move
+            // on. There is nothing for `discover` to say about a frame whose
+            // every slot is out of reach.
+            Some(Err(why)) => {
+                result.metrics.increment(
+                    match why {
+                        FrameEscape::CallWriteOnly => MEMORY_FRAME_DECLINED_WRITE_ONLY,
+                        FrameEscape::CallReadOnly => MEMORY_FRAME_DECLINED_READ_ONLY,
+                        FrameEscape::CallOpaque => MEMORY_FRAME_DECLINED_OPAQUE,
+                        FrameEscape::Other => MEMORY_FRAME_DECLINED_OTHER,
+                    },
+                    1,
+                );
+                continue;
+            }
+            None => continue,
+        };
+        // The escapes were all bounded, so anything still refused was
+        // refused by a later gate: overlap, a width conflict, a slot nothing
+        // writes, or every remaining slot sitting inside an escaped range.
+        if discover(func, layout.base, &cfg, escaped).is_none() {
+            result.metrics.increment(MEMORY_FRAME_DECLINED_OVERLAP, 1);
+        }
     }
 }
 
@@ -300,7 +353,12 @@ fn accessors_of(
 /// Declining is whole-frame rather than per-slot on purpose: the reason a
 /// frame is rejected is almost always an address we could not follow, and
 /// such an address may alias *any* slot.
-fn discover(func: &LiftedFunction, base: ValueId, cfg: &CfgFacts) -> Option<Vec<SlotAccess>> {
+fn discover(
+    func: &LiftedFunction,
+    base: ValueId,
+    cfg: &CfgFacts,
+    escaped: &[(i64, i64)],
+) -> Option<Vec<SlotAccess>> {
     let live = scheduled(func, cfg);
     let addresses = address_closure(func, base, &live);
     let mut slots: BTreeMap<u32, SlotAccess> = BTreeMap::new();
@@ -363,9 +421,6 @@ fn discover(func: &LiftedFunction, base: ValueId, cfg: &CfgFacts) -> Option<Vec<
         }
     }
 
-    if !addresses_only_flow_to(func, &addresses, &accessors, &live) {
-        return None;
-    }
     // Partial overlap means two "variables" share bytes, so a write to one
     // is a write to the other.
     let mut end = 0u64;
@@ -380,17 +435,35 @@ fn discover(func: &LiftedFunction, base: ValueId, cfg: &CfgFacts) -> Option<Vec<
     // A slot nothing *reads* is kept, and its stores are removed rather
     // than promoted. `SweepDeadPass` will not do it — it keeps every store
     // by design, because in general a store is observable — but here it is
-    // provably not: reaching this point means the frame passed the escape
-    // gate above, so no pointer to these bytes leaves the function, and a
+    // provably not: no pointer to *these* bytes leaves the function, and a
     // write nobody in it loads cannot be seen by anyone. Leaving them
     // behind became load-bearing once [`super::forward`] started retiring
     // the loads that used to keep such slots on this path.
+    //
+    // That argument is exactly why a slot inside an escaped range is dropped
+    // here rather than promoted: for those bytes a pointer *does* leave, so
+    // a store with no local reader may well be read by the callee, and a
+    // load may see what the callee wrote instead of what we stored. Dropping
+    // them from the returned set leaves their loads and stores untouched,
+    // which is the honest outcome, and keeps the reasoning above true of
+    // every slot that survives.
     Some(
         slots
             .into_values()
             .filter(|s| !s.conflicted && !s.stores.is_empty())
+            .filter(|s| !slot_escapes(s, escaped))
             .collect(),
     )
+}
+
+/// Whether a slot's bytes fall inside any range a callee can reach.
+///
+/// Half-open overlap on both sides: touching the byte after a slot is not
+/// touching the slot.
+fn slot_escapes(slot: &SlotAccess, escaped: &[(i64, i64)]) -> bool {
+    let start = i64::from(slot.offset);
+    let end = start + i64::from(slot.width);
+    escaped.iter().any(|&(lo, hi)| start < hi && lo < end)
 }
 
 
@@ -635,7 +708,7 @@ mod tests {
     fn slots_of(func: &LiftedFunction) -> Vec<SlotAccess> {
         let layout = frame::detect(func).expect("a frame");
         let cfg = CfgFacts::build(func);
-        discover(func, layout.base, &cfg).expect("promotable")
+        discover(func, layout.base, &cfg, &[]).expect("promotable")
     }
 
     #[test]
@@ -768,30 +841,37 @@ mod tests {
         }
     }
 
+    /// A slot a callee can reach is refused, and only that slot.
+    ///
+    /// The escape gate itself now lives in
+    /// [`super::slots::frame_escapes`], which hands `discover` the byte
+    /// ranges a callee touches rather than a veto. So the unit under test
+    /// here is the range check: the frame still resolves, and the slots
+    /// inside the escaped range are the ones left out.
     #[test]
-    fn an_escaping_frame_declines_wholesale() {
-        // The pointer is passed to a call, which may alias any slot.
-        let mut func = straight_line();
-        func.values.push(LiftedValue {
-            def: op(
-                waffle::Operator::Call {
-                    function_index: waffle::Func::from(1),
-                },
-                vec![v(2)],
-            ),
-            types: vec![],
-        });
-        func.blocks
-            .get_mut(BlockId::new(0))
-            .unwrap()
-            .instructions
-            .push(v(7));
+    fn a_slot_inside_an_escaped_range_is_refused() {
+        let func = straight_line();
         let layout = frame::detect(&func).unwrap();
         let cfg = CfgFacts::build(&func);
+
+        let all = discover(&func, layout.base, &cfg, &[]).expect("promotable");
+        assert!(!all.is_empty(), "the fixture has promotable slots");
+
+        // A callee reaching the first eight bytes.
+        let partial = discover(&func, layout.base, &cfg, &[(0, 8)]).expect("the frame resolves");
         assert!(
-            discover(&func, layout.base, &cfg).is_none(),
-            "an escaping frame declines"
+            partial.len() < all.len(),
+            "the slot in the escaped range is refused: {all:?} -> {partial:?}"
         );
+        assert!(
+            partial.iter().all(|s| i64::from(s.offset) >= 8),
+            "only slots outside the range survive: {partial:?}"
+        );
+
+        // A range covering everything leaves nothing, which is the old
+        // whole-frame decline arrived at from the other direction.
+        let none = discover(&func, layout.base, &cfg, &[(0, 4096)]).expect("the frame resolves");
+        assert!(none.is_empty(), "an unbounded reach refuses every slot");
     }
 
     #[test]
@@ -805,7 +885,7 @@ mod tests {
         );
         let layout = frame::detect(&func).unwrap();
         let cfg = CfgFacts::build(&func);
-        let slots = discover(&func, layout.base, &cfg).expect("the frame still resolves");
+        let slots = discover(&func, layout.base, &cfg, &[]).expect("the frame still resolves");
         assert!(
             slots.is_empty(),
             "a narrower read of a wider store is a reinterpretation, so that \
@@ -831,7 +911,7 @@ mod tests {
         let layout = frame::detect(&func).unwrap();
         let cfg = CfgFacts::build(&func);
         assert!(
-            discover(&func, layout.base, &cfg).is_none(),
+            discover(&func, layout.base, &cfg, &[]).is_none(),
             "overlapping slots share bytes"
         );
     }

@@ -152,20 +152,38 @@ pub(super) enum FrameEscape {
     Other,
 }
 
-/// The first escape that would make [`addresses_only_flow_to`] decline,
-/// classified. `None` when nothing escapes.
+/// What escaped, and whether it can be pinned to particular bytes.
 ///
-/// Reports the *first* rather than all of them: `promote` declines whole,
-/// so one escape is enough to explain the outcome, and attributing a frame
-/// to several buckets would double-count it in the census.
-pub(super) fn first_escape(
+/// [`first_escape`] answers "did anything escape", which is all a
+/// whole-frame decline needs. This answers the question promotion actually
+/// wants: *which slots* are out of reach, so the rest can still be
+/// promoted.
+pub(super) enum FrameEscapes {
+    /// Nothing escaped. Every slot is an ordinary local variable.
+    Clean,
+    /// Every escape was a call whose footprint we bounded. The ranges are
+    /// half-open and in the **caller's** frame-offset space, so they can be
+    /// compared against slot offsets directly.
+    Bounded(Vec<(i64, i64)>),
+    /// Something escaped that cannot be pinned to bytes, so no slot is safe.
+    /// Carries the classification for the census.
+    Unbounded(FrameEscape),
+}
+
+/// Classify every escape of a frame address, bounding what can be bounded.
+///
+/// The shape mirrors [`first_escape`] deliberately — the two must agree
+/// about what counts as an escape, or promotion and the census that explains
+/// it would tell different stories.
+pub(super) fn frame_escapes(
     func: &LiftedFunction,
     ir: &sordec_ir::LiftedIr,
     calls: &super::calls::CallIndex,
     addresses: &HashSet<ValueId>,
     accessors: &HashSet<ValueId>,
     live: &HashSet<ValueId>,
-) -> Option<FrameEscape> {
+) -> FrameEscapes {
+    let mut ranges: Vec<(i64, i64)> = Vec::new();
     for (id, value) in func.values.iter() {
         if !live.contains(&id) || accessors.contains(&id) || addresses.contains(&id) {
             continue;
@@ -175,17 +193,27 @@ pub(super) fn first_escape(
                 if !args.iter().any(|a| addresses.contains(a)) || is_global_set(op) {
                     continue;
                 }
-                // `CallIndex::target` shifts a wasm index into our
-                // `FuncId` space and returns `None` for a host import,
-                // which is the same answer as "not a direct call here".
-                return Some(match calls.target(op) {
-                    Some(target) => classify_callee(ir, target, args, addresses),
-                    None => FrameEscape::Other,
-                });
+                // A host import is not necessarily unbounded — the catalog
+                // documents each one's linear-memory behaviour — but at this
+                // layer its position argument is still the raw arithmetic
+                // that builds a `U32Val`, so the address arrives somewhere
+                // `canon_addr` cannot fold. Bounding those needs the encode
+                // recognised first; until then they decline as before.
+                let Some(target) = calls.target(op) else {
+                    return FrameEscapes::Unbounded(FrameEscape::Other);
+                };
+                match callee_footprint(ir, target, args, addresses, func) {
+                    Some(bounded) => ranges.extend(bounded),
+                    None => {
+                        return FrameEscapes::Unbounded(classify_callee(
+                            ir, target, args, addresses,
+                        ))
+                    }
+                }
             }
             LiftedValueDef::Alias(from) | LiftedValueDef::PickOutput { from, .. } => {
                 if addresses.contains(from) {
-                    return Some(FrameEscape::Other);
+                    return FrameEscapes::Unbounded(FrameEscape::Other);
                 }
             }
             LiftedValueDef::BlockParam { .. } => {}
@@ -200,10 +228,38 @@ pub(super) fn first_escape(
             escapes |= values.iter().any(|v| addresses.contains(v));
         }
         if escapes {
-            return Some(FrameEscape::Other);
+            return FrameEscapes::Unbounded(FrameEscape::Other);
         }
     }
-    None
+    if ranges.is_empty() {
+        FrameEscapes::Clean
+    } else {
+        FrameEscapes::Bounded(ranges)
+    }
+}
+
+/// The caller-relative ranges one call reaches through the frame addresses
+/// it was passed, or `None` when any of them cannot be bounded.
+fn callee_footprint(
+    ir: &sordec_ir::LiftedIr,
+    target: sordec_common::FuncId,
+    args: &[ValueId],
+    addresses: &HashSet<ValueId>,
+    caller: &LiftedFunction,
+) -> Option<Vec<(i64, i64)>> {
+    let callee = ir.function(target)?;
+    let params = &ir.function(target)?.blocks.get(callee.entry)?.params;
+    let mut out = Vec::new();
+    for (position, arg) in args.iter().enumerate() {
+        if !addresses.contains(arg) {
+            continue;
+        }
+        let param = params.get(position).copied()?;
+        // Where in *our* frame this argument points.
+        let (_, delta) = canon_addr(caller, *arg);
+        out.extend(param_footprint(callee, param)?.shifted(i64::from(delta)));
+    }
+    Some(out)
 }
 
 /// How `target` uses whichever of its parameters received a frame address.
@@ -253,6 +309,37 @@ fn classify_callee(
     }
 }
 
+/// The byte ranges a callee touches through a pointer parameter, measured
+/// from that pointer.
+///
+/// This is what turns "the frame escaped" into "these bytes escaped". A
+/// helper handed `fp+16` that loads and stores only within its own 16 bytes
+/// tells us nothing about `fp+0`, and the slot there is still an ordinary
+/// local variable.
+///
+/// Reads and writes are both recorded and not distinguished, because either
+/// one disqualifies a slot for the same reason: a write means a later load
+/// must see the callee's value rather than ours, and a read means our store
+/// is observed and cannot be deleted. What the caller needs is the union.
+#[derive(Debug, Default, Clone)]
+pub(super) struct Footprint {
+    /// `(start, end)` byte ranges relative to the pointer, half-open.
+    ranges: Vec<(i64, i64)>,
+}
+
+impl Footprint {
+    /// Record one access at `offset` of `width` bytes.
+    fn touch(&mut self, offset: i64, width: u32) {
+        self.ranges.push((offset, offset + i64::from(width)));
+    }
+
+    /// Shift every range into the caller's frame offsets. `delta` is the
+    /// constant the caller added to the frame base before passing it.
+    fn shifted(&self, delta: i64) -> Vec<(i64, i64)> {
+        self.ranges.iter().map(|(s, e)| (s + delta, e + delta)).collect()
+    }
+}
+
 /// Whether `param`'s address closure inside `callee` is only ever loaded
 /// from (`true, false`), only stored through (`false, true`), or both.
 /// `None` when it escapes the callee too.
@@ -287,6 +374,47 @@ fn param_usage(callee: &LiftedFunction, param: ValueId) -> Option<(bool, bool)> 
         return None;
     }
     Some((reads, writes))
+}
+
+/// `param`'s footprint inside `callee`, or `None` when it cannot be bounded.
+///
+/// Declines for the same reason [`param_usage`] does — the pointer escapes
+/// the callee as well — and for one more: an access whose address does not
+/// canonicalise to *this parameter* plus a constant. A pointer that arrives
+/// through a phi of two bases, or is computed by arithmetic
+/// [`canon_addr`] will not fold, has no offset we can name, and a footprint
+/// that silently omitted it would be a promise we cannot keep.
+fn param_footprint(callee: &LiftedFunction, param: ValueId) -> Option<Footprint> {
+    let live: HashSet<ValueId> = callee.values.iter().map(|(id, _)| id).collect();
+    let addresses = address_closure(callee, param, &live);
+    let mut accessors = HashSet::new();
+    let mut footprint = Footprint::default();
+
+    for (_, block) in callee.blocks.iter() {
+        for &id in &block.instructions {
+            let Some(value) = callee.values.get(id) else {
+                continue;
+            };
+            let LiftedValueDef::Operator { op, args } = &value.def else {
+                continue;
+            };
+            let Some(shape) = access_shape(op) else { continue };
+            let Some(addr) = args.first() else { continue };
+            if !addresses.contains(addr) {
+                continue;
+            }
+            accessors.insert(id);
+            let (base, delta) = canon_addr(callee, *addr);
+            if base != canon_addr(callee, param).0 {
+                return None;
+            }
+            footprint.touch(i64::from(delta) + i64::from(shape.memarg_offset), shape.width);
+        }
+    }
+    if !addresses_only_flow_to(callee, &addresses, &accessors, &live) {
+        return None;
+    }
+    Some(footprint)
 }
 
 fn is_global_set(op: &WasmOp) -> bool {
