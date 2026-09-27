@@ -277,6 +277,16 @@ pub struct GuardCoverage {
 pub struct MemoryCoverage {
     /// Shadow-stack slots promoted from linear memory to SSA values.
     pub slots_promoted: i64,
+    /// Slots of an analysable frame refused because two accesses at one
+    /// offset disagree about width or type.
+    pub slot_refused_conflict: i64,
+    /// Slots refused because nothing writes them.
+    pub slot_refused_unwritten: i64,
+    /// Slots refused because a callee can reach their bytes.
+    pub slot_refused_escaped: i64,
+    /// Slots refused because a load is not dominated by a store to the same
+    /// slot.
+    pub slot_refused_undominated: i64,
     /// Frames declined because an address was consumed by arithmetic that
     /// cannot be folded, or a tag chain not recognised as a `U32Val`.
     pub declined_address_arith: i64,
@@ -1217,6 +1227,10 @@ fn build_memory(t: &BTreeMap<&'static str, i64>) -> MemoryCoverage {
     let declined_layout = metric(t, mc::MEMORY_FRAME_DECLINED_OVERLAP);
     MemoryCoverage {
         slots_promoted: metric(t, mc::MEMORY_SLOTS_PROMOTED),
+        slot_refused_conflict: metric(t, mc::MEMORY_SLOT_REFUSED_CONFLICT),
+        slot_refused_unwritten: metric(t, mc::MEMORY_SLOT_REFUSED_UNWRITTEN),
+        slot_refused_escaped: metric(t, mc::MEMORY_SLOT_REFUSED_ESCAPED),
+        slot_refused_undominated: metric(t, mc::MEMORY_SLOT_REFUSED_UNDOMINATED),
         declined_address_arith,
         declined_host_call,
         declined_block_param,

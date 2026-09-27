@@ -124,6 +124,8 @@ use super::slots::{access_shape, address_closure, scheduled, EscapeReason, Frame
 use crate::dataflow::CfgFacts;
 use crate::declutter::for_each_target_mut;
 use crate::metrics_catalog::{
+    MEMORY_SLOT_REFUSED_CONFLICT, MEMORY_SLOT_REFUSED_ESCAPED,
+    MEMORY_SLOT_REFUSED_UNDOMINATED, MEMORY_SLOT_REFUSED_UNWRITTEN,
     MEMORY_FRAME_DECLINED_ADDRESS_ARITH, MEMORY_FRAME_DECLINED_BLOCK_PARAM,
     MEMORY_FRAME_DECLINED_ESCAPES_AGAIN, MEMORY_FRAME_DECLINED_HOST_CALL,
     MEMORY_FRAME_DECLINED_STORED_AS_VALUE,
@@ -209,7 +211,7 @@ impl Pass<LiftedIr> for SlotPromotionPass {
                 continue;
             };
             let cfg = CfgFacts::build(func);
-            let Some(slots) = discover(func, layout.base, &cfg, escaped) else {
+            let Some((slots, mut refused)) = discover(func, layout.base, &cfg, escaped) else {
                 continue;
             };
             // Promotability is decided for *every* slot before any of them
@@ -220,8 +222,15 @@ impl Pass<LiftedIr> for SlotPromotionPass {
             // does precede its store.
             let approved: Vec<SlotAccess> = slots
                 .into_iter()
-                .filter(|slot| every_load_is_written_first(slot, &cfg))
+                .filter(|slot| {
+                    let ok = every_load_is_written_first(slot, &cfg);
+                    if !ok {
+                        refused.undominated += 1;
+                    }
+                    ok
+                })
                 .collect();
+            refused.report(&mut result);
             for slot in approved {
                 if promote(func, &slot, &cfg) {
                     result.changed = true;
@@ -370,7 +379,7 @@ fn discover(
     base: ValueId,
     cfg: &CfgFacts,
     escaped: &[(i64, i64)],
-) -> Option<Vec<SlotAccess>> {
+) -> Option<(Vec<SlotAccess>, SlotRefusals)> {
     let live = scheduled(func, cfg);
     let addresses = address_closure(func, base, &live);
     let mut slots: BTreeMap<u32, SlotAccess> = BTreeMap::new();
@@ -459,13 +468,52 @@ fn discover(
     // them from the returned set leaves their loads and stores untouched,
     // which is the honest outcome, and keeps the reasoning above true of
     // every slot that survives.
-    Some(
-        slots
-            .into_values()
-            .filter(|s| !s.conflicted && !s.stores.is_empty())
-            .filter(|s| !slot_escapes(s, escaped))
-            .collect(),
-    )
+    let mut refused = SlotRefusals::default();
+    let kept = slots
+        .into_values()
+        .filter(|s| {
+            if s.conflicted {
+                refused.conflict += 1;
+            } else if s.stores.is_empty() {
+                refused.unwritten += 1;
+            } else if slot_escapes(s, escaped) {
+                refused.escaped += 1;
+            } else {
+                return true;
+            }
+            false
+        })
+        .collect();
+    Some((kept, refused))
+}
+
+/// Why slots of an otherwise analysable frame were not promoted.
+///
+/// A frame can pass every escape gate and still yield nothing, and until
+/// these were counted that outcome was indistinguishable from a frame
+/// nobody looked at. `account` is the case that prompted them: zero
+/// declines, zero promotions, 191 holes.
+#[derive(Debug, Default)]
+struct SlotRefusals {
+    conflict: i64,
+    unwritten: i64,
+    escaped: i64,
+    undominated: i64,
+}
+
+impl SlotRefusals {
+    fn report(&self, result: &mut PassResult) {
+        for (key, n) in [
+            (MEMORY_SLOT_REFUSED_CONFLICT, self.conflict),
+            (MEMORY_SLOT_REFUSED_UNWRITTEN, self.unwritten),
+            (MEMORY_SLOT_REFUSED_ESCAPED, self.escaped),
+            (MEMORY_SLOT_REFUSED_UNDOMINATED, self.undominated),
+        ] {
+            if n > 0 {
+                result.metrics.increment(key, n);
+            }
+        }
+    }
 }
 
 /// Whether a slot's bytes fall inside any range a callee can reach.
@@ -720,7 +768,7 @@ mod tests {
     fn slots_of(func: &LiftedFunction) -> Vec<SlotAccess> {
         let layout = frame::detect(func).expect("a frame");
         let cfg = CfgFacts::build(func);
-        discover(func, layout.base, &cfg, &[]).expect("promotable")
+        discover(func, layout.base, &cfg, &[]).expect("promotable").0
     }
 
     #[test]
@@ -866,11 +914,13 @@ mod tests {
         let layout = frame::detect(&func).unwrap();
         let cfg = CfgFacts::build(&func);
 
-        let all = discover(&func, layout.base, &cfg, &[]).expect("promotable");
+        let all = discover(&func, layout.base, &cfg, &[]).expect("promotable").0;
         assert!(!all.is_empty(), "the fixture has promotable slots");
 
         // A callee reaching the first eight bytes.
-        let partial = discover(&func, layout.base, &cfg, &[(0, 8)]).expect("the frame resolves");
+        let partial = discover(&func, layout.base, &cfg, &[(0, 8)])
+            .expect("the frame resolves")
+            .0;
         assert!(
             partial.len() < all.len(),
             "the slot in the escaped range is refused: {all:?} -> {partial:?}"
@@ -882,7 +932,9 @@ mod tests {
 
         // A range covering everything leaves nothing, which is the old
         // whole-frame decline arrived at from the other direction.
-        let none = discover(&func, layout.base, &cfg, &[(0, 4096)]).expect("the frame resolves");
+        let none = discover(&func, layout.base, &cfg, &[(0, 4096)])
+            .expect("the frame resolves")
+            .0;
         assert!(none.is_empty(), "an unbounded reach refuses every slot");
     }
 
@@ -897,7 +949,9 @@ mod tests {
         );
         let layout = frame::detect(&func).unwrap();
         let cfg = CfgFacts::build(&func);
-        let slots = discover(&func, layout.base, &cfg, &[]).expect("the frame still resolves");
+        let slots = discover(&func, layout.base, &cfg, &[])
+            .expect("the frame still resolves")
+            .0;
         assert!(
             slots.is_empty(),
             "a narrower read of a wider store is a reinterpretation, so that \

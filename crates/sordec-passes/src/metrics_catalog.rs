@@ -548,6 +548,18 @@ pub const MEMORY_FILL_LOOPS_UNROLLED: &str = "memory_fill_loops_unrolled";
 pub const MEMORY_SRET_CONVERTED: &str = "memory_sret_converted";
 /// Shadow-stack slots promoted from linear memory to SSA values.
 pub const MEMORY_SLOTS_PROMOTED: &str = "memory_slots_promoted";
+/// Slots refused because two accesses at one offset disagree about width or
+/// type — the bytes are being reinterpreted, not read as a variable.
+pub const MEMORY_SLOT_REFUSED_CONFLICT: &str = "memory_slot_refused_conflict";
+/// Slots refused because nothing writes them, so there is no value to
+/// forward and no honest one to invent.
+pub const MEMORY_SLOT_REFUSED_UNWRITTEN: &str = "memory_slot_refused_unwritten";
+/// Slots refused because a callee can reach their bytes.
+pub const MEMORY_SLOT_REFUSED_ESCAPED: &str = "memory_slot_refused_escaped";
+/// Slots refused because some load is not dominated by a store to the same
+/// slot: on at least one path the read comes first, and there is no value to
+/// give it.
+pub const MEMORY_SLOT_REFUSED_UNDOMINATED: &str = "memory_slot_refused_undominated";
 
 // Why a frame was declined. `promote` rejects a frame **whole** — an
 // address it cannot follow may alias any slot — so knowing which gate
