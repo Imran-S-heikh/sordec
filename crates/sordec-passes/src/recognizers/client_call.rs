@@ -251,7 +251,7 @@ fn try_resolve_args(
     let (site, ptr, len) = match &binding.expr {
         Expr::Call { target, args } => {
             let params = wrapper_params(ir, *target, WRAPPER_DEPTH, &|op| match op {
-                KnownOp::VecNew { vals_pos, len } => Some(vec![*vals_pos, *len]),
+                KnownOp::VecNew { vals_pos, len, .. } => Some(vec![*vals_pos, *len]),
                 _ => None,
             })?;
             let [ptr_idx, len_idx] = params[..] else {
@@ -259,7 +259,7 @@ fn try_resolve_args(
             };
             (terminal, *args.get(ptr_idx)?, *args.get(len_idx)?)
         }
-        Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { vals_pos, len })) => {
+        Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { vals_pos, len, .. })) => {
             (terminal, *vals_pos, *len)
         }
         _ => return None,
@@ -538,7 +538,7 @@ fn single_source_writer(
 /// Peel the C1 `ValEncodeSmall` wrapper and pure width conversions off
 /// a pointer operand (the inlined-`VecNew` shape carries its `vals_pos`
 /// as an encoded `U32Val`).
-fn peel_encode(func: &HighFunction, value: ValueId) -> ValueId {
+pub(crate) fn peel_encode(func: &HighFunction, value: ValueId) -> ValueId {
     let mut current = value;
     for _ in 0..PEEL_DEPTH {
         current = resolve_use(func, current);
@@ -680,6 +680,7 @@ mod tests {
             vec![Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
                 vals_pos: v(0),
                 len: v(1),
+                elements: None,
             }))],
         )
     }
@@ -900,6 +901,7 @@ mod tests {
                 Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
                     vals_pos: v(0),
                     len: v(3),
+                    elements: None,
                 })),
                 invoke(0, 1, 4, Some("balance")),
             ],

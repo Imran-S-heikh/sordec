@@ -1106,7 +1106,7 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io:
                 ctx.operand(*len)
             ),
         },
-        KnownOp::VecNew { vals_pos, len } => {
+        KnownOp::VecNew { vals_pos, len, .. } => {
             write!(
                 out,
                 "vec_new({}, {})",
@@ -2033,6 +2033,7 @@ mod tests {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
             vals_pos: v(7),
             len: v(12),
+            elements: None,
         }));
         let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "vec_new(v7, v12)");

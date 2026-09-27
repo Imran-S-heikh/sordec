@@ -734,15 +734,20 @@ pub enum KnownOp {
     /// returns a `VecObject`. Builds a `Vec` from a contiguous array of
     /// `len` `Val`s in linear memory.
     ///
-    /// No `resolved` field: the `Val`s live in a runtime stack buffer, not
-    /// rodata, so the element contents are not literal-recoverable even
-    /// with perfect tracing. This names the constructor shape; recovering
-    /// the elements is the collections recognizer's separate scope.
+    /// The `Val`s live in a runtime stack buffer rather than rodata, so
+    /// they are never *literals*. They are still recoverable as values:
+    /// the buffer is the caller's own frame, and the stores that filled it
+    /// are right there. `elements` holds them once
+    /// the vec-elements recognizer has read them
+    /// out of the frame, in index order; `None` until then, and the
+    /// constructor renders as a hole.
     VecNew {
         /// Linear-memory byte offset of the `Val` array.
         vals_pos: ValueId,
         /// Element count (each `Val` is 8 bytes).
         len: ValueId,
+        /// The stored element values, in order, once recovered.
+        elements: Option<Vec<ValueId>>,
     },
 
     /// `map_new_from_linear_memory(keys_pos, vals_pos, len)` — host import
@@ -1043,9 +1048,21 @@ impl KnownOp {
                 f(*lm_pos);
                 f(*len);
             }
-            KnownOp::VecNew { vals_pos, len } => {
+            // Once the elements are recovered the constructor no longer
+            // reads the buffer: the emitted `vec![..]` names the values
+            // directly. Reporting the pointer as a use would keep the
+            // frame alive and its stores with it, which is exactly the
+            // traffic recovering the elements exists to retire.
+            KnownOp::VecNew {
+                vals_pos,
+                len,
+                elements,
+            } => {
                 f(*vals_pos);
                 f(*len);
+                for e in elements.iter().flatten() {
+                    f(*e);
+                }
             }
             KnownOp::MapNew {
                 keys_pos,
@@ -1292,10 +1309,21 @@ impl KnownOp {
                 f(lm_pos);
                 f(len);
             }
-            KnownOp::VecNew { vals_pos, len } => {
-                f(vals_pos);
-                f(len);
-            }
+            KnownOp::VecNew {
+                vals_pos,
+                len,
+                elements,
+            } => match elements {
+                Some(values) => {
+                    for e in values {
+                        f(e);
+                    }
+                }
+                None => {
+                    f(vals_pos);
+                    f(len);
+                }
+            },
             KnownOp::MapNew {
                 keys_pos,
                 vals_pos,

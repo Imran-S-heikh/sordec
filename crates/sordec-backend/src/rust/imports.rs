@@ -45,7 +45,7 @@ const TYPE_NAMES: &[&str] = &[
 ];
 
 /// soroban-sdk macros the emitter writes as `soroban_sdk::<macro>!(…)`.
-const MACRO_NAMES: &[&str] = &["panic_with_error", "symbol_short"];
+const MACRO_NAMES: &[&str] = &["panic_with_error", "symbol_short", "vec"];
 
 /// soroban-sdk submodules kept as a short prefix (`token::Client::new`).
 const MODULE_NAMES: &[&str] = &["token"];

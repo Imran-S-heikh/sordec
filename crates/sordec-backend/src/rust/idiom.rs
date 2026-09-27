@@ -53,6 +53,18 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         // stay holes rather than guess a method: a wrong chain is worse
         // than an honest `todo!()`, because the scorer's extractor reads
         // these chains as facts.
+        // `vec![&e, a, b, c]`. Only once every element is recovered — a
+        // constructor with an unrecovered buffer stays a hole, because a
+        // vector printed shorter than the contract builds is a wrong fact,
+        // not a partial one.
+        KnownOp::VecNew {
+            elements: Some(values),
+            ..
+        } => {
+            let items: Vec<syn::Expr> = values.iter().map(|v| ctx.arg_ref(*v)).collect();
+            let e = ctx.env_borrow();
+            Some(parse_quote!(soroban_sdk::vec![#e, #(#items),*]))
+        }
         KnownOp::VecOp { kind, args } => {
             let v = ctx.value_ref(*args.first()?);
             let arg = |i: usize| args.get(i).map(|a| ctx.value_ref(*a));

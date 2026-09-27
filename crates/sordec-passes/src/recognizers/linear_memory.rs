@@ -204,6 +204,7 @@ fn classify(
             op: KnownOp::VecNew {
                 vals_pos: args[0],
                 len: args[1],
+                elements: None,
             },
             ty: KnownType::Vec(Box::new(IrType::Unknown(UnknownReason::InsufficientEvidence))),
             metric: M_VEC_NEW,

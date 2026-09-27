@@ -96,7 +96,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    BoolCodecPass, ClientArgVecPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -532,11 +532,34 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // The slab it was built from goes with it, because the
             // stores are then unread and `DeadFrameStorePass` is next.
             Box::new(ClientArgVecPass),
+            // And the same for every *other* linear-memory `Vec`: the
+            // elements of `vec![&e, a, b, c]` are stores into a scratch
+            // buffer a few lines above the constructor.
+            // `ClientArgVecPass` covers a cross-contract call's arguments;
+            // this covers the rest, `require_auth_for_args` included.
+            // Before the dead-store elision, which is what collects the
+            // buffer once nothing reads it.
             // A store into a private frame that nothing loads back is the
             // last reader of a frame pointer the bracket elision below
             // needs unread.
             Box::new(DeadFrameStorePass),
             Box::new(FrameElisionPass),
+            // Every *other* linear-memory `Vec`: the elements of
+            // `vec![&e, a, b, c]` are stores into a scratch buffer above
+            // the constructor, and recovering them is what lets the buffer
+            // go.
+            //
+            // Last in the group on purpose. A `Vec` is also how the SDK
+            // spells an enum key with a payload and a cross-contract
+            // call's arguments, and both have their own owner earlier here
+            // — `KeyConstructionElisionPass` and `ClientArgVecPass`.
+            // Claiming those first leaves their shape half-rewritten and
+            // the `Option` collapse that reads it stops matching: measured
+            // as auth, custom_types and events each falling 1.0000 ->
+            // 0.7059. Running after them means what reaches this pass is
+            // the vectors nobody else wants, and the group's next
+            // iteration retires the buffer.
+            Box::new(VecElementsPass),
             // Cancels a wide join against its own limbs. In the group
             // because the decode collapse is what plants the limb
             // extractors it cancels, and each cancellation may expose the

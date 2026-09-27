@@ -1392,7 +1392,7 @@ mod tests {
                 "b",
                 "m",
             ),
-            (KnownOp::VecNew { vals_pos: v(0), len: v(1) }, "v", "g"),
+            (KnownOp::VecNew { vals_pos: v(0), len: v(1), elements: None }, "v", "g"),
             (
                 KnownOp::MapNew { keys_pos: v(0), vals_pos: v(1), len: v(2) },
                 "m",
