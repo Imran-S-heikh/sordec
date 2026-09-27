@@ -157,9 +157,17 @@ pub(super) enum FrameEscapes {
 /// one names a different piece of missing work rather than a mood.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EscapeReason {
-    /// Left through something that is not a direct call at all: a host
-    /// import, a return, a terminator, or stored as a value.
-    NotACall,
+    /// Consumed by an operator that is not a call — address arithmetic we
+    /// cannot fold, or a tag chain we do not recognise.
+    AddressArithmetic,
+    /// Passed to a host import other than through a recognised `U32Val`
+    /// position argument.
+    HostCall,
+    /// Carried by a terminator into a block parameter, so the pointer is
+    /// merged with whatever the other edges bring.
+    BlockParam,
+    /// Stored as a value, or aliased into one.
+    StoredAsValue,
     /// A direct call whose callee could not be resolved, or which passed
     /// the address in a position the callee has no parameter for.
     CalleeUnresolved,
@@ -214,8 +222,25 @@ pub(super) fn frame_escapes(
                 if !args.iter().any(|a| addresses.contains(a)) || is_global_set(op) {
                     continue;
                 }
+                // A sub-word read or write of a frame slot: not promotable,
+                // but perfectly analysable. It declines its own bytes.
+                if let Some((memarg, width)) = sub_word_access(op)
+                    && let Some(addr) = args.first()
+                    && addresses.contains(addr)
+                {
+                    let (addr_base, delta) = canon_addr(func, *addr);
+                    if addr_base == canon_addr(func, base).0 {
+                        let start = i64::from(delta) + i64::from(memarg);
+                        ranges.push((start, start + i64::from(width)));
+                        continue;
+                    }
+                }
                 let Some(target) = calls.target(op) else {
-                    return FrameEscapes::Unbounded(EscapeReason::NotACall);
+                    return FrameEscapes::Unbounded(if is_call(op) {
+                        EscapeReason::HostCall
+                    } else {
+                        EscapeReason::AddressArithmetic
+                    });
                 };
                 let mut seen = HashSet::new();
                 match callee_footprint(
@@ -227,7 +252,7 @@ pub(super) fn frame_escapes(
             }
             LiftedValueDef::Alias(from) | LiftedValueDef::PickOutput { from, .. } => {
                 if addresses.contains(from) {
-                    return FrameEscapes::Unbounded(EscapeReason::NotACall);
+                    return FrameEscapes::Unbounded(EscapeReason::StoredAsValue);
                 }
             }
             LiftedValueDef::BlockParam { .. } => {}
@@ -242,7 +267,7 @@ pub(super) fn frame_escapes(
             escapes |= values.iter().any(|v| addresses.contains(v));
         }
         if escapes {
-            return FrameEscapes::Unbounded(EscapeReason::NotACall);
+            return FrameEscapes::Unbounded(EscapeReason::BlockParam);
         }
     }
     if ranges.is_empty() {
@@ -527,8 +552,23 @@ fn param_footprint_inner(
                 if !args.iter().any(|a| addresses.contains(a)) || is_global_set(op) {
                     continue;
                 }
+                if let Some((memarg, width)) = sub_word_access(op)
+                    && let Some(addr) = args.first()
+                    && addresses.contains(addr)
+                {
+                    let (addr_base, delta) = canon_addr(callee, *addr);
+                    if addr_base == param_base {
+                        let start = i64::from(delta) + i64::from(memarg);
+                        footprint.ranges.push((start, start + i64::from(width)));
+                        continue;
+                    }
+                }
                 let Some(target) = calls.target(op) else {
-                    return Err(EscapeReason::NotACall);
+                    return Err(if is_call(op) {
+                        EscapeReason::HostCall
+                    } else {
+                        EscapeReason::AddressArithmetic
+                    });
                 };
                 for (start, end) in callee_footprint(
                     ir,
@@ -545,7 +585,7 @@ fn param_footprint_inner(
             }
             LiftedValueDef::Alias(from) | LiftedValueDef::PickOutput { from, .. } => {
                 if addresses.contains(from) {
-                    return Err(EscapeReason::NotACall);
+                    return Err(EscapeReason::StoredAsValue);
                 }
             }
             LiftedValueDef::BlockParam { .. } => {}
@@ -560,10 +600,18 @@ fn param_footprint_inner(
             escapes |= values.iter().any(|v| addresses.contains(v));
         }
         if escapes {
-            return Err(EscapeReason::NotACall);
+            return Err(EscapeReason::BlockParam);
         }
     }
     Ok(footprint)
+}
+
+/// Whether an operator is any kind of call.
+fn is_call(op: &WasmOp) -> bool {
+    matches!(
+        op.0,
+        waffle::Operator::Call { .. } | waffle::Operator::CallIndirect { .. }
+    )
 }
 
 fn is_global_set(op: &WasmOp) -> bool {
@@ -584,6 +632,39 @@ pub(super) struct AccessShape {
 /// byte of a slot and sign/zero-extends it; promoting that would need the
 /// slot modelled as bytes rather than as a scalar, and the corpus does not
 /// contain one on a frame.
+/// A sub-word memory access's `(offset, width)`, or `None` for anything
+/// else.
+///
+/// [`access_shape`] deliberately excludes these: promoting a slot that is
+/// read one byte at a time would need it modelled as bytes rather than as a
+/// scalar. But *not being promotable* and *making the whole frame
+/// unanalysable* are different claims, and treating them alike is what made
+/// this the largest remaining decline reason on the held-out set. A
+/// sub-word access is an ordinary memory access at a known offset; it
+/// declines its own bytes and says nothing about the rest of the frame.
+fn sub_word_access(op: &WasmOp) -> Option<(u32, u32)> {
+    use waffle::Operator as O;
+    let (width, memarg) = match &op.0 {
+        O::I32Load8S { memory }
+        | O::I32Load8U { memory }
+        | O::I64Load8S { memory }
+        | O::I64Load8U { memory }
+        | O::I32Store8 { memory }
+        | O::I64Store8 { memory } => (1, memory),
+        O::I32Load16S { memory }
+        | O::I32Load16U { memory }
+        | O::I64Load16S { memory }
+        | O::I64Load16U { memory }
+        | O::I32Store16 { memory }
+        | O::I64Store16 { memory } => (2, memory),
+        O::I64Load32S { memory } | O::I64Load32U { memory } | O::I64Store32 { memory } => {
+            (4, memory)
+        }
+        _ => return None,
+    };
+    Some((memarg.offset, width))
+}
+
 pub(super) fn access_shape(op: &WasmOp) -> Option<AccessShape> {
     let (is_store, width, ty, memarg) = match &op.0 {
         waffle::Operator::I32Load { memory } => (false, 4, LiftedType::I32, memory),

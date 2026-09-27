@@ -562,13 +562,19 @@ pub const MEMORY_SLOTS_PROMOTED: &str = "memory_slots_promoted";
 /// Frames declined because an address reached a callee that only writes
 /// through it — `sret`'s territory.
 pub const MEMORY_FRAME_DECLINED_WRITE_ONLY: &str = "memory_frame_declined_write_only";
-/// A frame declined because an address left it through something that is
-/// not a direct call: a host import, a return, a terminator, or stored as a
-/// value. A host import's linear-memory footprint *is* documented, but at
-/// the lifted layer its position argument is still the arithmetic that
-/// builds a `U32Val`, so the address arrives somewhere `canon_addr` cannot
-/// fold.
-pub const MEMORY_FRAME_DECLINED_NOT_A_CALL: &str = "memory_frame_declined_not_a_call";
+/// A frame declined because an address was consumed by an operator that is
+/// not a call — arithmetic `canon_addr` cannot fold, or a tag chain the
+/// `U32Val` recogniser does not match.
+pub const MEMORY_FRAME_DECLINED_ADDRESS_ARITH: &str = "memory_frame_declined_address_arith";
+/// A frame declined because an address reached a host import other than
+/// through a recognised `U32Val` position argument.
+pub const MEMORY_FRAME_DECLINED_HOST_CALL: &str = "memory_frame_declined_host_call";
+/// A frame declined because a terminator carried an address into a block
+/// parameter, merging it with whatever the other edges bring.
+pub const MEMORY_FRAME_DECLINED_BLOCK_PARAM: &str = "memory_frame_declined_block_param";
+/// A frame declined because an address was stored as a value or aliased
+/// into one.
+pub const MEMORY_FRAME_DECLINED_STORED_AS_VALUE: &str = "memory_frame_declined_stored_as_value";
 /// A frame declined because a callee's access through the pointer is not at
 /// a constant offset from it — an indexed store, say. Bounding these needs
 /// the index's range, which the IR does not carry.

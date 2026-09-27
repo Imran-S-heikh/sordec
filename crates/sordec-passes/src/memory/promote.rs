@@ -124,7 +124,9 @@ use super::slots::{access_shape, address_closure, scheduled, EscapeReason, Frame
 use crate::dataflow::CfgFacts;
 use crate::declutter::for_each_target_mut;
 use crate::metrics_catalog::{
-    MEMORY_FRAME_DECLINED_ESCAPES_AGAIN, MEMORY_FRAME_DECLINED_NOT_A_CALL,
+    MEMORY_FRAME_DECLINED_ADDRESS_ARITH, MEMORY_FRAME_DECLINED_BLOCK_PARAM,
+    MEMORY_FRAME_DECLINED_ESCAPES_AGAIN, MEMORY_FRAME_DECLINED_HOST_CALL,
+    MEMORY_FRAME_DECLINED_STORED_AS_VALUE,
     MEMORY_FRAME_DECLINED_OFFSET_NOT_CONST, MEMORY_FRAME_DECLINED_OPAQUE,
     MEMORY_FRAME_DECLINED_OVERLAP, MEMORY_LOADS_FORWARDED, MEMORY_SLOTS_PROMOTED,
     MEMORY_STORES_REMOVED,
@@ -299,7 +301,10 @@ fn census(ir: &LiftedIr, result: &mut PassResult, escapes: &EscapeMap) {
             Some(Err(why)) => {
                 result.metrics.increment(
                     match why {
-                        EscapeReason::NotACall => MEMORY_FRAME_DECLINED_NOT_A_CALL,
+                        EscapeReason::AddressArithmetic => MEMORY_FRAME_DECLINED_ADDRESS_ARITH,
+                        EscapeReason::HostCall => MEMORY_FRAME_DECLINED_HOST_CALL,
+                        EscapeReason::BlockParam => MEMORY_FRAME_DECLINED_BLOCK_PARAM,
+                        EscapeReason::StoredAsValue => MEMORY_FRAME_DECLINED_STORED_AS_VALUE,
                         EscapeReason::CalleeUnresolved => MEMORY_FRAME_DECLINED_OPAQUE,
                         EscapeReason::OffsetNotConstant => MEMORY_FRAME_DECLINED_OFFSET_NOT_CONST,
                         EscapeReason::EscapesAgain => MEMORY_FRAME_DECLINED_ESCAPES_AGAIN,

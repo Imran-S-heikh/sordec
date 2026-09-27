@@ -277,12 +277,17 @@ pub struct GuardCoverage {
 pub struct MemoryCoverage {
     /// Shadow-stack slots promoted from linear memory to SSA values.
     pub slots_promoted: i64,
-    /// Frames declined because an address left through something that is
-    /// not a direct call: a host import, a return, a terminator, or stored
-    /// as a value. A host import's linear-memory footprint is documented,
-    /// but at the lifted layer its position argument is still the
-    /// arithmetic that builds a `U32Val`.
-    pub declined_not_a_call: i64,
+    /// Frames declined because an address was consumed by arithmetic that
+    /// cannot be folded, or a tag chain not recognised as a `U32Val`.
+    pub declined_address_arith: i64,
+    /// Frames declined because an address reached a host import other than
+    /// through a recognised `U32Val` position argument.
+    pub declined_host_call: i64,
+    /// Frames declined because a terminator carried an address into a block
+    /// parameter.
+    pub declined_block_param: i64,
+    /// Frames declined because an address was stored as a value.
+    pub declined_stored_as_value: i64,
     /// Frames declined because a callee's access through the pointer is not
     /// at a constant offset from it — an indexed store, say.
     pub declined_offset_not_const: i64,
@@ -1202,19 +1207,28 @@ fn build_guards(t: &BTreeMap<&'static str, i64>) -> GuardCoverage {
 }
 
 fn build_memory(t: &BTreeMap<&'static str, i64>) -> MemoryCoverage {
-    let declined_not_a_call = metric(t, mc::MEMORY_FRAME_DECLINED_NOT_A_CALL);
+    let declined_address_arith = metric(t, mc::MEMORY_FRAME_DECLINED_ADDRESS_ARITH);
+    let declined_host_call = metric(t, mc::MEMORY_FRAME_DECLINED_HOST_CALL);
+    let declined_block_param = metric(t, mc::MEMORY_FRAME_DECLINED_BLOCK_PARAM);
+    let declined_stored_as_value = metric(t, mc::MEMORY_FRAME_DECLINED_STORED_AS_VALUE);
     let declined_offset_not_const = metric(t, mc::MEMORY_FRAME_DECLINED_OFFSET_NOT_CONST);
     let declined_escapes_again = metric(t, mc::MEMORY_FRAME_DECLINED_ESCAPES_AGAIN);
     let declined_opaque = metric(t, mc::MEMORY_FRAME_DECLINED_OPAQUE);
     let declined_layout = metric(t, mc::MEMORY_FRAME_DECLINED_OVERLAP);
     MemoryCoverage {
         slots_promoted: metric(t, mc::MEMORY_SLOTS_PROMOTED),
-        declined_not_a_call,
+        declined_address_arith,
+        declined_host_call,
+        declined_block_param,
+        declined_stored_as_value,
         declined_offset_not_const,
         declined_escapes_again,
         declined_opaque,
         declined_layout,
-        declined_total: declined_not_a_call
+        declined_total: declined_address_arith
+            + declined_host_call
+            + declined_block_param
+            + declined_stored_as_value
             + declined_offset_not_const
             + declined_escapes_again
             + declined_opaque
