@@ -67,7 +67,7 @@ impl ValueNames {
             if map.contains_key(&vid) {
                 continue; // a parameter
             }
-            let name = match base_hint(binding) {
+            let name = match base_hint(func, binding) {
                 Some(base) if !taken.contains_key(&base) => {
                     taken.insert(base.clone(), 0);
                     ident(&base)
@@ -112,15 +112,50 @@ fn value_fallback(vid: ValueId) -> syn::Ident {
 /// value's type alone (an `i128` is not assumed to be an `amount`): that
 /// would be a guess, and the project's rule is never to mislead. Everything
 /// unrecognised keeps its `v{index}`.
-fn base_hint(binding: &Binding) -> Option<String> {
+fn base_hint(func: &HighFunction, binding: &Binding) -> Option<String> {
     match &binding.expr {
-        Expr::Semantic(SemanticOp::Known(op)) => known_op_hint(op),
+        Expr::Semantic(SemanticOp::Known(op)) => known_op_hint(func, op),
+        _ => None,
+    }
+}
+
+/// How far to follow a chain of renames looking for the key's constant.
+const MAX_RENAME_HOPS: usize = 8;
+
+/// The word a storage key offers, when it names one unambiguously.
+///
+/// An enum key gives its variant. A **symbol** key gives its text, which
+/// is the commoner shape by far — `const COUNTER: Symbol =
+/// symbol_short!("COUNTER")` is how most contracts key their storage, and
+/// naming only the enum case left every one of those reads as `vN`.
+/// Measured across the held-out set before this: 28 named bindings out of
+/// 9570.
+///
+/// The text is the author's own word for the slot, recovered from rodata
+/// or a `SymbolSmall` constant, so it is structure rather than a guess —
+/// the same licence the variant name has.
+fn key_word(func: &HighFunction, key: ValueId) -> Option<String> {
+    // Renames sit between the op and the constant, so follow them: the key
+    // operand is rarely the literal binding itself.
+    let mut key = key;
+    for _ in 0..MAX_RENAME_HOPS {
+        match func.bindings.get(key).map(|b| &b.expr) {
+            Some(Expr::Use(inner)) => key = *inner,
+            _ => break,
+        }
+    }
+    match &func.bindings.get(key)?.expr {
+        Expr::Literal(sordec_ir::Literal::Symbol(text)) => Some(snake(text)),
+        Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew {
+            resolved: Some(text),
+            ..
+        })) => Some(snake(text)),
         _ => None,
     }
 }
 
 /// The name a recovered host op lends the value it produces.
-fn known_op_hint(op: &KnownOp) -> Option<String> {
+fn known_op_hint(func: &HighFunction, op: &KnownOp) -> Option<String> {
     match op {
         // A storage read is named after the slot it reads: the recovered
         // key variant (`DataKey::Balance` → `balance`). Only when the key
@@ -129,6 +164,14 @@ fn known_op_hint(op: &KnownOp) -> Option<String> {
         KnownOp::StorageHas { resolved_key: Some(ek), .. } => {
             Some(format!("has_{}", snake(&ek.variant)))
         }
+        // The same, for the commoner symbol-keyed form.
+        KnownOp::StorageGet { key, .. } => key_word(func, *key),
+        KnownOp::StorageHas { key, .. } => key_word(func, *key).map(|k| format!("has_{k}")),
+        // A symbol is its own name.
+        KnownOp::SymbolNew { resolved: Some(text), .. } => Some(snake(text)),
+        // A cross-contract call is named for the function it invokes.
+        KnownOp::InvokeContract { resolved_callee: Some(name), .. }
+        | KnownOp::TryInvokeContract { resolved_callee: Some(name), .. } => Some(snake(name)),
         // Ledger context reads a single, well-known quantity.
         KnownOp::GetLedgerSequence => Some("sequence".to_string()),
         KnownOp::GetLedgerTimestamp => Some("timestamp".to_string()),
@@ -180,15 +223,72 @@ mod tests {
         assert_eq!(snake("A"), "a");
     }
 
+    /// A context read names itself; these need no function to consult.
+    /// A one-binding function whose only value is `key_expr`, for the
+    /// naming gates that consult the key's producer.
+    fn func_with_key(key_expr: Expr) -> HighFunction {
+        use sordec_common::{Arena, BlockId, FuncId, Provenance, ProvenanceSource, UnknownReason};
+        use sordec_ir::{Binding, HighBlock, IrType, Region};
+        let mut bindings: Arena<ValueId, Binding> = Arena::new();
+        bindings.push(Binding::new(
+            ValueId::from_index(0),
+            IrType::Unknown(UnknownReason::InsufficientEvidence),
+            key_expr,
+            Provenance::new("test", ProvenanceSource::DataFlow, "test"),
+        ));
+        let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
+        let block = BlockId::from_index(0);
+        blocks.push(HighBlock { id: block, bindings: vec![ValueId::from_index(0)] });
+        HighFunction {
+            id: FuncId::from_index(0),
+            name: None,
+            signature: None,
+            blocks,
+            bindings,
+            region: Region::Basic(block),
+            params: vec![],
+            returns: vec![],
+        }
+    }
+
+    fn empty_func() -> HighFunction {
+        func_with_key(Expr::Phi { incoming: vec![] })
+    }
+
     #[test]
-    fn ledger_and_storage_ops_earn_names() {
-        assert_eq!(known_op_hint(&KnownOp::GetLedgerSequence).as_deref(), Some("sequence"));
+    fn ledger_ops_earn_names() {
+        let func = empty_func();
         assert_eq!(
-            known_op_hint(&KnownOp::GetCurrentContractAddress).as_deref(),
+            known_op_hint(&func, &KnownOp::GetLedgerSequence).as_deref(),
+            Some("sequence")
+        );
+        assert_eq!(
+            known_op_hint(&func, &KnownOp::GetCurrentContractAddress).as_deref(),
             Some("current_contract_address")
         );
-        // A storage op with no resolved key has no honest name.
-        assert_eq!(known_op_hint(&KnownOp::GetLedgerNetworkId).as_deref(), Some("network_id"));
+        assert_eq!(
+            known_op_hint(&func, &KnownOp::GetLedgerNetworkId).as_deref(),
+            Some("network_id")
+        );
+    }
+
+    /// A storage read takes its word from the key. A key that names
+    /// nothing — an unresolved value, not a constant — leaves the read
+    /// unnamed rather than inventing one.
+    #[test]
+    fn a_storage_read_is_named_after_a_symbol_key() {
+        let func = func_with_key(Expr::Literal(sordec_ir::Literal::Symbol("COUNTER".into())));
+        let op = KnownOp::StorageGet {
+            tier: sordec_ir::StorageTier::Known(sordec_ir::KnownTier::Instance),
+            durability: ValueId::from_index(0),
+            key: ValueId::from_index(0),
+            resolved_key: None,
+            missing: sordec_ir::Missing::Option,
+        };
+        assert_eq!(known_op_hint(&func, &op).as_deref(), Some("counter"));
+
+        let opaque = func_with_key(Expr::Phi { incoming: vec![] });
+        assert!(known_op_hint(&opaque, &op).is_none(), "no key, no name");
     }
 }
 
