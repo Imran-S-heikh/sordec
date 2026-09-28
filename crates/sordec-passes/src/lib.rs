@@ -205,6 +205,10 @@ pub const PANIC_RECOVER_AFTER_RECOVERY: &str = "panic-recover-after-recovery";
 pub const POLARITY_AFTER_ELISION: &str = "polarity-after-elision";
 /// Name of the declared-type recovery re-run after the elision group.
 pub const SPEC_FROM_GUARDS_AFTER_ELISION: &str = "spec-from-guards-after-elision";
+/// [`DeadFrameStorePass`] re-run after the `Vec` elements are recovered.
+pub const DEAD_FRAME_STORE_AFTER_VEC: &str = "dead-frame-store-after-vec";
+/// [`FrameElisionPass`] re-run after the `Vec` elements are recovered.
+pub const FRAME_ELISION_AFTER_VEC: &str = "frame-elision-after-vec";
 /// Name of the declared-type recovery re-run inside the elision group,
 /// where a struct recovered from its key table first has fields to type.
 pub const SPEC_FROM_GUARDS_ON_FIELDS: &str = "spec-from-guards-on-fields";
@@ -585,6 +589,28 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // collected afterwards, since the elisions that would do it
             // have run.
             Box::new(VecElementsPass),
+            // Collecting the buffer the elements came out of, in a group of
+            // its own.
+            //
+            // The main elision group has already converged, and this pass
+            // must not rejoin it — see the note above. But recovering the
+            // elements makes the buffer's stores unread for the first time,
+            // and the two passes that collect an unread frame have run. So
+            // they run again here, as their own fixpoint: the store
+            // retirement makes the frame pointer unread, the bracket
+            // elision then takes the bracket, and neither reads the
+            // liveness-sensitive shapes the big group gates on. Worth 78
+            // more holes than leaving the buffer behind.
+            Box::new(pass::Rerun::new(
+                DeadFrameStorePass,
+                DEAD_FRAME_STORE_AFTER_VEC,
+                &[],
+            )),
+            Box::new(pass::Rerun::new(
+                FrameElisionPass,
+                FRAME_ELISION_AFTER_VEC,
+                &[],
+            )),
             // After the group, on settled IR: a returned `select` becomes
             // the `if`/`else` it compiled from, so each arm can be the
             // `Ok`/`Err` it is.
