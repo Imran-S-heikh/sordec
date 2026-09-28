@@ -89,6 +89,29 @@ fn unsuffixed_against(
     Some(if n < 0 { parse_quote!((#rendered)) } else { rendered })
 }
 
+/// One expression as the short text a hole label carries.
+fn operand_text(expr: &syn::Expr) -> String {
+    prettyplease::unparse(&syn::parse_quote!(
+        fn f() {
+            #expr;
+        }
+    ))
+    .lines()
+    .nth(1)
+    .map(|l| l.trim().trim_end_matches(';').to_string())
+    .unwrap_or_default()
+}
+
+/// `+N` for a non-zero memarg offset, empty for zero — the common case,
+/// where printing `+0` would be noise.
+fn offset_suffix(offset: u32) -> String {
+    if offset == 0 {
+        String::new()
+    } else {
+        format!("+{offset}")
+    }
+}
+
 /// The `KnownType` behind a type, whatever its certainty.
 fn base_of(ty: &IrType) -> Option<KnownType> {
     match ty {
@@ -268,8 +291,28 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             Some(path) => parse_quote!(#path),
             None => ctx.policy.unknown_expr("variant of an unnamed type"),
         },
-        Expr::Load { .. } => ctx.policy.unknown_expr("memory load"),
-        Expr::Store { .. } => ctx.policy.unknown_expr("memory store"),
+        // A raw memory access names its address and, for a store, the
+        // value it writes.
+        //
+        // `todo!("memory store")` discards both, which loses the only thing
+        // a reader could use — *which* slot took *what* — and leaves the
+        // address arithmetic above it with no reader at all: 564 of the
+        // held-out set's emitted bindings are unread for exactly this
+        // reason, and rustc warns about every one. Naming the operands
+        // keeps the fact and the binding together.
+        Expr::Load { addr, offset, width, .. } => ctx.policy.unknown_expr(&format!(
+            "load {}{} width {}",
+            operand_text(&ctx.value_ref(*addr)),
+            offset_suffix(*offset),
+            width.bytes()
+        )),
+        Expr::Store { addr, value, offset, width } => ctx.policy.unknown_expr(&format!(
+            "store {}{} <- {} width {}",
+            operand_text(&ctx.value_ref(*addr)),
+            offset_suffix(*offset),
+            operand_text(&ctx.value_ref(*value)),
+            width.bytes()
+        )),
         Expr::GlobalGet { index } => ctx.policy.unknown_expr(&format!("global.get {index}")),
         Expr::IndirectCall { .. } => ctx.policy.unknown_expr("indirect call"),
         // A phi never reaches here (phis are `let mut` declarations, not
@@ -538,7 +581,7 @@ fn binary_expr(op: BinaryOp, l: syn::Expr, r: syn::Expr) -> syn::Expr {
 mod tests {
     use super::*;
     use quote::ToTokens;
-
+    
     fn render(e: &syn::Expr) -> String {
         e.to_token_stream().to_string()
     }
