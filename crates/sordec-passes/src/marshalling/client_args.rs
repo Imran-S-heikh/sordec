@@ -148,6 +148,7 @@ mod tests {
                 Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
                     vals_pos: v(2),
                     len: v(2),
+                    elements: None,
                 })), // v3
                 Expr::Semantic(SemanticOp::Known(KnownOp::InvokeContract {
                     contract: v(0),

@@ -714,6 +714,17 @@ fn chase_key(func: &HighFunction, key: ValueId) -> ValueId {
     super::wrappers::chase_value(func, key)
 }
 
+/// Whether `target` is an enum-key constructor.
+///
+/// Exposed because a key with a payload is *spelled as a `Vec`*, so any
+/// pass that rewrites vectors has to know which ones belong to this
+/// recognizer and [`crate::marshalling::key_construction`]. The two
+/// together rewrite the whole converter shape, and a vector rewritten out
+/// from under them leaves it half-done.
+pub(crate) fn is_key_constructor(ir: &HighIr, target: FuncId) -> bool {
+    summarize_ctor(ir, target).is_some()
+}
+
 /// Gates 1 + 2: prove `target` is an enum-key constructor and identify
 /// which union it builds. `None` (memoized) when any part fails.
 fn summarize_ctor(ir: &HighIr, target: FuncId) -> Option<CtorSummary> {

@@ -532,34 +532,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // The slab it was built from goes with it, because the
             // stores are then unread and `DeadFrameStorePass` is next.
             Box::new(ClientArgVecPass),
-            // And the same for every *other* linear-memory `Vec`: the
-            // elements of `vec![&e, a, b, c]` are stores into a scratch
-            // buffer a few lines above the constructor.
-            // `ClientArgVecPass` covers a cross-contract call's arguments;
-            // this covers the rest, `require_auth_for_args` included.
-            // Before the dead-store elision, which is what collects the
-            // buffer once nothing reads it.
             // A store into a private frame that nothing loads back is the
             // last reader of a frame pointer the bracket elision below
             // needs unread.
             Box::new(DeadFrameStorePass),
             Box::new(FrameElisionPass),
-            // Every *other* linear-memory `Vec`: the elements of
-            // `vec![&e, a, b, c]` are stores into a scratch buffer above
-            // the constructor, and recovering them is what lets the buffer
-            // go.
-            //
-            // Last in the group on purpose. A `Vec` is also how the SDK
-            // spells an enum key with a payload and a cross-contract
-            // call's arguments, and both have their own owner earlier here
-            // — `KeyConstructionElisionPass` and `ClientArgVecPass`.
-            // Claiming those first leaves their shape half-rewritten and
-            // the `Option` collapse that reads it stops matching: measured
-            // as auth, custom_types and events each falling 1.0000 ->
-            // 0.7059. Running after them means what reaches this pass is
-            // the vectors nobody else wants, and the group's next
-            // iteration retires the buffer.
-            Box::new(VecElementsPass),
             // Cancels a wide join against its own limbs. In the group
             // because the decode collapse is what plants the limb
             // extractors it cancels, and each cancellation may expose the
@@ -593,6 +570,21 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(pass::Rerun::new(PolarityPass, POLARITY_AFTER_ELISION, &[])),
             Box::new(ScopeFallthroughPass),
             Box::new(ScopeIfElsePass),
+            // After the group, on settled IR. A `Vec`'s elements are stores
+            // into a scratch buffer above its constructor, and reading them
+            // back is what lets `vec![..]` be spelled at all.
+            //
+            // Outside the fixpoint group on purpose, not merely last in it.
+            // Filling the elements in changes which values are live, and
+            // several gates inside the group are liveness-sensitive: run in
+            // the group — anywhere in it — the `Option` collapse stops
+            // matching on auth, custom_types and events, each falling
+            // 1.0000 -> 0.7059 on a branch the source never wrote. Out
+            // here the group has already converged, so nothing it decided
+            // can be disturbed. The cost is that the buffer stores are not
+            // collected afterwards, since the elisions that would do it
+            // have run.
+            Box::new(VecElementsPass),
             // After the group, on settled IR: a returned `select` becomes
             // the `if`/`else` it compiled from, so each arm can be the
             // `Ok`/`Err` it is.

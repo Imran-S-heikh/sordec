@@ -1057,13 +1057,17 @@ impl KnownOp {
                 vals_pos,
                 len,
                 elements,
-            } => {
-                f(*vals_pos);
-                f(*len);
-                for e in elements.iter().flatten() {
-                    f(*e);
+            } => match elements {
+                Some(values) => {
+                    for e in values {
+                        f(*e);
+                    }
                 }
-            }
+                None => {
+                    f(*vals_pos);
+                    f(*len);
+                }
+            },
             KnownOp::MapNew {
                 keys_pos,
                 vals_pos,

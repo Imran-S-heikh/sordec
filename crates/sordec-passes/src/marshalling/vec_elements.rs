@@ -34,7 +34,7 @@
 //! - **Every element slot has a reaching store of exactly 8 bytes.** A
 //!   `Val` is 8 bytes; a slot written at another width is not one element,
 //!   and a slot with no reaching store is one this pass cannot supply.
-//!   [`facts_at`] is what makes "reaching" precise — it walks the region
+//!   [`facts_before`] is what makes "reaching" precise — it walks the region
 //!   tree, so a store on one arm of a branch does not count for a
 //!   constructor after the join, and anything that may write memory in
 //!   between kills the fact.
@@ -47,7 +47,7 @@ use sordec_common::{Provenance, ProvenanceSource};
 use sordec_ir::{Expr, HighIr, KnownOp, MemWidth, SemanticOp};
 
 use crate::dataflow::frame_facts::facts_before;
-use crate::dataflow::{block_containing, canon_addr, resolve_use, trace_u32val};
+use crate::dataflow::{block_containing, canon_addr, trace_u32val};
 use crate::recognizers::client_call::peel_encode;
 use crate::pass::{Pass, PassResult};
 
@@ -66,9 +66,6 @@ const M_RECOVERED: &str = "vec_elements_recovered";
 /// Constructors left alone because the gate did not pass.
 const M_UNRESOLVED: &str = "vec_elements_unresolved";
 
-/// The counters recording work newly done, for a re-run to report.
-pub(crate) const RESOLUTION_COUNTERS: &[&str] = &[M_RECOVERED];
-
 /// Fills in `VecNew`'s elements from the stores that built its buffer.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct VecElementsPass;
@@ -80,8 +77,26 @@ impl Pass<HighIr> for VecElementsPass {
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
+        // Which functions are somebody else's, decided over an immutable
+        // view before any rewriting.
+        let converters: std::collections::HashSet<sordec_common::FuncId> = ir
+            .functions
+            .iter()
+            .map(|f| f.id)
+            .filter(|&id| crate::recognizers::enum_key::is_key_constructor(ir, id))
+            .collect();
+
         for func in &mut ir.functions {
-            let claimed = claimed_vectors(func);
+            // A key with a payload is spelled as a `Vec`, and the converter
+            // that builds it belongs to `enum_key` +
+            // `super::key_construction`, which rewrite the whole shape
+            // between them. Recovering its elements leaves that half-done
+            // and the `Option` collapse downstream stops matching — auth,
+            // custom_types and events each fell 1.0000 -> 0.7059 before
+            // this gate existed.
+            if converters.contains(&func.id) {
+                continue;
+            }
             // Two phases: the recovery reads the whole function's frame
             // facts, which cannot be done while a binding is borrowed
             // mutably for the write.
@@ -95,9 +110,6 @@ impl Pass<HighIr> for VecElementsPass {
                 else {
                     continue;
                 };
-                if claimed.contains(&id) {
-                    continue;
-                }
                 match recover(func, id, *vals_pos, *len) {
                     Some(values) => found.push((id, values)),
                     None => result.metrics.increment(M_UNRESOLVED, 1),
@@ -150,46 +162,77 @@ fn recover(
         .collect()
 }
 
-/// Vectors another pass already owns, which this one must not touch.
-///
-/// A `Vec` is not only `vec![..]`. The SDK also spells an enum key with a
-/// payload as one (`DataKey::Counter(user)` is a two-element vector) and a
-/// cross-contract call's argument list as one, and each has an owner that
-/// rewrites the whole shape:
-/// [`super::key_construction`] and [`super::client_args`].
-///
-/// Recovering the elements of one of those leaves its shape half-rewritten
-/// — the constructor names values while its owner still expects the buffer
-/// — and the `Option` collapse reading the result stops matching.
-/// Measured: `auth`, `custom_types` and `events` each fell from 1.0000 to
-/// 0.7059, gaining a branch the source never wrote. Ordering alone cannot
-/// prevent it, because these passes share a fixpoint group and this one
-/// would still win a round.
-fn claimed_vectors(
-    func: &sordec_ir::HighFunction,
-) -> std::collections::HashSet<sordec_common::ValueId> {
-    let mut claimed = std::collections::HashSet::new();
-    let mut claim = |v: sordec_common::ValueId| {
-        claimed.insert(resolve_use(func, v));
-    };
-    for (_, binding) in func.bindings.iter() {
-        let Expr::Semantic(SemanticOp::Known(op)) = &binding.expr else {
-            continue;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::marshalling::test_support::{func_with, module, store, v};
+    use crate::pass::Pass;
+    use sordec_ir::Literal;
+
+    /// Two elements stored into a buffer, then the constructor: the
+    /// elements come back in offset order, which is the vector's order.
+    #[test]
+    fn elements_come_back_in_offset_order() {
+        let mut ir = module(vec![func_with(
+            vec![
+                Expr::Literal(Literal::I32(0)),                    // v0 base
+                Expr::Literal(Literal::I64(11)),                   // v1 first
+                Expr::Literal(Literal::I64(22)),                   // v2 second
+                store(v(0), v(1), 0),                              // v3
+                store(v(0), v(2), 8),                              // v4
+                Expr::Literal(Literal::I32(2)),                    // v5 count
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                    vals_pos: v(0),
+                    len: v(5),
+                    elements: None,
+                })),                                               // v6
+            ],
+            vec![],
+            (0..7).collect(),
+        )]);
+
+        assert!(VecElementsPass.run(&mut ir).changed, "the gate passes");
+        let func = ir.functions.first().expect("one function");
+        let Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { elements, .. })) =
+            &func.bindings.get(v(6)).expect("the constructor").expr
+        else {
+            panic!("still a VecNew");
         };
-        match op {
-            KnownOp::StorageGet { key, .. }
-            | KnownOp::StorageSet { key, .. }
-            | KnownOp::StorageHas { key, .. }
-            | KnownOp::StorageRemove { key, .. }
-            | KnownOp::StorageExtendTtl { key, .. }
-            | KnownOp::StorageExtendTtlV2 { key, .. } => claim(*key),
-            KnownOp::InvokeContract { args, .. } | KnownOp::TryInvokeContract { args, .. } => {
-                for a in args {
-                    claim(*a);
-                }
-            }
-            _ => {}
-        }
+        assert_eq!(
+            elements.as_deref(),
+            Some(&[v(1), v(2)][..]),
+            "offset 0 then offset 8"
+        );
     }
-    claimed
+
+    /// All or nothing: a buffer with a gap in it yields no elements at all,
+    /// because a vector printed shorter than the contract builds is a wrong
+    /// fact rather than a partial one.
+    #[test]
+    fn a_missing_slot_declines_the_whole_constructor() {
+        let mut ir = module(vec![func_with(
+            vec![
+                Expr::Literal(Literal::I32(0)),
+                Expr::Literal(Literal::I64(11)),
+                store(v(0), v(1), 0), // only slot 0 is written
+                Expr::Literal(Literal::I32(2)),
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                    vals_pos: v(0),
+                    len: v(3),
+                    elements: None,
+                })),
+            ],
+            vec![],
+            (0..5).collect(),
+        )]);
+
+        assert!(!VecElementsPass.run(&mut ir).changed, "slot 8 is unwritten");
+        let func = ir.functions.first().expect("one function");
+        let Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { elements, .. })) =
+            &func.bindings.get(v(4)).expect("the constructor").expr
+        else {
+            panic!("still a VecNew");
+        };
+        assert!(elements.is_none(), "no half-filled vector");
+    }
 }
