@@ -90,7 +90,7 @@ const M_PROBES: &str = "storage_option_probe";
 /// which is about separately *constructed* keys whose contents were never
 /// proven. A key that is not a constant is compared by identity exactly as
 /// before.
-fn same_key(func: &HighFunction, a: ValueId, b: ValueId) -> bool {
+pub(crate) fn same_key(func: &HighFunction, a: ValueId, b: ValueId) -> bool {
     if a == b {
         return true;
     }

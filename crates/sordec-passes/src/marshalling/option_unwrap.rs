@@ -34,7 +34,7 @@
 //! Only a probe whose guard is an else-less branch to a *bare* trap. A
 //! `has` whose branch selects a default (`unwrap_or`, `if let`) is the
 //! author's branch and stays; a `has` with no `get` on the same key is a
-//! real `has` and stays. The key must be the same SSA value on both
+//! real `has` and stays. The key must be the same slot on both
 //! calls, as the probe recognizer requires.
 //!
 //! # Why a flag on the read and not a separate operator
@@ -146,7 +146,8 @@ fn plan(func: &HighFunction) -> Vec<Plan> {
         // The read on the same key at the same tier, not yet unwrapped.
         let get = func.bindings.iter().find_map(|(id, b)| match &b.expr {
             Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { key: k, tier: t, missing: sordec_ir::Missing::Option, .. }))
-                if chase_value(func, *k) == *key && proven_tier(t) == Some(*tier) =>
+                if super::option_probe::same_key(func, chase_value(func, *k), *key)
+                    && proven_tier(t) == Some(*tier) =>
             {
                 Some(id)
             }

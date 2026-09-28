@@ -206,6 +206,13 @@ pub const POLARITY_AFTER_ELISION: &str = "polarity-after-elision";
 /// Name of the declared-type recovery re-run after the elision group.
 pub const SPEC_FROM_GUARDS_AFTER_ELISION: &str = "spec-from-guards-after-elision";
 /// [`DeadFrameStorePass`] re-run after the `Vec` elements are recovered.
+/// [`OptionProbePass`] re-run once every wrapper has been inlined.
+pub const OPTION_PROBE_AFTER_ELISION: &str = "option-probe-after-elision";
+/// [`OptionUnwrapPass`] re-run on the probes that re-run found.
+pub const OPTION_UNWRAP_AFTER_ELISION: &str = "option-unwrap-after-elision";
+/// [`OptionDefaultPass`] re-run on the probes that re-run found.
+pub const OPTION_DEFAULT_AFTER_ELISION: &str = "option-default-after-elision";
+/// [`DeadFrameStorePass`] re-run after the `Vec` elements are recovered.
 pub const DEAD_FRAME_STORE_AFTER_VEC: &str = "dead-frame-store-after-vec";
 /// [`FrameElisionPass`] re-run after the `Vec` elements are recovered.
 pub const FRAME_ELISION_AFTER_VEC: &str = "frame-elision-after-vec";
@@ -588,6 +595,37 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // can be disturbed. The cost is that the buffer stores are not
             // collected afterwards, since the elisions that would do it
             // have run.
+            // The SDK's `Option` probe, once more now that every wrapper
+            // has been pasted.
+            //
+            // The pairing gate needs a `has` and a `get` on one key at one
+            // tier, and its first run sees neither: the SDK puts them in
+            // *separate* wrappers that each build the same constant key
+            // themselves, so the caller passes nothing and there is no
+            // shared value to pair on. After inlining they are siblings
+            // with two equal constants, which `same_key` matches.
+            //
+            // Out here rather than in the elision group, and the collapse
+            // runs immediately after the marking. An earlier attempt put
+            // the re-run inside that group and cost 0.09 on the corpus —
+            // marking a probe takes the pair out of the group's reach
+            // while its members are still iterating, and a marked-but-
+            // uncollapsed probe is strictly worse than an unmarked one.
+            Box::new(pass::Rerun::new(
+                OptionProbePass,
+                OPTION_PROBE_AFTER_ELISION,
+                &[],
+            )),
+            Box::new(pass::Rerun::new(
+                OptionUnwrapPass,
+                OPTION_UNWRAP_AFTER_ELISION,
+                &[],
+            )),
+            Box::new(pass::Rerun::new(
+                OptionDefaultPass,
+                OPTION_DEFAULT_AFTER_ELISION,
+                &[],
+            )),
             Box::new(VecElementsPass),
             // Collecting the buffer the elements came out of, in a group of
             // its own.
