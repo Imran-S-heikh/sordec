@@ -81,7 +81,7 @@
 //! reports by name through [`LiftDiagnosticCode::SpecializationDeclined`]
 //! rather than only as a counter.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use sordec_common::{
     BlockId, Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, Provenance, ProvenanceSource,
@@ -106,6 +106,17 @@ const M_RETARGETED: &str = "specialize_retargeted";
 const M_PINNED: &str = "specialize_params_pinned";
 /// Candidates left merged (cycle, budget, or an unpinnable region shape).
 const M_DECLINED: &str = "specialize_declined";
+/// Why each declined candidate was left merged. The total alone cannot say
+/// whether a contract is near the fan-out line or nowhere near it.
+const M_FANOUT: &str = crate::metrics_catalog::SPECIALIZE_DECLINED_FANOUT;
+/// See [`M_FANOUT`].
+const M_GROUPING: &str = crate::metrics_catalog::SPECIALIZE_DECLINED_GROUPING;
+/// See [`M_FANOUT`].
+const M_BUDGET: &str = crate::metrics_catalog::SPECIALIZE_DECLINED_BUDGET;
+/// See [`M_FANOUT`].
+const M_UNPINNABLE: &str = crate::metrics_catalog::SPECIALIZE_DECLINED_UNPINNABLE;
+/// See [`M_FANOUT`].
+const M_INDIRECT: &str = crate::metrics_catalog::SPECIALIZE_DISABLED_INDIRECT;
 
 /// How deep to look through constructor helpers when asking which of a
 /// function's parameters a storage operand depends on. A `#[contracttype]`
@@ -142,11 +153,13 @@ impl Pass<HighIr> for SpecializePass {
         // across rounds so a deep nest cannot spend it a layer at a time.
         let mut budget = ir.functions.len();
         let mut declined: BTreeSet<FuncId> = BTreeSet::new();
+        let mut why: BTreeMap<FuncId, &'static str> = BTreeMap::new();
 
         for _ in 0..MAX_ROUNDS {
             let calls = CallIndex::build(ir);
             // Indirect calls anywhere mean no caller set is complete.
             if calls.has_indirect_calls() {
+                result.metrics.increment(M_INDIRECT, 1);
                 break;
             }
             let blocked = blocked_params(ir, &calls);
@@ -154,7 +167,15 @@ impl Pass<HighIr> for SpecializePass {
             if candidates.is_empty() {
                 break;
             }
-            let plans = plan_round(ir, &calls, &blocked, &candidates, &mut budget, &mut declined);
+            let plans = plan_round(
+                ir,
+                &calls,
+                &blocked,
+                &candidates,
+                &mut budget,
+                &mut declined,
+                &mut why,
+            );
             if plans.is_empty() {
                 break;
             }
@@ -163,6 +184,9 @@ impl Pass<HighIr> for SpecializePass {
 
         for func in declined {
             result.metrics.increment(M_DECLINED, 1);
+            if let Some(reason) = why.get(&func) {
+                result.metrics.increment(reason, 1);
+            }
             result.diagnostics.push(
                 Diagnostic::warning(LiftDiagnosticCode::SpecializationDeclined, "")
                     .at(Location::Function(func)),
@@ -465,6 +489,7 @@ fn plan_round(
     candidates: &HashSet<FuncId>,
     budget: &mut usize,
     declined: &mut BTreeSet<FuncId>,
+    why: &mut BTreeMap<FuncId, &'static str>,
 ) -> Vec<Plan> {
     let mut plans = Vec::new();
     // Deterministic order: FuncId, so budget exhaustion is reproducible.
@@ -478,6 +503,7 @@ fn plan_round(
         }
         if sites.len() > MAX_CALLSITE_FANOUT {
             declined.insert(id);
+            why.insert(id, M_FANOUT);
             continue;
         }
         let Some(func) = ir.function(id) else {
@@ -488,12 +514,14 @@ fn plan_round(
         let params: Vec<usize> = blocked.get(&id).cloned().unwrap_or_default().into_iter().collect();
         let Some(groups) = group_sites(ir, func, sites, &params) else {
             declined.insert(id);
+            why.insert(id, M_GROUPING);
             continue;
         };
         let clone = groups.len() > 1;
         // One copy per group; the original then goes dead.
         if clone && groups.len() > *budget {
             declined.insert(id);
+            why.insert(id, M_BUDGET);
             continue;
         }
         // A constant is only pinnable if it has somewhere to be
@@ -517,6 +545,7 @@ fn plan_round(
             // Blocked, and neither de-sharing nor pinning reaches it.
             if !pinnable {
                 declined.insert(id);
+                why.insert(id, M_UNPINNABLE);
             }
             continue;
         }

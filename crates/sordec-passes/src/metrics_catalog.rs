@@ -76,6 +76,23 @@ pub const SPECIALIZE_RETARGETED: &str = "specialize_retargeted";
 pub const SPECIALIZE_PARAMS_PINNED: &str = "specialize_params_pinned";
 /// Merged helpers left merged (cycle, budget, unpinnable region shape).
 pub const SPECIALIZE_DECLINED: &str = "specialize_declined";
+/// Candidates declined because the helper has more call sites than
+/// `MAX_CALLSITE_FANOUT`. Shared SDK infrastructure looks exactly like a
+/// folded source family from the inside; this is the line between them.
+pub const SPECIALIZE_DECLINED_FANOUT: &str = "specialize_declined_fanout";
+/// Candidates declined because their call sites could not be grouped by
+/// the constants they pass.
+pub const SPECIALIZE_DECLINED_GROUPING: &str = "specialize_declined_grouping";
+/// Candidates declined because cloning them would exceed the growth
+/// budget of one extra function per original.
+pub const SPECIALIZE_DECLINED_BUDGET: &str = "specialize_declined_budget";
+/// Candidates declined because no block dominates the readers of a pinned
+/// constant, so the parameter cannot be replaced.
+pub const SPECIALIZE_DECLINED_UNPINNABLE: &str = "specialize_declined_unpinnable";
+/// Set when the whole pass was disabled because the module contains an
+/// indirect call, so no caller set can be trusted. Module-wide: one
+/// `call_indirect` anywhere costs every helper in the contract.
+pub const SPECIALIZE_DISABLED_INDIRECT: &str = "specialize_disabled_indirect";
 
 /// `has` calls proven to be the SDK's `Option` discriminant rather than a
 /// source-level `.has()`.

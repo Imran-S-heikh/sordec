@@ -97,6 +97,8 @@ pub struct CoverageReport {
     pub memory: MemoryCoverage,
     /// `#[contracttype]` struct recovery. See [`UdtCoverage`].
     pub udt: UdtCoverage,
+    /// Helper de-sharing. See [`SpecializeCoverage`].
+    pub specialize: SpecializeCoverage,
     /// SDK argument-guard elision, and for every `if` left standing, which
     /// gate refused it.
     pub guards: GuardCoverage,
@@ -272,6 +274,33 @@ pub struct GuardCoverage {
     pub declined_other: i64,
     /// Every decline, summed.
     pub declined_total: i64,
+}
+
+/// Helper de-sharing, and why each merged family stayed merged.
+///
+/// LLVM folds a family of source functions that differ only in a constant
+/// into one body. Every downstream recognizer then declines correctly, on
+/// a disagreement that is not ambiguity but several facts sharing a body.
+/// This says how much was given back and what stopped the rest.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpecializeCoverage {
+    /// Copies created, one per de-shared call site.
+    pub cloned: i64,
+    /// Parameters replaced by the constant their caller passes.
+    pub params_pinned: i64,
+    /// Candidates left merged, for any reason.
+    pub declined: i64,
+    /// Declined: more call sites than the fan-out limit.
+    pub declined_fanout: i64,
+    /// Declined: call sites would not group by the constants they pass.
+    pub declined_grouping: i64,
+    /// Declined: cloning would exceed the growth budget.
+    pub declined_budget: i64,
+    /// Declined: no block dominates the readers of a pinned constant.
+    pub declined_unpinnable: i64,
+    /// Non-zero when the whole pass was disabled by an indirect call
+    /// anywhere in the module. One `call_indirect` costs every helper.
+    pub disabled_by_indirect: i64,
 }
 
 /// `#[contracttype]` struct recovery, and why each unpack stayed.
@@ -951,6 +980,7 @@ pub fn compute_coverage(
         types: build_types(metric_totals),
         memory: build_memory(metric_totals),
         udt: build_udt(metric_totals),
+        specialize: build_specialize(metric_totals),
         guards: build_guards(metric_totals),
         recognition: build_recognition(metric_totals),
         headline: build_headline(metric_totals, call_to_import),
@@ -1245,6 +1275,19 @@ fn build_guards(t: &BTreeMap<&'static str, i64>) -> GuardCoverage {
             + declined_shape
             + declined_inverted
             + declined_other,
+    }
+}
+
+fn build_specialize(t: &BTreeMap<&'static str, i64>) -> SpecializeCoverage {
+    SpecializeCoverage {
+        cloned: metric(t, mc::SPECIALIZE_CLONED),
+        params_pinned: metric(t, mc::SPECIALIZE_PARAMS_PINNED),
+        declined: metric(t, mc::SPECIALIZE_DECLINED),
+        declined_fanout: metric(t, mc::SPECIALIZE_DECLINED_FANOUT),
+        declined_grouping: metric(t, mc::SPECIALIZE_DECLINED_GROUPING),
+        declined_budget: metric(t, mc::SPECIALIZE_DECLINED_BUDGET),
+        declined_unpinnable: metric(t, mc::SPECIALIZE_DECLINED_UNPINNABLE),
+        disabled_by_indirect: metric(t, mc::SPECIALIZE_DISABLED_INDIRECT),
     }
 }
 
