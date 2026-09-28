@@ -228,6 +228,37 @@ fn storage_operand_values(expr: &Expr) -> Option<(ValueId, ValueId)> {
     }
 }
 
+/// The key-table position and element count of a map unpack (`m.a`), in
+/// either the raw or the recognised form.
+///
+/// Blocked for the same reason a storage key is. `#[contracttype]`'s
+/// derived `TryFromVal` unpacks every struct through one shared SDK
+/// wrapper whose key table and length arrive as parameters. De-sharing
+/// already happens here for other reasons, so the *clone* exists — but
+/// pinning only replaces parameters this demand rule named, so the key
+/// table stayed a parameter and `marshalling::udt_decode` kept declining
+/// for want of a table it could not read.
+///
+/// Measured on `other_custom_types`: three of its five unpacks resolve
+/// their length (3 and 8, per clone) and none resolve their key table.
+fn unpack_operand_values(expr: &Expr) -> Option<(ValueId, ValueId)> {
+    match expr {
+        Expr::Semantic(SemanticOp::Unknown {
+            host_module,
+            host_fn,
+            args,
+            ..
+        }) if host_module == "m" && host_fn == "a" && args.len() == 4 => {
+            Some((args[1], args[3]))
+        }
+        Expr::Semantic(SemanticOp::Known(KnownOp::MapOp {
+            kind: sordec_ir::MapOpKind::UnpackToLinearMemory,
+            args,
+        })) if args.len() == 4 => Some((args[1], args[3])),
+        _ => None,
+    }
+}
+
 /// Which of `func`'s parameters `value` depends on for its *identity* —
 /// the parameters that, left merged, cost a recognizer its answer.
 ///
@@ -288,12 +319,21 @@ fn blocked_params(ir: &HighIr, calls: &CallIndex) -> HashMap<FuncId, BTreeSet<us
 
     for func in &ir.functions {
         for (_, binding) in func.bindings.iter() {
-            let Some((key, durability)) = storage_operand_values(&binding.expr) else {
+            let Some((first, second)) = storage_operand_values(&binding.expr)
+                .or_else(|| unpack_operand_values(&binding.expr))
+            else {
                 continue;
             };
+            // A linear-memory operand reaches the host as a `U32Val`, so
+            // the parameter it really is sits one `ValEncodeSmall` down.
+            // `param_positions` chases renames and helper calls but not
+            // that wrapper, which is why an unpack's key table looked like
+            // no parameter at all.
+            let first = crate::recognizers::client_call::peel_encode(func, first);
+            let second = crate::recognizers::client_call::peel_encode(func, second);
             let mut positions = BTreeSet::new();
-            param_positions(ir, func, key, OPERAND_DEPTH, &mut positions);
-            param_positions(ir, func, durability, OPERAND_DEPTH, &mut positions);
+            param_positions(ir, func, first, OPERAND_DEPTH, &mut positions);
+            param_positions(ir, func, second, OPERAND_DEPTH, &mut positions);
             for idx in positions {
                 if blocked.entry(func.id).or_default().insert(idx) {
                     work.push((func.id, idx));
