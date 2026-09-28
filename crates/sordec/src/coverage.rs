@@ -95,6 +95,8 @@ pub struct CoverageReport {
     /// every frame that was **not** promoted, which pass would have to
     /// exist to unblock it.
     pub memory: MemoryCoverage,
+    /// `#[contracttype]` struct recovery. See [`UdtCoverage`].
+    pub udt: UdtCoverage,
     /// SDK argument-guard elision, and for every `if` left standing, which
     /// gate refused it.
     pub guards: GuardCoverage,
@@ -269,6 +271,35 @@ pub struct GuardCoverage {
     /// reporting is stale, not that a new failure mode exists.
     pub declined_other: i64,
     /// Every decline, summed.
+    pub declined_total: i64,
+}
+
+/// `#[contracttype]` struct recovery, and why each unpack stayed.
+///
+/// The successes alone cannot say whether a contract is fully recovered or
+/// barely touched, and a struct that stays a map keeps its field decodes,
+/// their tag checks and the frame they unpack into — so this is usually
+/// the first number to read when a contract is hole-heavy.
+#[derive(Debug, Clone, Serialize)]
+pub struct UdtCoverage {
+    /// Struct unpacks recognised from their key table and elided.
+    pub decodes_collapsed: i64,
+    /// Frame-slot loads rewritten to field accesses.
+    pub fields_recovered: i64,
+    /// Helper-shaped struct decoders collapsed at their call sites.
+    pub helpers_collapsed: i64,
+    /// Structs recovered from their own key table, for a stripped module.
+    pub structs_synthesized: i64,
+    /// Declined: the `(map, keys, frame, len)` operands did not read.
+    pub declined_operands: i64,
+    /// Declined: the key table was not in rodata.
+    pub declined_keys: i64,
+    /// Declined: no declared struct has exactly those field names.
+    pub declined_no_struct: i64,
+    /// Declined: the map's provenance is not evidence of its type — the
+    /// nested case, when the outer struct was missed.
+    pub declined_evidence: i64,
+    /// Sum of the four.
     pub declined_total: i64,
 }
 
@@ -919,6 +950,7 @@ pub fn compute_coverage(
         structuring: build_structuring(metric_totals),
         types: build_types(metric_totals),
         memory: build_memory(metric_totals),
+        udt: build_udt(metric_totals),
         guards: build_guards(metric_totals),
         recognition: build_recognition(metric_totals),
         headline: build_headline(metric_totals, call_to_import),
@@ -1213,6 +1245,27 @@ fn build_guards(t: &BTreeMap<&'static str, i64>) -> GuardCoverage {
             + declined_shape
             + declined_inverted
             + declined_other,
+    }
+}
+
+fn build_udt(t: &BTreeMap<&'static str, i64>) -> UdtCoverage {
+    let declined_operands = metric(t, mc::MARSHALLING_UDT_DECLINED_OPERANDS);
+    let declined_keys = metric(t, mc::MARSHALLING_UDT_DECLINED_KEYS);
+    let declined_no_struct = metric(t, mc::MARSHALLING_UDT_DECLINED_NO_STRUCT);
+    let declined_evidence = metric(t, mc::MARSHALLING_UDT_DECLINED_EVIDENCE);
+    UdtCoverage {
+        decodes_collapsed: metric(t, mc::MARSHALLING_UDT_DECODES_COLLAPSED),
+        fields_recovered: metric(t, mc::MARSHALLING_UDT_FIELDS_RECOVERED),
+        helpers_collapsed: metric(t, mc::MARSHALLING_UDT_HELPERS_COLLAPSED),
+        structs_synthesized: metric(t, mc::MARSHALLING_UDT_STRUCTS_SYNTHESIZED),
+        declined_operands,
+        declined_keys,
+        declined_no_struct,
+        declined_evidence,
+        declined_total: declined_operands
+            + declined_keys
+            + declined_no_struct
+            + declined_evidence,
     }
 }
 

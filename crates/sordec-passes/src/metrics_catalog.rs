@@ -389,6 +389,20 @@ pub const REFINE_CONST_BRANCHES_FOLDED: &str = "refine_const_branches_folded";
 pub const MARSHALLING_UDT_DECODES_COLLAPSED: &str = "marshalling_udt_decodes_collapsed";
 /// Frame-slot loads of an unpacked struct rewritten to field accesses.
 pub const MARSHALLING_UDT_FIELDS_RECOVERED: &str = "marshalling_udt_fields_recovered";
+/// Struct unpacks declined because the `(map, keys, frame, len)` operand
+/// shape could not be read off the call.
+pub const MARSHALLING_UDT_DECLINED_OPERANDS: &str = "marshalling_udt_declined_operands";
+/// Struct unpacks declined because the key table could not be read out of
+/// rodata — a runtime key array, or a position that did not resolve.
+pub const MARSHALLING_UDT_DECLINED_KEYS: &str = "marshalling_udt_declined_keys";
+/// Struct unpacks declined because no declared struct has exactly those
+/// field names. The keys were read; nothing in the spec matches them.
+pub const MARSHALLING_UDT_DECLINED_NO_STRUCT: &str = "marshalling_udt_declined_no_struct";
+/// Struct unpacks declined because the map's provenance is not evidence of
+/// the struct's type: not a host operation's result, not an entrypoint
+/// parameter declared with it, and not a field of a struct already
+/// recovered. This is the nested case when the outer struct was missed.
+pub const MARSHALLING_UDT_DECLINED_EVIDENCE: &str = "marshalling_udt_declined_evidence";
 /// Calls to a helper-shaped `#[contracttype]` struct decoder elided with
 /// their out-parameter reads.
 pub const MARSHALLING_UDT_HELPERS_COLLAPSED: &str = "marshalling_udt_helpers_collapsed";

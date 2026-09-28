@@ -102,6 +102,9 @@ impl Pass<HighIr> for UdtDecodePass {
             .collect();
         for func in &mut ir.functions {
             let planned = plan(func, &memory, &structs, &unions, &param_types, &helpers);
+            for key in &planned.declines {
+                result.metrics.increment(key, 1);
+            }
             if planned.elisions.is_empty() {
                 continue;
             }
@@ -135,6 +138,10 @@ impl Pass<HighIr> for UdtDecodePass {
 /// Everything one caller's walk decided.
 struct Planned {
     elisions: Vec<Elision>,
+    /// Why unpacks that looked like this pass's shape were not taken,
+    /// keyed by counter. Successes alone cannot say whether a contract is
+    /// fully recovered or barely touched.
+    declines: Vec<&'static str>,
     typed: Vec<(ValueId, IrType)>,
     /// Guard conditions (in `guard::strip`'s shape) that test a niche
     /// discriminant the collapse has just made a field.
@@ -223,6 +230,7 @@ fn plan<'a>(
     helpers: &HashMap<FuncId, DecoderHelper>,
 ) -> Planned {
     let mut elisions = Vec::new();
+    let mut declines: Vec<&'static str> = Vec::new();
     let mut typed = Vec::new();
     let mut guards = HashMap::new();
     let mut active: Vec<Frame<'a>> = Vec::new();
@@ -243,16 +251,20 @@ fn plan<'a>(
                 args,
             })) => {
                 let Some((map, keys_pos, vals, len)) = unpack_operands(func, args) else {
+                    declines.push(metrics::UDT_DECLINED_OPERANDS);
                     continue;
                 };
                 let Some(keys) = read_keys(memory, keys_pos, len) else {
+                    declines.push(metrics::UDT_DECLINED_KEYS);
                     continue;
                 };
                 let Some(def) = struct_for(structs, &keys) else {
+                    declines.push(metrics::UDT_DECLINED_NO_STRUCT);
                     continue;
                 };
                 let map = resolve_use(func, map);
                 let Some(evidence) = value_evidence(func, map, def.id, param_types) else {
+                    declines.push(metrics::UDT_DECLINED_EVIDENCE);
                     continue;
                 };
                 let (base, start) = canon_addr(func, vals);
@@ -408,7 +420,7 @@ fn plan<'a>(
             }
         }
     }
-    Planned { elisions, typed, guards }
+    Planned { elisions, declines, typed, guards }
 }
 
 /// A zero discriminant in the width the load claimed.
