@@ -232,7 +232,7 @@ fn plan(
         let expr = &func.bindings.get(id)?.expr;
         if in_some
             && let Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { key: k, tier: t, missing: Missing::Option, .. })) = expr
-            && chase_value(func, *k) == key
+            && super::option_probe::same_key(func, chase_value(func, *k), key)
             && proven_tier(t) == Some(tier)
         {
             if get.replace(id).is_some() {
