@@ -318,8 +318,21 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
         // A phi never reaches here (phis are `let mut` declarations, not
         // scheduled bindings); handled honestly if the invariant slips.
         Expr::Phi { .. } => ctx.policy.unknown_expr("phi"),
-        Expr::Unknown { op_kind, .. } => {
-            ctx.policy.unknown_expr(&format!("unrecovered {op_kind:?}"))
+        // Same argument as the memory holes above: an unrecovered operator
+        // that drops its operands tells a reader nothing and orphans the
+        // bindings that computed them. `GlobalSet` is the shadow-stack
+        // bracket and by far the commonest of these.
+        Expr::Unknown { op_kind, args, .. } => {
+            let operands = args
+                .iter()
+                .map(|a| operand_text(&ctx.value_ref(*a)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ctx.policy.unknown_expr(&if operands.is_empty() {
+                format!("unrecovered {op_kind:?}")
+            } else {
+                format!("unrecovered {op_kind:?}({operands})")
+            })
         }
     }
 }
