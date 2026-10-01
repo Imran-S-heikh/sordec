@@ -631,15 +631,20 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // marking a probe takes the pair out of the group's reach
             // while its members are still iterating, and a marked-but-
             // uncollapsed probe is strictly worse than an unmarked one.
+            // Both of these report their rewrite counter, which is what
+            // the wrapper's rule asks for — a mark an idempotent pass
+            // makes at most once, and the only record of recognition that
+            // the first run could not reach. On phoenix-vesting the first
+            // run marks nothing and this one marks seven.
             Box::new(pass::Rerun::new(
                 OptionProbePass,
                 OPTION_PROBE_AFTER_ELISION,
-                &[],
+                &[metrics_catalog::STORAGE_OPTION_PROBE],
             )),
             Box::new(pass::Rerun::new(
                 OptionUnwrapPass,
                 OPTION_UNWRAP_AFTER_ELISION,
-                &[],
+                &[metrics_catalog::MARSHALLING_OPTIONS_UNWRAPPED],
             )),
             // Unlike the re-runs above, this one reports. Two reasons, and
             // both turn on it sitting *outside* the elision group rather

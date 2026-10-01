@@ -352,6 +352,14 @@ pub struct UdtCoverage {
 /// not that there were none.
 #[derive(Debug, Clone, Serialize)]
 pub struct OptionCoverage {
+    /// `has` calls proven to be an SDK `Option` discriminant — the
+    /// denominator for everything below it.
+    ///
+    /// Read it first. A contract with probes and no recoveries and no
+    /// declines has candidates that no pass ever looked at, which is a
+    /// different problem from candidates that were looked at and refused,
+    /// and nothing else in this section can tell the two apart.
+    pub probes_marked: i64,
     /// Proven probes with a trapping `None` branch collapsed to
     /// `.unwrap()`.
     pub unwrapped: i64,
@@ -1388,6 +1396,7 @@ fn build_option(t: &BTreeMap<&'static str, i64>) -> OptionCoverage {
     let no_common_default = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_NO_COMMON_DEFAULT);
     let check_would_fire = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_CHECK_WOULD_FIRE);
     OptionCoverage {
+        probes_marked: metric(t, mc::STORAGE_OPTION_PROBE),
         unwrapped: metric(t, mc::MARSHALLING_OPTIONS_UNWRAPPED),
         helpers_collapsed: metric(t, mc::MARSHALLING_OPTION_HELPERS_COLLAPSED),
         defaults_recovered: metric(t, mc::MARSHALLING_OPTION_DEFAULTS_RECOVERED),
