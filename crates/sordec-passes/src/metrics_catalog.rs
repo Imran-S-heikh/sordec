@@ -437,6 +437,12 @@ pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defa
 // candidates it saw minus the ones it folded. Read them the way the
 // `sret` ones are read: the gates are ordered, so an earlier bucket
 // hides the ones after it, and a large count is not by itself a bug.
+/// The read's arm always traps, so the branch is an assertion and not a
+/// default. `marshalling::option_unwrap` owns the shape; this counter
+/// exists so the two passes' censuses add up rather than this one
+/// reporting another pass's candidates as its own control-flow refusals.
+pub const MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS: &str =
+    "marshalling_option_default_declined_arm_always_traps";
 /// The read's arm carries control flow that is not a trap guard, so there
 /// is no one expression to fold the branch into.
 pub const MARSHALLING_OPTION_DEFAULT_DECLINED_SOME_ARM_BRANCHES: &str =
@@ -903,6 +909,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_OPTIONS_UNWRAPPED,
         MARSHALLING_OPTION_HELPERS_COLLAPSED,
         MARSHALLING_OPTION_DEFAULTS_RECOVERED,
+        MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS,
         MARSHALLING_OPTION_DEFAULT_DECLINED_SOME_ARM_BRANCHES,
         MARSHALLING_OPTION_DEFAULT_DECLINED_NONE_ARM_BRANCHES,
         MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_HAS_EFFECTS,

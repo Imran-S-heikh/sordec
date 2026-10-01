@@ -104,6 +104,11 @@ impl Pass<HighIr> for OptionDefaultPass {
 /// came to nothing because this pass could only say no.
 #[derive(Debug, Clone, Copy)]
 enum Decline {
+    /// The read's arm always traps, so the branch is an assertion rather
+    /// than a default. [`super::option_unwrap`] owns this shape; it is
+    /// counted here only so the two censuses add up to the candidates
+    /// each pass saw.
+    ArmAlwaysTraps,
     /// The read's arm carries control flow this pass cannot move onto a
     /// single expression — a nested branch, a loop, anything that is not a
     /// trap guard.
@@ -136,6 +141,7 @@ enum Decline {
 impl Decline {
     fn metric(self) -> &'static str {
         match self {
+            Self::ArmAlwaysTraps => metrics::OPTION_DEFAULT_ARM_ALWAYS_TRAPS,
             Self::SomeArmBranches => metrics::OPTION_DEFAULT_SOME_ARM_BRANCHES,
             Self::NoneArmBranches => metrics::OPTION_DEFAULT_NONE_ARM_BRANCHES,
             Self::ArmHasEffects => metrics::OPTION_DEFAULT_ARM_HAS_EFFECTS,
@@ -286,6 +292,16 @@ fn plan(
     none_arm: Option<&Region>,
     returned: Option<(ValueId, ValueId)>,
 ) -> Result<Plan, Decline> {
+    // **First**, because every gate below asks how to fold the arm and
+    // this one asks whether the arm is a value at all. A trapping arm is
+    // `.unwrap()`, not `.unwrap_or(..)`, and reporting one as "the arm
+    // branches" is what made 10 of the 14 held-out refusals read as
+    // control flow this pass could not carry when none of the 10 was a
+    // default in the first place — the same misattribution the `sret`
+    // census had to correct.
+    if always_traps(some_arm) {
+        return Err(Decline::ArmAlwaysTraps);
+    }
     let mut checks = Vec::new();
     // Two gates, not one: an arm that branches and an arm that has an
     // effect need different work to unblock, and a single counter over
@@ -623,6 +639,20 @@ fn eval(func: &HighFunction, value: ValueId, get: ValueId, default: i128, depth:
 }
 
 /// Blocks, sequences and renames only.
+/// Whether an arm leaves the function by trapping on every path through
+/// it, so it merges no value.
+fn always_traps(region: &Region) -> bool {
+    match region {
+        Region::Panic { .. } | Region::Unreachable => true,
+        // A sequence traps if any item does: nothing after it runs.
+        Region::Sequence(items) => items.iter().any(always_traps),
+        Region::If { then_region, else_region: Some(else_region), .. } => {
+            always_traps(then_region) && always_traps(else_region)
+        }
+        _ => false,
+    }
+}
+
 fn straight(region: &Region) -> bool {
     let mut ok = true;
     region.for_each_node(|node| {
@@ -731,7 +761,7 @@ mod tests {
     use super::*;
     use crate::marshalling::test_support::{module, v};
     use sordec_common::{Arena, FuncId, IrId, UnknownReason};
-    use sordec_ir::{HighBlock, StorageTier};
+    use sordec_ir::{HighBlock, PanicKind, StorageTier};
 
     fn bb(i: u32) -> BlockId {
         BlockId::from_index(i)
@@ -909,5 +939,50 @@ mod tests {
         let mut m = module(vec![shape(0)]);
         assert!(OptionDefaultPass.run(&mut m).changed);
         assert!(!OptionDefaultPass.run(&mut m).changed);
+    }
+
+    /// An arm that leaves by trapping merges no value, so it is
+    /// `.unwrap()`'s shape and not this pass's. The census says so rather
+    /// than filing it under control flow this pass could not carry.
+    #[test]
+    fn a_trapping_arm_is_not_this_passs_candidate() {
+        let panic = || Region::Panic { kind: PanicKind::Bare };
+        assert!(always_traps(&panic()), "a bare trap");
+        assert!(
+            always_traps(&Region::Sequence(vec![Region::Basic(bb(0)), panic()])),
+            "nothing after a trap runs"
+        );
+        assert!(
+            always_traps(&Region::If {
+                cond: v(0),
+                then_region: Box::new(panic()),
+                else_region: Some(Box::new(panic())),
+            }),
+            "both arms trap"
+        );
+    }
+
+    /// The half that matters: an arm that only *may* trap still merges a
+    /// value on the other path, so the gate must not swallow it.
+    #[test]
+    fn an_arm_that_only_may_trap_still_merges() {
+        let panic = Region::Panic { kind: PanicKind::Bare };
+        assert!(!always_traps(&Region::Basic(bb(0))), "straight-line work");
+        assert!(
+            !always_traps(&Region::If {
+                cond: v(0),
+                then_region: Box::new(panic),
+                else_region: Some(Box::new(Region::Basic(bb(1)))),
+            }),
+            "the else arm returns normally"
+        );
+        assert!(
+            !always_traps(&Region::If {
+                cond: v(0),
+                then_region: Box::new(Region::Panic { kind: PanicKind::Bare }),
+                else_region: None,
+            }),
+            "a hoisted trap check is exactly what `arm_fits` accepts"
+        );
     }
 }

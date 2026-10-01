@@ -360,6 +360,10 @@ pub struct OptionCoverage {
     pub helpers_collapsed: i64,
     /// Branches folded into `.unwrap_or(default)`.
     pub defaults_recovered: i64,
+    /// Declined: the read's arm always traps, so the branch is an
+    /// assertion. `unwrapped` is the pass that owns it; this is counted
+    /// here only so the two add up.
+    pub defaults_declined_arm_always_traps: i64,
     /// Declined: the read's arm carries control flow that is not a trap
     /// guard.
     pub defaults_declined_some_arm_branches: i64,
@@ -385,7 +389,7 @@ pub struct OptionCoverage {
     /// Declined: a hoisted check would fire with the read standing for the
     /// default, so the fold would trap where the original did not.
     pub defaults_declined_check_would_fire: i64,
-    /// Sum of the ten.
+    /// Sum of the eleven.
     pub defaults_declined_total: i64,
 }
 
@@ -1371,6 +1375,7 @@ fn build_udt(t: &BTreeMap<&'static str, i64>) -> UdtCoverage {
 }
 
 fn build_option(t: &BTreeMap<&'static str, i64>) -> OptionCoverage {
+    let always_traps = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS);
     let some_branches = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_SOME_ARM_BRANCHES);
     let none_branches = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_NONE_ARM_BRANCHES);
     let arm_effects = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_HAS_EFFECTS);
@@ -1385,6 +1390,7 @@ fn build_option(t: &BTreeMap<&'static str, i64>) -> OptionCoverage {
         unwrapped: metric(t, mc::MARSHALLING_OPTIONS_UNWRAPPED),
         helpers_collapsed: metric(t, mc::MARSHALLING_OPTION_HELPERS_COLLAPSED),
         defaults_recovered: metric(t, mc::MARSHALLING_OPTION_DEFAULTS_RECOVERED),
+        defaults_declined_arm_always_traps: always_traps,
         defaults_declined_some_arm_branches: some_branches,
         defaults_declined_none_arm_branches: none_branches,
         defaults_declined_arm_has_effects: arm_effects,
@@ -1395,7 +1401,8 @@ fn build_option(t: &BTreeMap<&'static str, i64>) -> OptionCoverage {
         defaults_declined_struct_with_checks: struct_with_checks,
         defaults_declined_no_common_default: no_common_default,
         defaults_declined_check_would_fire: check_would_fire,
-        defaults_declined_total: some_branches
+        defaults_declined_total: always_traps
+            + some_branches
             + none_branches
             + arm_effects
             + probe_shared
