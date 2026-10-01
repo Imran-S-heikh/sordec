@@ -48,6 +48,7 @@ use sordec_ir::{
     Region, SemanticOp, StructDef, UnaryOp,
 };
 
+use super::metrics;
 use super::option_probe::proven_tier;
 use super::sret::emission_order;
 use crate::dataflow::{block_containing, resolve_use};
@@ -75,13 +76,77 @@ impl Pass<HighIr> for OptionDefaultPass {
         let structs: Vec<StructDef> =
             ir.soroban_facts.as_ref().map(|f| f.types.structs.clone()).unwrap_or_default();
         for func in &mut ir.functions {
-            for plan in plans(func, &structs) {
+            let planned = plans(func, &structs);
+            for why in &planned.declines {
+                result.metrics.increment(why.metric(), 1);
+            }
+            for plan in planned.plans {
                 apply(func, &plan);
                 result.metrics.increment(M_DEFAULTS, 1);
                 result.changed = true;
             }
         }
         result
+    }
+}
+
+/// Why a probe that looked like an `unwrap_or` was not folded.
+///
+/// The gate is specific and the reasons are not interchangeable: one of
+/// these says the author wrote something this pass must not touch, another
+/// says the shape is right and a *different* recogniser has not finished
+/// yet. Counting them apart is the difference between "this contract has no
+/// `unwrap_or`" and "it has three and we are one decode away".
+///
+/// Measured need: ten probes across the held-out set mark as SDK probes and
+/// then fail to collapse, which leaves the output strictly worse than an
+/// unmarked probe — a hole *and* the branch it guards. Diagnosing that twice
+/// came to nothing because this pass could only say no.
+#[derive(Debug, Clone, Copy)]
+enum Decline {
+    /// The read's arm carries control flow this pass cannot move onto a
+    /// single expression — a nested branch, a loop, anything that is not a
+    /// trap guard.
+    SomeArmBranches,
+    /// The `None` arm carries control flow, so there is no one value for
+    /// `unwrap_or` to take.
+    NoneArmBranches,
+    /// An effectful binding on one of the arms besides the read itself.
+    /// Folding would make that effect run on `None` too.
+    ArmHasEffects,
+    /// The probe decides something besides this branch.
+    ProbeUsedElsewhere,
+    /// No read of the probed entry on the arm, or more than one.
+    NotOneRead,
+    /// A merge this pass cannot address positionally — a phi with other than
+    /// two incoming edges, or both edges from the same arm.
+    MergeShape,
+    /// The branch merges nothing, so there is no value to give a default.
+    NothingMerged,
+    /// A struct default with a hoisted check on the arm: the default names
+    /// no single integer to evaluate the check against.
+    StructWithChecks,
+    /// No single default reproduces every constant the other arm merged.
+    NoCommonDefault,
+    /// A hoisted check on the read's arm would fire with the read standing
+    /// for the default, so folding would trap where the original did not.
+    CheckWouldFire,
+}
+
+impl Decline {
+    fn metric(self) -> &'static str {
+        match self {
+            Self::SomeArmBranches => metrics::OPTION_DEFAULT_SOME_ARM_BRANCHES,
+            Self::NoneArmBranches => metrics::OPTION_DEFAULT_NONE_ARM_BRANCHES,
+            Self::ArmHasEffects => metrics::OPTION_DEFAULT_ARM_HAS_EFFECTS,
+            Self::ProbeUsedElsewhere => metrics::OPTION_DEFAULT_PROBE_SHARED,
+            Self::NotOneRead => metrics::OPTION_DEFAULT_NOT_ONE_READ,
+            Self::MergeShape => metrics::OPTION_DEFAULT_MERGE_SHAPE,
+            Self::NothingMerged => metrics::OPTION_DEFAULT_NOTHING_MERGED,
+            Self::StructWithChecks => metrics::OPTION_DEFAULT_STRUCT_WITH_CHECKS,
+            Self::NoCommonDefault => metrics::OPTION_DEFAULT_NO_COMMON_DEFAULT,
+            Self::CheckWouldFire => metrics::OPTION_DEFAULT_CHECK_WOULD_FIRE,
+        }
     }
 }
 
@@ -112,7 +177,14 @@ enum Part {
     Field(String),
 }
 
-fn plans(func: &HighFunction, structs: &[StructDef]) -> Vec<Plan> {
+/// The folds for one function, and why each candidate that looked like this
+/// pass's shape was refused.
+struct Planned {
+    plans: Vec<Plan>,
+    declines: Vec<Decline>,
+}
+
+fn plans(func: &HighFunction, structs: &[StructDef]) -> Planned {
     let order = emission_order(func);
     let probes: Vec<(ValueId, ValueId, KnownTier)> = order
         .iter()
@@ -124,8 +196,11 @@ fn plans(func: &HighFunction, structs: &[StructDef]) -> Vec<Plan> {
         })
         .collect();
     let mut plans = Vec::new();
+    let mut declines: Vec<Decline> = Vec::new();
     if probes.is_empty() {
-        return plans;
+        // Not a decline: no probe means no candidate, and counting
+        // every function without one would swamp the census.
+        return Planned { plans, declines };
     }
     func.region.for_each_node(|node| {
         let Region::If { cond, then_region, else_region } = node else {
@@ -143,8 +218,9 @@ fn plans(func: &HighFunction, structs: &[StructDef]) -> Vec<Plan> {
                     None => continue,
                 }
             };
-            if let Some(plan) = plan(func, &order, structs, *probe, *key, *tier, some_arm, none_arm, None) {
-                plans.push(plan);
+            match plan(func, &order, structs, *probe, *key, *tier, some_arm, none_arm, None) {
+                Err(why) => declines.push(why),
+                Ok(plan) => plans.push(plan),
             }
         }
     });
@@ -173,13 +249,14 @@ fn plans(func: &HighFunction, structs: &[StructDef]) -> Vec<Plan> {
                 } else {
                     (&fallen_rest, &taken_rest, (fallen, taken))
                 };
-                if let Some(plan) = plan(func, &order, structs, *probe, *key, *tier, some, Some(none), Some(pair)) {
-                    plans.push(plan);
+                match plan(func, &order, structs, *probe, *key, *tier, some, Some(none), Some(pair)) {
+                    Err(why) => declines.push(why),
+                    Ok(plan) => plans.push(plan),
                 }
             }
         }
     });
-    plans
+    Planned { plans, declines }
 }
 
 /// An arm that ends by returning one value: that value, and everything the
@@ -208,14 +285,21 @@ fn plan(
     some_arm: &Region,
     none_arm: Option<&Region>,
     returned: Option<(ValueId, ValueId)>,
-) -> Option<Plan> {
+) -> Result<Plan, Decline> {
     let mut checks = Vec::new();
-    if !arm_fits(func, some_arm, &mut checks) || none_arm.is_some_and(|n| !straight(n)) {
-        return None;
+    // Two gates, not one: an arm that branches and an arm that has an
+    // effect need different work to unblock, and a single counter over
+    // both says only "something". The first census ran them together and
+    // reported 51 of 51 on the corpus, which named nothing.
+    if !arm_fits(func, some_arm, &mut checks) {
+        return Err(Decline::SomeArmBranches);
+    }
+    if none_arm.is_some_and(|n| !straight(n)) {
+        return Err(Decline::NoneArmBranches);
     }
     // The probe decides this branch and nothing else.
     if uses(func, order, probe) != 1 {
-        return None;
+        return Err(Decline::ProbeUsedElsewhere);
     }
     // Exactly one read of the probed entry, on the read's arm; nothing else
     // there with an effect, nothing at all with one on the other arm.
@@ -229,22 +313,27 @@ fn plan(
         if !in_some && !in_none {
             continue;
         }
-        let expr = &func.bindings.get(id)?.expr;
+        let Some(binding) = func.bindings.get(id) else {
+            continue;
+        };
+        let expr = &binding.expr;
         if in_some
             && let Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { key: k, tier: t, missing: Missing::Option, .. })) = expr
             && super::option_probe::same_key(func, chase_value(func, *k), key)
             && proven_tier(t) == Some(tier)
         {
             if get.replace(id).is_some() {
-                return None;
+                return Err(Decline::NotOneRead);
             }
             continue;
         }
         if !expr_effects(expr).is_pure_total() {
-            return None;
+            return Err(Decline::ArmHasEffects);
         }
     }
-    let get = get?;
+    let Some(get) = get else {
+        return Err(Decline::NotOneRead);
+    };
 
     // Every merge fed from the read's arm, as (read's arm, other arm).
     let mut pairs = Vec::new();
@@ -259,35 +348,40 @@ fn plan(
             continue;
         }
         let [(a_block, a), (b_block, b)] = incoming.as_slice() else {
-            return None;
+            return Err(Decline::MergeShape);
         };
         let (some, none) = match (contains_block(some_arm, *a_block), contains_block(some_arm, *b_block)) {
             (true, false) => (*a, *b),
             (false, true) => (*b, *a),
-            _ => return None,
+            _ => return Err(Decline::MergeShape),
         };
         pairs.push((resolve_use(func, some), resolve_use(func, none)));
     }
     if pairs.is_empty() {
-        return None;
+        return Err(Decline::NothingMerged);
     }
-    let ty = func.bindings.get(get)?.ty.clone();
+    let ty = func.bindings.get(get).ok_or(Decline::NotOneRead)?.ty.clone();
     if let Some(fields) = struct_default(func, &pairs, get, structs, &ty) {
         // A struct default names no single integer, so there is nothing to
         // evaluate a hoisted check against.
-        return checks.is_empty().then_some(Plan { probe, get, default: Default::Struct(fields), ty });
+        if !checks.is_empty() {
+            return Err(Decline::StructWithChecks);
+        }
+        return Ok(Plan { probe, get, default: Default::Struct(fields), ty });
     }
-    let default = literal_default(func, &pairs, get).or_else(|| zero_default(func, &pairs, get, some_arm))?;
+    let default = literal_default(func, &pairs, get)
+        .or_else(|| zero_default(func, &pairs, get, some_arm))
+        .ok_or(Decline::NoCommonDefault)?;
     // The default is spelled as a literal of the read's type; it has to fit
     // the literal the IR carries.
-    i64::try_from(default).ok()?;
+    i64::try_from(default).map_err(|_| Decline::NoCommonDefault)?;
     // Every check on the read's arm passes when the read is the default.
     for check in checks {
-        if eval(func, check, get, default, 0)? != 0 {
-            return None;
+        if eval(func, check, get, default, 0).ok_or(Decline::CheckWouldFire)? != 0 {
+            return Err(Decline::CheckWouldFire);
         }
     }
-    Some(Plan { probe, get, default: Default::Int(default), ty })
+    Ok(Plan { probe, get, default: Default::Int(default), ty })
 }
 
 /// The default the merges name when each is a part of the read against a

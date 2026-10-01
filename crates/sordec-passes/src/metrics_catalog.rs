@@ -432,6 +432,51 @@ pub const MARSHALLING_OPTION_HELPERS_COLLAPSED: &str = "marshalling_option_helpe
 /// Storage reads whose SDK `Option` branch folded into
 /// `.unwrap_or(default)`.
 pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defaults_recovered";
+// Why an `unwrap_or` fold was declined. One of these fires for every
+// `Option` branch the pass looked at and left alone, so they sum to the
+// candidates it saw minus the ones it folded. Read them the way the
+// `sret` ones are read: the gates are ordered, so an earlier bucket
+// hides the ones after it, and a large count is not by itself a bug.
+/// The read's arm carries control flow that is not a trap guard, so there
+/// is no one expression to fold the branch into.
+pub const MARSHALLING_OPTION_DEFAULT_DECLINED_SOME_ARM_BRANCHES: &str =
+    "marshalling_option_default_declined_some_arm_branches";
+/// The `None` arm carries control flow, so it names no single default.
+pub const MARSHALLING_OPTION_DEFAULT_DECLINED_NONE_ARM_BRANCHES: &str =
+    "marshalling_option_default_declined_none_arm_branches";
+/// An effectful binding on one of the arms besides the read, which the
+/// fold would move onto the `None` path.
+pub const MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_HAS_EFFECTS: &str =
+    "marshalling_option_default_declined_arm_has_effects";
+/// The probe decides something besides this branch, so collapsing the
+/// branch would leave the other use reading a value that no longer exists.
+pub const MARSHALLING_OPTION_DEFAULT_DECLINED_PROBE_SHARED: &str =
+    "marshalling_option_default_declined_probe_shared";
+/// The arm holds no read of the probed entry, or more than one. Neither is
+/// an `unwrap_or`: the first has nothing to default, the second would need
+/// two.
+pub const MARSHALLING_OPTION_DEFAULT_DECLINED_NOT_ONE_READ: &str =
+    "marshalling_option_default_declined_not_one_read";
+/// The merge is one this pass cannot address positionally — a phi with
+/// other than two incoming edges, or both edges arriving from one arm.
+pub const MARSHALLING_OPTION_DEFAULT_DECLINED_MERGE_SHAPE: &str =
+    "marshalling_option_default_declined_merge_shape";
+/// The branch merges nothing, so there is no value for a default to stand
+/// in for. The `Option` is being tested, not read.
+pub const MARSHALLING_OPTION_DEFAULT_DECLINED_NOTHING_MERGED: &str =
+    "marshalling_option_default_declined_nothing_merged";
+/// A struct default with a hoisted check on the arm: the default names no
+/// single integer to evaluate the check against.
+pub const MARSHALLING_OPTION_DEFAULT_DECLINED_STRUCT_WITH_CHECKS: &str =
+    "marshalling_option_default_declined_struct_with_checks";
+/// No single default reproduces every constant the other arm merged, so
+/// there is no one expression to put in the `unwrap_or`.
+pub const MARSHALLING_OPTION_DEFAULT_DECLINED_NO_COMMON_DEFAULT: &str =
+    "marshalling_option_default_declined_no_common_default";
+/// A hoisted check on the read's arm would fire with the read standing for
+/// the default, so folding would trap where the original did not.
+pub const MARSHALLING_OPTION_DEFAULT_DECLINED_CHECK_WOULD_FIRE: &str =
+    "marshalling_option_default_declined_check_would_fire";
 /// Storage reads whose SDK payload conversion folded into the read's type.
 pub const MARSHALLING_TYPED_READS: &str = "marshalling_typed_reads";
 /// `bool` <-> `Val` conversions folded into the `bool`.
@@ -858,6 +903,16 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_OPTIONS_UNWRAPPED,
         MARSHALLING_OPTION_HELPERS_COLLAPSED,
         MARSHALLING_OPTION_DEFAULTS_RECOVERED,
+        MARSHALLING_OPTION_DEFAULT_DECLINED_SOME_ARM_BRANCHES,
+        MARSHALLING_OPTION_DEFAULT_DECLINED_NONE_ARM_BRANCHES,
+        MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_HAS_EFFECTS,
+        MARSHALLING_OPTION_DEFAULT_DECLINED_PROBE_SHARED,
+        MARSHALLING_OPTION_DEFAULT_DECLINED_NOT_ONE_READ,
+        MARSHALLING_OPTION_DEFAULT_DECLINED_MERGE_SHAPE,
+        MARSHALLING_OPTION_DEFAULT_DECLINED_NOTHING_MERGED,
+        MARSHALLING_OPTION_DEFAULT_DECLINED_STRUCT_WITH_CHECKS,
+        MARSHALLING_OPTION_DEFAULT_DECLINED_NO_COMMON_DEFAULT,
+        MARSHALLING_OPTION_DEFAULT_DECLINED_CHECK_WOULD_FIRE,
         MARSHALLING_TYPED_READS,
         MARSHALLING_BOOL_CODECS,
         MARSHALLING_UDT_ENCODES,

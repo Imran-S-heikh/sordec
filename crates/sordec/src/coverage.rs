@@ -97,6 +97,10 @@ pub struct CoverageReport {
     pub memory: MemoryCoverage,
     /// `#[contracttype]` struct recovery. See [`UdtCoverage`].
     pub udt: UdtCoverage,
+    /// `Option` recovery — `unwrap`, `unwrap_or` and the SDK helpers —
+    /// and why each `Option` branch left standing stayed. See
+    /// [`OptionCoverage`].
+    pub option: OptionCoverage,
     /// Helper de-sharing. See [`SpecializeCoverage`].
     pub specialize: SpecializeCoverage,
     /// SDK argument-guard elision, and for every `if` left standing, which
@@ -330,6 +334,59 @@ pub struct UdtCoverage {
     pub declined_evidence: i64,
     /// Sum of the four.
     pub declined_total: i64,
+}
+
+/// `Option` recovery, and why each `Option` branch stayed.
+///
+/// A storage read behind an `Option` is the single most common shape in a
+/// Soroban contract, and an unrecovered one is expensive out of all
+/// proportion: the branch survives into the output, its `None` arm carries
+/// whatever the compiler hoisted into it, and the frame slot the SDK
+/// decoded through stays alive. So the declines here are read the way
+/// [`MemoryCoverage`]'s `sret_*` ones are — as a worklist, not a tally.
+///
+/// Only `unwrap_or` reports a reason per refusal so far. The `unwrap`,
+/// probe and out-parameter passes are counted by their successes alone,
+/// so a zero in `defaults_declined_total` with zero
+/// `defaults_recovered` means the candidates never reached this pass,
+/// not that there were none.
+#[derive(Debug, Clone, Serialize)]
+pub struct OptionCoverage {
+    /// Proven probes with a trapping `None` branch collapsed to
+    /// `.unwrap()`.
+    pub unwrapped: i64,
+    /// SDK `Option` out-parameter storage helpers replaced by the
+    /// `get(..).unwrap()` they make.
+    pub helpers_collapsed: i64,
+    /// Branches folded into `.unwrap_or(default)`.
+    pub defaults_recovered: i64,
+    /// Declined: the read's arm carries control flow that is not a trap
+    /// guard.
+    pub defaults_declined_some_arm_branches: i64,
+    /// Declined: the `None` arm carries control flow, so it names no
+    /// single default.
+    pub defaults_declined_none_arm_branches: i64,
+    /// Declined: an effectful binding on one of the arms besides the read.
+    pub defaults_declined_arm_has_effects: i64,
+    /// Declined: the probe decides something besides this branch.
+    pub defaults_declined_probe_shared: i64,
+    /// Declined: no read of the probed entry on the arm, or more than one.
+    pub defaults_declined_not_one_read: i64,
+    /// Declined: a merge this pass cannot address positionally.
+    pub defaults_declined_merge_shape: i64,
+    /// Declined: the branch merges nothing, so there is no value to
+    /// default.
+    pub defaults_declined_nothing_merged: i64,
+    /// Declined: a struct default with a hoisted check on the arm.
+    pub defaults_declined_struct_with_checks: i64,
+    /// Declined: no single default reproduces every constant the other arm
+    /// merged.
+    pub defaults_declined_no_common_default: i64,
+    /// Declined: a hoisted check would fire with the read standing for the
+    /// default, so the fold would trap where the original did not.
+    pub defaults_declined_check_would_fire: i64,
+    /// Sum of the ten.
+    pub defaults_declined_total: i64,
 }
 
 /// Shadow-stack recovery, and why each unpromoted frame stayed.
@@ -980,6 +1037,7 @@ pub fn compute_coverage(
         types: build_types(metric_totals),
         memory: build_memory(metric_totals),
         udt: build_udt(metric_totals),
+        option: build_option(metric_totals),
         specialize: build_specialize(metric_totals),
         guards: build_guards(metric_totals),
         recognition: build_recognition(metric_totals),
@@ -1309,6 +1367,44 @@ fn build_udt(t: &BTreeMap<&'static str, i64>) -> UdtCoverage {
             + declined_keys
             + declined_no_struct
             + declined_evidence,
+    }
+}
+
+fn build_option(t: &BTreeMap<&'static str, i64>) -> OptionCoverage {
+    let some_branches = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_SOME_ARM_BRANCHES);
+    let none_branches = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_NONE_ARM_BRANCHES);
+    let arm_effects = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_HAS_EFFECTS);
+    let probe_shared = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_PROBE_SHARED);
+    let not_one_read = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_NOT_ONE_READ);
+    let merge_shape = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_MERGE_SHAPE);
+    let nothing_merged = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_NOTHING_MERGED);
+    let struct_with_checks = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_STRUCT_WITH_CHECKS);
+    let no_common_default = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_NO_COMMON_DEFAULT);
+    let check_would_fire = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_CHECK_WOULD_FIRE);
+    OptionCoverage {
+        unwrapped: metric(t, mc::MARSHALLING_OPTIONS_UNWRAPPED),
+        helpers_collapsed: metric(t, mc::MARSHALLING_OPTION_HELPERS_COLLAPSED),
+        defaults_recovered: metric(t, mc::MARSHALLING_OPTION_DEFAULTS_RECOVERED),
+        defaults_declined_some_arm_branches: some_branches,
+        defaults_declined_none_arm_branches: none_branches,
+        defaults_declined_arm_has_effects: arm_effects,
+        defaults_declined_probe_shared: probe_shared,
+        defaults_declined_not_one_read: not_one_read,
+        defaults_declined_merge_shape: merge_shape,
+        defaults_declined_nothing_merged: nothing_merged,
+        defaults_declined_struct_with_checks: struct_with_checks,
+        defaults_declined_no_common_default: no_common_default,
+        defaults_declined_check_would_fire: check_would_fire,
+        defaults_declined_total: some_branches
+            + none_branches
+            + arm_effects
+            + probe_shared
+            + not_one_read
+            + merge_shape
+            + nothing_merged
+            + struct_with_checks
+            + no_common_default
+            + check_would_fire,
     }
 }
 
