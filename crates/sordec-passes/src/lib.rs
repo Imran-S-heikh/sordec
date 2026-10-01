@@ -212,6 +212,26 @@ pub const OPTION_PROBE_AFTER_ELISION: &str = "option-probe-after-elision";
 pub const OPTION_UNWRAP_AFTER_ELISION: &str = "option-unwrap-after-elision";
 /// [`OptionDefaultPass`] re-run on the probes that re-run found.
 pub const OPTION_DEFAULT_AFTER_ELISION: &str = "option-default-after-elision";
+/// What that re-run reports: its fold count and its whole decline census.
+///
+/// A site refused by both the first run and this one is counted twice.
+/// These counters are a worklist of refusal *events*, not a set of sites —
+/// the catalog says so for the `sret` family too — and under-reporting a
+/// contract as having no candidates at all is the worse failure.
+const OPTION_DEFAULT_COUNTERS: &[&str] = &[
+    metrics_catalog::MARSHALLING_OPTION_DEFAULTS_RECOVERED,
+    metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS,
+    metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_SOME_ARM_BRANCHES,
+    metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_NONE_ARM_BRANCHES,
+    metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_HAS_EFFECTS,
+    metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_PROBE_SHARED,
+    metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_NOT_ONE_READ,
+    metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_MERGE_SHAPE,
+    metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_NOTHING_MERGED,
+    metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_STRUCT_WITH_CHECKS,
+    metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_NO_COMMON_DEFAULT,
+    metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_CHECK_WOULD_FIRE,
+];
 /// [`DeadFrameStorePass`] re-run after the `Vec` elements are recovered.
 pub const DEAD_FRAME_STORE_AFTER_VEC: &str = "dead-frame-store-after-vec";
 /// [`FrameElisionPass`] re-run after the `Vec` elements are recovered.
@@ -621,10 +641,21 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
                 OPTION_UNWRAP_AFTER_ELISION,
                 &[],
             )),
+            // Unlike the re-runs above, this one reports. Two reasons, and
+            // both turn on it sitting *outside* the elision group rather
+            // than in it: it runs exactly once, so a miss counter cannot be
+            // counted per iteration, and its rewrite counter is the only
+            // record of a fold that the first run could not see.
+            //
+            // On phoenix-vesting the probes do not exist until the wrappers
+            // are inlined, so every one of its `unwrap_or` candidates is
+            // decided here. With an empty list the contract reported a
+            // clean zero in all fifteen counters while the pass was
+            // refusing two sites.
             Box::new(pass::Rerun::new(
                 OptionDefaultPass,
                 OPTION_DEFAULT_AFTER_ELISION,
-                &[],
+                OPTION_DEFAULT_COUNTERS,
             )),
             Box::new(VecElementsPass),
             // Collecting the buffer the elements came out of, in a group of
