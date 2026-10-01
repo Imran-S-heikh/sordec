@@ -104,10 +104,16 @@ impl Pass<HighIr> for OptionDefaultPass {
 /// came to nothing because this pass could only say no.
 #[derive(Debug, Clone, Copy)]
 enum Decline {
-    /// The read's arm always traps, so the branch is an assertion rather
-    /// than a default. [`super::option_unwrap`] owns this shape; it is
-    /// counted here only so the two censuses add up to the candidates
-    /// each pass saw.
+    /// The read's arm always traps, so the branch asserts rather than
+    /// merges and there is no value for a default to stand in for.
+    ///
+    /// Measured on the held-out 25, all 10 are the else-less
+    /// `if has(k) { panic!() }` — the "already initialized" guard — which
+    /// the emitter already spells correctly. [`super::option_unwrap`]
+    /// takes the opposite polarity, `if !has(k) { panic!() }`, so neither
+    /// pass is missing work here. The counter exists so that is visible
+    /// instead of being filed under control flow this pass could not
+    /// carry.
     ArmAlwaysTraps,
     /// The read's arm carries control flow this pass cannot move onto a
     /// single expression — a nested branch, a loop, anything that is not a
@@ -293,12 +299,12 @@ fn plan(
     returned: Option<(ValueId, ValueId)>,
 ) -> Result<Plan, Decline> {
     // **First**, because every gate below asks how to fold the arm and
-    // this one asks whether the arm is a value at all. A trapping arm is
-    // `.unwrap()`, not `.unwrap_or(..)`, and reporting one as "the arm
-    // branches" is what made 10 of the 14 held-out refusals read as
-    // control flow this pass could not carry when none of the 10 was a
-    // default in the first place — the same misattribution the `sret`
-    // census had to correct.
+    // this one asks whether the arm is a value at all. A trapping arm
+    // asserts; it merges nothing. Reporting one as "the arm branches" is
+    // what made 10 of the 14 held-out refusals read as control flow this
+    // pass could not carry when not one of the 10 was a default in the
+    // first place — the same misattribution the `sret` census had to
+    // correct.
     if always_traps(some_arm) {
         return Err(Decline::ArmAlwaysTraps);
     }
@@ -941,9 +947,9 @@ mod tests {
         assert!(!OptionDefaultPass.run(&mut m).changed);
     }
 
-    /// An arm that leaves by trapping merges no value, so it is
-    /// `.unwrap()`'s shape and not this pass's. The census says so rather
-    /// than filing it under control flow this pass could not carry.
+    /// An arm that leaves by trapping merges no value, so the branch
+    /// asserts and is not this pass's. The census says so rather than
+    /// filing it under control flow this pass could not carry.
     #[test]
     fn a_trapping_arm_is_not_this_passs_candidate() {
         let panic = || Region::Panic { kind: PanicKind::Bare };

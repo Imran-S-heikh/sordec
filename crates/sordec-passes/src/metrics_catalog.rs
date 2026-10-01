@@ -437,10 +437,14 @@ pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defa
 // candidates it saw minus the ones it folded. Read them the way the
 // `sret` ones are read: the gates are ordered, so an earlier bucket
 // hides the ones after it, and a large count is not by itself a bug.
-/// The read's arm always traps, so the branch is an assertion and not a
-/// default. `marshalling::option_unwrap` owns the shape; this counter
-/// exists so the two passes' censuses add up rather than this one
-/// reporting another pass's candidates as its own control-flow refusals.
+/// The read's arm always traps, so the branch asserts rather than merges
+/// and there is no value for a default to stand in for.
+///
+/// Measured on the held-out 25, all 10 are `if has(k) { panic!() }` — the
+/// "already initialized" guard, which the emitter already spells
+/// correctly. `marshalling::option_unwrap` takes the opposite polarity,
+/// so a count here is not work either pass is missing. It exists so that
+/// stays visible rather than inflating the control-flow bucket.
 pub const MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS: &str =
     "marshalling_option_default_declined_arm_always_traps";
 /// The read's arm carries control flow that is not a trap guard, so there

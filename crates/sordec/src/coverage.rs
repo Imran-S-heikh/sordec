@@ -360,9 +360,10 @@ pub struct OptionCoverage {
     pub helpers_collapsed: i64,
     /// Branches folded into `.unwrap_or(default)`.
     pub defaults_recovered: i64,
-    /// Declined: the read's arm always traps, so the branch is an
-    /// assertion. `unwrapped` is the pass that owns it; this is counted
-    /// here only so the two add up.
+    /// Declined: the read's arm always traps, so the branch asserts
+    /// rather than merges. Measured, these are the else-less
+    /// `if has(k) { panic!() }` guard, which the emitter already spells —
+    /// not work any `Option` pass is missing.
     pub defaults_declined_arm_always_traps: i64,
     /// Declined: the read's arm carries control flow that is not a trap
     /// guard.
