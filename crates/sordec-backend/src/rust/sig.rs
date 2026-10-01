@@ -43,6 +43,21 @@ pub(crate) fn spec_signature(
         .signature
         .as_ref()
         .expect("spec_signature requires a contractspec signature");
+    spec_signature_of(sig, func, reg, policy)
+}
+
+/// The same, against a signature given explicitly.
+///
+/// An entrypoint whose body LLVM merged with another's is reached through
+/// [`HighFunction::aliases`] rather than `signature`, and renders from the
+/// alias's own spec entry: the bodies are identical but the declared types
+/// need not be — `woid` returns `()` where `val` returns `Val`.
+pub(crate) fn spec_signature_of(
+    sig: &sordec_ir::FunctionSignature,
+    func: &HighFunction,
+    reg: &TypeRegistry,
+    policy: &dyn HolePolicy,
+) -> syn::Signature {
     let name = ident(&sig.name);
     let params: Vec<_> = param_idents(func)
         .iter()

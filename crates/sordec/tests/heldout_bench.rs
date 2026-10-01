@@ -147,7 +147,7 @@ fn heldout_floor(name: &str) -> f64 {
         "merkle_distribution" => 0.50,
         "mint-lock" => 0.48,
         "modular_account" => 0.40,
-        "other_custom_types" => 0.69,
+        "other_custom_types" => 0.70,
         "pause" => 0.98,
         "simple_account" => 0.79,
         "single_offer" => 0.77,

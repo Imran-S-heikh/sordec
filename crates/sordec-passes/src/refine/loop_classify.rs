@@ -250,6 +250,7 @@ mod tests {
             id: FuncId::from_index(0),
             name: None,
             signature: None,
+            aliases: Vec::new(),
             blocks,
             bindings,
             region: Region::Sequence(vec![

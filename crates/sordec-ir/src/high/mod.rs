@@ -112,6 +112,19 @@ pub struct HighFunction {
     /// helper).
     pub signature: Option<FunctionSignature>,
 
+    /// The *other* entrypoints that share this body.
+    ///
+    /// LLVM merges functions with identical code, and the export section
+    /// then names one function twice — `other_custom_types` exports both
+    /// `woid` and `val` at the same index, because each is one instruction
+    /// returning a constant `Val`. The source has two functions, so a
+    /// reconstruction that emits one has lost an entrypoint; keeping the
+    /// extra signatures here is what lets the emitter put both back.
+    ///
+    /// Empty for every function the linker did not merge, which is almost
+    /// all of them. [`signature`](Self::signature) holds the first.
+    pub aliases: Vec<FunctionSignature>,
+
     /// Underlying basic blocks. Regions reference these by id; passes
     /// may add or rewrite block contents but the structured `region`
     /// remains the source of truth for emission order.

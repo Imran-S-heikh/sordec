@@ -178,6 +178,7 @@ mod tests {
             id: FuncId::new(0),
             name: Some("test_fn".to_string()),
             signature: None,
+            aliases: Vec::new(),
             blocks,
             bindings,
             region: Region::Basic(bid),

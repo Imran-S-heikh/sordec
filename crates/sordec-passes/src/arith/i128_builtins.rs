@@ -569,6 +569,7 @@ pub(crate) mod tests {
             id: FuncId::from_index(id),
             name: None,
             signature: None,
+            aliases: Vec::new(),
             blocks,
             bindings,
             region: Region::Basic(BlockId::from_index(0)),

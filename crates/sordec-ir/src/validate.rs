@@ -734,6 +734,7 @@ mod tests {
             id: FuncId::new(0),
             name: None,
             signature: None,
+            aliases: Vec::new(),
             blocks: blk_arena,
             bindings: b_arena,
             region,

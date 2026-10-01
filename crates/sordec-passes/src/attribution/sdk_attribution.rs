@@ -83,6 +83,7 @@ mod tests {
             id: FuncId::from_index(id),
             name: None,
             signature: None,
+            aliases: Vec::new(),
             blocks: Arena::new(),
             bindings: Arena::new(),
             region: Region::Sequence(vec![]),

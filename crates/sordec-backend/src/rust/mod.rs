@@ -131,9 +131,11 @@ fn build_file(high: &HighIr, policy: &dyn HolePolicy) -> syn::File {
         if !reachable.contains(&func.id) {
             continue;
         }
-        match func::emit_function(high, func, reg, policy) {
-            Emitted::Method(m) => methods.push(*m),
-            Emitted::Free(f) => free_fns.push(*f),
+        for emitted in func::emit_function(high, func, reg, policy) {
+            match emitted {
+                Emitted::Method(m) => methods.push(*m),
+                Emitted::Free(f) => free_fns.push(*f),
+            }
         }
     }
 

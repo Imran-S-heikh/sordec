@@ -1076,6 +1076,7 @@ mod tests {
             id: FuncId::from_index(id),
             name: None,
             signature: None,
+            aliases: Vec::new(),
             blocks,
             bindings,
             region,

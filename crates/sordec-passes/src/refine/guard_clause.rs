@@ -204,6 +204,7 @@ mod tests {
             id: FuncId::new(0),
             name: None,
             signature: None,
+            aliases: Vec::new(),
             blocks: blk,
             bindings: b,
             region,

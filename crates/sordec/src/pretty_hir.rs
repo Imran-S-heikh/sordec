@@ -1531,6 +1531,7 @@ mod tests {
             id: FuncId::from_index(3),
             name: name.map(str::to_string),
             signature: None,
+            aliases: Vec::new(),
             blocks,
             bindings: Arena::new(),
             region: Region::Unreachable,

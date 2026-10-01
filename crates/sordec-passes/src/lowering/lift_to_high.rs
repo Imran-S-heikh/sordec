@@ -141,6 +141,14 @@ fn lower_function(
             .or_else(|| exported_signature(soroban_facts, n, arity, returns_a_value))
     });
 
+    // Only a function the spec already names can carry aliases: the
+    // extras are additional spec entries, not a new kind of thing.
+    let aliases = if signature.is_some() {
+        recover_aliases(facts, soroban_facts, func.id, imported_func_count)
+    } else {
+        Vec::new()
+    };
+
     let phi_edges = build_phi_edges(func);
     let ctx = LowerCtx {
         imports: &facts.imports,
@@ -212,6 +220,7 @@ fn lower_function(
         id: func.id,
         name,
         signature,
+        aliases,
         blocks,
         bindings,
         region,
@@ -231,6 +240,33 @@ fn recover_name(facts: &WasmFacts, func_id: FuncId, imported_func_count: u32) ->
         .iter()
         .find(|e| matches!(e.kind, ExportKind::Func) && e.index == global_index)
         .map(|e| e.name.clone())
+}
+
+/// The spec signatures of the *other* names this function is exported
+/// under.
+///
+/// LLVM merges functions with identical bodies and the export section then
+/// carries several names at one index. `recover_name` keeps the first;
+/// without these the rest are simply lost, and the reconstruction is an
+/// entrypoint short of the contract — `other_custom_types` loses `woid`
+/// because it compiles to the same single instruction as `val`.
+///
+/// Only names the spec declares are returned: a name with no spec entry
+/// has no signature to emit from, and guessing one would invent an ABI.
+fn recover_aliases(
+    facts: &WasmFacts,
+    soroban_facts: Option<&SorobanFacts>,
+    func_id: FuncId,
+    imported_func_count: u32,
+) -> Vec<FunctionSignature> {
+    let global_index = func_id.index() + imported_func_count;
+    facts
+        .exports
+        .iter()
+        .filter(|e| matches!(e.kind, ExportKind::Func) && e.index == global_index)
+        .skip(1)
+        .filter_map(|e| recover_signature(soroban_facts, &e.name))
+        .collect()
 }
 
 /// Recover a function's Soroban signature from `contractspecv0`, keyed by
@@ -1186,6 +1222,55 @@ mod tests {
         let high = LiftToHigh.lower(ir).expect("lowering succeeds");
         let f = high.functions.into_iter().next().unwrap();
         assert_eq!(f.name.as_deref(), Some("add"));
+    }
+
+    /// LLVM merges identical bodies and the export section then names one
+    /// function twice. Both names are entrypoints the source wrote, so both
+    /// have to come back.
+    #[test]
+    fn a_body_exported_twice_keeps_both_entrypoints() {
+        let facts = facts_with(
+            vec![],
+            vec![
+                Export { name: "val".to_string(), kind: ExportKind::Func, index: 0 },
+                Export { name: "woid".to_string(), kind: ExportKind::Func, index: 0 },
+            ],
+        );
+        let mut soroban = SorobanFacts::default();
+        for name in ["val", "woid"] {
+            soroban.functions.insert(
+                name.to_string(),
+                FunctionSignature { name: name.to_string(), inputs: vec![], outputs: vec![] },
+            );
+        }
+
+        assert_eq!(
+            recover_name(&facts, FuncId::from_index(0), 0).as_deref(),
+            Some("val"),
+            "the first export is the primary"
+        );
+        let aliases = recover_aliases(&facts, Some(&soroban), FuncId::from_index(0), 0);
+        assert_eq!(aliases.len(), 1, "and the rest are aliases");
+        assert_eq!(aliases[0].name, "woid");
+    }
+
+    /// The half that matters: an ordinary single-export function must not
+    /// grow a phantom second entrypoint.
+    #[test]
+    fn one_export_means_no_aliases() {
+        let facts = facts_with(
+            vec![],
+            vec![Export { name: "add".to_string(), kind: ExportKind::Func, index: 0 }],
+        );
+        let mut soroban = SorobanFacts::default();
+        soroban.functions.insert(
+            "add".to_string(),
+            FunctionSignature { name: "add".to_string(), inputs: vec![], outputs: vec![] },
+        );
+        assert!(
+            recover_aliases(&facts, Some(&soroban), FuncId::from_index(0), 0).is_empty(),
+            "nothing was merged"
+        );
     }
 
     fn check_auth_sig(name: &str, element: TypeRef) -> FunctionSignature {

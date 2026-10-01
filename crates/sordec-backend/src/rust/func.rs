@@ -25,13 +25,22 @@ pub(crate) fn emit_function(
     func: &HighFunction,
     reg: &TypeRegistry,
     policy: &dyn HolePolicy,
-) -> Emitted {
+) -> Vec<Emitted> {
     let block = body::emit_body(high, func, reg, policy);
-    if func.signature.is_some() {
-        let signature = sig::spec_signature(func, reg, policy);
-        Emitted::Method(Box::new(parse_quote!(pub #signature #block)))
-    } else {
+    if func.signature.is_none() {
         let signature = sig::helper_signature(func, reg, policy);
-        Emitted::Free(Box::new(parse_quote!(#signature #block)))
+        return vec![Emitted::Free(Box::new(parse_quote!(#signature #block)))];
     }
+    let signature = sig::spec_signature(func, reg, policy);
+    let mut out = vec![Emitted::Method(Box::new(parse_quote!(pub #signature #block)))];
+    // One method per name the linker merged onto this body. The source
+    // wrote each of them separately, so emitting one and dropping the rest
+    // loses entrypoints the contract really has; the body is shared
+    // because it is genuinely identical.
+    for alias in &func.aliases {
+        let signature = sig::spec_signature_of(alias, func, reg, policy);
+        let block = block.clone();
+        out.push(Emitted::Method(Box::new(parse_quote!(pub #signature #block))));
+    }
+    out
 }

@@ -372,6 +372,7 @@ mod tests {
             id: FuncId::from_index(0),
             name: None,
             signature: None,
+            aliases: Vec::new(),
             blocks,
             bindings,
             region: Region::Sequence(vec![Region::If {
@@ -392,6 +393,7 @@ mod tests {
             id: FuncId::from_index(id),
             name: None,
             signature: None,
+            aliases: Vec::new(),
             blocks,
             bindings: Arena::new(),
             region: Region::Unreachable,

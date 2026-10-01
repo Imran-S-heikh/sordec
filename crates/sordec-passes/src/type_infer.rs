@@ -1544,6 +1544,7 @@ mod tests {
             id: FuncId::from_index(0),
             name: Some("add".to_string()),
             signature: Some(sig),
+            aliases: Vec::new(),
             blocks,
             bindings,
             region: Region::Basic(BlockId::from_index(0)),

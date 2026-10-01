@@ -254,6 +254,7 @@ mod tests {
             id: FuncId::from_index(id),
             name: name.map(str::to_string),
             signature: None,
+            aliases: Vec::new(),
             blocks,
             bindings,
             region: Region::Unreachable,
