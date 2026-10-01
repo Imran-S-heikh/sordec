@@ -437,6 +437,12 @@ pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defa
 // candidates it saw minus the ones it folded. Read them the way the
 // `sret` ones are read: the gates are ordered, so an earlier bucket
 // hides the ones after it, and a large count is not by itself a bug.
+/// The branch tests the probe the other way round and has no `else`, so
+/// the read is on the fall-through rather than on an arm. The early-return
+/// sweep owns that shape and only when both sides return one value;
+/// anything else falls between the two sweeps.
+pub const MARSHALLING_OPTION_DEFAULT_DECLINED_READ_ON_FALL_THROUGH: &str =
+    "marshalling_option_default_declined_read_on_fall_through";
 /// The read's arm always traps, so the branch asserts rather than merges
 /// and there is no value for a default to stand in for.
 ///
@@ -913,6 +919,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_OPTIONS_UNWRAPPED,
         MARSHALLING_OPTION_HELPERS_COLLAPSED,
         MARSHALLING_OPTION_DEFAULTS_RECOVERED,
+        MARSHALLING_OPTION_DEFAULT_DECLINED_READ_ON_FALL_THROUGH,
         MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS,
         MARSHALLING_OPTION_DEFAULT_DECLINED_SOME_ARM_BRANCHES,
         MARSHALLING_OPTION_DEFAULT_DECLINED_NONE_ARM_BRANCHES,

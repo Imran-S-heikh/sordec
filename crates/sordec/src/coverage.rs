@@ -368,6 +368,9 @@ pub struct OptionCoverage {
     pub helpers_collapsed: i64,
     /// Branches folded into `.unwrap_or(default)`.
     pub defaults_recovered: i64,
+    /// Declined: the branch has no `else`, so the read is on the
+    /// fall-through — between the two sweeps this pass makes.
+    pub defaults_declined_read_on_fall_through: i64,
     /// Declined: the read's arm always traps, so the branch asserts
     /// rather than merges. Measured, these are the else-less
     /// `if has(k) { panic!() }` guard, which the emitter already spells —
@@ -398,7 +401,7 @@ pub struct OptionCoverage {
     /// Declined: a hoisted check would fire with the read standing for the
     /// default, so the fold would trap where the original did not.
     pub defaults_declined_check_would_fire: i64,
-    /// Sum of the eleven.
+    /// Sum of the twelve.
     pub defaults_declined_total: i64,
 }
 
@@ -1384,6 +1387,7 @@ fn build_udt(t: &BTreeMap<&'static str, i64>) -> UdtCoverage {
 }
 
 fn build_option(t: &BTreeMap<&'static str, i64>) -> OptionCoverage {
+    let fall_through = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_READ_ON_FALL_THROUGH);
     let always_traps = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS);
     let some_branches = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_SOME_ARM_BRANCHES);
     let none_branches = metric(t, mc::MARSHALLING_OPTION_DEFAULT_DECLINED_NONE_ARM_BRANCHES);
@@ -1400,6 +1404,7 @@ fn build_option(t: &BTreeMap<&'static str, i64>) -> OptionCoverage {
         unwrapped: metric(t, mc::MARSHALLING_OPTIONS_UNWRAPPED),
         helpers_collapsed: metric(t, mc::MARSHALLING_OPTION_HELPERS_COLLAPSED),
         defaults_recovered: metric(t, mc::MARSHALLING_OPTION_DEFAULTS_RECOVERED),
+        defaults_declined_read_on_fall_through: fall_through,
         defaults_declined_arm_always_traps: always_traps,
         defaults_declined_some_arm_branches: some_branches,
         defaults_declined_none_arm_branches: none_branches,
@@ -1411,7 +1416,8 @@ fn build_option(t: &BTreeMap<&'static str, i64>) -> OptionCoverage {
         defaults_declined_struct_with_checks: struct_with_checks,
         defaults_declined_no_common_default: no_common_default,
         defaults_declined_check_would_fire: check_would_fire,
-        defaults_declined_total: always_traps
+        defaults_declined_total: fall_through
+            + always_traps
             + some_branches
             + none_branches
             + arm_effects

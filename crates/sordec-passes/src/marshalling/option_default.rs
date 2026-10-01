@@ -104,6 +104,16 @@ impl Pass<HighIr> for OptionDefaultPass {
 /// came to nothing because this pass could only say no.
 #[derive(Debug, Clone, Copy)]
 enum Decline {
+    /// The branch tests the probe the other way round and has no `else`,
+    /// so the read is on the fall-through rather than on an arm.
+    ///
+    /// The early-return sweep below owns this shape, and only when both
+    /// sides leave by returning one value. Anything else falls between the
+    /// two sweeps, which is why it is counted here: 5 of phoenix-vesting's
+    /// 7 proven probes are this, and before this counter existed they were
+    /// dropped without a word — the pass reported neither a fold nor a
+    /// refusal for any of them.
+    ReadOnFallThrough,
     /// The read's arm always traps, so the branch asserts rather than
     /// merges and there is no value for a default to stand in for.
     ///
@@ -147,6 +157,7 @@ enum Decline {
 impl Decline {
     fn metric(self) -> &'static str {
         match self {
+            Self::ReadOnFallThrough => metrics::OPTION_DEFAULT_READ_ON_FALL_THROUGH,
             Self::ArmAlwaysTraps => metrics::OPTION_DEFAULT_ARM_ALWAYS_TRAPS,
             Self::SomeArmBranches => metrics::OPTION_DEFAULT_SOME_ARM_BRANCHES,
             Self::NoneArmBranches => metrics::OPTION_DEFAULT_NONE_ARM_BRANCHES,
@@ -227,7 +238,12 @@ fn plans(func: &HighFunction, structs: &[StructDef]) -> Planned {
             } else {
                 match else_region.as_deref() {
                     Some(e) => (e, Some(&**then_region)),
-                    None => continue,
+                    // The read is whatever follows the branch, which this
+                    // sweep does not model. Counted, not skipped.
+                    None => {
+                        declines.push(Decline::ReadOnFallThrough);
+                        continue;
+                    }
                 }
             };
             match plan(func, &order, structs, *probe, *key, *tier, some_arm, none_arm, None) {
@@ -945,6 +961,29 @@ mod tests {
         let mut m = module(vec![shape(0)]);
         assert!(OptionDefaultPass.run(&mut m).changed);
         assert!(!OptionDefaultPass.run(&mut m).changed);
+    }
+
+    /// The two sweeps overlap, and the census must not pretend otherwise:
+    /// the first sweep sees an else-less branch, counts that the read is on
+    /// the fall-through and moves on, and the second sweep folds it anyway.
+    /// So a refusal here is a note about sweep one, never a verdict on the
+    /// candidate — which is why it is counted beside a recovery rather than
+    /// instead of one.
+    #[test]
+    fn a_fall_through_read_is_counted_without_blocking_the_fold() {
+        let mut m = module(vec![exit_shape()]);
+        let result = OptionDefaultPass.run(&mut m);
+        assert!(result.changed, "sweep two still folds it");
+        assert_eq!(
+            result.metrics.get(metrics::OPTION_DEFAULT_READ_ON_FALL_THROUGH),
+            Some(1),
+            "and sweep one says it looked"
+        );
+        assert_eq!(
+            result.metrics.get(M_DEFAULTS),
+            Some(1),
+            "both, not one or the other"
+        );
     }
 
     /// An arm that leaves by trapping merges no value, so the branch

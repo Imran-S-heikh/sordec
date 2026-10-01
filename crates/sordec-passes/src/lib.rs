@@ -220,6 +220,7 @@ pub const OPTION_DEFAULT_AFTER_ELISION: &str = "option-default-after-elision";
 /// contract as having no candidates at all is the worse failure.
 const OPTION_DEFAULT_COUNTERS: &[&str] = &[
     metrics_catalog::MARSHALLING_OPTION_DEFAULTS_RECOVERED,
+    metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_READ_ON_FALL_THROUGH,
     metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS,
     metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_SOME_ARM_BRANCHES,
     metrics_catalog::MARSHALLING_OPTION_DEFAULT_DECLINED_NONE_ARM_BRANCHES,
