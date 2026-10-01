@@ -28,6 +28,29 @@
 //! the macro-expanded basis needs `cargo expand`, which only resolves in
 //! cargo's environment. A decompile that fails or panics is reported, never
 //! skipped, because on unseen input it is a finding in its own right.
+//!
+//! ## This is a guard, not only a report
+//!
+//! It used to print and assert nothing, which made it a number someone had to
+//! remember to read. Twice that was not enough: a change landed with the
+//! corpus green at 0.9359 while `auth`, `custom_types` and `events` each fell
+//! from 1.0000 to 0.7059 here, and the mean moved only 0.028. Both were found
+//! late and one was written up with the wrong cause. So the measured values
+//! are committed, in [`heldout_floor`] and [`HELDOUT_AGGREGATE`], and a drop
+//! fails.
+//!
+//! **The per-contract bounds are one-sided on purpose**, which is a deliberate
+//! departure from `benchmark.rs`'s two-sided `overall_band`. The corpus is
+//! seven *tuned* fixtures where any movement is meaningful. These twenty-five
+//! are untuned, and improvement lands on them unevenly by design — that is
+//! what the set is for — so a two-sided bound would fail on every genuine gain,
+//! twenty-five times over, which is how a guard teaches people to skip it.
+//!
+//! [`HELDOUT_AGGREGATE`] is the two-sided half, and it covers what
+//! two-sidedness is actually for on the corpus: a machine that cannot run
+//! `cargo expand` degrades every category to the source basis, which moves
+//! every contract at once and breaches the mean loudly rather than quietly
+//! reporting a different metric.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -93,6 +116,52 @@ fn mean(values: impl Iterator<Item = f64>) -> Option<f64> {
     (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64)
 }
 
+/// The lowest overall score a contract may report.
+///
+/// Measured at the commit that introduced this guard, less ~0.02 — the same
+/// derivation `benchmark.rs`'s `overall_band` entries use. One-sided: see the
+/// module docs for why a gain must not fail.
+///
+/// An unlisted contract floors at `0.0`, so adding one to the corpus reports
+/// it without failing until someone commits its number — mirroring
+/// `overall_band`'s `_ => (0.00, 1.00)` wildcard.
+fn heldout_floor(name: &str) -> f64 {
+    match name {
+        "account" => 0.48,
+        "alloc" => 0.54,
+        "atomic_swap" => 0.90,
+        "auth" => 0.98,
+        "bls_signature" => 0.66,
+        "custom_types" => 0.98,
+        "deep_contract_auth" => 0.59,
+        "errors" => 0.83,
+        "eth_abi" => 0.52,
+        "events" => 0.98,
+        "fuzzing" => 0.48,
+        "hello_world" => 0.98,
+        "import_ark_bn254" => 0.33,
+        "increment" => 0.68,
+        "increment_with_fuzz" => 0.81,
+        "increment_with_pause" => 0.75,
+        "logging" => 0.86,
+        "merkle_distribution" => 0.50,
+        "mint-lock" => 0.48,
+        "modular_account" => 0.31,
+        "other_custom_types" => 0.69,
+        "pause" => 0.98,
+        "simple_account" => 0.70,
+        "single_offer" => 0.77,
+        "ttl" => 0.98,
+        _ => 0.0,
+    }
+}
+
+/// Two-sided band on the mean overall score, `(low, high)`.
+///
+/// The upper bound is not pedantry: it is the detector for a run that measured
+/// something other than what it says it measured. See the module docs.
+const HELDOUT_AGGREGATE: (f64, f64) = (0.71, 0.76);
+
 #[test]
 #[ignore = "needs SORDEC_HELDOUT_DIR pointing at a built held-out corpus; run explicitly"]
 #[allow(clippy::print_stdout)]
@@ -120,7 +189,7 @@ fn score_heldout_corpus() {
                     fmt(structure),
                     fmt(semantic)
                 );
-                scored.push((overall, structure, semantic, holes));
+                scored.push((name.clone(), overall, structure, semantic, holes));
             }
             Outcome::Failed(why) => {
                 failed += 1;
@@ -131,11 +200,38 @@ fn score_heldout_corpus() {
     println!(
         "\n{} scored, {failed} failed — mean overall {}, structure {} (over {} measured), semantic {} (over {}), holes {}",
         scored.len(),
-        fmt(mean(scored.iter().map(|s| s.0))),
-        fmt(mean(scored.iter().filter_map(|s| s.1))),
-        scored.iter().filter(|s| s.1.is_some()).count(),
+        fmt(mean(scored.iter().map(|s| s.1))),
         fmt(mean(scored.iter().filter_map(|s| s.2))),
         scored.iter().filter(|s| s.2.is_some()).count(),
-        scored.iter().map(|s| s.3).sum::<usize>(),
+        fmt(mean(scored.iter().filter_map(|s| s.3))),
+        scored.iter().filter(|s| s.3.is_some()).count(),
+        scored.iter().map(|s| s.4).sum::<usize>(),
+    );
+
+    // Asserted after the table, so a failing run still prints every number
+    // someone needs to decide whether the change was intended.
+    for (name, overall, ..) in &scored {
+        let floor = heldout_floor(name);
+        assert!(
+            *overall >= floor,
+            "{name}: overall {overall:.4} below floor {floor:.2} — if this is an \
+             intended change, update heldout_floor() with the new measurement"
+        );
+    }
+
+    let overall_mean = mean(scored.iter().map(|s| s.1)).expect("the corpus is not empty");
+    let (lo, hi) = HELDOUT_AGGREGATE;
+    assert!(
+        (lo..=hi).contains(&overall_mean),
+        "mean overall {overall_mean:.4} outside band {lo:.2}..={hi:.2} — a breach of the \
+         upper bound usually means the run measured something else (no `cargo expand`, \
+         so every category fell back to the source basis); if the gain is real, update \
+         HELDOUT_AGGREGATE"
+    );
+
+    assert_eq!(
+        failed, 0,
+        "{failed} contract(s) failed to decompile or score; on unseen input that is a \
+         finding in its own right, not an environment problem — see the table above"
     );
 }

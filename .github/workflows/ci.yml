@@ -95,6 +95,63 @@ jobs:
       - name: cargo check on MSRV
         run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-targets
 
+  heldout:
+    name: held-out corpus (regression guard)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # A job of its own rather than a step in `gate`, because the header
+      # above is a rule: the `gate` job mirrors `tools/gate.sh` and nothing
+      # else. This guard cannot live in that script — it needs a corpus that
+      # is not repo content, and `gate.sh` is deliberately allowed to assume
+      # nothing about machine state. `msrv` and `publish-readiness` already
+      # answer questions the gate does not, so a fourth job is the shape this
+      # file already has.
+      #
+      # What it guards: `samples/contracts` is what every recognizer was built
+      # against, so the accuracy bands there cannot see a change that helps
+      # the corpus and breaks everything else. Measured twice: a change landed
+      # with the corpus green at 0.9359 while three held-out contracts fell
+      # from 1.0000 to 0.7059.
+      #
+      # The full provisioning, not `--scoring-only`: the bench needs
+      # `cargo-expand` for the macro-expanded basis *and* `wasm32v1-none` to
+      # build the corpus in the first place. `RUSTFLAGS` is cleared for the
+      # same reason the `gate` job clears it — `-D warnings` is a policy for
+      # our code, not for someone else's `cargo install`.
+      - name: Provision both harnesses
+        run: bash tools/setup-toolchains.sh
+        env:
+          RUSTFLAGS: ""
+
+      # Built, not vendored. The set is Stellar's `soroban-examples` at a
+      # pinned clone, and rebuilding it here keeps the repo from carrying 25
+      # more contracts whose only job is to be unfamiliar. `build_heldout.sh`
+      # documents the canonical cache path it writes to.
+      # The target is added from *inside* the clone on purpose.
+      # `setup-toolchains.sh` adds `wasm32v1-none` to toolchain 1.89 alone (the
+      # behavior harness it provisions), and `build_heldout.sh` builds each
+      # example under whatever `soroban-examples`' own `rust-toolchain.toml`
+      # selects — which is not ours and not 1.89. Adding it where the build
+      # actually runs is the only placement that covers that.
+      - name: Build the held-out corpus
+        run: |
+          git clone --depth 1 https://github.com/stellar/soroban-examples \
+            ~/.cache/soroban-examples
+          (cd ~/.cache/soroban-examples && rustup target add wasm32v1-none)
+          bash tools/build_heldout.sh ~/.cache/soroban-examples ~/.cache/sordec-heldout
+
+      - name: Score it
+        run: |
+          cargo test --release -p sordec --test heldout_bench \
+            -- --ignored --nocapture
+        env:
+          SORDEC_HELDOUT_DIR: /home/runner/.cache/sordec-heldout
+
   publish-readiness:
     name: publish readiness (dry run)
     runs-on: ubuntu-latest
