@@ -41,6 +41,7 @@ use sordec_common::{
 };
 use sordec_ir::{
     BinaryOp, ClientInterface, Expr, HighFunction, HighIr, KnownOp, MemWidth, SemanticOp,
+    VecOpKind,
 };
 
 use super::wrappers::{chase_value, wrapper_params};
@@ -261,6 +262,25 @@ fn try_resolve_args(
         }
         Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { vals_pos, len, .. })) => {
             (terminal, *vals_pos, *len)
+        }
+        // A zero-argument call. The SDK builds the empty args vec with
+        // `vec_new()` rather than out of a linear-memory buffer, so there
+        // is no `(ptr, len)` pair to read and no slots to prove: the arity
+        // is 0 by construction.
+        //
+        // Safe because `chase_value` has already walked to the terminal
+        // binding. A vec that was pushed to before the call terminates at
+        // the push, not here, so this arm cannot claim arity 0 for a call
+        // that actually passes arguments.
+        //
+        // Without it every nullary cross-contract call is unrecoverable —
+        // `decimals`, `name` and `symbol` on a token client all take none.
+        Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::New, .. })) => {
+            return Some(Recovered {
+                arity: 0,
+                elements: Some(Vec::new()),
+                via_copy_loop: false,
+            });
         }
         _ => return None,
     };
@@ -693,6 +713,79 @@ mod tests {
         match &ir.functions[func as usize].bindings.get(v(id)).unwrap().expr {
             Expr::Semantic(SemanticOp::Known(op)) => op,
             other => panic!("expected Known op, got {other:?}"),
+        }
+    }
+
+    /// A nullary call: the SDK builds the args vec with `vec_new()`, so
+    /// there is no buffer to read and the arity is 0 by construction.
+    /// Without this the token client's `decimals`, `name` and `symbol`
+    /// are unrecoverable — they are the only shapes that take no
+    /// arguments.
+    #[test]
+    fn a_nullary_call_recovers_through_the_empty_vec() {
+        let caller = func(
+            0,
+            None,
+            1,
+            vec![
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecOp {
+                    kind: VecOpKind::New,
+                    args: Vec::new(),
+                })), // v1
+                invoke(0, 0, 1, Some("decimals")), // v2
+            ],
+        );
+        let mut ir = module(vec![caller]);
+        assert!(run(&mut ir).changed);
+        match invoke_op(&ir, 0, 2) {
+            KnownOp::InvokeContract {
+                arg_count,
+                resolved_args,
+                interface,
+                ..
+            } => {
+                assert_eq!(*arg_count, Some(0), "no arguments");
+                assert_eq!(*resolved_args, Some(Vec::new()), "and none to prove");
+                assert_eq!(
+                    *interface,
+                    Some(ClientInterface::Sep41Token),
+                    "`decimals` at arity 0 is the SEP-41 method"
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// The half that matters: a vec that was pushed to before the call
+    /// terminates at the push, not at the `vec_new`, so the empty-vec arm
+    /// cannot claim arity 0 for a call that really passes arguments.
+    #[test]
+    fn a_pushed_vec_is_not_claimed_as_nullary() {
+        let caller = func(
+            0,
+            None,
+            1,
+            vec![
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecOp {
+                    kind: VecOpKind::New,
+                    args: Vec::new(),
+                })), // v1
+                i64c(7), // v2
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecOp {
+                    kind: VecOpKind::PushBack,
+                    args: vec![v(1), v(2)],
+                })), // v3
+                invoke(0, 0, 3, Some("decimals")), // v4
+            ],
+        );
+        let mut ir = module(vec![caller]);
+        run(&mut ir);
+        match invoke_op(&ir, 0, 4) {
+            KnownOp::InvokeContract { arg_count, interface, .. } => {
+                assert_eq!(*arg_count, None, "the push is not an empty vec");
+                assert_eq!(*interface, None, "so no interface is claimed");
+            }
+            other => panic!("unexpected {other:?}"),
         }
     }
 
