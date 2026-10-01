@@ -161,6 +161,18 @@ const DECLINED_TWO_STORES: &str = "two stores to one offset";
 /// A storing block does not dominate every return: the `Result`/`Option`
 /// conditional payload.
 const DECLINED_PATH_DEPENDENT: &str = "a storing block does not dominate every return";
+/// The same refusal in its narrowest and most recoverable form: exactly two
+/// slots, a discriminant at `+0` and one payload word at `+8`.
+///
+/// Split out because it is the slice worth building first. Of the
+/// path-dependent refusals on the held-out 25, **45 of 94 are this shape**;
+/// the rest are 3, 4 or 5 slots (a 128-bit or multi-word payload). A
+/// two-slot out-parameter is `Option<T>` or `Result<T, E>` with a
+/// single-word payload, and recovering it as the sum type needs no invented
+/// value for the untaken path — which is the whole of the design objection
+/// recorded against this item.
+const DECLINED_PATH_DEPENDENT_TWO_SLOT: &str =
+    "a storing block does not dominate every return (two slots: tag + one payload)";
 /// The pointer is read as well as written — an in-out parameter.
 const DECLINED_READ_OUTSIDE_STORES: &str = "out-pointer read outside the stores";
 /// A `?` guard in [`plan_for`] refused a shape without naming a gate.
@@ -489,6 +501,19 @@ fn plan_for(
         decline!(DECLINED_NOT_AN_OUT_POINTER);
     }
     if let Some(why) = escape {
+        // Narrow the path-dependent reason to the two-slot case, which is
+        // the recoverable one. Done here rather than where `escape` is set
+        // because the slot map is only complete once every block has been
+        // walked.
+        let why = if why == DECLINED_PATH_DEPENDENT
+            && slots.len() == 2
+            && slots.contains_key(&0)
+            && slots.contains_key(&8)
+        {
+            DECLINED_PATH_DEPENDENT_TWO_SLOT
+        } else {
+            why
+        };
         decline!(why);
     }
 
@@ -762,6 +787,9 @@ fn renumber_entry_params(func: &mut LiftedFunction) {
 fn report_declines(declines: &[&'static str], result: &mut PassResult) {
     for reason in declines {
         let key = match *reason {
+            DECLINED_PATH_DEPENDENT_TWO_SLOT => {
+                crate::metrics_catalog::MEMORY_SRET_DECLINED_PATH_DEPENDENT_TWO_SLOT
+            }
             DECLINED_PATH_DEPENDENT => {
                 crate::metrics_catalog::MEMORY_SRET_DECLINED_PATH_DEPENDENT
             }

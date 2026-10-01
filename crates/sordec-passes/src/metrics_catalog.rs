@@ -718,6 +718,16 @@ pub const MEMORY_FRAME_DECLINED_ESCAPES_AGAIN: &str = "memory_frame_declined_esc
 /// every return — the `Result`/`Option` ABI, whose payload is written only
 /// under its own tag.
 pub const MEMORY_SRET_DECLINED_PATH_DEPENDENT: &str = "memory_sret_declined_path_dependent";
+/// The two-slot form of the above: a discriminant at `+0` and one payload
+/// word at `+8`, which is `Option<T>` or `Result<T, E>` returned by
+/// pointer with a single-word payload.
+///
+/// Counted apart because it is the recoverable slice. Recovering it as a
+/// sum type needs no invented value for the untaken path, which is the
+/// design objection that stopped this item. Held-out: 45 of the 94
+/// path-dependent refusals.
+pub const MEMORY_SRET_DECLINED_PATH_DEPENDENT_TWO_SLOT: &str =
+    "memory_sret_declined_path_dependent_two_slot";
 /// `sret` candidates with no stores through the out-pointer at all: the
 /// parameter is not an out-pointer.
 ///
@@ -1000,6 +1010,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MEMORY_SLOTS_PROMOTED,
         MEMORY_FRAME_DECLINED_WRITE_ONLY,
         MEMORY_SRET_DECLINED_PATH_DEPENDENT,
+        MEMORY_SRET_DECLINED_PATH_DEPENDENT_TWO_SLOT,
         MEMORY_SRET_DECLINED_NO_STORES,
         MEMORY_SRET_DECLINED_NON_STORE_USE,
         MEMORY_SRET_DECLINED_READ,

@@ -469,6 +469,10 @@ pub struct MemoryCoverage {
     ///
     /// **The only gate that refuses a real out-pointer on this corpus.**
     pub sret_declined_path_dependent: i64,
+    /// The two-slot form of the above — a discriminant and one payload
+    /// word. This is the recoverable slice: the sum type it wants needs no
+    /// invented value for the untaken path.
+    pub sret_declined_path_dependent_two_slot: i64,
     /// `sret` candidates whose parameter was not an out-pointer at all —
     /// nothing is stored through it. Much the largest bucket, and not a
     /// blocker: most parameters of most functions are ordinary arguments.
@@ -1485,6 +1489,10 @@ fn build_memory(t: &BTreeMap<&'static str, i64>) -> MemoryCoverage {
             + declined_layout,
         sret_converted: metric(t, mc::MEMORY_SRET_CONVERTED),
         sret_declined_path_dependent: metric(t, mc::MEMORY_SRET_DECLINED_PATH_DEPENDENT),
+        sret_declined_path_dependent_two_slot: metric(
+            t,
+            mc::MEMORY_SRET_DECLINED_PATH_DEPENDENT_TWO_SLOT,
+        ),
         sret_declined_no_stores: metric(t, mc::MEMORY_SRET_DECLINED_NO_STORES),
         sret_declined_non_store_use: metric(t, mc::MEMORY_SRET_DECLINED_NON_STORE_USE),
         sret_declined_read: metric(t, mc::MEMORY_SRET_DECLINED_READ),
