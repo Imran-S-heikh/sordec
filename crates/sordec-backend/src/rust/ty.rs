@@ -15,7 +15,7 @@
 use proc_macro2::{Ident, Literal, Span};
 use syn::parse_quote;
 
-use sordec_ir::{CompositeType, IrType, KnownType, PrimitiveType, TypeRef, TypeRegistry};
+use sordec_ir::{CompositeType, IrType, KnownType, PrimitiveType, TypeRef, TypeRegistry, SdkType};
 
 use crate::rust::hole::HolePolicy;
 
@@ -32,6 +32,10 @@ pub(crate) fn type_ref(ty: &TypeRef, reg: &TypeRegistry, policy: &dyn HolePolicy
             // internally-inconsistent case; degrade honestly rather than panic.
             None => policy.unknown_type(None),
         },
+        // The path, not a bare ident: `Context` alone would collide with a
+        // contract's own type of that name, and the SDK's is the one the
+        // protocol means.
+        TypeRef::Sdk(SdkType::AuthContext) => parse_quote!(soroban_sdk::auth::Context),
         TypeRef::Unknown(reason) => policy.unknown_type(Some(reason)),
     }
 }

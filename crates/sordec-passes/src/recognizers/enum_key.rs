@@ -580,7 +580,10 @@ fn slot_width(types: &TypeRegistry, ty: &TypeRef, depth: u32) -> Option<usize> {
             let def = types.structs.iter().find(|s| s.id == *id)?;
             def.fields.iter().map(|f| slot_width(types, &f.ty, depth + 1)).sum()
         }
-        TypeRef::Unknown(_) => None,
+        // An SDK type is one `Val` on the wire like any other host object,
+        // but nothing here needs that: no `#[contracttype]` key has an
+        // SDK-typed field, so declining is both honest and unreachable.
+        TypeRef::Sdk(_) | TypeRef::Unknown(_) => None,
     }
 }
 

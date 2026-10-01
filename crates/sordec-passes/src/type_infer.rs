@@ -960,7 +960,11 @@ pub(crate) fn known_of_type_ref(t: &TypeRef) -> Option<KnownType> {
         TypeRef::Primitive(p) => primitive_to_known(*p),
         TypeRef::Composite(c) => composite_to_known(c)?,
         TypeRef::UserDefined(id) => KnownType::UserDefined(*id),
-        TypeRef::Unknown(_) => return None,
+        // An SDK type has no `KnownType`: the recovered-type vocabulary
+        // covers what a *contract* declares, and this is something only
+        // the protocol declares. The signature carries it; nothing in a
+        // body needs to reason about it.
+        TypeRef::Sdk(_) | TypeRef::Unknown(_) => return None,
     })
 }
 

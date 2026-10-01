@@ -127,11 +127,11 @@ fn mean(values: impl Iterator<Item = f64>) -> Option<f64> {
 /// `overall_band`'s `_ => (0.00, 1.00)` wildcard.
 fn heldout_floor(name: &str) -> f64 {
     match name {
-        "account" => 0.48,
+        "account" => 0.54,
         "alloc" => 0.54,
         "atomic_swap" => 0.90,
         "auth" => 0.98,
-        "bls_signature" => 0.66,
+        "bls_signature" => 0.71,
         "custom_types" => 0.98,
         "deep_contract_auth" => 0.59,
         "errors" => 0.83,
@@ -146,10 +146,10 @@ fn heldout_floor(name: &str) -> f64 {
         "logging" => 0.86,
         "merkle_distribution" => 0.50,
         "mint-lock" => 0.48,
-        "modular_account" => 0.31,
+        "modular_account" => 0.40,
         "other_custom_types" => 0.69,
         "pause" => 0.98,
-        "simple_account" => 0.70,
+        "simple_account" => 0.79,
         "single_offer" => 0.77,
         "ttl" => 0.98,
         _ => 0.0,

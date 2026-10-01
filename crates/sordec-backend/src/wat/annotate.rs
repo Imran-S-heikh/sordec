@@ -11,8 +11,7 @@
 
 use sordec_ir::{
     ClientInterface, CompositeType, DispatchTable, EnumKey, FunctionSignature, KnownOp, KnownTier,
-    PanicKind, PrimitiveType, StorageTier, TypeRef, TypeRegistry,
-};
+    PanicKind, PrimitiveType, StorageTier, TypeRef, TypeRegistry, SdkType,};
 use sordec_common::ValueId;
 
 /// Render a function signature as `fn name(p: T, …) -> R`, resolving all
@@ -249,6 +248,7 @@ pub(crate) fn type_ref_label(ty: &TypeRef, reg: &TypeRegistry) -> String {
         TypeRef::Primitive(p) => primitive_label(*p).to_string(),
         TypeRef::Composite(c) => composite_label(c, reg),
         TypeRef::UserDefined(id) => reg.name_of(*id).unwrap_or("<udt>").to_string(),
+        TypeRef::Sdk(SdkType::AuthContext) => "Context".to_string(),
         TypeRef::Unknown(_) => "?".to_string(),
     }
 }

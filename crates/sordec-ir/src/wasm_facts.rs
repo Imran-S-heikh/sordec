@@ -270,10 +270,33 @@ pub enum TypeRef {
     Composite(CompositeType),
     /// A user-defined struct/union/enum/error/event by id.
     UserDefined(TypeId),
+    /// A type the SDK defines, which a contract spec never carries.
+    ///
+    /// Contract specs declare only the contract's *own* types, so an SDK
+    /// type in a signature reaches us as
+    /// [`Unknown`](Self::Unknown)`(NoMetadata)`. For a parameter the
+    /// protocol fixes, that is information we have and the binary does
+    /// not — the same standing as the SEP-41 table in
+    /// `sordec_passes::interfaces`, and named here rather than spelled as
+    /// a string at the rendering boundary so passes can match on it.
+    Sdk(SdkType),
     /// Recovery placeholder: the spec referenced a type we couldn't
     /// resolve. The `UnknownReason` records why; the diagnostic emitted
     /// at the same site carries the human-readable context.
     Unknown(UnknownReason),
+}
+
+/// An SDK-defined type a contract spec cannot name.
+///
+/// One variant per type the protocol pins somewhere, added as cases are
+/// proven rather than mirroring the SDK wholesale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum SdkType {
+    /// `soroban_sdk::auth::Context` — the element type of
+    /// `__check_auth`'s `auth_contexts` parameter, which the custom
+    /// account interface fixes for every contract that implements it.
+    AuthContext,
 }
 
 /// Soroban primitive types.

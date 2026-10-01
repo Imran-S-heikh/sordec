@@ -49,8 +49,7 @@ use sordec_ir::{
     Binding, BinaryOp, BlockTarget, Expr, ExportKind, FunctionParam, FunctionSignature, HighBlock,
     HighFunction, HighIr, ImportKind, Import, IrType, LiftedFunction, LiftedIr, LiftedTerminator,
     LiftedValue, LiftedValueDef, Literal, MemWidth, PrimitiveType, Region, SemanticOp,
-    SorobanFacts, TypeRef, UnaryOp, WasmFacts, WasmOp, WasmOpcodeKind,
-};
+    SorobanFacts, TypeRef, UnaryOp, WasmFacts, WasmOp, WasmOpcodeKind, CompositeType, SdkType};
 use waffle::entity::EntityRef as _;
 
 use crate::dataflow::CfgFacts;
@@ -235,12 +234,49 @@ fn recover_name(facts: &WasmFacts, func_id: FuncId, imported_func_count: u32) ->
 }
 
 /// Recover a function's Soroban signature from `contractspecv0`, keyed by
-/// its exported name.
+/// its exported name, with the types the protocol fixes filled in.
 fn recover_signature(
     soroban_facts: Option<&SorobanFacts>,
     name: &str,
 ) -> Option<FunctionSignature> {
-    soroban_facts?.functions.get(name).cloned()
+    let mut sig = soroban_facts?.functions.get(name).cloned()?;
+    fill_reserved_types(&mut sig);
+    Some(sig)
+}
+
+/// Name of the custom account interface's authorization entrypoint.
+const CHECK_AUTH: &str = "__check_auth";
+
+/// Position of `auth_contexts` in [`CHECK_AUTH`]'s signature.
+const AUTH_CONTEXTS_INDEX: usize = 2;
+
+/// Fill in parameter types the protocol fixes and the spec cannot carry.
+///
+/// A `contractspecv0` declares the contract's own types; an SDK type in a
+/// signature therefore arrives as `Unknown(NoMetadata)` and renders as a
+/// bare `Val`. For most parameters that is the honest answer. For one it
+/// is not: `__check_auth` is reserved by the custom account interface,
+/// whose third parameter is `Vec<Context>` for every contract that
+/// implements it — so the type is known, just not from this binary.
+///
+/// This is the same standing as the SEP-41 table in
+/// [`crate::interfaces`]: protocol knowledge, applied only where the
+/// protocol is what decides. The shape is checked before it is filled, so
+/// a function that merely shares the name is left alone.
+fn fill_reserved_types(sig: &mut FunctionSignature) {
+    if sig.name != CHECK_AUTH {
+        return;
+    }
+    let Some(param) = sig.inputs.get_mut(AUTH_CONTEXTS_INDEX) else {
+        return;
+    };
+    // Only an unresolved element type is filled. A spec that already names
+    // one knows something we do not and keeps it.
+    if let TypeRef::Composite(CompositeType::Vec(element)) = &mut param.ty
+        && matches!(**element, TypeRef::Unknown(_))
+    {
+        **element = TypeRef::Sdk(SdkType::AuthContext);
+    }
 }
 
 /// The signature an export implies when the module carries no
@@ -1150,5 +1186,76 @@ mod tests {
         let high = LiftToHigh.lower(ir).expect("lowering succeeds");
         let f = high.functions.into_iter().next().unwrap();
         assert_eq!(f.name.as_deref(), Some("add"));
+    }
+
+    fn check_auth_sig(name: &str, element: TypeRef) -> FunctionSignature {
+        FunctionSignature {
+            name: name.to_owned(),
+            inputs: vec![
+                sordec_ir::FunctionParam {
+                    name: "signature_payload".into(),
+                    ty: TypeRef::Composite(CompositeType::BytesN(32)),
+                },
+                sordec_ir::FunctionParam {
+                    name: "signature".into(),
+                    ty: TypeRef::Composite(CompositeType::BytesN(64)),
+                },
+                sordec_ir::FunctionParam {
+                    name: "auth_context".into(),
+                    ty: TypeRef::Composite(CompositeType::Vec(Box::new(element))),
+                },
+            ],
+            outputs: vec![],
+        }
+    }
+
+    /// The spec cannot name an SDK type, so `auth_contexts` arrives as a
+    /// `Vec` of nothing. The custom account interface fixes it.
+    #[test]
+    fn check_auths_context_vector_is_filled_from_the_protocol() {
+        let mut sig = check_auth_sig(
+            CHECK_AUTH,
+            TypeRef::Unknown(sordec_common::UnknownReason::NoMetadata),
+        );
+        fill_reserved_types(&mut sig);
+        assert!(
+            matches!(
+                &sig.inputs[AUTH_CONTEXTS_INDEX].ty,
+                TypeRef::Composite(CompositeType::Vec(e))
+                    if matches!(**e, TypeRef::Sdk(SdkType::AuthContext))
+            ),
+            "the element type the protocol fixes"
+        );
+    }
+
+    /// Two ways this must not fire: on a function that merely shares the
+    /// name's shape, and over a spec that already named the element —
+    /// which knows something this rule does not.
+    #[test]
+    fn the_protocol_fill_is_narrow() {
+        let mut other = check_auth_sig(
+            "transfer",
+            TypeRef::Unknown(sordec_common::UnknownReason::NoMetadata),
+        );
+        fill_reserved_types(&mut other);
+        assert!(
+            matches!(
+                &other.inputs[AUTH_CONTEXTS_INDEX].ty,
+                TypeRef::Composite(CompositeType::Vec(e)) if matches!(**e, TypeRef::Unknown(_))
+            ),
+            "another entrypoint is left alone"
+        );
+
+        let mut named =
+            check_auth_sig(CHECK_AUTH, TypeRef::Primitive(sordec_ir::PrimitiveType::Address));
+        fill_reserved_types(&mut named);
+        assert!(
+            matches!(
+                &named.inputs[AUTH_CONTEXTS_INDEX].ty,
+                TypeRef::Composite(CompositeType::Vec(e))
+                    if matches!(**e, TypeRef::Primitive(sordec_ir::PrimitiveType::Address))
+            ),
+            "a spec that named the element keeps it"
+        );
     }
 }
