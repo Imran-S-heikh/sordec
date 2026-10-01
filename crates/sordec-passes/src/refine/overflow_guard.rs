@@ -58,6 +58,7 @@ use sordec_common::{BlockId, Diagnostic, LiftDiagnosticCode};
 use sordec_ir::{HighFunction, HighIr, PanicKind, Region};
 
 use super::debug_validate;
+use crate::metrics_catalog;
 use crate::metrics_catalog::REFINE_OVERFLOW_GUARDS_ELIDED as M_ELIDED;
 use crate::pass::{Pass, PassResult};
 use crate::structuring::seq;
@@ -77,11 +78,12 @@ impl Pass<HighIr> for OverflowGuardElisionPass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
         let mut elided: i64 = 0;
+        let mut kept: Vec<&'static str> = Vec::new();
         for func in &mut ir.functions {
             let before = elided;
             let inert = inert_blocks(func);
             let region = std::mem::replace(&mut func.region, Region::Unreachable);
-            func.region = strip(region, &mut elided, &inert);
+            func.region = strip(region, &mut elided, &mut kept, &inert);
             // One diagnostic per removal. Deleting a reachable trap is a
             // behavioural claim; it should be reviewable without diffing
             // two decompilations.
@@ -96,6 +98,9 @@ impl Pass<HighIr> for OverflowGuardElisionPass {
                     ),
                 ));
             }
+        }
+        for key in kept {
+            result.metrics.increment(key, 1);
         }
         if elided > 0 {
             result.metrics.increment(M_ELIDED, elided);
@@ -116,11 +121,16 @@ fn func_prefix(func: &HighFunction) -> String {
 }
 
 /// Bottom-up rewrite dropping every overflow guard.
-fn strip(region: Region, elided: &mut i64, inert: &HashSet<BlockId>) -> Region {
+fn strip(
+    region: Region,
+    elided: &mut i64,
+    kept: &mut Vec<&'static str>,
+    inert: &HashSet<BlockId>,
+) -> Region {
     match region {
         Region::Sequence(items) => {
             let items: Vec<Region> =
-                items.into_iter().map(|item| strip(item, elided, inert)).collect();
+                items.into_iter().map(|item| strip(item, elided, kept, inert)).collect();
             // The inverted spelling: `if no_overflow { work; return }`
             // followed by the trap. rustc writes a *signed* `+`/`-` this
             // way round, because the sign-mask test reads "no overflow"
@@ -141,11 +151,11 @@ fn strip(region: Region, elided: &mut i64, inert: &HashSet<BlockId>) -> Region {
         }
         Region::Scope { out, body } => Region::Scope {
             out,
-            body: Box::new(strip(*body, elided, inert)),
+            body: Box::new(strip(*body, elided, kept, inert)),
         },
         Region::Loop { header, body, kind } => Region::Loop {
             header,
-            body: Box::new(strip(*body, elided, inert)),
+            body: Box::new(strip(*body, elided, kept, inert)),
             kind,
         },
         Region::Switch {
@@ -158,11 +168,11 @@ fn strip(region: Region, elided: &mut i64, inert: &HashSet<BlockId>) -> Region {
             arms: arms
                 .into_iter()
                 .map(|mut arm| {
-                    arm.body = strip(arm.body, elided, inert);
+                    arm.body = strip(arm.body, elided, kept, inert);
                     arm
                 })
                 .collect(),
-            default: Box::new(strip(*default, elided, inert)),
+            default: Box::new(strip(*default, elided, kept, inert)),
             dispatch,
         },
         Region::If {
@@ -174,8 +184,13 @@ fn strip(region: Region, elided: &mut i64, inert: &HashSet<BlockId>) -> Region {
                 *elided += 1;
                 return seq(vec![]);
             }
-            let then_region = strip(*then_region, elided, inert);
-            let else_region = else_region.map(|e| strip(*e, elided, inert));
+            if else_region.is_none()
+                && let Some(key) = kept_guard_metric(&then_region)
+            {
+                kept.push(key);
+            }
+            let then_region = strip(*then_region, elided, kept, inert);
+            let else_region = else_region.map(|e| strip(*e, elided, kept, inert));
             // Both arms now empty: the division guards come in a pair, and
             // the `d == -1` test that selects between them carries no trap
             // of its own. Once the trap inside it goes, the branch decides
@@ -300,6 +315,46 @@ fn inverted_guard(items: &[Region]) -> Option<usize> {
 /// so a `Basic` prefix is expected — but only *ahead of* the classified
 /// trap, and only when the arm contains nothing else. Any other region in
 /// the arm means it does work, and work is not something to delete.
+/// Why a trap-armed, else-less guard was left standing: the kind of trap
+/// it holds.
+///
+/// This pass elides exactly two kinds and keeps the rest, and until now it
+/// counted only what it removed — so a contract where it removed nothing
+/// looked the same as one with no guards at all. 26% of the `if`s this
+/// pipeline emits on the held-out 25 have a trap for a body, and the
+/// original sources have almost no branches at all, so which traps those
+/// are is the first question to ask about the structure category.
+fn kept_guard_metric(region: &Region) -> Option<&'static str> {
+    let kind = match trap_kind(region)? {
+        PanicKind::Bare => metrics_catalog::REFINE_OVERFLOW_GUARD_KEPT_BARE,
+        PanicKind::Unwrap => metrics_catalog::REFINE_OVERFLOW_GUARD_KEPT_UNWRAP,
+        other => {
+            debug_assert!(
+                !matches!(other, PanicKind::ArithOverflow | PanicKind::DivisionGuard),
+                "an elided kind reached the kept census"
+            );
+            metrics_catalog::REFINE_OVERFLOW_GUARD_KEPT_OTHER
+        }
+    };
+    Some(kind)
+}
+
+/// The trap a guard arm ends in, under the same shape rule
+/// [`is_overflow_trap`] uses: plain blocks, then the trap.
+fn trap_kind(region: &Region) -> Option<PanicKind> {
+    match region {
+        Region::Panic { kind } => Some(*kind),
+        Region::Sequence(items) => {
+            let last = trap_kind(items.last()?)?;
+            items[..items.len() - 1]
+                .iter()
+                .all(|item| matches!(item, Region::Basic(_)))
+                .then_some(last)
+        }
+        _ => None,
+    }
+}
+
 fn is_overflow_trap(region: &Region) -> bool {
     match region {
         Region::Panic {
@@ -352,7 +407,7 @@ mod tests {
 
     fn run_with(region: Region, inert: &HashSet<BlockId>) -> (Region, i64) {
         let mut n = 0;
-        let out = strip(region, &mut n, inert);
+        let out = strip(region, &mut n, &mut Vec::new(), inert);
         (out, n)
     }
 

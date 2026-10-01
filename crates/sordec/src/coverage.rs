@@ -244,6 +244,19 @@ pub struct GuardCoverage {
     /// Guards removed, each also carrying a `MarshallingGuardElided`
     /// diagnostic.
     pub elided: i64,
+    /// Arithmetic overflow and division guards removed by
+    /// `refine::overflow_guard`, which is a different pass from the
+    /// argument-guard elision the rest of this section reports.
+    pub overflow_elided: i64,
+    /// Trap-armed guards `refine::overflow_guard` left standing, by the
+    /// kind of trap. Read these as the denominator for `overflow_elided`:
+    /// a bare trap is one the source wrote no branch for and that nothing
+    /// has yet classified, so it is the bucket worth reading first.
+    pub overflow_kept_bare: i64,
+    /// See [`Self::overflow_kept_bare`]: an `.unwrap()`-shaped trap.
+    pub overflow_kept_unwrap: i64,
+    /// See [`Self::overflow_kept_bare`]: any other classified trap.
+    pub overflow_kept_other: i64,
     /// Two-way branches: an `if` with an else arm is not a guard.
     pub declined_has_else: i64,
     /// The taken arm does real work instead of trapping — this is where an
@@ -1314,6 +1327,10 @@ fn build_structuring(t: &BTreeMap<&'static str, i64>) -> StructuringCoverage {
 /// [`build_memory`]: a pass that can only report its successes cannot tell
 /// you what to build next.
 fn build_guards(t: &BTreeMap<&'static str, i64>) -> GuardCoverage {
+    let overflow_elided = metric(t, mc::REFINE_OVERFLOW_GUARDS_ELIDED);
+    let overflow_kept_bare = metric(t, mc::REFINE_OVERFLOW_GUARD_KEPT_BARE);
+    let overflow_kept_unwrap = metric(t, mc::REFINE_OVERFLOW_GUARD_KEPT_UNWRAP);
+    let overflow_kept_other = metric(t, mc::REFINE_OVERFLOW_GUARD_KEPT_OTHER);
     let declined_has_else = metric(t, mc::MARSHALLING_GUARD_DECLINED_HAS_ELSE);
     let declined_arm_not_trap = metric(t, mc::MARSHALLING_GUARD_DECLINED_ARM_NOT_TRAP);
     let declined_tag_not_negated = metric(t, mc::MARSHALLING_GUARD_DECLINED_TAG_NOT_NEGATED);
@@ -1327,6 +1344,10 @@ fn build_guards(t: &BTreeMap<&'static str, i64>) -> GuardCoverage {
     let declined_other = metric(t, mc::MARSHALLING_GUARD_DECLINED_OTHER);
     GuardCoverage {
         elided: metric(t, mc::MARSHALLING_GUARDS_ELIDED),
+        overflow_elided,
+        overflow_kept_bare,
+        overflow_kept_unwrap,
+        overflow_kept_other,
         declined_has_else,
         declined_arm_not_trap,
         declined_tag_not_negated,

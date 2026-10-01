@@ -345,6 +345,21 @@ pub const REFINE_UNWRAPS: &str = "refine_unwraps";
 /// source never wrote, which `#[contractimpl]` + `overflow-checks = true`
 /// regenerate from the arithmetic itself.
 pub const REFINE_ARITH_OVERFLOWS: &str = "refine_arith_overflows";
+/// Else-less, trap-armed guards this pass left standing, by the kind of
+/// trap they hold.
+///
+/// The pass elides `ArithOverflow` and `DivisionGuard` and keeps the rest,
+/// and counted only its removals — so a module where it removed nothing
+/// read the same as one with no guards in it. These are the denominator.
+/// A bare trap is the interesting bucket: the source wrote no branch at
+/// all, so a guard carrying one is either a check rustc inserted that is
+/// not yet classified, or a recogniser gap upstream.
+pub const REFINE_OVERFLOW_GUARD_KEPT_BARE: &str = "refine_overflow_guard_kept_bare";
+/// See [`REFINE_OVERFLOW_GUARD_KEPT_BARE`]: an `.unwrap()`-shaped trap,
+/// which `marshalling::option_unwrap` owns rather than this pass.
+pub const REFINE_OVERFLOW_GUARD_KEPT_UNWRAP: &str = "refine_overflow_guard_kept_unwrap";
+/// See [`REFINE_OVERFLOW_GUARD_KEPT_BARE`]: any other classified trap.
+pub const REFINE_OVERFLOW_GUARD_KEPT_OTHER: &str = "refine_overflow_guard_kept_other";
 /// Arithmetic overflow guards removed — each also emits the
 /// `MarshallingGuardElided` diagnostic, because deleting a *reachable*
 /// trap is a behavioural claim resting on `overflow-checks = true`
@@ -900,6 +915,9 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         REFINE_UNWRAPS,
         REFINE_ARITH_OVERFLOWS,
         REFINE_OVERFLOW_GUARDS_ELIDED,
+        REFINE_OVERFLOW_GUARD_KEPT_BARE,
+        REFINE_OVERFLOW_GUARD_KEPT_UNWRAP,
+        REFINE_OVERFLOW_GUARD_KEPT_OTHER,
         REFINE_SWITCH_ARMS_DEDUPED,
         REFINE_LOOPS_CLASSIFIED,
         REFINE_AND_MERGED,
