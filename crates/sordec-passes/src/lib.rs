@@ -107,7 +107,7 @@ pub use recognizers::{
     StoragePass, TtlPass, UnrecognizedScanPass, ValEncodingPass, ValPackedComparePass,
 };
 pub use refine::{
-    AndMergePass, ConstBranchFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
+    AndMergePass, ConstBranchFoldPass, ConstLoadPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
     OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass, SelectReturnPass,
     SwitchDedupPass,
     TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WideArithPass, WideComparePass, WidePhiPass, WideSelectPass, WideZeroPass, WidthFoldPass,
@@ -394,6 +394,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the guard elision so the constant discriminant it plants is
             // what that pass then folds.
             Box::new(WideCodecPass),
+            // A load off a literal address is the module's own data
+            // section; folding it feeds the branch fold below the same way
+            // a forwarded frame store does. Inside the group because a
+            // constant only becomes the address once the passes above have
+            // pinned it, and idempotent, so a second round finds no load.
+            Box::new(ConstLoadPass),
             // Forwards the frame stores the collapses above leave behind
             // to the loads that read them back, so a constant discriminant
             // reaches its guard and a stored join reaches its consumer.
@@ -719,7 +725,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 32..76],
+        vec![1..7, 32..77],
     )
 }
 
@@ -770,6 +776,7 @@ mod tests {
                 marshalling::decode::PASS_NAME,
                 marshalling::encode::PASS_NAME,
                 marshalling::wide_codec::PASS_NAME,
+                refine::CONST_LOAD_PASS_NAME,
                 marshalling::forward::PASS_NAME,
                 refine::CONST_BRANCH_PASS_NAME,
                 refine::TRIVIAL_PHI_PASS_NAME,

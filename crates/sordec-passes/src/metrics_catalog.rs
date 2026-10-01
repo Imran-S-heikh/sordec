@@ -345,6 +345,16 @@ pub const REFINE_UNWRAPS: &str = "refine_unwraps";
 /// source never wrote, which `#[contractimpl]` + `overflow-checks = true`
 /// regenerate from the arithmetic itself.
 pub const REFINE_ARITH_OVERFLOWS: &str = "refine_arith_overflows";
+/// Loads from a literal address folded to the bytes the module's data
+/// section puts there.
+pub const REFINE_CONST_LOADS_FOLDED: &str = "refine_const_loads_folded";
+/// Constant-address loads left alone because some store writes the same
+/// bytes through a literal address — the `static mut` case, which the
+/// initial image does not describe.
+pub const REFINE_CONST_LOADS_MUTABLE: &str = "refine_const_loads_mutable";
+/// Constant-address loads left alone because no one data segment covers
+/// the width read: uninitialized memory, or a read across a boundary.
+pub const REFINE_CONST_LOADS_UNCOVERED: &str = "refine_const_loads_uncovered";
 /// Else-less, trap-armed guards this pass left standing, by the kind of
 /// trap they hold.
 ///
@@ -925,6 +935,9 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         REFINE_UNWRAPS,
         REFINE_ARITH_OVERFLOWS,
         REFINE_OVERFLOW_GUARDS_ELIDED,
+        REFINE_CONST_LOADS_FOLDED,
+        REFINE_CONST_LOADS_MUTABLE,
+        REFINE_CONST_LOADS_UNCOVERED,
         REFINE_OVERFLOW_GUARD_KEPT_BARE,
         REFINE_OVERFLOW_GUARD_KEPT_UNWRAP,
         REFINE_OVERFLOW_GUARD_KEPT_OTHER,

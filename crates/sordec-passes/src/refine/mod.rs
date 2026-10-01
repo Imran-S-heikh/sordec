@@ -35,6 +35,7 @@
 
 mod and_merge;
 mod const_branch;
+mod const_load;
 mod dispatch_link;
 mod guard_clause;
 mod loop_classify;
@@ -58,6 +59,7 @@ mod wide_zero;
 
 pub use and_merge::AndMergePass;
 pub use const_branch::ConstBranchFoldPass;
+pub use const_load::ConstLoadPass;
 pub use dispatch_link::DispatchLinkPass;
 pub use guard_clause::GuardClausePass;
 pub use loop_classify::LoopClassifyPass;
@@ -74,6 +76,8 @@ pub use select_return::SelectReturnPass;
 // their types, not their strings.
 #[cfg(test)]
 pub(crate) use const_branch::PASS_NAME as CONST_BRANCH_PASS_NAME;
+#[cfg(test)]
+pub(crate) use const_load::PASS_NAME as CONST_LOAD_PASS_NAME;
 #[cfg(test)]
 pub(crate) use trivial_phi::PASS_NAME as TRIVIAL_PHI_PASS_NAME;
 #[cfg(test)]

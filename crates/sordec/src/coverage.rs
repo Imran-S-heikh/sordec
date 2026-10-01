@@ -421,6 +421,16 @@ pub struct OptionCoverage {
 /// Shadow-stack recovery, and why each unpromoted frame stayed.
 #[derive(Debug, Clone, Serialize)]
 pub struct MemoryCoverage {
+    /// Loads from a literal address folded to the bytes the module's data
+    /// section puts there.
+    pub const_loads_folded: i64,
+    /// Constant-address loads left alone because a store writes the same
+    /// bytes through a literal address — a `static mut`, whose initial
+    /// image is not its value.
+    pub const_loads_mutable: i64,
+    /// Constant-address loads left alone because no single data segment
+    /// covers the width read.
+    pub const_loads_uncovered: i64,
     /// Shadow-stack slots promoted from linear memory to SSA values.
     pub slots_promoted: i64,
     /// Slots of an analysable frame refused because two accesses at one
@@ -1466,6 +1476,9 @@ fn build_memory(t: &BTreeMap<&'static str, i64>) -> MemoryCoverage {
     let declined_opaque = metric(t, mc::MEMORY_FRAME_DECLINED_OPAQUE);
     let declined_layout = metric(t, mc::MEMORY_FRAME_DECLINED_OVERLAP);
     MemoryCoverage {
+        const_loads_folded: metric(t, mc::REFINE_CONST_LOADS_FOLDED),
+        const_loads_mutable: metric(t, mc::REFINE_CONST_LOADS_MUTABLE),
+        const_loads_uncovered: metric(t, mc::REFINE_CONST_LOADS_UNCOVERED),
         slots_promoted: metric(t, mc::MEMORY_SLOTS_PROMOTED),
         slot_refused_conflict: metric(t, mc::MEMORY_SLOT_REFUSED_CONFLICT),
         slot_refused_unwritten: metric(t, mc::MEMORY_SLOT_REFUSED_UNWRITTEN),
