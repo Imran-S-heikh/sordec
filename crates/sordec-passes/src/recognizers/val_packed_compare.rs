@@ -320,7 +320,13 @@ fn try_oriented(
         // Only `<`, and only with the constant on the right: the other
         // ordered operators map onto a *different* payload operator (see
         // the module docs) and nothing witnesses them.
-        BinaryOp::Lt if side == ConstSide::Rhs => try_ordered(func, cmp, value, const_id, bits),
+        // `>=` against a bare boundary is `<`'s mirror and rests on the
+        // same unsigned reading: `p >= k << 32` iff `payload >= k`. It
+        // reached here once an entrypoint's own `u32` parameter counted as
+        // a producer — `if decimal > 18` compiles to `ge param, 19 << 32`.
+        BinaryOp::Lt | BinaryOp::Ge if side == ConstSide::Rhs => {
+            try_ordered(func, cmp, value, const_id, bits)
+        }
         BinaryOp::Gt if side == ConstSide::Rhs => try_ordered_gt(func, value, const_id, bits),
         _ => None,
     }
@@ -575,6 +581,16 @@ fn mask_and_producer(
 /// here returns a tagged Val per `env.json`.
 fn u32val_producer(func: &HighFunction, value: ValueId) -> Option<KnownType> {
     let id = resolve_use(func, value);
+    // An entrypoint parameter the contract's own spec declares `u32` is a
+    // `U32Val` on the wire, by the same ABI that types a host call's
+    // result — and declared by the contract rather than looked up, so if
+    // anything it is the firmer of the two. The guest code around it is
+    // compiled against the encoding exactly as it is around a `bytes_len`:
+    // token-v22's `if decimal > 18` reaches us as
+    // `ge param, 19 << 32`.
+    if let Some(ty) = spec_u32_param(func, id) {
+        return Some(ty);
+    }
     let Expr::Semantic(SemanticOp::Known(op)) = binding_expr(func, id)? else {
         return None;
     };
@@ -588,6 +604,23 @@ fn u32val_producer(func: &HighFunction, value: ValueId) -> Option<KnownType> {
         _ => return None,
     };
     matches!(ty, KnownType::U32 | KnownType::I32).then_some(ty)
+}
+
+/// The declared `u32`/`i32` type of `value` when it is this function's own
+/// entrypoint parameter, by position against `contractspecv0`.
+///
+/// Positional because that is what the ABI is: one Val per declared
+/// argument, in order. A function without a spec signature has no declared
+/// types to read, and a parameter declared anything else is not a
+/// `U32Val`.
+fn spec_u32_param(func: &HighFunction, value: ValueId) -> Option<KnownType> {
+    let index = func.params.iter().position(|p| *p == value)?;
+    let input = func.signature.as_ref()?.inputs.get(index)?;
+    match &input.ty {
+        sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::U32) => Some(KnownType::U32),
+        sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::I32) => Some(KnownType::I32),
+        _ => None,
+    }
 }
 
 /// `value`'s expression, bounds-checked.
@@ -921,9 +954,13 @@ mod tests {
         assert_eq!(run(&mut func).get(M_MASKED), None);
     }
 
+    /// `Le` stays unwitnessed: no fixture has produced one, so there is
+    /// nothing to check a reading against. `Gt` declines *this* constant
+    /// because [`try_ordered_gt`] needs every low bit set; it has its own
+    /// test.
     #[test]
     fn the_unwitnessed_ordered_operators_are_declined() {
-        for op in [BinaryOp::Le, BinaryOp::Gt, BinaryOp::Ge] {
+        for op in [BinaryOp::Le, BinaryOp::Gt] {
             let mut func = func_with(vec![
                 Expr::Phi { incoming: vec![] },
                 bytes_len(v(0)),
@@ -932,6 +969,26 @@ mod tests {
             ]);
             assert_eq!(run(&mut func).get(M_ORDERED), None, "{op:?} must not match");
         }
+    }
+
+    /// `>=` is `<`'s mirror under the same unsigned reading, and
+    /// token-v22's `if decimal > 18` is what witnessed it.
+    #[test]
+    fn a_ge_against_a_bare_boundary_reads_as_the_payload() {
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            bytes_len(v(0)),
+            Expr::Literal(Literal::I64(19 << val_abi::MAJOR_SHIFT)),
+            Expr::Binary { op: BinaryOp::Ge, lhs: v(1), rhs: v(2) },
+        ]);
+        assert_eq!(run(&mut func).get(M_ORDERED), Some(1), "Ge is witnessed");
+        assert!(
+            matches!(
+                func.bindings.get(v(2)).expect("the boundary").expr,
+                Expr::Literal(Literal::U32(19))
+            ),
+            "the boundary reads as its payload"
+        );
     }
 
     #[test]
