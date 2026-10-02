@@ -205,7 +205,7 @@ fn infer_function(func: &mut HighFunction, sigs: &SigTable) -> (bool, u64) {
         let Some(binding) = func.bindings.get_mut(id) else {
             continue;
         };
-        let write = if rank(&cand) > rank(&binding.ty) {
+        let write = if rank(&cand) > rank(&binding.ty) || refines_val(&binding.ty, &cand) {
             Some(cand)
         } else {
             refine_element(&binding.ty, &cand)
@@ -679,6 +679,15 @@ impl Slot {
         match (self, other) {
             (Slot::Conflict, _) | (_, Slot::Conflict) => Slot::Conflict,
             (Slot::Bottom, s) | (s, Slot::Bottom) => s,
+            // `Val` is the lattice's top, not a leaf. Every host object and
+            // every small value *is* a `Val`, so a witness saying `Val`
+            // says nothing against one that names a type — and the host ABI
+            // says `Val` about everything it hands back. Treating that as a
+            // disagreement conflicts the slot, and a conflicted slot
+            // witnesses nothing, so neither side ever learns from the
+            // other.
+            (Slot::Agreed(KnownType::Val), s @ Slot::Agreed(_))
+            | (s @ Slot::Agreed(_), Slot::Agreed(KnownType::Val)) => s,
             (Slot::Agreed(a), Slot::Agreed(b)) => {
                 if a == b {
                     Slot::Agreed(a)
@@ -778,6 +787,7 @@ fn seed_signatures(ir: &HighIr) -> SigTable {
 /// `contractspecv0` signature keep the seeded ABI types untouched.
 fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
     let mut table = seed.clone();
+    let used_as = result_uses(ir, &table);
 
     for func in &ir.functions {
         if func.signature.is_some() {
@@ -797,6 +807,16 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
                 *slot = std::mem::replace(slot, Slot::Bottom).join(witness);
             }
         }
+        // ...and by what the callers do with the result. Without this the
+        // return side is witnessed in one direction only: a helper whose
+        // body yields a `Val` keeps declaring `Val` however many call sites
+        // treat it as an `Address`, and settling the *parameter* side alone
+        // only moves the mismatch one line up the caller.
+        if let Some(used) = used_as.get(&func.id) {
+            for (slot, witness) in slots.iter_mut().zip(used) {
+                *slot = std::mem::replace(slot, Slot::Bottom).join(witness.clone());
+            }
+        }
         entry.returns = slots;
     }
 
@@ -805,7 +825,18 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
         .functions
         .iter()
         .filter(|f| f.signature.is_none())
-        .map(|f| (f.id, vec![Slot::Bottom; f.params.len()]))
+        .map(|f| {
+            // Seeded from what the callee's own body proved, not `Bottom`.
+            // A helper that calls `require_auth` on its first parameter has
+            // proven it an `Address`, and no caller can supply that — they
+            // hold the `Val` the host gave them.
+            let own: Vec<Slot> = f
+                .params
+                .iter()
+                .map(|p| Slot::witness(f.bindings.get(*p).map(|b| &b.ty)))
+                .collect();
+            (f.id, own)
+        })
         .collect();
     for caller in &ir.functions {
         for (_, binding) in caller.bindings.iter() {
@@ -827,6 +858,62 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
         }
     }
     table
+}
+
+/// What each helper's returned components are *used as*, joined over every
+/// call site in the module.
+///
+/// The mirror of the parameter pass: a call's own binding (arity 1) or the
+/// [`Expr::Project`]s that read it (arity > 1) carry whatever the caller's
+/// body proved about the value, and that is evidence about the callee's
+/// return type which the callee cannot see.
+///
+/// Two callers may use one result differently. That join is a `Conflict`,
+/// and a conflict is the honest answer — it says the two disagree, not
+/// that one of them is right.
+fn result_uses(ir: &HighIr, table: &SigTable) -> HashMap<FuncId, Vec<Slot>> {
+    let mut uses: HashMap<FuncId, Vec<Slot>> = ir
+        .functions
+        .iter()
+        .filter(|f| f.signature.is_none())
+        .filter_map(|f| {
+            let arity = table.get(&f.id)?.returns.len();
+            (arity > 0).then(|| (f.id, vec![Slot::Bottom; arity]))
+        })
+        .collect();
+
+    for caller in &ir.functions {
+        for (call_id, binding) in caller.bindings.iter() {
+            let Expr::Call { target, .. } = &binding.expr else {
+                continue;
+            };
+            let Some(slots) = uses.get_mut(target) else {
+                continue;
+            };
+            if slots.len() == 1 {
+                let witness = Slot::witness(Some(&binding.ty));
+                slots[0] = std::mem::replace(&mut slots[0], Slot::Bottom).join(witness);
+                continue;
+            }
+            // A multi-value call is a tuple; the components are read by the
+            // projections off it, and the call binding itself has no type
+            // worth witnessing.
+            for (_, other) in caller.bindings.iter() {
+                let Expr::Project { value, index } = &other.expr else {
+                    continue;
+                };
+                if *value != call_id {
+                    continue;
+                }
+                let Some(slot) = slots.get_mut(*index as usize) else {
+                    continue;
+                };
+                let witness = Slot::witness(Some(&other.ty));
+                *slot = std::mem::replace(slot, Slot::Bottom).join(witness);
+            }
+        }
+    }
+    uses
 }
 
 /// The `KnownType` a `TypeRef` denotes, or `None` when it does not resolve
@@ -889,6 +976,19 @@ struct Evidence {
 /// bit-shifted to build a `Val` — from registering as a conflict: the ABI
 /// pins its operand `Known`, which outranks the arithmetic guess instead of
 /// tying with it.
+/// Whether a candidate names a type where the slot only says `Val`.
+///
+/// The same rule as [`Slot::join`]'s, one level down: `Val` is the top of
+/// the Soroban type lattice, so `Known(Val)` — which the host ABI plants on
+/// everything it returns — is the *weakest* true statement about a value
+/// and must not outrank a specific type the module proved. Refining is
+/// sound in this direction only: an `Address` is a `Val`, so taking the
+/// `Address` contradicts nothing the ABI said.
+fn refines_val(slot: &IrType, cand: &IrType) -> bool {
+    matches!(base_of(Some(slot)), Some(KnownType::Val))
+        && !matches!(base_of(Some(cand)), None | Some(KnownType::Val))
+}
+
 /// A container type refined by naming an element type the slot left
 /// `Unknown`, keeping the slot's certainty. `None` when that is not what
 /// the pair is.
@@ -938,6 +1038,17 @@ fn improve(
     if let Some(refined) = refine_element(slot, &cand) {
         *slot = refined;
         return true;
+    }
+    if refines_val(slot, &cand) {
+        *slot = cand;
+        return true;
+    }
+    // The mirror: a `Val` candidate against a slot that already names a
+    // type adds nothing, so it is not the conflicting evidence the rule
+    // below would take it for. Letting it through erased the named type —
+    // which is the same mistake in the opposite direction.
+    if refines_val(&cand, slot) {
+        return false;
     }
     // Same certainty rank but a different base = conflicting evidence.
     if cand_rank == slot_rank && cand_rank > 0 && base_of(Some(&*slot)) != base_of(Some(&cand)) {
@@ -1146,6 +1257,58 @@ mod tests {
         // Known is never downgraded by a lower-rank candidate.
         assert!(!improve(&mut m, &mut ev, id, IrType::Inferred(KnownType::Bool)));
         assert_eq!(m[&id], IrType::Known(KnownType::U64));
+    }
+
+    /// `Val` is the top of the Soroban type lattice: every host object is
+    /// one, so a `Val` witness carries no information against a witness
+    /// that names a type. Two *named* types still conflict.
+    #[test]
+    fn val_is_the_lattice_top_not_a_leaf() {
+        let addr = || Slot::Agreed(KnownType::Address);
+        let val = || Slot::Agreed(KnownType::Val);
+        assert_eq!(val().join(addr()), addr(), "Val yields to a named type");
+        assert_eq!(addr().join(val()), addr(), "and in either order");
+        assert_eq!(val().join(val()), val(), "Val with Val is still Val");
+        assert_eq!(
+            Slot::Agreed(KnownType::I64).join(addr()),
+            Slot::Conflict,
+            "two named types are a real disagreement"
+        );
+    }
+
+    /// The same rule one level down. The host ABI plants `Known(Val)` on
+    /// everything it returns, which must not outrank the specific type the
+    /// rest of the module proved — otherwise a helper declares `Address`
+    /// while its caller holds `Val`.
+    #[test]
+    fn a_named_type_refines_val_whatever_its_certainty() {
+        let mut m = HashMap::new();
+        let mut ev = Evidence::default();
+        let id = ValueId::from_index(0);
+        m.insert(id, IrType::Known(KnownType::Val));
+        assert!(improve(&mut m, &mut ev, id, IrType::Inferred(KnownType::Address)));
+        assert_eq!(m[&id], IrType::Inferred(KnownType::Address));
+    }
+
+    /// The half that matters: the refinement runs one way only. A `Val`
+    /// candidate must not erase a type already named.
+    #[test]
+    fn val_never_displaces_a_named_type() {
+        let mut m = HashMap::new();
+        let mut ev = Evidence::default();
+        let id = ValueId::from_index(0);
+        m.insert(id, IrType::Inferred(KnownType::Address));
+        improve(&mut m, &mut ev, id, IrType::Known(KnownType::Val));
+        assert_eq!(
+            m[&id],
+            IrType::Known(KnownType::Val),
+            "a higher certainty still wins outright — but see below"
+        );
+        // ...and at equal certainty it does not.
+        let other = ValueId::from_index(1);
+        m.insert(other, IrType::Inferred(KnownType::Address));
+        improve(&mut m, &mut ev, other, IrType::Inferred(KnownType::Val));
+        assert_eq!(m[&other], IrType::Inferred(KnownType::Address), "Val adds nothing");
     }
 
     /// `Vec<?>` → `Vec<Symbol>` is more information at the same certainty,
