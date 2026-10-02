@@ -121,6 +121,8 @@ pub const PASS_NAME: &str = "val-packed-compare";
 // carry different evidence and a reviewer wants to see the ratio.
 const M_MASKED: &str = "val_packed_compare_masked";
 const M_ORDERED: &str = "val_packed_compare_ordered";
+/// Shape E: a mask read at the payload level rather than on the bits.
+const M_MASKED_VALUE: &str = "val_packed_compare_masked_value";
 /// Shape C — a `Bool` Val narrowed to a machine bool by `== 1`.
 const M_BOOL: &str = "val_packed_compare_bool";
 
@@ -328,8 +330,81 @@ fn try_oriented(
             try_ordered(func, cmp, value, const_id, bits)
         }
         BinaryOp::Gt if side == ConstSide::Rhs => try_ordered_gt(func, value, const_id, bits),
+        BinaryOp::BitAnd => try_masked_value(func, cmp, value, const_id, bits),
         _ => None,
     }
+}
+
+/// Shape E — `p & ((m << 32) | tag)` as a *value*, which is
+/// `payload & m`.
+///
+/// The other shapes end in a comparison; this one does not. rustc emits it
+/// when it has proven a payload's range and masks to the bits that range
+/// can occupy: token-v22's `TokenMetadata { decimal, … }` arrives as
+/// `decimal & 0x1F_00000004`, because the `decimal > 18` check above it
+/// bounds the payload at 18 and `0x1F` covers `0..=31`.
+///
+/// **Exact, with no premise.** A bitwise AND distributes over the Val's
+/// fields independently: `(payload << 32 | tag) & (m << 32 | tag)` is
+/// `((payload & m) << 32) | tag`. So the result is a well-formed Val of the
+/// same tag whose payload is `payload & m`, and reading it at the payload
+/// level is that mask and nothing else. The redundancy rustc was exploiting
+/// is not needed to recover the expression — only to simplify it further,
+/// which would take range reasoning this pipeline does not do.
+///
+/// The constant's whole minor field must be exactly the tag. `p & 0xFF` is
+/// the tag *extraction* the SDK's own checks use, and reading that as a
+/// payload mask would be nonsense.
+fn try_masked_value(
+    func: &HighFunction,
+    and: ValueId,
+    value: ValueId,
+    const_id: ValueId,
+    bits: u64,
+) -> Option<Site> {
+    let ty = u32val_producer(func, value)?;
+    let tag = match ty {
+        KnownType::U32 => u64::from(val_abi::TAG_U32_VAL),
+        _ => return None,
+    };
+    if bits & !val_abi::MAJOR_MASK != tag {
+        return None;
+    }
+    let m = u32::try_from(bits >> val_abi::MAJOR_SHIFT).ok()?;
+    // An all-ones mask is the identity on the payload and the whole
+    // expression is a rename; leave it to the sweep rather than emit
+    // `x & u32::MAX`.
+    if m == u32::MAX {
+        return None;
+    }
+    Some(Site {
+        rewrites: vec![
+            Rewrite {
+                id: const_id,
+                expr: Expr::Literal(Literal::U32(m)),
+                ty: Some(IrType::Known(KnownType::U32)),
+                source: ProvenanceSource::SdkPattern,
+                note: format!(
+                    "val-packed-compare: `& ({m} << {shift} | tag)` on a packed U32Val is                      `& {m}` on its payload — the AND distributes over the Val's fields, so                      this is exact",
+                    shift = val_abi::MAJOR_SHIFT
+                ),
+                metric: M_MASKED_VALUE,
+            },
+            Rewrite {
+                id: and,
+                expr: Expr::Binary {
+                    op: BinaryOp::BitAnd,
+                    lhs: value,
+                    rhs: const_id,
+                },
+                ty: Some(IrType::Known(KnownType::U32)),
+                source: ProvenanceSource::SdkPattern,
+                note: "val-packed-compare: the masked value is its payload".to_string(),
+                metric: M_MASKED_VALUE,
+            },
+        ],
+        metric: M_MASKED_VALUE,
+    })
 }
 
 /// Shape D — `p > (k << 32) - 1`, which is `payload > k - 1`.
@@ -969,6 +1044,45 @@ mod tests {
             ]);
             assert_eq!(run(&mut func).get(M_ORDERED), None, "{op:?} must not match");
         }
+    }
+
+    /// A mask used as a *value* reads at the payload level, exactly: the
+    /// AND distributes over the Val's fields, so `p & (31 << 32 | 4)` is
+    /// `payload & 31`. token-v22's `TokenMetadata { decimal, … }` is the
+    /// witness — rustc masked to the bits the `decimal > 18` check above
+    /// proves the payload can occupy.
+    #[test]
+    fn a_mask_used_as_a_value_reads_as_its_payload() {
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            bytes_len(v(0)),
+            Expr::Literal(Literal::I64(
+                (31 << val_abi::MAJOR_SHIFT) | i64::from(val_abi::TAG_U32_VAL),
+            )),
+            Expr::Binary { op: BinaryOp::BitAnd, lhs: v(1), rhs: v(2) },
+        ]);
+        assert_eq!(run(&mut func).get(M_MASKED_VALUE), Some(1), "one site");
+        assert!(
+            matches!(
+                func.bindings.get(v(2)).expect("the mask").expr,
+                Expr::Literal(Literal::U32(31))
+            ),
+            "the mask reads as its payload"
+        );
+    }
+
+    /// The half that matters. `p & 0xFF` is the SDK's own *tag*
+    /// extraction, not a payload mask — its minor field is not the tag, so
+    /// reading it at the payload level would be nonsense.
+    #[test]
+    fn a_tag_extraction_is_not_a_payload_mask() {
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            bytes_len(v(0)),
+            Expr::Literal(Literal::I64(255)),
+            Expr::Binary { op: BinaryOp::BitAnd, lhs: v(1), rhs: v(2) },
+        ]);
+        assert_eq!(run(&mut func).get(M_MASKED_VALUE), None, "left alone");
     }
 
     /// `>=` is `<`'s mirror under the same unsigned reading, and
