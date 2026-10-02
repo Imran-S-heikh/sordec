@@ -17,6 +17,24 @@ pub struct CheckReport {
     pub output: String,
 }
 
+/// Where every emitted crate's `cargo check` puts its build artifacts.
+///
+/// One directory, shared across fixtures and across runs, because the
+/// expensive part of checking an emitted crate is building `soroban-sdk`
+/// and that build is identical every time. A scratch target dir per
+/// fixture made the corpus compile rate seven consecutive SDK builds —
+/// minutes of wall clock and gigabytes of churn on a disk that does not
+/// have gigabytes spare, which is reason enough not to run the
+/// measurement, and a measurement nobody runs drifts.
+///
+/// Overridable so a machine with its own layout, or CI wanting a cold
+/// build, can say so.
+pub fn shared_target_dir() -> std::path::PathBuf {
+    std::env::var_os("SORDEC_CHECK_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("sordec-check-target"))
+}
+
 /// Emit `wasm` as a standalone crate and `cargo check` it offline.
 ///
 /// The manifest is written **verbatim** as the emitter produced it — never
@@ -42,6 +60,7 @@ pub fn cargo_check_emitted(wasm: &[u8]) -> CheckReport {
     let output = std::process::Command::new(cargo)
         .args(["check", "--offline", "--quiet", "--manifest-path"])
         .arg(dir.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", shared_target_dir())
         .output()
         .expect("cargo runs");
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

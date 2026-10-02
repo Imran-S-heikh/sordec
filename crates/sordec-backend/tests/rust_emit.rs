@@ -329,6 +329,7 @@ fn attestation_cargo_check() {
     let output = std::process::Command::new(cargo)
         .args(["check", "--offline", "--quiet", "--manifest-path"])
         .arg(dir.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", common::shared_target_dir())
         .output();
 
     match output {
@@ -419,6 +420,7 @@ fn token_v23_cargo_check_rate() {
     let output = std::process::Command::new(cargo)
         .args(["check", "--offline", "--quiet", "--manifest-path"])
         .arg(dir.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", common::shared_target_dir())
         .output();
 
     match output {

@@ -198,9 +198,19 @@ fn infer_function(func: &mut HighFunction, sigs: &SigTable) -> (bool, u64) {
         let Some(cand) = types.get(&id).cloned() else {
             continue;
         };
-        if let Some(binding) = func.bindings.get_mut(id)
-            && rank(&cand) > rank(&binding.ty)
-        {
+        // A higher certainty wins, and so does naming an element type the
+        // binding left `Unknown` — that is more information at the same
+        // certainty, and refusing it is what kept a `vec_new` typed
+        // `Vec<?>` after its elements were recovered.
+        let Some(binding) = func.bindings.get_mut(id) else {
+            continue;
+        };
+        let write = if rank(&cand) > rank(&binding.ty) {
+            Some(cand)
+        } else {
+            refine_element(&binding.ty, &cand)
+        };
+        if let Some(cand) = write {
             let note = format!("type-propagation: {}", describe(&cand));
             binding.ty = cand;
             binding.add_provenance(Provenance::new(
@@ -451,6 +461,23 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
         // it is what Soroban contracts overwhelmingly use; a recognizer
         // that knows the value is a `u128` plants `Known` and wins.
         Expr::WideJoin { .. } => Some(IrType::Inferred(KnownType::I128)),
+        // A vec whose elements are recovered knows its element type: the
+        // elements have one. The recognizer types a `vec_new` as
+        // `Vec<Unknown>` because at recognition the buffer is still a
+        // buffer, and `Unknown` renders as `Val` — so the *type* said
+        // `Vec<Val>` while the emitted `vec![e, sym]` was a `Vec<Symbol>`,
+        // and a helper returning it did not compile. Only when every
+        // element agrees: a mixed vec really is a `Vec<Val>`.
+        Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+            elements: Some(values),
+            ..
+        })) if !values.is_empty() => {
+            let first = base_of(types.get(values.first()?))?;
+            values
+                .iter()
+                .all(|v| base_of(types.get(v)) == Some(first.clone()))
+                .then(|| IrType::Inferred(KnownType::Vec(Box::new(IrType::Inferred(first)))))
+        }
         // Semantic ops are typed by the recognizers (host ABI); leave them.
         // Load/Store/GlobalGet/IndirectCall/Unknown stay for later waves.
         _ => None,
@@ -862,6 +889,24 @@ struct Evidence {
 /// bit-shifted to build a `Val` — from registering as a conflict: the ABI
 /// pins its operand `Known`, which outranks the arithmetic guess instead of
 /// tying with it.
+/// A container type refined by naming an element type the slot left
+/// `Unknown`, keeping the slot's certainty. `None` when that is not what
+/// the pair is.
+fn refine_element(slot: &IrType, cand: &IrType) -> Option<IrType> {
+    let rewrap = |k: KnownType| match slot {
+        IrType::Known(_) => IrType::Known(k),
+        _ => IrType::Inferred(k),
+    };
+    match (base_of(Some(slot))?, base_of(Some(cand))?) {
+        (KnownType::Vec(have), KnownType::Vec(got))
+            if matches!(*have, IrType::Unknown(_)) && !matches!(*got, IrType::Unknown(_)) =>
+        {
+            Some(rewrap(KnownType::Vec(got)))
+        }
+        _ => None,
+    }
+}
+
 fn improve(
     types: &mut HashMap<ValueId, IrType>,
     ev: &mut Evidence,
@@ -879,6 +924,19 @@ fn improve(
     let slot_rank = rank(slot);
     if cand_rank > slot_rank {
         *slot = cand;
+        return true;
+    }
+    // A container whose element type is still `Unknown` is refined by one
+    // that names it, at the container's own certainty. This is not the
+    // conflict the rule below catches: both sides agree it is a `Vec`, and
+    // `Vec<Unknown>` is strictly less information than `Vec<Symbol>`.
+    //
+    // Without it a recognizer's `Vec<?>` outranks everything the elements
+    // later prove, the element renders as `Val`, and a helper returning
+    // the vec does not compile — the declared `Vec<Val>` against a
+    // `vec![e, sym]` that is a `Vec<Symbol>`.
+    if let Some(refined) = refine_element(slot, &cand) {
+        *slot = refined;
         return true;
     }
     // Same certainty rank but a different base = conflicting evidence.
@@ -1088,6 +1146,46 @@ mod tests {
         // Known is never downgraded by a lower-rank candidate.
         assert!(!improve(&mut m, &mut ev, id, IrType::Inferred(KnownType::Bool)));
         assert_eq!(m[&id], IrType::Known(KnownType::U64));
+    }
+
+    /// `Vec<?>` → `Vec<Symbol>` is more information at the same certainty,
+    /// not a conflict. A recogniser types a `vec_new` before its elements
+    /// are read back, so without this the element stays `Unknown`, renders
+    /// as `Val`, and a helper declared to return `Vec<Val>` is handed a
+    /// `vec![e, sym]` that is a `Vec<Symbol>`.
+    #[test]
+    fn an_unknown_element_type_is_refined_not_rejected() {
+        let mut m = HashMap::new();
+        let mut ev = Evidence::default();
+        let id = ValueId::from_index(0);
+        let vec_unknown =
+            IrType::Known(KnownType::Vec(Box::new(IrType::Unknown(UnknownReason::InsufficientEvidence))));
+        m.insert(id, vec_unknown);
+        let named = IrType::Inferred(KnownType::Vec(Box::new(IrType::Inferred(KnownType::Symbol))));
+        assert!(improve(&mut m, &mut ev, id, named), "the element is named");
+        // The container keeps the certainty it already had.
+        assert!(
+            matches!(&m[&id], IrType::Known(KnownType::Vec(inner))
+                if matches!(**inner, IrType::Inferred(KnownType::Symbol))),
+            "Known<Vec<Symbol>>, got {:?}",
+            m[&id]
+        );
+    }
+
+    /// The half that matters: a vec that already names its element is not
+    /// re-opened, and a disagreement about the element is still a
+    /// disagreement.
+    #[test]
+    fn a_named_element_type_is_not_displaced() {
+        let mut m = HashMap::new();
+        let mut ev = Evidence::default();
+        let id = ValueId::from_index(0);
+        let addrs = IrType::Inferred(KnownType::Vec(Box::new(IrType::Inferred(KnownType::Address))));
+        m.insert(id, addrs.clone());
+        let syms = IrType::Inferred(KnownType::Vec(Box::new(IrType::Inferred(KnownType::Symbol))));
+        improve(&mut m, &mut ev, id, syms);
+        assert_ne!(m[&id], addrs, "two element types at one rank is a conflict");
+        assert!(matches!(m[&id], IrType::Unknown(_)), "so it reverts, got {:?}", m[&id]);
     }
 
     #[test]
