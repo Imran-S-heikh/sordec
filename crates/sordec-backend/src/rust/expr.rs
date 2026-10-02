@@ -158,6 +158,15 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
         Expr::Unary { op: op @ (UnaryOp::Wrap32 | UnaryOp::ExtendU32 | UnaryOp::ExtendS32), value } => {
             width_move(*op, ctx.value_ref(*value), &binding.ty)
         }
+        // Rust's bit-counting methods return `u32` whatever the receiver's
+        // width; the wasm opcode returns the operand's own type. The cast
+        // is the whole difference, and without it a `clz` on an `i64` is
+        // an `i64 - u32` one line later — which is what nine of the
+        // corpus's remaining type errors were.
+        Expr::Unary { op: op @ (UnaryOp::Clz | UnaryOp::Ctz | UnaryOp::Popcnt), value } => {
+            let counted = unary_expr(*op, ctx.value_ref(*value), false);
+            count_cast(counted, &binding.ty)
+        }
         Expr::Unary { op, value } => {
             unary_expr(*op, ctx.value_ref(*value), ctx.is_boolean(*value))
         }
@@ -546,6 +555,25 @@ fn unary_expr(op: UnaryOp, v: syn::Expr, operand_is_bool: bool) -> syn::Expr {
 /// A width move rendered at the type the pipeline recovered for its
 /// result: the low half of a `u64` reads as `u32`, a zero-extended `u32`
 /// as `u64`. The cast chain fixes the bits whatever the operand's Rust type.
+/// A bit count cast back to the type the binding was recovered as.
+///
+/// `u32` needs nothing — that is what Rust already gives. An unrecovered
+/// type gets nothing either: inventing a cast onto a value we could not
+/// type would turn a visible gap into a silent one.
+fn count_cast(counted: syn::Expr, ty: &IrType) -> syn::Expr {
+    let base = match ty {
+        IrType::Known(k) | IrType::Inferred(k) => k,
+        IrType::Unknown(_) => return counted,
+    };
+    match base {
+        KnownType::U32 => counted,
+        KnownType::I32 => parse_quote!((#counted as i32)),
+        KnownType::I64 => parse_quote!((#counted as i64)),
+        KnownType::U64 => parse_quote!((#counted as u64)),
+        _ => counted,
+    }
+}
+
 fn width_move(op: UnaryOp, v: syn::Expr, ty: &IrType) -> syn::Expr {
     let unsigned = |k: KnownType| matches!(ty, IrType::Known(t) | IrType::Inferred(t) if *t == k);
     match op {

@@ -534,8 +534,15 @@ fn unary_result(op: UnaryOp, operand: Option<&IrType>) -> Option<IrType> {
                 .filter(KnownType::is_numeric)
                 .map(IrType::Inferred)
         }
-        // Bit-count intrinsics yield u32.
-        UnaryOp::Clz | UnaryOp::Ctz | UnaryOp::Popcnt => Some(IrType::Inferred(KnownType::U32)),
+        // A bit count is the operand's own width in wasm — `i64.clz` is an
+        // `i64` — and `u32` only in Rust's spelling of it. The IR carries
+        // the wasm meaning and the emitter casts, the same division of
+        // labour as `WideLo`/`WideHi` below. Typing it `u32` here instead
+        // put the Rust return type on a value the next instruction
+        // subtracts from an `i64`, and the cast had nowhere to come from.
+        UnaryOp::Clz | UnaryOp::Ctz | UnaryOp::Popcnt => Some(IrType::Inferred(
+            base_of(operand).filter(KnownType::is_numeric).unwrap_or(KnownType::U32),
+        )),
         // `eqz` is a comparison wearing a unary opcode: whatever the
         // operand's width, the answer is a boolean. Typing it so is what
         // lets a nested `eqz(eqz(x))` render its outer half as `!…` rather
@@ -1396,11 +1403,30 @@ mod tests {
         assert_eq!(binary_result(BinaryOp::Add, None, None), None);
     }
 
+    /// A bit count carries the **wasm** result type, not Rust's.
+    /// `i64.clz` yields an `i64`; `i64::leading_zeros()` yields a `u32`,
+    /// and `rust::expr::count_cast` is what bridges the two. Typing the
+    /// binding `u32` here put Rust's answer on the IR and left the next
+    /// instruction subtracting a `u32` from an `i64` with no cast to
+    /// reach for.
+    ///
+    /// Only a numeric operand decides it. Without one there is nothing to
+    /// carry, and `u32` is the safe fallback.
     #[test]
-    fn bit_count_is_u32_neg_preserves() {
+    fn bit_count_takes_the_operands_width_neg_preserves() {
         assert_eq!(
             unary_result(UnaryOp::Clz, Some(&IrType::Known(KnownType::U64))),
-            Some(IrType::Inferred(KnownType::U32))
+            Some(IrType::Inferred(KnownType::U64))
+        );
+        assert_eq!(
+            unary_result(UnaryOp::Clz, None),
+            Some(IrType::Inferred(KnownType::U32)),
+            "no operand type to carry"
+        );
+        assert_eq!(
+            unary_result(UnaryOp::Clz, Some(&IrType::Known(KnownType::Address))),
+            Some(IrType::Inferred(KnownType::U32)),
+            "a logical type is not a width"
         );
         assert_eq!(
             unary_result(UnaryOp::Neg, Some(&IrType::Known(KnownType::I128))),
