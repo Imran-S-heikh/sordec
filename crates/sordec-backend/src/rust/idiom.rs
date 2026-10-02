@@ -454,8 +454,53 @@ fn key_expr(ctx: &FnCtx, key: sordec_common::ValueId, resolved: &Option<EnumKey>
         // `to` is dex-liquidity-pool's last compile error. The same rule
         // every other by-value position already goes through.
         let payload: Vec<syn::Expr> = ek.payload.iter().map(|v| ctx.arg_ref(*v)).collect();
+        // A variant whose single declared field is a struct is handed that
+        // struct, not the struct's fields. On the wire there is no
+        // difference — the recogniser reads the flattened map and hands
+        // back one value per field — but `DataKey::Allowance(from, spender)`
+        // is two arguments to a variant that takes one.
+        if let Some(fields) = struct_payload_fields(ctx, ek, payload.len()) {
+            let struct_name = ident(&fields.0);
+            let names: Vec<syn::Ident> = fields.1.iter().map(|f| ident(f)).collect();
+            return parse_quote!(
+                #enum_name::#variant(#struct_name { #(#names: #payload),* })
+            );
+        }
         parse_quote!(#enum_name::#variant(#(#payload),*))
     }
+}
+
+/// The struct a key variant's single declared field names, and that
+/// struct's field names in declared order — when the recovered payload has
+/// exactly one value per field.
+///
+/// `None` for every other shape: a variant with loose fields, a payload
+/// whose arity disagrees with the struct's, or a field type that is not a
+/// declared struct. Each of those would be a guess about which value goes
+/// where, and a key assembled wrongly reads a different storage slot.
+fn struct_payload_fields(
+    ctx: &FnCtx,
+    ek: &EnumKey,
+    payload_len: usize,
+) -> Option<(String, Vec<String>)> {
+    let case = ctx
+        .reg
+        .unions
+        .iter()
+        .find(|u| u.name == ek.enum_name)?
+        .cases
+        .iter()
+        .find(|c| c.name == ek.variant)?;
+    let [sordec_ir::TypeRef::UserDefined(id)] = case.fields.as_slice() else {
+        return None;
+    };
+    let def = ctx.reg.structs.iter().find(|s| s.id == *id)?;
+    (def.fields.len() == payload_len).then(|| {
+        (
+            def.name.clone(),
+            def.fields.iter().map(|f| f.name.clone()).collect(),
+        )
+    })
 }
 
 #[cfg(test)]
