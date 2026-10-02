@@ -657,6 +657,76 @@ impl<'a> FnCtx<'a> {
         }
     }
 
+    /// A returned `Vec` spread back into the tuple the spec declares.
+    ///
+    /// A Soroban tuple's wire form **is** a vec of its components, so a
+    /// function returning `(i128, i128)` returns a two-element vec and the
+    /// SDK's encoder is what built it. Handed back as a vec it is the right
+    /// value with the wrong Rust type, which is `dex-liquidity-pool`'s last
+    /// compile error, twice.
+    ///
+    /// Only when the spec says tuple *and* the value is a vec: a function
+    /// that really returns a `Vec` is left alone, and so is one whose value
+    /// we could not type — spreading an unrecovered value would invent an
+    /// arity.
+    ///
+    /// `get_unchecked` rather than `get(i).unwrap()`: the arity comes from
+    /// the contract's own declared ABI, so an index inside it is not a
+    /// claim that needs an `unwrap` to stand behind — and `unwrap` would
+    /// read as a panic the source never wrote.
+    fn tuple_unpacked(&self, vid: ValueId) -> syn::Expr {
+        let v = self.value_ref(vid);
+        let Some(arity) = sig::declared_tuple_arity(self.func) else {
+            return v;
+        };
+        if !self.emits_a_vec(vid) {
+            return v;
+        }
+        let items: Vec<syn::Expr> = (0..arity)
+            .map(|i| {
+                let i = proc_macro2::Literal::u32_unsuffixed(i);
+                parse_quote!(#v.get_unchecked(#i))
+            })
+            .collect();
+        parse_quote!((#(#items),*))
+    }
+
+    /// Whether the Rust this binding emits is a `Vec`.
+    ///
+    /// Its *recovered* type is not the question: the ABI seeds the returned
+    /// value with the tuple the spec declares, so it already reads
+    /// `(i128, i128)` while the expression that produces it is a call to a
+    /// helper emitting `Vec<i128>`. What the destructure needs to know is
+    /// which of the two the Rust actually is — and for a call that is the
+    /// callee's own emitted return type, which is the helper's returned
+    /// binding.
+    ///
+    /// Anything else says no. A multi-value call already renders as a real
+    /// Rust tuple, and indexing one would not compile.
+    fn emits_a_vec(&self, vid: ValueId) -> bool {
+        let is_vec = |ty: Option<&IrType>| {
+            matches!(
+                ty,
+                Some(IrType::Known(KnownType::Vec(_)) | IrType::Inferred(KnownType::Vec(_)))
+            )
+        };
+        match self.func.bindings.get(vid).map(|b| &b.expr) {
+            Some(Expr::Call { target, .. }) => {
+                let Some(callee) = self.high.function(*target) else {
+                    return false;
+                };
+                match callee.returns.as_slice() {
+                    [one] => match one.as_slice() {
+                        [value] => is_vec(callee.bindings.get(*value).map(|b| &b.ty)),
+                        _ => false,
+                    },
+                    _ => false,
+                }
+            }
+            _ => is_vec(self.func.bindings.get(vid).map(|b| &b.ty)),
+        }
+    }
+
     /// The expression for a single returned value, wrapping it in `Ok`/`Err`
     /// when the function returns a `Result` and the value's recovered type
     /// says which. Four cases, all honoring never-guess:
@@ -670,7 +740,7 @@ impl<'a> FnCtx<'a> {
     /// - any other recovered payload → `Ok(v)`, or `Ok(())` when the `Ok`
     ///   type is unit.
     fn return_expr(&self, vid: ValueId) -> syn::Expr {
-        let v = self.value_ref(vid);
+        let v = self.tuple_unpacked(vid);
         let Some(ok_ty) = sig::result_ok_type(self.func) else {
             return v; // not a Result-returning entrypoint
         };

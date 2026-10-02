@@ -163,6 +163,19 @@ fn value_type(
     }
 }
 
+/// The arity of the tuple this function's spec says it returns, if it says
+/// one. `None` for every other return shape, including a one-element tuple
+/// (which Soroban does not express) and a `Result` whose `Ok` is a tuple —
+/// that case has its own wrapping and is left for when a fixture needs it.
+pub(crate) fn declared_tuple_arity(func: &HighFunction) -> Option<u32> {
+    match func.signature.as_ref()?.outputs.as_slice() {
+        [TypeRef::Composite(CompositeType::Tuple(items))] if items.len() > 1 => {
+            u32::try_from(items.len()).ok()
+        }
+        _ => None,
+    }
+}
+
 fn spec_return(
     outputs: &[TypeRef],
     reg: &TypeRegistry,

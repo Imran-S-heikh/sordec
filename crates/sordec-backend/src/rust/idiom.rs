@@ -448,7 +448,12 @@ fn key_expr(ctx: &FnCtx, key: sordec_common::ValueId, resolved: &Option<EnumKey>
     if ek.payload.is_empty() {
         parse_quote!(#enum_name::#variant)
     } else {
-        let payload: Vec<syn::Expr> = ek.payload.iter().map(|v| ctx.value_ref(*v)).collect();
+        // `arg_ref`, not `value_ref`: a payload is *moved* into the
+        // variant, so a value the function reads again afterwards has to be
+        // cloned here — `DataKey::Shares(to)` followed by any later use of
+        // `to` is dex-liquidity-pool's last compile error. The same rule
+        // every other by-value position already goes through.
+        let payload: Vec<syn::Expr> = ek.payload.iter().map(|v| ctx.arg_ref(*v)).collect();
         parse_quote!(#enum_name::#variant(#(#payload),*))
     }
 }
