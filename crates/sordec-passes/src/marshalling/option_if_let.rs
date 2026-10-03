@@ -184,6 +184,11 @@ fn plan(
             continue;
         }
         let Some(b) = func.bindings.get(id) else { continue };
+        // A rename nothing reads is not a reader: an inlined wrapper leaves
+        // its own copy of the probe behind.
+        if matches!(b.expr, Expr::Use(_)) && unread(func, order, id) {
+            continue;
+        }
         let mut reads = false;
         b.expr.for_each_value_use(|u| reads |= chain.contains(&u));
         if reads {
@@ -259,6 +264,18 @@ fn plan(
         return Err(M_READ_OUTSIDE);
     }
     Ok(get)
+}
+
+/// Whether nothing live reads `value`.
+fn unread(func: &HighFunction, order: &[ValueId], value: ValueId) -> bool {
+    let mut n = 0;
+    for id in order {
+        if let Some(b) = func.bindings.get(*id) {
+            b.expr.for_each_value_use(|u| n += usize::from(u == value));
+        }
+    }
+    func.region.for_each_value_use(|u| n += usize::from(u == value));
+    n == 0
 }
 
 /// The condition, and every rename or negation between it and the probe.
