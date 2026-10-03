@@ -88,9 +88,21 @@ impl Pass<HighIr> for MuxedAddressPass {
             if collapsed.is_empty() {
                 continue;
             }
+            // Decided on the intact tree: `rewrite` runs with the region
+            // taken out, and a reader in it would be invisible from there.
+            let mut removable: HashSet<ValueId> = HashSet::new();
+            func.region.for_each_node(|node| {
+                if let Region::Switch { index, arms, default, .. } = node
+                    && is_two_tag_check(arms, default)
+                    && tag_dispatch(func, *index).is_some_and(|m| collapsed.contains(&m))
+                    && flag_only_feeds_extraction(func, arms)
+                {
+                    removable.insert(*index);
+                }
+            });
             let region = std::mem::replace(&mut func.region, Region::Unreachable);
             let mut count = 0_i64;
-            func.region = rewrite(func, region, &collapsed, &mut count);
+            func.region = rewrite(func, region, &collapsed, &removable, &mut count);
             if count > 0 {
                 result.metrics.increment(M_COLLAPSED, count);
                 result.changed = true;
@@ -130,7 +142,7 @@ fn extraction_branch(func: &HighFunction, node: &Region) -> Option<ValueId> {
 }
 
 /// The one phi transfer an arm makes, when it makes exactly one.
-fn sole_transfer(region: &Region) -> Option<(ValueId, ValueId)> {
+pub(super) fn sole_transfer(region: &Region) -> Option<(ValueId, ValueId)> {
     let mut found = None;
     let mut count = 0;
     region.for_each_node(|n| {
@@ -146,7 +158,7 @@ fn sole_transfer(region: &Region) -> Option<(ValueId, ValueId)> {
 
 /// The parameter a `switch` dispatches on the object tag of, rebased so
 /// that `AddressObject` is case 0 — `(m as i32 & 255) - 77`.
-fn tag_dispatch(func: &HighFunction, index: ValueId) -> Option<ValueId> {
+pub(super) fn tag_dispatch(func: &HighFunction, index: ValueId) -> Option<ValueId> {
     let Expr::Binary { op: BinaryOp::Add, lhs, rhs } = &func.bindings.get(resolve_use(func, index))?.expr
     else {
         return None;
@@ -179,7 +191,7 @@ fn int_literal(func: &HighFunction, v: ValueId) -> Option<i64> {
 
 /// Whether a switch is the two-tag check: exactly cases 0 and 1, and a
 /// default that traps.
-fn is_two_tag_check(arms: &[sordec_ir::SwitchArm], default: &Region) -> bool {
+pub(super) fn is_two_tag_check(arms: &[sordec_ir::SwitchArm], default: &Region) -> bool {
     let mut cases: Vec<u32> = arms.iter().flat_map(|a| a.cases.iter().copied()).collect();
     cases.sort_unstable();
     cases == [0, 1] && matches!(default, Region::Unreachable | Region::Panic { .. })
@@ -201,32 +213,60 @@ fn flag_only_feeds_extraction(func: &HighFunction, arms: &[sordec_ir::SwitchArm]
     let [flag] = flags.into_iter().collect::<Vec<_>>()[..] else {
         return false;
     };
-    let readers = func
+    // Live readers only: what the block schedules, the merges, and the
+    // region tree — each through any rename of the flag. A rename is
+    // itself not a reader: one left behind by an earlier rewrite sits in
+    // the arena unscheduled, and counting it kept a dispatch whose only
+    // other reader had gone. But a branch may test the flag *through*
+    // such a rename, so the renames are what the readers are looked for.
+    //
+    // A copy is a rename or a merge whose every input is already a name
+    // for the flag — token-v23-stripped's id branch tests a one-input
+    // merge of it.
+    let is_copy = |b: &sordec_ir::Binding, names: &HashSet<ValueId>| match &b.expr {
+        Expr::Use(v) => names.contains(v),
+        Expr::Phi { incoming } => !incoming.is_empty() && incoming.iter().all(|(_, v)| names.contains(v)),
+        _ => false,
+    };
+    let mut names: HashSet<ValueId> = HashSet::from([flag]);
+    loop {
+        let more: Vec<ValueId> = func
+            .bindings
+            .iter()
+            .filter(|(id, b)| !names.contains(id) && is_copy(b, &names))
+            .map(|(id, _)| id)
+            .collect();
+        if more.is_empty() {
+            break;
+        }
+        names.extend(more);
+    }
+    let reads = |b: &sordec_ir::Binding| {
+        let mut r = false;
+        b.expr.for_each_value_use(|v| r |= names.contains(&v));
+        r && !is_copy(b, &names)
+    };
+    let order = super::sret::emission_order(func);
+    let scheduled = order.iter().filter(|id| func.bindings.get(**id).is_some_and(reads)).count();
+    let merges = func
         .bindings
         .iter()
-        .filter(|(_, b)| {
-            let mut reads = false;
-            b.expr.for_each_value_use(|v| reads |= v == flag);
-            reads
-        })
+        .filter(|(_, b)| matches!(b.expr, Expr::Phi { .. }) && reads(b))
         .count();
-    readers <= 1
+    let mut region = 0;
+    func.region.for_each_value_use(|v| region += usize::from(names.contains(&v)));
+    scheduled + merges + region <= 1
 }
 
 fn rewrite(
     func: &HighFunction,
     region: Region,
     collapsed: &HashSet<ValueId>,
+    removable: &HashSet<ValueId>,
     count: &mut i64,
 ) -> Region {
     match region {
-        Region::Switch { ref index, ref arms, ref default, .. }
-            if is_two_tag_check(arms, default)
-                && tag_dispatch(func, *index).is_some_and(|m| collapsed.contains(&m))
-                && flag_only_feeds_extraction(func, arms) =>
-        {
-            Region::Sequence(vec![])
-        }
+        Region::Switch { ref index, .. } if removable.contains(index) => Region::Sequence(vec![]),
         node @ Region::If { .. } if extraction_branch(func, &node).is_some_and(|m| collapsed.contains(&m)) => {
             let Region::If { else_region: Some(e), .. } = node else {
                 unreachable!("extraction_branch matched an if with an else");
@@ -237,7 +277,7 @@ fn rewrite(
         Region::Sequence(items) => Region::Sequence(
             items
                 .into_iter()
-                .map(|i| rewrite(func, i, collapsed, count))
+                .map(|i| rewrite(func, i, collapsed, removable, count))
                 .flat_map(|r| match r {
                     Region::Sequence(inner) => inner,
                     other => vec![other],
@@ -246,16 +286,16 @@ fn rewrite(
         ),
         Region::If { cond, then_region, else_region } => Region::If {
             cond,
-            then_region: Box::new(rewrite(func, *then_region, collapsed, count)),
-            else_region: else_region.map(|e| Box::new(rewrite(func, *e, collapsed, count))),
+            then_region: Box::new(rewrite(func, *then_region, collapsed, removable, count)),
+            else_region: else_region.map(|e| Box::new(rewrite(func, *e, collapsed, removable, count))),
         },
         Region::Scope { out, body } => Region::Scope {
             out,
-            body: Box::new(rewrite(func, *body, collapsed, count)),
+            body: Box::new(rewrite(func, *body, collapsed, removable, count)),
         },
         Region::Loop { header, body, kind } => Region::Loop {
             header,
-            body: Box::new(rewrite(func, *body, collapsed, count)),
+            body: Box::new(rewrite(func, *body, collapsed, removable, count)),
             kind,
         },
         Region::Switch { index, arms, default, dispatch } => Region::Switch {
@@ -264,11 +304,11 @@ fn rewrite(
                 .into_iter()
                 .map(|mut arm| {
                     let body = std::mem::replace(&mut arm.body, Region::Unreachable);
-                    arm.body = rewrite(func, body, collapsed, count);
+                    arm.body = rewrite(func, body, collapsed, removable, count);
                     arm
                 })
                 .collect(),
-            default: Box::new(rewrite(func, *default, collapsed, count)),
+            default: Box::new(rewrite(func, *default, collapsed, removable, count)),
             dispatch,
         },
         leaf => leaf,
@@ -379,7 +419,12 @@ mod tests {
             ));
         }
         let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
-        blocks.push(HighBlock { id: bb(0), bindings: vec![v(1), v(2), v(3), v(4), v(5), v(6), v(7), v(9)] });
+        let mut entry = vec![v(1), v(2), v(3), v(4), v(5), v(6), v(7), v(9)];
+        if extra_reader {
+            // Scheduled: an unscheduled binding is residue, not a reader.
+            entry.push(v(12));
+        }
+        blocks.push(HighBlock { id: bb(0), bindings: entry });
         blocks.push(HighBlock { id: bb(1), bindings: vec![v(10)] });
         let transfer = |phi: u32, src: u32| Region::Transfer { target: bb(2), transfer: vec![(v(phi), v(src))] };
         sordec_ir::HighFunction {

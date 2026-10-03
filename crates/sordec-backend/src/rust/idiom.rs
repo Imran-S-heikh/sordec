@@ -189,6 +189,30 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             // multi-topic `(a, b,)` and zero-topic `()` forms.
             Some(parse_quote!(#e.events().publish((#(#topics,)*), #data)))
         }
+        // The struct literal the source built, published. Values by
+        // `arg_ref`: a field takes its value by move, so one read again
+        // later is cloned here, as for any other by-value position.
+        KnownOp::PublishContractEvent { event, fields } => {
+            let name = ident(event);
+            let inits: Vec<proc_macro2::TokenStream> = fields
+                .iter()
+                .map(|(field, value)| {
+                    let f = ident(field);
+                    match value {
+                        Some(v) => {
+                            let v = ctx.arg_ref(*v);
+                            quote::quote!(#f: #v)
+                        }
+                        None => quote::quote!(#f: None),
+                    }
+                })
+                .collect();
+            Some(parse_quote!(#name { #(#inits),* }.publish(#eb)))
+        }
+        KnownOp::MuxedAddressId { muxed } => {
+            let m = ctx.value_ref(*muxed);
+            Some(parse_quote!(#m.id()))
+        }
 
         // ---- Cross-contract (SEP-41 client) ----
         KnownOp::InvokeContract {

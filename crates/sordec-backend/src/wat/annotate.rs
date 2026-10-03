@@ -138,6 +138,8 @@ pub(crate) fn label_known_op(op: &KnownOp) -> String {
             interface_label(interface)
         ),
         KnownOp::PublishEvent { topics, .. } => format!("publish_event topics={}", topics.len()),
+        KnownOp::PublishContractEvent { event, .. } => format!("publish_contract_event {event}"),
+        KnownOp::MuxedAddressId { .. } => "muxed_address_id".to_string(),
         KnownOp::GetCurrentContractAddress => "current_contract_address".to_string(),
         KnownOp::GetLedgerSequence => "ledger_sequence".to_string(),
         KnownOp::GetLedgerTimestamp => "ledger_timestamp".to_string(),

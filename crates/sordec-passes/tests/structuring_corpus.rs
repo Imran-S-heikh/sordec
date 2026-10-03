@@ -332,10 +332,17 @@ fn skeleton_matches_original_wasm_nesting() {
                 high_func.id,
                 original.loops,
             );
-            assert_eq!(
-                switches, original.br_tables,
-                "[{name}] {}: derived Switch regions vs original `br_table` opcodes",
+            // At most, likewise: `MuxedAddress`'s two-tag dispatch is a
+            // `br_table`, and once both its readers are calls again
+            // (`address()`, and the `id()` a recovered event takes) it is
+            // the source's argument check and is removed. Never more — and
+            // the exact per-fixture count stays pinned in the coverage
+            // matrix.
+            assert!(
+                switches <= original.br_tables,
+                "[{name}] {}: derived Switch regions ({switches}) vs original `br_table` opcodes ({})",
                 high_func.id,
+                original.br_tables,
             );
         }
     }

@@ -1048,6 +1048,17 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io:
             }
             write!(out, "{})", ctx.operand(*data))
         }
+        KnownOp::PublishContractEvent { event, fields } => {
+            write!(out, "{event} {{ ")?;
+            for (name, value) in fields {
+                match value {
+                    Some(v) => write!(out, "{name}: {}, ", ctx.operand(*v))?,
+                    None => write!(out, "{name}: None, ")?,
+                }
+            }
+            write!(out, "}}.publish()")
+        }
+        KnownOp::MuxedAddressId { muxed } => write!(out, "{}.id()", ctx.operand(*muxed)),
         KnownOp::ValCompare { a, b } => {
             write!(out, "val_cmp({}, {})", ctx.operand(*a), ctx.operand(*b))
         }

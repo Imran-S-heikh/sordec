@@ -284,7 +284,13 @@ fn coverage_matrix_prints_and_holds_invariants() {
         // remaining `while`s are its Newton bisection and string parse.
         ("hello-add", 5, 5, 0, 0, 0, 0),
         ("token-v22", 59, 59, 0, 1, 1, 0),
-        ("token-v23", 53, 53, 0, 1, 2, 0),
+        // token-v23's second switch was `MuxedAddress`'s two-tag
+        // dispatch. Its readers were `address()` and the inlined `id()`;
+        // with the `Transfer` publish recovered both are calls again, so
+        // the dispatch is the source's argument check and goes. The
+        // stripped build has no event spec to recover against, and keeps
+        // it.
+        ("token-v23", 53, 53, 0, 1, 1, 0),
         ("token-v23-stripped", 53, 53, 0, 1, 2, 0),
         ("timelock", 26, 26, 0, 1, 1, 1),
         ("dex-liquidity-pool", 67, 67, 2, 2, 1, 0),
@@ -344,7 +350,7 @@ fn coverage_matrix_prints_and_holds_invariants() {
     let corpus = |key| structuring.iter().map(|s| count(s.0, key)).sum::<i64>();
     assert_eq!(corpus(mc::STRUCTURING_LOOPS_WHILE_TOP), 2, "corpus while loops");
     assert_eq!(corpus(mc::STRUCTURING_LOOPS_UNCLASSIFIED), 6, "corpus unclassified loops");
-    assert_eq!(corpus(mc::STRUCTURING_SWITCHES), 7, "corpus recovered switches");
+    assert_eq!(corpus(mc::STRUCTURING_SWITCHES), 6, "corpus recovered switches");
 
     // --- Type recovery: the Tranche 2 "typed program" evidence ---
     // After the type-infer pass a majority of every fixture's bindings

@@ -508,6 +508,23 @@ pub enum KnownOp {
         /// Event data payload.
         data: ValueId,
     },
+    /// `Name { field: value, … }.publish(&env)` — a `#[contractevent]`
+    /// struct the SDK's generated publish helper was handed.
+    PublishContractEvent {
+        /// The event struct, by its declared name.
+        // JUSTIFY: event names come from the contract's own spec.
+        event: String,
+        /// Every field in declaration order, with its value. `None` is an
+        /// `Option` field given the literal `None`.
+        fields: Vec<(String, Option<ValueId>)>,
+    },
+
+    // ---- MuxedAddress ----
+    /// `muxed.id()` — the `Option<u64>` id, `None` for a plain address.
+    MuxedAddressId {
+        /// The `MuxedAddress`.
+        muxed: ValueId,
+    },
 
     // ---- Ledger context ----
     /// `env.current_contract_address()`.
@@ -1026,6 +1043,14 @@ impl KnownOp {
                 }
                 f(*data);
             }
+            KnownOp::PublishContractEvent { event: _, fields } => {
+                for (_, value) in fields {
+                    if let Some(value) = value {
+                        f(*value);
+                    }
+                }
+            }
+            KnownOp::MuxedAddressId { muxed } => f(*muxed),
             KnownOp::ValCompare { a, b } => {
                 f(*a);
                 f(*b);
@@ -1291,6 +1316,14 @@ impl KnownOp {
                 }
                 f(data);
             }
+            KnownOp::PublishContractEvent { event: _, fields } => {
+                for (_, value) in fields {
+                    if let Some(value) = value {
+                        f(value);
+                    }
+                }
+            }
+            KnownOp::MuxedAddressId { muxed } => f(muxed),
             KnownOp::ValCompare { a, b } => {
                 f(a);
                 f(b);

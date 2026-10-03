@@ -97,7 +97,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    KeyFieldTypePass, MuxedAddressPass,
+    KeyFieldTypePass, MuxedAddressPass, ContractEventPass,
     BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
@@ -730,6 +730,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // dispatch and a branch. Static — it depends on no elision —
             // so it runs once, here, ahead of the typing that should see
             // the one call rather than the branch.
+            // Ahead of the muxed collapse: an event's `to_muxed.id()` is the
+            // other reader of the dispatch that collapse removes, and it goes
+            // with the publish it feeds.
+            Box::new(ContractEventPass),
             Box::new(MuxedAddressPass),
             Box::new(TypeInferPass),
             // After the types settle, and outside the group: a stripped

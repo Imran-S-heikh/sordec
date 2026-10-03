@@ -706,7 +706,10 @@ pub fn known_op_effects(op: &KnownOp) -> Effects {
         // memory — host axes only (see `call_effects`).
         KnownOp::InvokeContract { .. } | KnownOp::TryInvokeContract { .. } => TRAP_RW_HOST,
         // Events (x.1).
-        KnownOp::PublishEvent { .. } => TRAP_WRITE_HOST,
+        KnownOp::PublishEvent { .. } | KnownOp::PublishContractEvent { .. } => TRAP_WRITE_HOST,
+        // Reads the id only when the address is muxed, which is the one
+        // case the host call cannot fail on: a read with nothing to trap.
+        KnownOp::MuxedAddressId { .. } => Effects::PURE,
         // Invocation-constant context reads (x.2/3/4/6/7/8).
         KnownOp::GetCurrentContractAddress
         | KnownOp::GetLedgerSequence

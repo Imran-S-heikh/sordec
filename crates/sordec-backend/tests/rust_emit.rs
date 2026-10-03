@@ -222,14 +222,20 @@ fn token_v23_eliminates_dead_bindings() {
 /// at their def site, so they stay in scope at the later use. This clears
 /// the `E0425 cannot find value` class the W3 compile measurement flagged.
 /// (`let mut vN: T;` are phis; a plain `let vN: T;` is a hoisted escapee.)
+///
+/// Witnessed by whichever fixture still has one: each recovery that turns
+/// a body into the source's own spelling removes the scopes these crossed,
+/// and token-v23's last went with its event helper.
 #[test]
 fn escaping_values_are_hoisted() {
-    let src = emit_rust(&common::build_high(common::TOKEN_V23)).expect("emits");
-    let has_hoisted_escapee = src.lines().any(|line| {
-        let t = line.trim();
-        t.starts_with("let v") && t.contains(':') && !t.contains('=') && t.ends_with(';')
+    let has_hoisted_escapee = common::fixtures().into_iter().any(|(_, wasm)| {
+        let src = emit_rust(&common::build_high(wasm)).expect("emits");
+        src.lines().any(|line| {
+            let t = line.trim();
+            t.starts_with("let v") && t.contains(':') && !t.contains('=') && t.ends_with(';')
+        })
     });
-    assert!(has_hoisted_escapee, "expected a hoisted escaping-value decl:\n{src}");
+    assert!(has_hoisted_escapee, "expected a hoisted escaping-value decl in some fixture");
 }
 
 /// R3: soroban-sdk type paths are collapsed into a single `use` list and
@@ -264,17 +270,17 @@ fn every_fixture_emits_real_bodies() {
 /// comparison written out, or rustc answers `expected bool, found i32` —
 /// the shape it usually takes is the low-bit mask `let v = x & 1i32; if v`.
 ///
-/// token-v23 is the corpus witness (one such branch). The other fixtures
-/// do not exercise it, which is why this asserts the emitted form rather
-/// than a count: the wasm truth test is a language difference, so no
-/// fixture should ever render a bare integer as a condition.
+/// Witnessed by whichever fixture still has such a branch (token-v23's
+/// went with its event helper; the stripped build keeps one), which is why
+/// this asserts the emitted form rather than a count: the wasm truth test
+/// is a language difference, so no fixture should ever render a bare
+/// integer as a condition.
 #[test]
 fn an_integer_condition_is_compared_against_zero() {
-    let src = emit_rust(&common::build_high(common::TOKEN_V23)).expect("emits");
-    assert!(
-        src.contains("!= 0 {"),
-        "expected the wasm nonzero test spelled out as a Rust comparison\n---\n{src}"
-    );
+    let spelled = common::fixtures().into_iter().any(|(_, wasm)| {
+        emit_rust(&common::build_high(wasm)).expect("emits").contains("!= 0 {")
+    });
+    assert!(spelled, "expected the wasm nonzero test spelled out as a Rust comparison in some fixture");
 
     // And it stays a condition, not a value: every fixture still parses.
     for (name, wasm) in common::fixtures() {
