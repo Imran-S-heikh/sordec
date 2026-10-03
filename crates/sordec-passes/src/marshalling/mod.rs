@@ -53,6 +53,7 @@
 //! because each strictly reduces the number of live marshalling bindings.
 
 pub mod bool_codec;
+pub mod bytesn_convert;
 pub mod client_args;
 pub mod contract_event;
 pub mod decode;
@@ -85,6 +86,7 @@ pub mod wide_codec;
 pub mod wide_return;
 
 pub use bool_codec::BoolCodecPass;
+pub use bytesn_convert::BytesNConvertPass;
 pub use client_args::ClientArgVecPass;
 pub use contract_event::ContractEventPass;
 pub use dead_store::DeadFrameStorePass;

@@ -97,7 +97,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass,
+    KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
     BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
@@ -664,6 +664,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // typed-read has run — so the `Option` collapse below would see
             // a raw `Val` where the payload should be, and fold nothing.
             Box::new(pass::Rerun::new(TypedReadPass, TYPED_READ_AFTER_ELISION, &[])),
+            // `BytesN<N>`'s conversion, outlined into a helper writing a
+            // `Result`, folded into the read it converts. Here so the
+            // constant-branch fold below drops the `unwrap`'s trap.
+            Box::new(BytesNConvertPass),
             Box::new(pass::Rerun::new(
                 OptionProbePass,
                 OPTION_PROBE_AFTER_ELISION,
