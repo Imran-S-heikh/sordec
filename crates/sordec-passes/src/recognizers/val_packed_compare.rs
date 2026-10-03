@@ -703,12 +703,35 @@ fn u32val_producer(func: &HighFunction, value: ValueId) -> Option<KnownType> {
 /// `U32Val`.
 fn spec_u32_param(func: &HighFunction, value: ValueId) -> Option<KnownType> {
     let index = func.params.iter().position(|p| *p == value)?;
-    let input = func.signature.as_ref()?.inputs.get(index)?;
-    match &input.ty {
-        sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::U32) => Some(KnownType::U32),
-        sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::I32) => Some(KnownType::I32),
-        _ => None,
-    }
+    let declared = func
+        .signature
+        .as_ref()
+        .and_then(|sig| sig.inputs.get(index))
+        .and_then(|input| match &input.ty {
+            sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::U32) => Some(KnownType::U32),
+            sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::I32) => Some(KnownType::I32),
+            _ => None,
+        });
+    declared.or_else(|| tag_checked_u32(func, value).then_some(KnownType::U32))
+}
+
+/// Whether the function's own body checks `value`'s tag against
+/// `U32Val`.
+///
+/// The proof a `strip = true` module still carries. With no spec to declare
+/// the parameter `u32`, the SDK's argument decode is still there, and its
+/// first act is to test the tag byte: a value checked against `U32Val` *is*
+/// one, by that check. The pipeline does recover the `u32` type later, but
+/// `type_infer` runs long after this pass, so the recovered type is not
+/// there yet to read — the tag check is.
+fn tag_checked_u32(func: &HighFunction, value: ValueId) -> bool {
+    func.bindings.iter().any(|(_, b)| {
+        matches!(
+            &b.expr,
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value: checked, tag, .. }))
+                if *tag == val_abi::TAG_U32_VAL && resolve_use(func, *checked) == value
+        )
+    })
 }
 
 /// `value`'s expression, bounds-checked.
@@ -1118,6 +1141,44 @@ mod tests {
             Expr::Binary { op: BinaryOp::BitAnd, lhs: v(1), rhs: v(2) },
         ]);
         assert_eq!(run(&mut func).get(M_MASKED_VALUE), None, "left alone");
+    }
+
+    /// A stripped module has no spec to declare a parameter `u32`, but the
+    /// SDK's decode still tag-checks it — and a value checked against
+    /// `U32Val` is one. token-v23-stripped's `__constructor` is the witness.
+    #[test]
+    fn a_tag_checked_parameter_is_a_u32val_without_a_spec() {
+        let mut func = crate::marshalling::test_support::func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0, the parameter
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                    value: v(0),
+                    tag: val_abi::TAG_U32_VAL,
+                    negated: true,
+                })), // v1
+                Expr::Literal(Literal::I64(19 << val_abi::MAJOR_SHIFT)), // v2
+                Expr::Binary { op: BinaryOp::Ge, lhs: v(0), rhs: v(2) }, // v3
+            ],
+            vec![v(0)],
+            vec![1, 2, 3],
+        );
+        assert_eq!(run(&mut func).get(M_ORDERED), Some(1), "the tag check is the proof");
+    }
+
+    /// The half that matters: an untested parameter is a raw word, and a
+    /// comparison on it is ordinary arithmetic.
+    #[test]
+    fn an_unchecked_parameter_without_a_spec_is_left_alone() {
+        let mut func = crate::marshalling::test_support::func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Literal(Literal::I64(19 << val_abi::MAJOR_SHIFT)),
+                Expr::Binary { op: BinaryOp::Ge, lhs: v(0), rhs: v(1) },
+            ],
+            vec![v(0)],
+            vec![1, 2],
+        );
+        assert_eq!(run(&mut func).get(M_ORDERED), None, "nothing proves it is a Val");
     }
 
     /// `>=` is `<`'s mirror under the same unsigned reading, and
