@@ -97,6 +97,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
+    KeyFieldTypePass,
     BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
@@ -721,6 +722,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // propagating over the cleaned IR means no type has to be
             // threaded through glue that is about to disappear.
             Box::new(TypeInferPass),
+            // After the types settle, and outside the group: a stripped
+            // module's key union is synthesized with untyped fields, and
+            // the values its construction sites put in them are the
+            // evidence the declaration lacks.
+            Box::new(KeyFieldTypePass),
             Box::new(TreeifyStatsPass),
             Box::new(StructuringCensusPass),
         ],
