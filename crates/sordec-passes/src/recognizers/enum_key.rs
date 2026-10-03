@@ -555,7 +555,7 @@ fn try_name_key_at(
 /// is not pinned down here — a sub-word integer, a nested enum, an
 /// `Option`, a tuple — answers `None`, and the caller keeps its presence
 /// test.
-fn case_footprint(types: &TypeRegistry, fields: &[TypeRef]) -> Option<usize> {
+pub(crate) fn case_footprint(types: &TypeRegistry, fields: &[TypeRef]) -> Option<usize> {
     fields.iter().map(|f| slot_width(types, f, 0)).sum()
 }
 

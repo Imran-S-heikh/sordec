@@ -32,12 +32,29 @@
 //!   guess, so the field stays as it is.
 //! - **Fill from an unrecovered value.** An `Unknown` payload witnesses
 //!   nothing.
+//!
+//! ## And then the keys are cut to size
+//!
+//! A key read out of a frame takes the word slots after its discriminant,
+//! and the frame runs on past the key to whatever rustc laid out next.
+//! `recognizers::enum_key` cuts the slot list to the variant's footprint —
+//! but only when the field types say how wide it is, and a stripped
+//! module's are `Unknown` when that runs. So token-v23-stripped's TTL bump
+//! named `Allowance(from, spender, 0, from, spender, amount, …)`: nine
+//! values for a two-field variant, the last seven being the allowance
+//! record stored beside it.
+//!
+//! Once the fields are typed the footprint is known, and the same cut
+//! applies. Only where every field is one word — then a slot is a field
+//! and the first `n` slots are the `n` fields, exactly as the recogniser
+//! would have taken them.
 
 use std::collections::BTreeMap;
 
 use sordec_ir::{Expr, HighIr, IrType, SemanticOp, TypeRef};
 
 use crate::pass::{Pass, PassResult};
+use crate::recognizers::enum_key::case_footprint;
 use crate::type_infer::primitive_of_known;
 
 /// Pass name.
@@ -47,6 +64,8 @@ pub const PASS_NAME: &str = "marshalling-key-field-type";
 const M_TYPED: &str = "marshalling_key_fields_typed";
 /// Fields left alone because the sites disagreed about the type.
 const M_DISAGREED: &str = "marshalling_key_fields_disagreed";
+/// Frame-read keys cut back to their variant's now-known footprint.
+const M_TRIMMED: &str = "marshalling_key_payloads_trimmed";
 
 /// Fills a synthesized key union's `Unknown` field types.
 #[derive(Debug, Default, Clone, Copy)]
@@ -97,7 +116,75 @@ impl Pass<HighIr> for KeyFieldTypePass {
                 }
             }
         }
+        trim_payloads(ir, &mut result);
         result
+    }
+}
+
+/// Cut every resolved key whose payload runs past its variant's fields,
+/// where each field is now known to be one frame word.
+fn trim_payloads(ir: &mut HighIr, result: &mut PassResult) {
+    let Some(facts) = ir.soroban_facts.as_ref() else {
+        return;
+    };
+    let types = &facts.types;
+    // (enum, variant) → field count, for variants whose every field is one
+    // word wide.
+    let mut one_word: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for union in &types.unions {
+        for case in &union.cases {
+            let each_one = case
+                .fields
+                .iter()
+                .all(|f| case_footprint(types, std::slice::from_ref(f)) == Some(1));
+            if each_one && !case.fields.is_empty() {
+                one_word.insert((union.name.clone(), case.name.clone()), case.fields.len());
+            }
+        }
+    }
+    if one_word.is_empty() {
+        return;
+    }
+    for func in &mut ir.functions {
+        for (_, binding) in func.bindings.iter_mut() {
+            let Expr::Semantic(SemanticOp::Known(op)) = &mut binding.expr else {
+                continue;
+            };
+            let Some(key) = resolved_key_mut(op) else {
+                continue;
+            };
+            let Some(&n) = one_word.get(&(key.enum_name.clone(), key.variant.clone())) else {
+                continue;
+            };
+            if key.payload.len() <= n {
+                continue;
+            }
+            let dropped = key.payload.len() - n;
+            key.payload.truncate(n);
+            binding.add_provenance(sordec_common::Provenance::new(
+                PASS_NAME,
+                sordec_common::ProvenanceSource::SdkPattern,
+                format!(
+                    "key cut to its variant's {n} one-word fields; the {dropped} frame slot(s) \
+                     after them are what rustc laid out next, not the key"
+                ),
+            ));
+            result.metrics.increment(M_TRIMMED, 1);
+            result.changed = true;
+        }
+    }
+}
+
+/// [`resolved_key`], for rewriting.
+fn resolved_key_mut(op: &mut sordec_ir::KnownOp) -> Option<&mut sordec_ir::EnumKey> {
+    use sordec_ir::KnownOp as K;
+    match op {
+        K::StorageGet { resolved_key, .. }
+        | K::StorageSet { resolved_key, .. }
+        | K::StorageHas { resolved_key, .. }
+        | K::StorageRemove { resolved_key, .. }
+        | K::StorageExtendTtl { resolved_key, .. } => resolved_key.as_mut(),
+        _ => None,
     }
 }
 
@@ -234,6 +321,34 @@ mod tests {
         let result = KeyFieldTypePass.run(&mut ir);
         assert!(!result.changed, "nothing agreed");
         assert_eq!(result.metrics.get(M_DISAGREED), Some(1), "and it says why");
+    }
+
+    /// A frame-read key that ran past its variant is cut back once the
+    /// field is known to be one word: the extra slots were the frame's
+    /// next occupant, not the key.
+    #[test]
+    fn an_overlong_key_is_cut_to_its_typed_fields() {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Literal(sordec_ir::Literal::I64(0)),
+                get_with(vec![v(0), v(1)]),
+            ],
+            vec![],
+            vec![1, 2],
+        );
+        f.bindings.get_mut(v(0)).expect("the payload").ty =
+            IrType::Known(sordec_ir::KnownType::Address);
+        let mut ir = with_union(module(vec![f]));
+
+        let result = KeyFieldTypePass.run(&mut ir);
+        assert_eq!(result.metrics.get(M_TRIMMED), Some(1));
+        let get = ir.functions[0].bindings.get(v(2)).expect("the read");
+        let Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { resolved_key: Some(k), .. })) = &get.expr
+        else {
+            panic!("still a keyed read")
+        };
+        assert_eq!(k.payload, vec![v(0)], "one field, one value");
     }
 
     /// A field the spec declared is never second-guessed.
