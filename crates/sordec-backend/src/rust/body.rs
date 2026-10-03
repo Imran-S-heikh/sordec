@@ -742,11 +742,48 @@ impl<'a> FnCtx<'a> {
                 .bindings
                 .get(phi)
                 .and_then(|b| {
-                    expr::unsuffixed_against(self, source, &b.ty)
+                    self.result_wrapped(source, &b.ty)
+                        .or_else(|| expr::unsuffixed_against(self, source, &b.ty))
                         .or_else(|| expr::val_constant(self, source, phi))
                 })
                 .unwrap_or_else(|| self.value_ref(source));
             out.push(parse_quote!(#lhs = #rhs;));
+        }
+    }
+
+    /// A value merged into the function's `Result`, wrapped the way a
+    /// returned one is ([`Self::return_expr`]): the merge *is* the returned
+    /// value, collected from several paths before one `return`. An error
+    /// goes in as `Err(e)`; the `Void` a `Result<(), E>` encodes `Ok` as
+    /// goes in as `Ok(())`. Anything else is left to the other rules.
+    fn result_wrapped(&self, source: ValueId, merge_ty: &IrType) -> Option<syn::Expr> {
+        if !matches!(merge_ty, IrType::Known(KnownType::Result(..)) | IrType::Inferred(KnownType::Result(..))) {
+            return None;
+        }
+        let ok_ty = sig::result_ok_type(self.func)?;
+        let binding = self.func.bindings.get(source)?;
+        match &binding.ty {
+            IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error) => {
+                let v = self.value_ref(source);
+                Some(parse_quote!(Err(#v)))
+            }
+            _ if sig::is_unit(ok_ty)
+                && matches!(binding.expr, Expr::Literal(sordec_ir::Literal::I64(2))) =>
+            {
+                Some(parse_quote!(Ok(())))
+            }
+            _ => None,
+        }
+    }
+
+    /// The single type a helper (no spec) is emitted returning.
+    fn helper_return_type(&self) -> Option<IrType> {
+        if self.func.signature.is_some() {
+            return None;
+        }
+        match sig::helper_return_site(self.func)?.as_slice() {
+            [one] => self.func.bindings.get(*one).map(|b| b.ty.clone()),
+            _ => None,
         }
     }
 
@@ -764,7 +801,12 @@ impl<'a> FnCtx<'a> {
         match values {
             [] => parse_quote!(return;),
             [one] => {
-                let v = self.return_expr(*one);
+                // A helper's constant return takes the type the function
+                // returns, as a merge's constant input does.
+                let v = self
+                    .helper_return_type()
+                    .and_then(|ty| expr::unsuffixed_against(self, *one, &ty))
+                    .unwrap_or_else(|| self.return_expr(*one));
                 parse_quote!(return #v;)
             }
             many => {

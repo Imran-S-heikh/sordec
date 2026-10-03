@@ -591,7 +591,8 @@ fn phi_join_with_constants(
     let Some(k) = base_of(Some(&decided)) else {
         return phi_join(incoming, types);
     };
-    if constants.iter().all(|(_, v)| constant(*v).is_some_and(|n| fits(&k, n))) {
+    let word = |v: ValueId| Slot::witness(types.get(&v));
+    if constants.iter().all(|(_, v)| constant(*v).is_some_and(|n| fits_constant(&k, n, &word(*v)))) {
         Some(decided)
     } else {
         phi_join(incoming, types)
@@ -882,10 +883,25 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
             continue;
         }
         let mut slots = vec![Slot::Bottom; arity];
+        // Constants vote last here too: `return 0i32` beside `return found`
+        // is a `bool` function whose constant was loaded as a wasm word.
+        let mut held: Vec<Vec<(i128, Slot)>> = vec![Vec::new(); arity];
         for site in func.returns.iter().filter(|s| s.len() == arity) {
-            for (slot, value) in slots.iter_mut().zip(site) {
+            for (index, (slot, value)) in slots.iter_mut().zip(site).enumerate() {
                 let witness = Slot::witness(func.bindings.get(*value).map(|b| &b.ty));
+                if let Some(n) = int_constant(func, *value) {
+                    held[index].push((n, witness));
+                    continue;
+                }
                 *slot = std::mem::replace(slot, Slot::Bottom).join(witness);
+            }
+        }
+        for (slot, consts) in slots.iter_mut().zip(held) {
+            let agrees = matches!(&*slot, Slot::Agreed(k) if consts.iter().all(|(n, w)| fits_constant(k, *n, w)));
+            if !agrees {
+                for (_, witness) in consts {
+                    *slot = std::mem::replace(slot, Slot::Bottom).join(witness);
+                }
             }
         }
         // ...and by what the callers do with the result. Without this the
@@ -954,7 +970,7 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
     for ((id, index), consts) in constants {
         let Some(slot) = evidence.get_mut(&id).and_then(|s| s.get_mut(index)) else { continue };
         let fits_all = match &*slot {
-            Slot::Agreed(k) => consts.iter().all(|(n, _)| fits(k, *n)),
+            Slot::Agreed(k) => consts.iter().all(|(n, w)| fits_constant(k, *n, w)),
             _ => false,
         };
         if !fits_all {
@@ -996,6 +1012,15 @@ fn int_constant(func: &HighFunction, value: ValueId) -> Option<i128> {
     }
 }
 
+/// [`fits`], for a constant whose own type is `word`: a `bool` is a 32-bit
+/// value in the wasm, so only a 32-bit `0` or `1` can be one.
+fn fits_constant(k: &KnownType, n: i128, word: &Slot) -> bool {
+    if *k == KnownType::Bool {
+        return matches!(word, Slot::Agreed(KnownType::I32 | KnownType::U32) | Slot::Bottom) && fits(k, n);
+    }
+    fits(k, n)
+}
+
 /// Whether the integer `n` is a value of type `k`.
 fn fits(k: &KnownType, n: i128) -> bool {
     match k {
@@ -1004,6 +1029,7 @@ fn fits(k: &KnownType, n: i128) -> bool {
         KnownType::U64 => u64::try_from(n).is_ok(),
         KnownType::I64 | KnownType::I128 => true,
         KnownType::U128 => n >= 0,
+        KnownType::Bool => n == 0 || n == 1,
         _ => false,
     }
 }

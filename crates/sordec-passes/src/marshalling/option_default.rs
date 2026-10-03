@@ -603,6 +603,8 @@ fn int_literal(func: &HighFunction, value: ValueId) -> Option<i128> {
         Expr::Literal(Literal::I64(n)) => Some(i128::from(*n)),
         Expr::Literal(Literal::U32(n)) => Some(i128::from(*n)),
         Expr::Literal(Literal::U64(n)) => Some(i128::from(*n)),
+        // A `bool` default already decoded from its `0`/`1` encoding.
+        Expr::Literal(Literal::Bool(b)) => Some(i128::from(*b)),
         _ => None,
     }
 }

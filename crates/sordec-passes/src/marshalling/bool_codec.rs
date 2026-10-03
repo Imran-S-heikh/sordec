@@ -156,13 +156,14 @@ fn compares(func: &HighFunction) -> Vec<(ValueId, Expr)> {
     func.bindings
         .iter()
         .filter_map(|(id, b)| {
-            let Expr::Binary { op: op @ (BinaryOp::Eq | BinaryOp::Ne), lhs, rhs } = &b.expr else {
+            let Expr::Binary { op: op @ (BinaryOp::Eq | BinaryOp::Ne | BinaryOp::BitXor), lhs, rhs } = &b.expr else {
                 return None;
             };
             let (l, r) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
-            let (value, n) = if is_bool(func, l) {
+            let bool_like = |v: ValueId| is_bool(func, v) || is_comparison(func, v);
+            let (value, n) = if bool_like(l) {
                 (l, int_literal(func, r)?)
-            } else if is_bool(func, r) {
+            } else if bool_like(r) {
                 (r, int_literal(func, l)?)
             } else {
                 return None;
@@ -173,9 +174,10 @@ fn compares(func: &HighFunction) -> Vec<(ValueId, Expr)> {
             {
                 return None;
             }
+            // `b ^ 1` is how wasm spells `!b` on a 0/1 value; `b ^ 0` is `b`.
             let itself = match (op, n) {
-                (BinaryOp::Eq, 1) | (BinaryOp::Ne, 0) => true,
-                (BinaryOp::Eq, 0) | (BinaryOp::Ne, 1) => false,
+                (BinaryOp::Eq, 1) | (BinaryOp::Ne, 0) | (BinaryOp::BitXor, 0) => true,
+                (BinaryOp::Eq, 0) | (BinaryOp::Ne, 1) | (BinaryOp::BitXor, 1) => false,
                 _ => return None,
             };
             Some((
@@ -510,6 +512,44 @@ fn is_bool(func: &HighFunction, value: ValueId) -> bool {
         )
 }
 
+/// Whether `value` is a comparison, or a negation of one — `0` or `1` by
+/// construction, whatever type it has been given yet.
+fn is_comparison(func: &HighFunction, value: ValueId) -> bool {
+    is_comparison_at(func, value, 0)
+}
+
+fn is_comparison_at(func: &HighFunction, value: ValueId, depth: u32) -> bool {
+    if depth > 4 {
+        return false;
+    }
+    match func.bindings.get(value).map(|b| &b.expr) {
+        // A merge of comparisons and the constants `0` and `1` is one too —
+        // account's `found` is `a == b` on one path and `0` on another.
+        Some(Expr::Phi { incoming }) if !incoming.is_empty() => {
+            let mut computed = false;
+            let all = incoming.iter().all(|(_, v)| {
+                let v = resolve_use(func, *v);
+                if matches!(int_literal(func, v), Some(0 | 1)) {
+                    return true;
+                }
+                computed = true;
+                is_bool(func, v) || is_comparison_at(func, v, depth + 1)
+            });
+            all && computed
+        }
+        Some(Expr::Binary { op, .. }) => matches!(
+            op,
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        ),
+        Some(Expr::Unary { op: UnaryOp::Eqz, .. }) => true,
+        Some(Expr::Unary { op: UnaryOp::Not, value: inner }) => {
+            let inner = resolve_use(func, *inner);
+            is_bool(func, inner) || is_comparison_at(func, inner, depth + 1)
+        }
+        _ => false,
+    }
+}
+
 fn int_literal(func: &HighFunction, value: ValueId) -> Option<i128> {
     match &func.bindings.get(value)?.expr {
         Expr::Literal(Literal::I32(n)) => Some(i128::from(*n)),
@@ -749,5 +789,28 @@ mod tests {
             items[1]
         );
         assert!(matches!(f.bindings.get(v(0)).map(|b| &b.ty), Some(IrType::Inferred(KnownType::Bool))));
+    }
+
+    /// `(a == b) ^ 1` is `!(a == b)`: a comparison is `0` or `1`, and
+    /// xor with `1` is how wasm negates one.
+    #[test]
+    fn a_comparison_xor_one_is_its_negation() {
+        let f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                              // v0
+                Expr::Literal(Literal::I32(0)),                              // v1
+                Expr::Binary { op: BinaryOp::Eq, lhs: v(0), rhs: v(1) },    // v2
+                Expr::Literal(Literal::I32(1)),                              // v3
+                Expr::Binary { op: BinaryOp::BitXor, lhs: v(2), rhs: v(3) }, // v4
+            ],
+            vec![v(0)],
+            vec![1, 2, 3, 4],
+        );
+        let mut ir = module(vec![f]);
+        assert!(BoolCodecPass.run(&mut ir).changed);
+        assert!(matches!(
+            ir.functions[0].bindings.get(v(4)).map(|b| &b.expr),
+            Some(Expr::Unary { op: UnaryOp::Not, value }) if *value == v(2)
+        ));
     }
 }

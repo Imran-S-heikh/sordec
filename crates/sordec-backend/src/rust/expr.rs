@@ -64,6 +64,20 @@ pub(crate) fn unsuffixed_against(
     value: sordec_common::ValueId,
     against: &IrType,
 ) -> Option<syn::Expr> {
+    // A `bool` is `0` or `1` in the wasm, and a constant one of those
+    // standing where a `bool` goes is that `bool`.
+    if matches!(against, IrType::Known(KnownType::Bool) | IrType::Inferred(KnownType::Bool)) {
+        let binding = ctx.func.bindings.get(ctx.fold_target(value))?;
+        return match &binding.expr {
+            Expr::Literal(Literal::I32(0) | Literal::I64(0) | Literal::U32(0) | Literal::U64(0)) => {
+                Some(parse_quote!(false))
+            }
+            Expr::Literal(Literal::I32(1) | Literal::I64(1) | Literal::U32(1) | Literal::U64(1)) => {
+                Some(parse_quote!(true))
+            }
+            _ => None,
+        };
+    }
     if !matches!(
         *against,
         IrType::Known(

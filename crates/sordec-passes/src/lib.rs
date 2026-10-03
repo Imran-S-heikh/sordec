@@ -702,8 +702,6 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // And the `count + 1` folded into its re-encode, now that the
             // count is a `u32` the encode can be read against.
             Box::new(pass::Rerun::new(FoldedEncodePass, FOLDED_ENCODE_AFTER_ELISION, &[])),
-            // Which leaves an encode of the new count on its way out.
-            Box::new(pass::Rerun::new(ValEncodeCollapsePass, VAL_ENCODE_AFTER_ELISION, &[])),
             // What the `unwrap_or` fold leaves: a probe whose present arm
             // does more than hand the read back. That branch is the
             // author's `if let`, and only now is it final — both folds
@@ -736,6 +734,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the `if`/`else` it compiled from, so each arm can be the
             // `Ok`/`Err` it is.
             Box::new(SelectReturnPass),
+            // The return encodes the late folds expose — a re-encoded count
+            // on its way out — and the arms a returned `select` became: an
+            // arm returning a constant already encoded (`4`, a `U32Val(0)`)
+            // is only an arm once the branch exists.
+            Box::new(pass::Rerun::new(ValEncodeCollapsePass, VAL_ENCODE_AFTER_ELISION, &[])),
             // Again, on settled IR. A return whose encode has collapsed
             // now *is* the value, so its type names the return type; the
             // first run saw only the helper call. Parameters were already

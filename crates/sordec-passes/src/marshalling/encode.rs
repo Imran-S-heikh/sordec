@@ -31,7 +31,8 @@
 
 use sordec_common::ValueId;
 use sordec_ir::{
-    Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Region, SemanticOp, ValObjectKind,
+    Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region, SemanticOp, UnaryOp,
+    ValObjectKind,
 };
 
 use super::{apply_elisions, metrics, Elision};
@@ -291,7 +292,27 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
         // a disagreement means this is not a single value in a wrapper.
         let mut payload: Option<ValueId> = None;
         let mut ok = true;
-        for (_, encoded) in &sites {
+        // A constant the path returns already encoded — `4`, `U32Val(0)` —
+        // stands for its payload, whatever the other paths encode.
+        let mut constants: Vec<(ValueId, Literal)> = Vec::new();
+        for (binding, encoded) in &sites {
+            if let Some(lit) = encoded_constant(func, *encoded, &declared) {
+                // Rewritten in place, so only a constant nothing else reads.
+                if read_count(func, *binding) != 1 {
+                    ok = false;
+                    break;
+                }
+                constants.push((*binding, lit));
+                continue;
+            }
+            // A path returning a value already of the declared type is the
+            // payload as it stands.
+            if matches!(
+                func.bindings.get(*encoded).map(|b| &b.ty),
+                Some(IrType::Known(k) | IrType::Inferred(k)) if *k == declared
+            ) {
+                continue;
+            }
             match encoded_payload(func, *encoded, &declared) {
                 Some(value) if payload.is_none_or(|p| p == value) => payload = Some(value),
                 _ => {
@@ -300,18 +321,38 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
                 }
             }
         }
-        let (true, Some(payload)) = (ok, payload) else {
+        if !ok {
+            continue;
+        }
+        let note = format!(
+            "return-value encode collapsed at the ABI boundary \
+             (contractspecv0 declares this entrypoint returns {declared:?})"
+        );
+        for (binding, lit) in constants {
+            elisions.push(Elision {
+                id: binding,
+                expr: Expr::Literal(lit),
+                ty: Some(IrType::Known(declared.clone())),
+                note: note.clone(),
+                metric: metrics::ENCODE_COLLAPSED,
+            });
+        }
+        let Some(payload) = payload else {
             continue;
         };
-        for (binding, _) in sites {
+        for (binding, encoded) in sites {
+            let typed = matches!(
+                func.bindings.get(encoded).map(|b| &b.ty),
+                Some(IrType::Known(k) | IrType::Inferred(k)) if *k == declared
+            );
+            if typed || encoded_constant(func, encoded, &declared).is_some() {
+                continue;
+            }
             elisions.push(Elision {
                 id: binding,
                 expr: Expr::Use(payload),
                 ty: Some(IrType::Known(declared.clone())),
-                note: format!(
-                    "return-value encode collapsed at the ABI boundary \
-                     (contractspecv0 declares this entrypoint returns {declared:?})"
-                ),
+                note: note.clone(),
                 metric: metrics::ENCODE_COLLAPSED,
             });
         }
@@ -378,7 +419,74 @@ fn producing_sites(func: &HighFunction, value: ValueId) -> Vec<(ValueId, ValueId
                 (def, def)
             })
             .collect(),
+        // A returned `select` returns one of its arms.
+        Expr::Select { if_true, if_false, .. } => [*if_true, *if_false]
+            .iter()
+            .map(|v| {
+                let def = resolve_use(func, *v);
+                (def, def)
+            })
+            .collect(),
         _ => vec![(id, id)],
+    }
+}
+
+/// How often scheduled bindings and the region tree read `value`.
+///
+/// A reader that is itself read by nothing and has no effect does not
+/// count: the `select` a returned select was branched from stays scheduled
+/// until the sweep, reading both arms.
+fn read_count(func: &HighFunction, value: ValueId) -> usize {
+    let order = super::sret::emission_order(func);
+    let raw = |v: ValueId| {
+        let mut n = 0;
+        for id in &order {
+            if let Some(b) = func.bindings.get(*id) {
+                b.expr.for_each_value_use(|u| n += usize::from(u == v));
+            }
+        }
+        func.region.for_each_value_use(|u| n += usize::from(u == v));
+        n
+    };
+    let mut n = 0;
+    for id in &order {
+        let Some(b) = func.bindings.get(*id) else { continue };
+        let mut reads = 0;
+        b.expr.for_each_value_use(|u| reads += usize::from(u == value));
+        if reads == 0 {
+            continue;
+        }
+        let dead = raw(*id) == 0 && crate::effects::expr_effects(&b.expr).is_pure_total();
+        if !dead {
+            n += reads;
+        }
+    }
+    func.region.for_each_value_use(|u| n += usize::from(u == value));
+    n
+}
+
+/// A constant that is a returned value's encoding already: the bits of a
+/// small `Val` of the declared type, read back as its payload. Only a raw
+/// 64-bit constant — one already given a narrower type has been decoded.
+fn encoded_constant(func: &HighFunction, value: ValueId, declared: &KnownType) -> Option<Literal> {
+    let binding = func.bindings.get(resolve_use(func, value))?;
+    let bits = match &binding.expr {
+        Expr::Literal(Literal::I64(n)) => *n as u64,
+        Expr::Literal(Literal::U64(n)) => *n,
+        _ => return None,
+    };
+    let tag = (bits & 0xFF) as u8;
+    let body_low = (bits >> 8) & 0xFF_FFFF;
+    match declared {
+        KnownType::U32 if tag == crate::val_abi::TAG_U32_VAL && body_low == 0 => {
+            Some(Literal::U32((bits >> 32) as u32))
+        }
+        KnownType::I32 if tag == crate::val_abi::TAG_I32_VAL && body_low == 0 => {
+            Some(Literal::I32((bits >> 32) as u32 as i32))
+        }
+        KnownType::Bool if bits == u64::from(crate::val_abi::TAG_FALSE) => Some(Literal::Bool(false)),
+        KnownType::Bool if bits == u64::from(crate::val_abi::TAG_TRUE) => Some(Literal::Bool(true)),
+        _ => None,
     }
 }
 
@@ -400,6 +508,16 @@ fn encoded_payload(
             if args.len() == 1 =>
         {
             (args[0], object_ctor_payload_type(*kind)?)
+        }
+        // A `bool` is its own tag, `0` or `1`: widening it to the word *is*
+        // its encoding.
+        Expr::Unary { op: UnaryOp::ExtendU32, value }
+            if matches!(
+                func.bindings.get(resolve_use(func, *value)).map(|b| &b.ty),
+                Some(IrType::Known(KnownType::Bool) | IrType::Inferred(KnownType::Bool))
+            ) =>
+        {
+            (*value, KnownType::Bool)
         }
         _ => return None,
     };
@@ -494,6 +612,16 @@ mod tests {
         let elisions = plan(&f);
         assert_eq!(elisions.len(), 2, "one per encoding arm");
         assert!(elisions.iter().all(|el| el.ty == Some(IrType::Known(KnownType::U64))));
+    }
+
+    /// A path returning `4` from a `u32` function returns `U32Val(0)`
+    /// already encoded: it is the constant `0`.
+    #[test]
+    fn a_returned_encoded_constant_is_its_payload() {
+        let f = returning(PrimitiveType::U32, vec![Expr::Literal(Literal::I64(4))], v(0));
+        let elisions = plan(&f);
+        assert_eq!(elisions.len(), 1);
+        assert!(matches!(elisions[0].expr, Expr::Literal(Literal::U32(0))));
     }
 
     #[test]

@@ -191,15 +191,31 @@ fn spec_return(
     }
 }
 
-/// Return type from the first return site that carries values. Distinct
-/// return sites almost always agree; when they do not, the first is a
-/// faithful choice for a `todo!()` skeleton (W2's body walk supersedes it).
+/// The return site a helper's return type is read from: the first that
+/// returns something other than constants, else the first that returns
+/// anything.
+///
+/// A constant is typed by the wasm word it was loaded as — `return 0i32`
+/// beside `return found` from a function the caller tests as a `bool` —
+/// so a site that computes its value is the one that says what the
+/// function returns.
+pub(crate) fn helper_return_site(func: &HighFunction) -> Option<&Vec<ValueId>> {
+    let constant = |v: &ValueId| {
+        matches!(func.bindings.get(*v).map(|b| &b.expr), Some(sordec_ir::Expr::Literal(_)))
+    };
+    func.returns
+        .iter()
+        .find(|vals| !vals.is_empty() && !vals.iter().all(constant))
+        .or_else(|| func.returns.iter().find(|vals| !vals.is_empty()))
+}
+
+/// Return type from [`helper_return_site`].
 fn helper_return(
     func: &HighFunction,
     reg: &TypeRegistry,
     policy: &dyn HolePolicy,
 ) -> Option<syn::Type> {
-    let site = func.returns.iter().find(|vals| !vals.is_empty())?;
+    let site = helper_return_site(func)?;
     match site.as_slice() {
         [] => None,
         [one] => Some(value_type(func, *one, reg, policy)),
