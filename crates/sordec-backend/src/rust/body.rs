@@ -628,7 +628,18 @@ impl<'a> FnCtx<'a> {
     fn emit_transfers(&self, transfer: &[(ValueId, ValueId)], out: &mut Vec<syn::Stmt>) {
         for &(phi, source) in transfer {
             let lhs = self.value_ident(phi);
-            let rhs = self.value_ref(source);
+            // A constant flowing into a merge takes the merge's type, the
+            // same rule a call argument already follows: the variable is
+            // declared from what the merge proved (`let mut v109: u64;`)
+            // while the literal still carries the wasm word it was loaded
+            // as (`0i64`). Unsuffixed, it takes the declared type — and
+            // only when it fits, so a real disagreement stays visible.
+            let rhs = self
+                .func
+                .bindings
+                .get(phi)
+                .and_then(|b| expr::unsuffixed_against(self, source, &b.ty))
+                .unwrap_or_else(|| self.value_ref(source));
             out.push(parse_quote!(#lhs = #rhs;));
         }
     }

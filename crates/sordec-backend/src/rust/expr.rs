@@ -46,7 +46,7 @@ fn unsuffixed(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common
 ///
 /// The call-argument case needs this form: the type to match lives on the
 /// *callee's* parameter, in another function's bindings entirely.
-fn unsuffixed_against(
+pub(crate) fn unsuffixed_against(
     ctx: &FnCtx,
     value: sordec_common::ValueId,
     against: &IrType,
