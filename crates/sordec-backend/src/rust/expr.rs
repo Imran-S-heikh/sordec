@@ -46,6 +46,19 @@ fn unsuffixed(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common
 ///
 /// The call-argument case needs this form: the type to match lives on the
 /// *callee's* parameter, in another function's bindings entirely.
+/// Whether a read's recovered type is a *struct* payload rather than the
+/// `Option` around it.
+///
+/// Only a struct. A number has an obvious default and the source very
+/// often wrote `.unwrap_or(0)` — other_custom_types does, and unwrapping it
+/// cost that contract 0.039 by adding a fact the source never spelled. A
+/// `#[contracttype]` struct has no such default, so a body that uses one
+/// as its payload got there through `.unwrap()` or a `Some` arm, both of
+/// which `.unwrap()` matches under the probe that guards the read.
+fn is_bare_payload(ty: &IrType) -> bool {
+    matches!(ty, IrType::Known(KnownType::UserDefined(_)) | IrType::Inferred(KnownType::UserDefined(_)))
+}
+
 pub(crate) fn unsuffixed_against(
     ctx: &FnCtx,
     value: sordec_common::ValueId,
@@ -233,6 +246,20 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
         // A recovered Soroban op renders as its idiomatic method chain when
         // the idiom table can build one honestly; otherwise it is a labeled
         // hole (an unmapped op, or an `Unknown` storage tier).
+        // A storage read the pipeline has typed as its bare payload — the
+        // `i128` a balance is, the `AllowanceValue` an allowance is — while
+        // the op still says `Missing::Option`. The two contradict each
+        // other, and the payload type is the one the rest of the body was
+        // built against: the read is shifted, field-accessed, assigned to
+        // the payload. Rust cannot do that with an `Option`, so the source
+        // did not either — at this point the value is present, which is
+        // what `.unwrap()` says.
+        Expr::Semantic(SemanticOp::Known(
+            known @ sordec_ir::KnownOp::StorageGet { missing: sordec_ir::Missing::Option, .. },
+        )) if is_bare_payload(&binding.ty) => match idiom::known_op_expr(ctx, known) {
+            Some(read) => parse_quote!(#read.unwrap()),
+            None => ctx.policy.unknown_expr(&annotate::label_known_op(known)),
+        },
         Expr::Semantic(SemanticOp::Known(known)) => idiom::known_op_expr(ctx, known)
             .unwrap_or_else(|| ctx.policy.unknown_expr(&annotate::label_known_op(known))),
         Expr::Semantic(op @ SemanticOp::Unknown { .. }) => {
