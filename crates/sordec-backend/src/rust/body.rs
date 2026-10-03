@@ -390,13 +390,26 @@ impl<'a> FnCtx<'a> {
     /// `Address` — has no machine-level reader to contradict, and without
     /// the annotation `let v = todo!()` has nothing to infer from.
     fn has_handle_type_untouched(&self, vid: ValueId) -> bool {
+        // A map or vec counts too: an SDK generic it is handed to (the
+        // event data `publish` takes) pins nothing, and the never-type
+        // fallback then makes the hole `()`.
         let handle = matches!(
             self.func.bindings.get(vid).map(|b| &b.ty),
             Some(
                 IrType::Known(
-                    KnownType::Address | KnownType::Symbol | KnownType::String | KnownType::Bytes
+                    KnownType::Address
+                        | KnownType::Symbol
+                        | KnownType::String
+                        | KnownType::Bytes
+                        | KnownType::Map(_, _)
+                        | KnownType::Vec(_)
                 ) | IrType::Inferred(
-                    KnownType::Address | KnownType::Symbol | KnownType::String | KnownType::Bytes
+                    KnownType::Address
+                        | KnownType::Symbol
+                        | KnownType::String
+                        | KnownType::Bytes
+                        | KnownType::Map(_, _)
+                        | KnownType::Vec(_)
                 )
             )
         );
@@ -715,7 +728,10 @@ impl<'a> FnCtx<'a> {
                 .func
                 .bindings
                 .get(phi)
-                .and_then(|b| expr::unsuffixed_against(self, source, &b.ty))
+                .and_then(|b| {
+                    expr::unsuffixed_against(self, source, &b.ty)
+                        .or_else(|| expr::val_constant(self, source, phi))
+                })
                 .unwrap_or_else(|| self.value_ref(source));
             out.push(parse_quote!(#lhs = #rhs;));
         }

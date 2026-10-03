@@ -163,13 +163,71 @@ fn index_of_absence(
     })
 }
 
+/// An operand of a width move, as the bits the wasm moved.
+///
+/// A host object is one `Val` word on the wire, and reading its tag — the
+/// SDK's argument checks do, `(m as i32 & 255) - 77` — reads those bits.
+/// Rust will not cast an `Address` to an integer, but the SDK hands the
+/// word out: `to_val().get_payload()` is exactly what the wasm read.
+fn raw_bits(ctx: &FnCtx, value: sordec_common::ValueId) -> syn::Expr {
+    let v = ctx.value_ref(value);
+    let object = matches!(
+        ctx.func.bindings.get(value).map(|b| &b.ty),
+        Some(
+            IrType::Known(
+                KnownType::Address | KnownType::MuxedAddress | KnownType::Symbol | KnownType::Vec(_) | KnownType::Map(_, _)
+            ) | IrType::Inferred(
+                KnownType::Address | KnownType::MuxedAddress | KnownType::Symbol | KnownType::Vec(_) | KnownType::Map(_, _)
+            )
+        )
+    );
+    if object { parse_quote!(#v.to_val().get_payload()) } else { v }
+}
+
+/// A raw constant handed to a `Val`, spelled as the `Val` it is.
+///
+/// The wasm moves a `Val` as its 64 bits, so a constant flowing into one
+/// is already encoded: `2` is `Void`, not the integer two. Spelled as an
+/// integer it is a type error; converted with `into_val` it would be the
+/// wrong value. `Val::from_payload` takes the bits as they are.
+///
+/// The merge must be a `Val`: typed one, or untyped (it is declared `Val`)
+/// with another input that is one.
+pub(crate) fn val_constant(ctx: &FnCtx, value: sordec_common::ValueId, phi: sordec_common::ValueId) -> Option<syn::Expr> {
+    let is_val = |t: &IrType| matches!(t, IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val));
+    let merge = ctx.func.bindings.get(phi)?;
+    let a_val = is_val(&merge.ty)
+        || (matches!(merge.ty, IrType::Unknown(_))
+            && matches!(&merge.expr, Expr::Phi { incoming } if incoming.iter().any(|(_, v)| {
+                ctx.func.bindings.get(ctx.fold_target(*v)).is_some_and(|b| is_val(&b.ty))
+            })));
+    if !a_val {
+        return None;
+    }
+    let binding = ctx.func.bindings.get(ctx.fold_target(value))?;
+    if !matches!(binding.ty, IrType::Known(KnownType::I64) | IrType::Inferred(KnownType::I64) | IrType::Unknown(_)) {
+        return None;
+    }
+    let bits: u64 = match &binding.expr {
+        Expr::Literal(Literal::I64(n)) => *n as u64,
+        Expr::Literal(Literal::U64(n)) => *n,
+        _ => return None,
+    };
+    Some(if bits == 2 {
+        parse_quote!(soroban_sdk::Val::VOID.into())
+    } else {
+        let lit = proc_macro2::Literal::u64_suffixed(bits);
+        parse_quote!(soroban_sdk::Val::from_payload(#lit))
+    })
+}
+
 /// The right-hand side expression for one binding.
 pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
     match &binding.expr {
         Expr::Literal(lit) => literal_expr(ctx, lit, &binding.ty),
         Expr::Use(v) => ctx.value_ref(*v),
         Expr::Unary { op: op @ (UnaryOp::Wrap32 | UnaryOp::ExtendU32 | UnaryOp::ExtendS32), value } => {
-            width_move(*op, ctx.value_ref(*value), &binding.ty)
+            width_move(*op, raw_bits(ctx, *value), &binding.ty)
         }
         // Rust's bit-counting methods return `u32` whatever the receiver's
         // width; the wasm opcode returns the operand's own type. The cast
