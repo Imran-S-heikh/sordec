@@ -682,6 +682,14 @@ fn u32val_producer(func: &HighFunction, value: ValueId) -> Option<KnownType> {
     let Expr::Semantic(SemanticOp::Known(op)) = binding_expr(func, id)? else {
         return None;
     };
+    // A storage read the SDK's own conversion checks against `U32Val`: the
+    // check traps on anything else, and the typed read that replaces it
+    // traps at the read itself — so from the read on, it is one. The
+    // `errors` example's `count <= MAX` arrives as the raw read compared
+    // with `MAX + 1 << 32`.
+    if matches!(op, KnownOp::StorageGet { .. }) && tag_checked_u32(func, id) {
+        return Some(KnownType::U32);
+    }
     let ty = match op {
         KnownOp::BufOp { kind, .. } => val_abi::buf_kind_result_type(kind),
         KnownOp::VecOp { kind, .. } => val_abi::vec_kind_result_type(kind),

@@ -59,6 +59,7 @@ impl Pass<HighIr> for ConstBranchFoldPass {
             func.region = fold(func, region, &mut counts);
             let folded = counts.folded;
             if folded > 0 || counts.truncated > 0 {
+                prune_merges(func);
                 result.changed = true;
                 result.metrics.increment(M_FOLDED, folded + counts.truncated);
                 // Every constant condition here came out of a marshalling
@@ -77,6 +78,37 @@ impl Pass<HighIr> for ConstBranchFoldPass {
             }
         }
         result
+    }
+}
+
+/// Drop each merge's inputs that no surviving edge assigns.
+///
+/// A folded arm's transfer goes with it, but the merge's own input list
+/// still names what it carried — and type inference reads that list. Left
+/// in, `unwrap_or(0)`'s dead `0i64` disagrees with the `u32` read and the
+/// merge comes out untyped. The region tree is the record of which edges
+/// remain, so an input is kept exactly when some transfer still assigns it.
+fn prune_merges(func: &mut HighFunction) {
+    let mut assigned: std::collections::HashMap<sordec_common::ValueId, Vec<sordec_common::ValueId>> =
+        std::collections::HashMap::new();
+    let mut unstructured = false;
+    func.region.for_each_node(|node| match node {
+        Region::Transfer { transfer, .. } | Region::Break { transfer, .. } | Region::Continue { transfer, .. } => {
+            for (phi, src) in transfer {
+                assigned.entry(*phi).or_default().push(*src);
+            }
+        }
+        Region::Unstructured { .. } => unstructured = true,
+        _ => {}
+    });
+    if unstructured {
+        return;
+    }
+    for (id, binding) in func.bindings.iter_mut() {
+        let Some(sources) = assigned.get(&id) else { continue };
+        if let sordec_ir::Expr::Phi { incoming } = &mut binding.expr {
+            incoming.retain(|(_, v)| sources.contains(v));
+        }
     }
 }
 

@@ -139,6 +139,28 @@ fn plan(func: &HighFunction, order: &[ValueId], read: ValueId) -> Option<Plan> {
             Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { .. })) => decodes.push(id),
             // The tag byte the check was recognized from, left behind unread.
             Expr::Binary { op: sordec_ir::BinaryOp::BitAnd, .. } if uses(func, order, id) == 0 => {}
+            // A comparison the packed-compare recogniser already read on the
+            // payload: its other side is a decoded `u32`, so once the read is
+            // typed the two agree.
+            Expr::Binary { op, lhs, rhs }
+                if matches!(
+                    op,
+                    sordec_ir::BinaryOp::Lt
+                        | sordec_ir::BinaryOp::Le
+                        | sordec_ir::BinaryOp::Gt
+                        | sordec_ir::BinaryOp::Ge
+                        | sordec_ir::BinaryOp::Eq
+                        | sordec_ir::BinaryOp::Ne
+                ) && [*lhs, *rhs].iter().any(|v| {
+                    matches!(
+                        func.bindings.get(resolve_use(func, *v)).map(|b| &b.expr),
+                        Some(Expr::Literal(Literal::U32(_)))
+                    )
+                }) => {}
+            // A rename is not a reader: an inlined wrapper hands the read back
+            // through one, and what reads *it* is found here already, through
+            // `resolve_use`.
+            Expr::Use(_) => {}
             _ => return None,
         }
     }

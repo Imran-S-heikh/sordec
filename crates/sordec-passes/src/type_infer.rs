@@ -174,7 +174,11 @@ fn infer_function(func: &mut HighFunction, sigs: &SigTable) -> (bool, u64) {
         let mut round_changed = false;
         // Forward: each binding's type from its own expression.
         for (id, binding) in func.bindings.iter() {
-            if let Some(cand) = infer_expr(&binding.expr, &types) {
+            let cand = match &binding.expr {
+                Expr::Phi { incoming } => phi_join_with_constants(func, incoming, &types),
+                other => infer_expr(other, &types),
+            };
+            if let Some(cand) = cand {
                 round_changed |= improve(&mut types, &mut ev, id, cand);
             }
             // Across a call: the callee's return components.
@@ -551,6 +555,52 @@ fn phi_join(
         }
     }
     agreed.map(IrType::Inferred)
+}
+
+/// [`phi_join`], with a constant arm taking the type the other arms agree
+/// on when it fits.
+///
+/// A literal is typed by the wasm word it was loaded as, which is the
+/// machine's choice and not a claim about the value: `unwrap_or(0) + 1`
+/// folds its `None` arm to `1i64` while the `Some` arm is a `u32`. Read as
+/// a vote, that constant conflicts the merge and it comes out untyped —
+/// declared `Val`, assigned a `u32`. So the arms that are not constants
+/// decide, and a constant agrees with them when its value fits.
+fn phi_join_with_constants(
+    func: &HighFunction,
+    incoming: &[(sordec_common::BlockId, ValueId)],
+    types: &HashMap<ValueId, IrType>,
+) -> Option<IrType> {
+    let constant = |v: ValueId| match func.bindings.get(v).map(|b| &b.expr) {
+        Some(Expr::Literal(Literal::I32(n))) => Some(i128::from(*n)),
+        Some(Expr::Literal(Literal::I64(n))) => Some(i128::from(*n)),
+        Some(Expr::Literal(Literal::U32(n))) => Some(i128::from(*n)),
+        Some(Expr::Literal(Literal::U64(n))) => Some(i128::from(*n)),
+        _ => None,
+    };
+    let (constants, others): (Vec<_>, Vec<_>) =
+        incoming.iter().copied().partition(|(_, v)| constant(*v).is_some());
+    if constants.is_empty() || others.is_empty() {
+        return phi_join(incoming, types);
+    }
+    // The other arms saying nothing yet — a loop counter's back edge, typed
+    // only once its own merge is — leaves the constants as all there is.
+    let Some(decided) = phi_join(&others, types) else {
+        return phi_join(incoming, types);
+    };
+    let fits = |n: i128| match base_of(Some(&decided)) {
+        Some(KnownType::U32) => u32::try_from(n).is_ok(),
+        Some(KnownType::I32) => i32::try_from(n).is_ok(),
+        Some(KnownType::U64) => u64::try_from(n).is_ok(),
+        Some(KnownType::I64 | KnownType::I128) => true,
+        Some(KnownType::U128) => n >= 0,
+        _ => false,
+    };
+    if constants.iter().all(|(_, v)| constant(*v).is_some_and(fits)) {
+        Some(decided)
+    } else {
+        phi_join(incoming, types)
+    }
 }
 
 fn unary_result(op: UnaryOp, operand: Option<&IrType>) -> Option<IrType> {
@@ -1502,6 +1552,39 @@ mod tests {
         assert_eq!(
             unary_result(UnaryOp::Neg, Some(&IrType::Known(KnownType::I128))),
             Some(IrType::Inferred(KnownType::I128))
+        );
+    }
+
+    /// A constant arm takes the type the other arms agree on when it fits
+    /// (`unwrap_or(0) + 1` folds its `None` arm to `1i64` beside a `u32`),
+    /// and is all there is when they say nothing yet (a loop counter's
+    /// back edge).
+    #[test]
+    fn a_constant_arm_takes_the_merges_type() {
+        use crate::marshalling::test_support::{func_with, v};
+        let b0 = BlockId::from_index(0);
+        let b1 = BlockId::from_index(1);
+        let f = func_with(
+            vec![
+                Expr::Literal(Literal::I64(1)),                              // v0
+                Expr::Phi { incoming: vec![] },                              // v1 the u32
+                Expr::Phi { incoming: vec![(b0, v(0)), (b1, v(1))] },       // v2
+                Expr::Phi { incoming: vec![] },                              // v3 untyped
+                Expr::Phi { incoming: vec![(b0, v(0)), (b1, v(3))] },       // v4
+            ],
+            vec![],
+            vec![0],
+        );
+        let mut types: HashMap<ValueId, IrType> = HashMap::new();
+        types.insert(v(0), IrType::Known(KnownType::I64));
+        types.insert(v(1), IrType::Known(KnownType::U32));
+        let Expr::Phi { incoming } = &f.bindings.get(v(2)).unwrap().expr else { unreachable!() };
+        assert_eq!(phi_join_with_constants(&f, incoming, &types), Some(IrType::Inferred(KnownType::U32)));
+        let Expr::Phi { incoming } = &f.bindings.get(v(4)).unwrap().expr else { unreachable!() };
+        assert_eq!(
+            phi_join_with_constants(&f, incoming, &types),
+            Some(IrType::Inferred(KnownType::I64)),
+            "nothing else typed: the constant is the evidence"
         );
     }
 

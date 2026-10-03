@@ -102,10 +102,24 @@ struct Site {
 }
 
 fn is_u32(func: &HighFunction, v: ValueId) -> bool {
-    matches!(
-        func.bindings.get(v).map(|b| &b.ty),
-        Some(IrType::Known(KnownType::U32) | IrType::Inferred(KnownType::U32))
-    )
+    let typed = |v: ValueId| {
+        matches!(
+            func.bindings.get(resolve_use(func, v)).map(|b| &b.ty),
+            Some(IrType::Known(KnownType::U32) | IrType::Inferred(KnownType::U32))
+        )
+    };
+    if typed(v) {
+        return true;
+    }
+    // A merge of `u32`s is one — `unwrap_or(0)`'s result once the read's
+    // arm is all that is left, which is what type inference would conclude
+    // after this runs. Not a merge with a constant arm still in it: that is
+    // the `Option` shape before its fold, and reading the encode there
+    // first takes the `+ 1`'s overflow check out of the fold's reach.
+    match func.bindings.get(v).map(|b| &b.expr) {
+        Some(Expr::Phi { incoming }) => !incoming.is_empty() && incoming.iter().all(|(_, x)| typed(*x)),
+        _ => false,
+    }
 }
 
 fn encodes(func: &HighFunction) -> Vec<Site> {
@@ -340,12 +354,24 @@ fn stores_of_encodes(func: &HighFunction) -> Vec<(ValueId, ValueId)> {
             let Expr::Semantic(SemanticOp::Known(KnownOp::StorageSet { value, .. })) = &func.bindings.get(id)?.expr else {
                 return None;
             };
-            let Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: p })) =
+            let Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty, value: p })) =
                 &func.bindings.get(resolve_use(func, *value))?.expr
             else {
                 return None;
             };
-            is_u32(func, resolve_use(func, *p)).then_some((id, *p))
+            let p_id = resolve_use(func, *p);
+            // `i32` the same way: its `IntoVal` is the `I32Val` encode, and a
+            // payload already an `i32` is stored as exactly that — ttl's
+            // `set(&DataKey::MyKey, &0)`.
+            let carries = match ty {
+                KnownType::U32 => is_u32(func, p_id),
+                KnownType::I32 => func.bindings.get(p_id).is_some_and(|b| {
+                    matches!(b.ty, IrType::Known(KnownType::I32) | IrType::Inferred(KnownType::I32))
+                        || matches!(b.expr, Expr::Literal(Literal::I32(_)))
+                }),
+                _ => false,
+            };
+            carries.then_some((id, *p))
         })
         .collect()
 }

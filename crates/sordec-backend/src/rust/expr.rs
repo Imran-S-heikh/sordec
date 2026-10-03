@@ -261,9 +261,15 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             // signedness to record a `i64.const`'s bits; against a `u64`
             // that choice would not compile, and it was never a claim
             // about the value.
+            //
+            // Arithmetic the same way, and for the same reason: `count + 1`
+            // on a `u32` reaches us as `count + 1i64`, the constant still the
+            // wasm word it was loaded as.
             let (l, r) = match op {
                 BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt
-                | BinaryOp::Ge => (unsuffixed(ctx, *lhs, *rhs), unsuffixed(ctx, *rhs, *lhs)),
+                | BinaryOp::Ge | BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
+                    (unsuffixed(ctx, *lhs, *rhs), unsuffixed(ctx, *rhs, *lhs))
+                }
                 _ => (None, None),
             };
             binary_expr(

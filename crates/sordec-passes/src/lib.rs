@@ -210,6 +210,14 @@ pub const SPEC_FROM_GUARDS_AFTER_ELISION: &str = "spec-from-guards-after-elision
 /// [`DeadFrameStorePass`] re-run after the `Vec` elements are recovered.
 /// [`OptionProbePass`] re-run once every wrapper has been inlined.
 pub const OPTION_PROBE_AFTER_ELISION: &str = "option-probe-after-elision";
+/// [`TypedReadPass`] re-run on the reads the late inlining exposed.
+pub const TYPED_READ_AFTER_ELISION: &str = "typed-read-after-elision";
+/// [`ConstBranchFoldPass`] re-run on the probes the late folds made `true`.
+pub const CONST_BRANCH_AFTER_ELISION: &str = "const-branch-after-elision";
+/// [`ValEncodeCollapsePass`] re-run on the encodes the late folds exposed.
+pub const VAL_ENCODE_AFTER_ELISION: &str = "val-encode-after-elision";
+/// [`FoldedEncodePass`] re-run on the payloads those reads typed.
+pub const FOLDED_ENCODE_AFTER_ELISION: &str = "folded-encode-after-elision";
 /// [`OptionUnwrapPass`] re-run on the probes that re-run found.
 pub const OPTION_UNWRAP_AFTER_ELISION: &str = "option-unwrap-after-elision";
 /// [`OptionDefaultPass`] re-run on the probes that re-run found.
@@ -651,6 +659,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // makes at most once, and the only record of recognition that
             // the first run could not reach. On phoenix-vesting the first
             // run marks nothing and this one marks seven.
+            // The read the probe guards, typed. A wrapper inlined this late
+            // brings its tag check and decode with it, after the group's own
+            // typed-read has run — so the `Option` collapse below would see
+            // a raw `Val` where the payload should be, and fold nothing.
+            Box::new(pass::Rerun::new(TypedReadPass, TYPED_READ_AFTER_ELISION, &[])),
             Box::new(pass::Rerun::new(
                 OptionProbePass,
                 OPTION_PROBE_AFTER_ELISION,
@@ -677,6 +690,16 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
                 OPTION_DEFAULT_AFTER_ELISION,
                 OPTION_DEFAULT_COUNTERS,
             )),
+            // The late folds turn their probe into `true` and rely on the
+            // constant-branch fold to keep the read's arm — but that fold sits
+            // at the top of the group, which has already converged. Without
+            // this the branch stays, as `if !true { 0 } else { … }`.
+            Box::new(pass::Rerun::new(ConstBranchFoldPass, CONST_BRANCH_AFTER_ELISION, &[])),
+            // And the `count + 1` folded into its re-encode, now that the
+            // count is a `u32` the encode can be read against.
+            Box::new(pass::Rerun::new(FoldedEncodePass, FOLDED_ENCODE_AFTER_ELISION, &[])),
+            // Which leaves an encode of the new count on its way out.
+            Box::new(pass::Rerun::new(ValEncodeCollapsePass, VAL_ENCODE_AFTER_ELISION, &[])),
             // What the `unwrap_or` fold leaves: a probe whose present arm
             // does more than hand the read back. That branch is the
             // author's `if let`, and only now is it final — both folds

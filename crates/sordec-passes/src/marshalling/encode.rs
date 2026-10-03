@@ -324,12 +324,24 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
 /// `None` for a helper, for a `void` entrypoint, and for the exotic
 /// multi-value case — all of which lack the one-value ABI boundary the
 /// collapse is anchored on.
+///
+/// For `Result<T, E>` it is `T`. The host reads a returned `Val` back as
+/// the `Result` by its tag: an error is `Err`, anything else is the `Ok`
+/// payload's own encoding — so a path returning an encoded `T` returns
+/// `Ok(t)`, and the emitter wraps a returned `T` in exactly that. The
+/// `Err` paths return an error value, which is no encode and is left be.
 fn declared_return_type(func: &HighFunction) -> Option<KnownType> {
     let sig = func.signature.as_ref()?;
     let [only] = sig.outputs.as_slice() else {
         return None;
     };
-    known_of_type_ref(only)
+    match known_of_type_ref(only)? {
+        KnownType::Result(ok, _) => match *ok {
+            IrType::Known(k) | IrType::Inferred(k) => Some(k),
+            IrType::Unknown(_) => None,
+        },
+        other => Some(other),
+    }
 }
 
 /// Every value this function returns.
@@ -466,6 +478,22 @@ mod tests {
             assert!(matches!(el.expr, Expr::Use(p) if p == v(0)));
             assert_eq!(el.ty, Some(IrType::Known(KnownType::U64)));
         }
+    }
+
+    /// `Result<T, E>`: the `Ok` path's encode of a `T` is the `Ok` payload,
+    /// and the emitter wraps a returned `T` in `Ok`.
+    #[test]
+    fn a_result_returns_ok_payload_encode_collapses_too() {
+        let mut f = both_encodings(PrimitiveType::U64);
+        if let Some(sig) = f.signature.as_mut() {
+            sig.outputs = vec![TypeRef::Composite(sordec_ir::CompositeType::Result(
+                Box::new(TypeRef::Primitive(PrimitiveType::U64)),
+                Box::new(TypeRef::Primitive(PrimitiveType::Error)),
+            ))];
+        }
+        let elisions = plan(&f);
+        assert_eq!(elisions.len(), 2, "one per encoding arm");
+        assert!(elisions.iter().all(|el| el.ty == Some(IrType::Known(KnownType::U64))));
     }
 
     #[test]

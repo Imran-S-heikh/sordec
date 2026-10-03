@@ -143,7 +143,11 @@ fn token_v23_emits_soroban_idioms() {
         "persistent get:\n{src}"
     );
     assert!(flat.contains("e.storage().instance().get(&DataKey::Admin"), "instance get:\n{src}");
-    assert!(flat.contains("e.storage().temporary().get(&DataKey::Allowance"), "temporary get:\n{src}");
+    // The source's `if let Some(allowance) = …get::<_, AllowanceValue>(…)`.
+    assert!(
+        flat.contains("e.storage().temporary().get::<DataKey,AllowanceValue"),
+        "temporary get:\n{src}"
+    );
     assert!(flat.contains(".set(&DataKey::"), "a keyed set:\n{src}");
     // Auth, events, ledger context.
     assert!(src.contains(".require_auth()"), "require_auth:\n{src}");

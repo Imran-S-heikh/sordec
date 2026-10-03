@@ -363,13 +363,18 @@ fn read_outside(
             }
             continue;
         }
+        // Residue a rewrite left unscheduled is never emitted, so it reads
+        // nothing. Counting it declined `errors`' read over a rename the
+        // typed-read fold had already orphaned.
+        if !scheduled.contains(&id) {
+            continue;
+        }
         let mut reads = false;
         b.expr.for_each_value_use(|u| reads |= u == get);
         if !reads {
             continue;
         }
-        let inside = scheduled.contains(&id) && block_containing(func, id).is_some_and(|blk| blocks.contains(&blk));
-        if !inside {
+        if !block_containing(func, id).is_some_and(|blk| blocks.contains(&blk)) {
             return true;
         }
     }

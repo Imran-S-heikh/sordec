@@ -84,6 +84,7 @@ impl Pass<HighIr> for BoolCodecPass {
             let tests = marker_tests(func, &folded);
             let widened = widenings(func, &folded);
             let masked = masks(func, &folded);
+            let compared = compares(func);
             for (id, value) in &folded {
                 retype(func, *id, Expr::Use(*value), "the `bool` this encoding was made from");
             }
@@ -95,6 +96,12 @@ impl Pass<HighIr> for BoolCodecPass {
             }
             for (id, answer) in tests {
                 retype(func, id, Expr::Literal(Literal::Bool(answer)), "a `bool` encoding is never the void marker");
+            }
+            if !compared.is_empty() {
+                result.changed = true;
+            }
+            for (id, expr) in compared {
+                retype(func, id, expr, "a `bool` compared with its own encoding, `0` or `1`, is the `bool`");
             }
             if !folded.is_empty() {
                 result.metrics.increment(M_BOOLS, folded.len() as i64);
@@ -137,6 +144,46 @@ fn retype(func: &mut HighFunction, id: ValueId, expr: Expr, note: &'static str) 
         b.ty = IrType::Inferred(KnownType::Bool);
         b.add_provenance(Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note));
     }
+}
+
+/// `b == 1`, `b != 0` and their negations, for a `b` already a `bool`.
+///
+/// A `bool` is its tag, `0` or `1`, both as a `Val` and as the `i32` a
+/// comparison yields — so the SDK's `bool::try_from_val` on a host result
+/// is the comparison against `1`, and the comparison is the value. Left
+/// alone it prints `has_x == 1i64`, a `bool` against an integer.
+fn compares(func: &HighFunction) -> Vec<(ValueId, Expr)> {
+    func.bindings
+        .iter()
+        .filter_map(|(id, b)| {
+            let Expr::Binary { op: op @ (BinaryOp::Eq | BinaryOp::Ne), lhs, rhs } = &b.expr else {
+                return None;
+            };
+            let (l, r) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
+            let (value, n) = if is_bool(func, l) {
+                (l, int_literal(func, r)?)
+            } else if is_bool(func, r) {
+                (r, int_literal(func, l)?)
+            } else {
+                return None;
+            };
+            // Both sides already `bool`: nothing to fold.
+            if matches!(func.bindings.get(resolve_use(func, if value == l { r } else { l })).map(|b| &b.expr),
+                Some(Expr::Literal(Literal::Bool(_))))
+            {
+                return None;
+            }
+            let itself = match (op, n) {
+                (BinaryOp::Eq, 1) | (BinaryOp::Ne, 0) => true,
+                (BinaryOp::Eq, 0) | (BinaryOp::Ne, 1) => false,
+                _ => return None,
+            };
+            Some((
+                id,
+                if itself { Expr::Use(value) } else { Expr::Unary { op: UnaryOp::Not, value } },
+            ))
+        })
+        .collect()
 }
 
 /// `select(1, select(2, 0, tag_byte(v)), has_tag(v, True))` over a value
@@ -566,5 +613,50 @@ mod tests {
     fn a_dispatch_that_is_not_a_round_trip_stays() {
         let mut m = decode_shape(7);
         assert!(!BoolCodecPass.run(&mut m).changed);
+    }
+
+    /// `b == 1` on a `bool` is `b`, `b == 0` its negation — the SDK's
+    /// `bool::try_from_val` of a host result, which is a `bool` already.
+    #[test]
+    fn a_bool_compared_with_its_encoding_is_the_bool() {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                              // v0 b
+                Expr::Literal(Literal::I64(1)),                              // v1
+                Expr::Literal(Literal::I64(0)),                              // v2
+                Expr::Binary { op: BinaryOp::Eq, lhs: v(0), rhs: v(1) },    // v3
+                Expr::Binary { op: BinaryOp::Eq, lhs: v(0), rhs: v(2) },    // v4
+            ],
+            vec![v(0)],
+            vec![1, 2, 3, 4],
+        );
+        f.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(KnownType::Bool);
+        let mut ir = module(vec![f]);
+        assert!(BoolCodecPass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        assert!(matches!(f.bindings.get(v(3)).map(|b| &b.expr), Some(Expr::Use(x)) if *x == v(0)));
+        assert!(matches!(
+            f.bindings.get(v(4)).map(|b| &b.expr),
+            Some(Expr::Unary { op: UnaryOp::Not, value }) if *value == v(0)
+        ));
+    }
+
+    /// An integer compared with `1` is not touched: only a `bool` is its
+    /// own encoding.
+    #[test]
+    fn an_integer_compared_with_one_is_left_alone() {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Literal(Literal::I64(1)),
+                Expr::Binary { op: BinaryOp::Eq, lhs: v(0), rhs: v(1) },
+            ],
+            vec![v(0)],
+            vec![1, 2],
+        );
+        f.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(KnownType::I64);
+        let mut ir = module(vec![f]);
+        BoolCodecPass.run(&mut ir);
+        assert!(matches!(ir.functions[0].bindings.get(v(2)).map(|b| &b.expr), Some(Expr::Binary { .. })));
     }
 }
