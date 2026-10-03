@@ -63,6 +63,10 @@ pub(crate) struct FnCtx<'a> {
     /// top and assigned at their definition site, so they stay in scope at
     /// every use. See [`escaping_values`].
     escaping: HashSet<ValueId>,
+    /// Branches spelled `if let Some(v) = get(&k)`: the probe each tests →
+    /// the read its present arm binds. Neither is a statement of its own —
+    /// the probe is the `if let`, and the read is its pattern.
+    if_lets: HashMap<ValueId, ValueId>,
 }
 
 /// Emit the body of `func` as a `syn::Block`.
@@ -137,6 +141,7 @@ impl<'a> FnCtx<'a> {
         let names = ValueNames::build(func);
         let fold = Fold::build(func);
         let escaping = escaping_values(func, &fold);
+        let if_lets = if_let_reads(func);
         let mut ctx = Self {
             high,
             func,
@@ -148,6 +153,7 @@ impl<'a> FnCtx<'a> {
             liveness: Liveness::build(func),
             escaping,
             fold,
+            if_lets,
         };
         ctx.liveness = ctx.settle_liveness();
         // The escape set was taken before liveness settled. A value whose
@@ -496,6 +502,22 @@ impl<'a> FnCtx<'a> {
                 cond,
                 then_region,
                 else_region,
+            } if self.if_lets.contains_key(cond) => {
+                let read = self.if_lets[cond];
+                let header = self.if_let_header(read);
+                let then_block = self.region_block(then_region);
+                out.push(match else_region {
+                    Some(er) => {
+                        let else_block = self.region_block(er);
+                        parse_quote!(if let #header #then_block else #else_block)
+                    }
+                    None => parse_quote!(if let #header #then_block),
+                });
+            }
+            Region::If {
+                cond,
+                then_region,
+                else_region,
             } => {
                 let c = self.cond_ref(*cond);
                 let then_block = self.region_block(then_region);
@@ -575,6 +597,9 @@ impl<'a> FnCtx<'a> {
             if matches!(binding.expr, Expr::Phi { .. }) {
                 continue;
             }
+            if self.if_lets.contains_key(&vid) || self.if_lets.values().any(|r| *r == vid) {
+                continue;
+            }
             let value = expr::binding_expr(self, binding);
             // A value that is never read binds nothing: keep it only as a
             // statement when it carries an effect (a host call, a trap),
@@ -626,6 +651,27 @@ impl<'a> FnCtx<'a> {
                     out.push(parse_quote!(let #name = #value;));
                 }
             }
+        }
+    }
+
+    /// `Some(v) = …get::<K, T>(&k)`, the head of an `if let` — the pattern
+    /// binds the read's own name, so every reader on the arm finds it.
+    fn if_let_header(&self, read: ValueId) -> proc_macro2::TokenStream {
+        let Some(binding) = self.func.bindings.get(read) else {
+            let hole = self.policy.unknown_expr("if-let read");
+            return quote::quote!(Some(_) = #hole);
+        };
+        let payload = (!matches!(binding.ty, IrType::Unknown(_))).then(|| self.value_type(read));
+        let get = match &binding.expr {
+            Expr::Semantic(SemanticOp::Known(op)) => crate::rust::idiom::option_read(self, op, payload),
+            _ => None,
+        }
+        .unwrap_or_else(|| self.policy.unknown_expr("if-let read"));
+        if self.liveness.is_unused(read) {
+            quote::quote!(Some(_) = #get)
+        } else {
+            let name = self.value_ident(read);
+            quote::quote!(Some(#name) = #get)
         }
     }
 
@@ -853,6 +899,30 @@ fn escaping_values(func: &HighFunction, fold: &Fold) -> HashSet<ValueId> {
         .filter_map(|(value, scope)| fold.reads(value).map(|v| (v, scope)))
         .collect();
     analysis.finish()
+}
+
+/// The `if let` branches in this body: probe → the read it binds.
+///
+/// Keyed on what the region tree actually holds — a read marked present
+/// whose branch is not there (a later rewrite moved it) is spelled where
+/// it stands, with the `unwrap` its proven presence allows.
+fn if_let_reads(func: &HighFunction) -> HashMap<ValueId, ValueId> {
+    let mut conds = HashSet::new();
+    func.region.for_each_node(|node| {
+        if let Region::If { cond, .. } = node {
+            conds.insert(*cond);
+        }
+    });
+    func.bindings
+        .iter()
+        .filter_map(|(id, b)| match &b.expr {
+            Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+                missing: sordec_ir::Missing::Present(probe),
+                ..
+            })) if conds.contains(probe) => Some((*probe, id)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Root lexical scope: the function body block itself.

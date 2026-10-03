@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass,
-    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -677,6 +677,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
                 OPTION_DEFAULT_AFTER_ELISION,
                 OPTION_DEFAULT_COUNTERS,
             )),
+            // What the `unwrap_or` fold leaves: a probe whose present arm
+            // does more than hand the read back. That branch is the
+            // author's `if let`, and only now is it final — both folds
+            // above have had their chance at it.
+            Box::new(OptionIfLetPass),
             Box::new(VecElementsPass),
             // Collecting the buffer the elements came out of, in a group of
             // its own.

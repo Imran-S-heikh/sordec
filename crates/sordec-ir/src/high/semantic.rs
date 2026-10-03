@@ -154,6 +154,10 @@ pub enum Missing {
     /// `get(&key).unwrap_or(default)` — a missing entry reads as the
     /// value bound to this id.
     Or(ValueId),
+    /// `if let Some(v) = get(&key)` — the read sits on the arm where the
+    /// SDK probe bound to this id said the entry is present, and the value
+    /// is the payload. The branch on that probe is the `if let`.
+    Present(ValueId),
 }
 
 /// Soroban operations the decompiler knows how to recover.
@@ -877,8 +881,8 @@ impl KnownOp {
                 f(*durability);
                 f(*key);
                 visit_key(resolved_key, &mut f);
-                if let Missing::Or(default) = missing {
-                    f(*default);
+                if let Missing::Or(id) | Missing::Present(id) = missing {
+                    f(*id);
                 }
             }
             KnownOp::StorageSet {
@@ -1142,8 +1146,8 @@ impl KnownOp {
                 f(durability);
                 f(key);
                 visit_key(resolved_key, &mut f);
-                if let Missing::Or(default) = missing {
-                    f(default);
+                if let Missing::Or(id) | Missing::Present(id) = missing {
+                    f(id);
                 }
             }
             KnownOp::StorageSet {

@@ -871,6 +871,7 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io:
                     sordec_ir::Missing::Option => String::new(),
                     sordec_ir::Missing::Unwrap => ".unwrap()".to_string(),
                     sordec_ir::Missing::Or(d) => format!(".unwrap_or(v{})", d.index()),
+                    sordec_ir::Missing::Present(p) => format!(" present-by(v{})", p.index()),
                 }
             )
         }

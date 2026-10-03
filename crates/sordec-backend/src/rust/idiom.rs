@@ -102,7 +102,12 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             let k = key_expr(ctx, *key, resolved_key);
             Some(match missing {
                 sordec_ir::Missing::Option => parse_quote!(#e.storage().#tier().get(&#k)),
-                sordec_ir::Missing::Unwrap => parse_quote!(#e.storage().#tier().get(&#k).unwrap()),
+                // Present is spelled as the `if let` that binds it; see
+                // `option_read`. Read anywhere else, the probe has already
+                // proved the entry is there, which is what `unwrap` says.
+                sordec_ir::Missing::Unwrap | sordec_ir::Missing::Present(_) => {
+                    parse_quote!(#e.storage().#tier().get(&#k).unwrap())
+                }
                 sordec_ir::Missing::Or(default) => {
                     let d = ctx.value_ref(*default);
                     parse_quote!(#e.storage().#tier().get(&#k).unwrap_or(#d))
@@ -424,6 +429,39 @@ pub(crate) fn rendered_operands(
 /// The tier method (`persistent`/`instance`/`temporary`), or `None` for an
 /// `Unknown` tier — naming an unproven tier would be a guess (K2).
 /// `Inferred` is evidence-based, not a default, so it is emitted.
+/// The `Option`-returning read an `if let Some(..)` tests: `get(&k)` with
+/// the payload type spelled when it was recovered.
+///
+/// `Storage::get` is generic in its payload, and the pattern binding pins
+/// nothing — `if let Some(b) = …get(&k) { b >> 64 }` is `type annotations
+/// needed`. So the turbofish carries the type, written as the source writes
+/// it: the key's enum by name when the key was resolved, `_` otherwise.
+pub(crate) fn option_read(
+    ctx: &FnCtx,
+    op: &KnownOp,
+    payload: Option<syn::Type>,
+) -> Option<syn::Expr> {
+    let KnownOp::StorageGet { tier, key, resolved_key, .. } = op else {
+        return None;
+    };
+    let e = ctx.env();
+    let tier = tier_method(tier)?;
+    let k = key_expr(ctx, *key, resolved_key);
+    Some(match payload {
+        Some(ty) => {
+            let key_ty: syn::Type = match resolved_key {
+                Some(ek) => {
+                    let name = ident(&ek.enum_name);
+                    parse_quote!(#name)
+                }
+                None => parse_quote!(_),
+            };
+            parse_quote!(#e.storage().#tier().get::<#key_ty, #ty>(&#k))
+        }
+        None => parse_quote!(#e.storage().#tier().get(&#k)),
+    })
+}
+
 fn tier_method(tier: &StorageTier) -> Option<syn::Ident> {
     let known = match tier {
         StorageTier::Known(t) | StorageTier::Inferred(t) => t,

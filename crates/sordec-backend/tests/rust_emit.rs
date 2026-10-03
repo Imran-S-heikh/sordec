@@ -136,7 +136,12 @@ fn token_v23_emits_soroban_idioms() {
     // type annotation is wrapped across lines by the formatter, and where
     // the line breaks fall is not what this test is about.
     let flat: String = src.chars().filter(|c| !c.is_whitespace()).collect();
-    assert!(flat.contains("e.storage().persistent().get(&DataKey::Balance"), "persistent get:\n{src}");
+    // The balance read is the source's `if let Some(..)`, whose turbofish
+    // carries the payload type the pattern cannot pin.
+    assert!(
+        flat.contains("e.storage().persistent().get::<DataKey,i128>(&DataKey::Balance"),
+        "persistent get:\n{src}"
+    );
     assert!(flat.contains("e.storage().instance().get(&DataKey::Admin"), "instance get:\n{src}");
     assert!(flat.contains("e.storage().temporary().get(&DataKey::Allowance"), "temporary get:\n{src}");
     assert!(flat.contains(".set(&DataKey::"), "a keyed set:\n{src}");
@@ -164,8 +169,11 @@ fn token_v23_names_locals_from_structure() {
         src.contains("let admin = e.storage().instance().get(&DataKey::Admin)"),
         "storage read named `admin`:\n{src}"
     );
+    // Bound by an `if let` pattern rather than a `let`: the source tests
+    // whether the balance is there before using it.
+    let flat: String = src.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        src.contains("let balance = e.storage().persistent().get(&DataKey::Balance"),
+        flat.contains("ifletSome(balance)=e.storage().persistent().get::<DataKey,i128>(&DataKey::Balance"),
         "storage read named `balance`:\n{src}"
     );
     // A ledger-context read named after the quantity it returns.
