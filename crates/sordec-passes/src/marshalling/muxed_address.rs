@@ -36,13 +36,20 @@
 //! never wrote it. It is removed only alongside a branch the pass also
 //! rewrites, and only on a parameter, so a dispatch with any other job is
 //! left alone.
+//!
+//! **The parameter's type.** Accepting exactly those two tags and taking
+//! the address out of the second is what `MuxedAddress` *is* on the wire.
+//! A module with a spec already says so; a stripped one leaves the
+//! parameter untyped (a placeholder `Val`), and `arg1.address()` on a
+//! `Val` does not compile. So an untyped parameter the collapse fired on
+//! is typed `MuxedAddress`.
 
 use std::collections::HashSet;
 
 use sordec_common::{Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
-    AddressOpKind, BinaryOp, Expr, HighFunction, HighIr, KnownOp, Literal, Region, SemanticOp,
-    UnaryOp,
+    AddressOpKind, BinaryOp, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal,
+    PrimitiveType, Region, SemanticOp, TypeRef, UnaryOp,
 };
 
 use crate::dataflow::resolve_use;
@@ -54,6 +61,8 @@ pub const PASS_NAME: &str = "marshalling-muxed-address";
 
 /// Dispatches collapsed into `.address()`.
 const M_COLLAPSED: &str = "marshalling_muxed_address_collapsed";
+/// Untyped parameters the collapse proved are `MuxedAddress`.
+const M_TYPED: &str = "marshalling_muxed_address_params_typed";
 
 /// Rewrites the inlined `MuxedAddress::address()` back into the call.
 #[derive(Debug, Default, Clone, Copy)]
@@ -86,6 +95,8 @@ impl Pass<HighIr> for MuxedAddressPass {
                 result.metrics.increment(M_COLLAPSED, count);
                 result.changed = true;
                 note_extractions(func, &collapsed);
+                let typed = type_params(func, &collapsed);
+                result.metrics.increment(M_TYPED, typed);
             }
         }
         result
@@ -264,6 +275,39 @@ fn rewrite(
     }
 }
 
+/// Type each collapsed parameter `MuxedAddress` where nothing declared it.
+fn type_params(func: &mut HighFunction, collapsed: &HashSet<ValueId>) -> i64 {
+    let mut typed = 0;
+    for (index, param) in func.params.clone().into_iter().enumerate() {
+        if !collapsed.contains(&param) {
+            continue;
+        }
+        let mut changed = false;
+        if let Some(input) = func.signature.as_mut().and_then(|s| s.inputs.get_mut(index))
+            // `Val` is what a stripped module's synthesized signature
+            // holds for a parameter nothing has typed yet.
+            && matches!(input.ty, TypeRef::Unknown(_) | TypeRef::Primitive(PrimitiveType::Val))
+        {
+            input.ty = TypeRef::Primitive(PrimitiveType::MuxedAddress);
+            changed = true;
+        }
+        if let Some(b) = func.bindings.get_mut(param)
+            && matches!(b.ty, IrType::Unknown(_))
+        {
+            b.ty = IrType::Known(KnownType::MuxedAddress);
+            b.add_provenance(Provenance::new(
+                PASS_NAME,
+                ProvenanceSource::SdkPattern,
+                "`MuxedAddress`: accepts exactly the address and muxed-address tags, and the \
+                 address is extracted from the second",
+            ));
+            changed = true;
+        }
+        typed += i64::from(changed);
+    }
+    typed
+}
+
 /// Record the collapse on each extraction it now stands for.
 fn note_extractions(func: &mut HighFunction, collapsed: &HashSet<ValueId>) {
     let ids: Vec<ValueId> = func
@@ -391,6 +435,10 @@ mod tests {
         let f = &ir.functions[0];
         assert!(!has_if(&f.region), "the branch is gone");
         assert!(!has_switch(&f.region), "and so is the tag check");
+        assert!(
+            matches!(f.bindings.get(v(0)).map(|b| &b.ty), Some(IrType::Known(sordec_ir::KnownType::MuxedAddress))),
+            "the untyped parameter is what the dispatch proves it is"
+        );
     }
 
     /// The half that matters. When the flag the dispatch sets is read
