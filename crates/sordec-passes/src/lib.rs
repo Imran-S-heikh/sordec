@@ -86,7 +86,8 @@ pub use arith::{I128BuiltinPass, WideFoldPass};
 pub use attribution::SdkAttributionPass;
 pub use recognizers::symbol_encoder::SymbolEncoderPass;
 pub use interproc::{
-    ConstReturnPass, SpecializePass, StructArgPass, WideParamPass, WideReturnPromotePass,
+    ConstReturnPass, SpecializePass, StructArgPass, SymbolArgsPass, WideParamPass,
+    WideReturnPromotePass,
     WrapperInlinePass,
 };
 pub use lift::{lift_with_waffle, LiftOutput};
@@ -545,6 +546,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the callee's own key table says which slot is which field.
             // After the UDT passes, which is what reads that table.
             Box::new(StructArgPass),
+            // A packed `SymbolSmall` handed to the same parameter a
+            // sibling call site hands a proven `Symbol`. Inside the
+            // group, because what proves the position is the sibling's
+            // argument having been recognised — which the symbol and
+            // const-prop passes above do.
+            Box::new(SymbolArgsPass),
             // A unit enum, once typed, is masked and compared as a
             // number. Name the variant instead — there is no `&` between
             // an enum and an integer. After the field typing that gives
@@ -725,7 +732,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 32..77],
+        vec![1..7, 32..78],
     )
 }
 
@@ -807,6 +814,7 @@ mod tests {
                 SPEC_FROM_GUARDS_ON_FIELDS,
                 marshalling::field_type::PASS_NAME,
                 interproc::struct_arg::PASS_NAME,
+                interproc::symbol_args::PASS_NAME,
                 marshalling::enum_discriminant::PASS_NAME,
                 marshalling::enum_encode::PASS_NAME,
                 marshalling::option_unwrap::PASS_NAME,

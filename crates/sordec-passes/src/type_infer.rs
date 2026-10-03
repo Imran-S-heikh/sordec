@@ -420,6 +420,26 @@ fn backward(
                     changed |= improve(types, ev, *rhs, IrType::Inferred(base));
                 }
             }
+            // A vec whose recovered elements disagree is a `Vec<Val>` —
+            // that is the only element type they all satisfy — so each of
+            // them is a `Val`. Only the ones nothing has typed take it:
+            // `refines_val` keeps `Val` from displacing a named type, so a
+            // `Symbol, Address, Address` vec types nothing and a
+            // `?, Address, Address` one types the `?`.
+            //
+            // Without this the untyped element stays untyped, is *emitted*
+            // as a `Val` because that is what the hole policy names it,
+            // and a helper declaring it that way is handed a `Symbol` by
+            // its caller. The conversion belongs after this, not instead
+            // of it.
+            Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                elements: Some(values),
+                ..
+            })) if disagree(values, types) => {
+                for v in values {
+                    changed |= improve(types, ev, *v, IrType::Inferred(KnownType::Val));
+                }
+            }
             // Host-call arguments and conversions: the recovered op's ABI
             // *pins* these operand types authoritatively — `val_encode<u32>`'s
             // argument IS a `u32`, `require_auth`'s receiver IS an `Address`.
@@ -482,6 +502,15 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
         // Load/Store/GlobalGet/IndirectCall/Unknown stay for later waves.
         _ => None,
     }
+}
+
+/// Whether two of these values carry *different* recovered bases.
+///
+/// An untyped value is not a disagreement — it has said nothing. Two named
+/// and different ones are, and that is what makes the vec a `Vec<Val>`.
+fn disagree(values: &[ValueId], types: &HashMap<ValueId, IrType>) -> bool {
+    let named: Vec<KnownType> = values.iter().filter_map(|v| base_of(types.get(v))).collect();
+    named.windows(2).any(|w| w[0] != w[1])
 }
 
 /// Join the incoming edges of a phi: `Inferred(T)` when every *resolved*

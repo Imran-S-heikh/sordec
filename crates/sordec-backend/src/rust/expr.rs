@@ -221,8 +221,10 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
-                    callee_param_type(ctx, *target, i)
-                        .and_then(|ty| unsuffixed_against(ctx, *v, &ty))
+                    let want = callee_param_type(ctx, *target, i);
+                    want.as_ref()
+                        .and_then(|ty| unsuffixed_against(ctx, *v, ty))
+                        .or_else(|| want.as_ref().and_then(|ty| val_coerced(ctx, *v, ty)))
                         .unwrap_or_else(|| ctx.arg_ref(*v))
                 })
                 .collect();
@@ -351,6 +353,38 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
 /// `None` whenever the callee, the parameter or its binding cannot be
 /// resolved — an argument then renders exactly as it did before, which is
 /// the honest fallback for a call we cannot line up.
+/// A recovered value handed to a `Val` parameter, converted on the way in.
+///
+/// A helper taking a `Val` takes the host representation; the caller holds
+/// the recovered thing, and passing it straight through is a type error.
+///
+/// Both sides must be *recovered*. A parameter that is merely `Unknown`
+/// also prints as `Val`, but it is not evidence of anything — coercing
+/// against it was measured at +2 error lines, because it converts
+/// arguments at sites that were already right. What makes this fire is the
+/// typing in `type_infer`'s backward rule for a mixed vec, not a guess
+/// here.
+///
+/// The trait is written with its parameters spelled out: the bare method
+/// needs its target type pinned from context, and supplying that is the
+/// point of the call.
+fn val_coerced(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<syn::Expr> {
+    if !matches!(want, IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val)) {
+        return None;
+    }
+    match &ctx.func.bindings.get(v)?.ty {
+        IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val) => None,
+        IrType::Unknown(_) => None,
+        _ => {
+            let x = ctx.arg_ref(v);
+            let e = ctx.env_borrow();
+            Some(parse_quote!(
+                soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#x, #e)
+            ))
+        }
+    }
+}
+
 fn callee_param_type(ctx: &FnCtx, target: FuncId, index: usize) -> Option<IrType> {
     let callee = ctx.high.function(target)?;
     let param = *callee.params.get(index)?;
