@@ -97,7 +97,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    KeyFieldTypePass,
+    KeyFieldTypePass, MuxedAddressPass,
     BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
@@ -721,6 +721,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // (the authoritative ABI) rather than inferred types, and
             // propagating over the cleaned IR means no type has to be
             // threaded through glue that is about to disappear.
+            // `MuxedAddress::address()`, inlined by the SDK as a two-tag
+            // dispatch and a branch. Static — it depends on no elision —
+            // so it runs once, here, ahead of the typing that should see
+            // the one call rather than the branch.
+            Box::new(MuxedAddressPass),
             Box::new(TypeInferPass),
             // After the types settle, and outside the group: a stripped
             // module's key union is synthesized with untyped fields, and

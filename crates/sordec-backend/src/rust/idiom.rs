@@ -201,6 +201,20 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             Some(parse_quote!(soroban_sdk::token::Client::new(#eb, &#c).#method(#(&#a),*)))
         }
 
+        // ---- Address conversions ----
+        // `MuxedAddress::address()`. The SDK method, not the bare host
+        // function: on a muxed value that wraps a plain address the host
+        // call is not even reached, and the method handles both — which is
+        // what lets `marshalling::muxed_address` collapse the SDK's own
+        // two-way dispatch into this one call.
+        KnownOp::AddressConversion {
+            kind: sordec_ir::AddressOpKind::GetAddressFromMuxedAddress,
+            args,
+        } => {
+            let m = ctx.value_ref(*args.first()?);
+            Some(parse_quote!(#m.address()))
+        }
+
         // ---- Ledger context ----
         KnownOp::GetLedgerSequence => Some(parse_quote!(#e.ledger().sequence())),
         KnownOp::GetLedgerTimestamp => Some(parse_quote!(#e.ledger().timestamp())),
