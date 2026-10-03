@@ -874,6 +874,9 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
             (f.id, own)
         })
         .collect();
+    // Positions some caller hands a value that can only cross a call as a
+    // `Val` — see the conflict rule below.
+    let mut val_only: HashSet<(FuncId, usize)> = HashSet::new();
     for caller in &ir.functions {
         for (_, binding) in caller.bindings.iter() {
             let Expr::Call { target, args } = &binding.expr else {
@@ -882,18 +885,57 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
             let Some(slots) = evidence.get_mut(target) else {
                 continue;
             };
-            for (slot, arg) in slots.iter_mut().zip(args) {
-                let witness = Slot::witness(caller.bindings.get(*arg).map(|b| &b.ty));
+            for (index, (slot, arg)) in slots.iter_mut().zip(args).enumerate() {
+                let ty = caller.bindings.get(*arg).map(|b| &b.ty);
+                if base_of(ty).is_some_and(|k| crosses_only_as_val(&k)) {
+                    val_only.insert((*target, index));
+                }
+                let witness = Slot::witness(ty);
                 *slot = std::mem::replace(slot, Slot::Bottom).join(witness);
             }
         }
     }
-    for (id, slots) in evidence {
+    for (id, mut slots) in evidence {
+        // Callers disagreeing is usually the end of the story: no single
+        // type is sound, so the slot says nothing. Not when one of them
+        // passes an object. An `Address` or a `Map` reaches a wasm function
+        // only as a `Val`, so the parameter *is* a `Val`, and every caller
+        // is handing one over — some of them as the thing it was before
+        // encoding. The SDK's two-element vec builder is the witness:
+        // LLVM merged it across a key's `(Symbol, payload)` and an event's
+        // `(amount, ledger)`, and with the slot left `Unknown` the
+        // `amount` call site is a type error.
+        for (index, slot) in slots.iter_mut().enumerate() {
+            if *slot == Slot::Conflict && val_only.contains(&(id, index)) {
+                *slot = Slot::Agreed(KnownType::Val);
+            }
+        }
         if let Some(entry) = table.get_mut(&id) {
             entry.params = slots;
         }
     }
     table
+}
+
+/// Whether a value of this type can only be passed between wasm functions
+/// as a `Val`: a host object, or a number too wide for one machine word.
+fn crosses_only_as_val(k: &KnownType) -> bool {
+    matches!(
+        k,
+        KnownType::Address
+            | KnownType::MuxedAddress
+            | KnownType::Symbol
+            | KnownType::String
+            | KnownType::Bytes
+            | KnownType::BytesN(_)
+            | KnownType::Vec(_)
+            | KnownType::Map(_, _)
+            | KnownType::UserDefined(_)
+            | KnownType::I128
+            | KnownType::U128
+            | KnownType::I256
+            | KnownType::U256
+    )
 }
 
 /// What each helper's returned components are *used as*, joined over every
@@ -1796,6 +1838,19 @@ mod tests {
         assert!(
             matches!(ty_of(&ir, 1, 0), IrType::Unknown(_)),
             "conflicting evidence has no sound single type, got {:?}",
+            ty_of(&ir, 1, 0)
+        );
+    }
+
+    #[test]
+    fn disagreeing_call_sites_with_an_object_make_the_parameter_a_val() {
+        // A `Symbol` crosses a call only as a `Val`, so a parameter one
+        // caller hands a symbol to *is* a `Val`, whatever the other passes.
+        let mut ir = two_callers(Literal::Symbol("approve".into()));
+        TypeInferPass.run(&mut ir);
+        assert!(
+            matches!(ty_of(&ir, 1, 0), IrType::Inferred(KnownType::Val) | IrType::Known(KnownType::Val)),
+            "an object among the witnesses proves the wire type, got {:?}",
             ty_of(&ir, 1, 0)
         );
     }
