@@ -373,6 +373,35 @@ impl<'a> FnCtx<'a> {
     /// rustc had already inferred from use sites); annotating every recovered
     /// type cost attestation 8 and timelock 6; annotating only the coinciding
     /// two is worth -66.
+    /// A hole whose recovered type is a host-object handle — an `Address`,
+    /// a `Symbol` — and which nothing does machine arithmetic on.
+    ///
+    /// The documented objection to annotating these is that the value
+    /// beside the hole is masked and shifted as an `i64` while the IR calls
+    /// it an `Address`, so pinning the ABI type relocates the error. That
+    /// holds only where the hole's value *is* masked and shifted. A hole
+    /// that is only ever passed along — cloned into a call that wants an
+    /// `Address` — has no machine-level reader to contradict, and without
+    /// the annotation `let v = todo!()` has nothing to infer from.
+    fn has_handle_type_untouched(&self, vid: ValueId) -> bool {
+        let handle = matches!(
+            self.func.bindings.get(vid).map(|b| &b.ty),
+            Some(
+                IrType::Known(
+                    KnownType::Address | KnownType::Symbol | KnownType::String | KnownType::Bytes
+                ) | IrType::Inferred(
+                    KnownType::Address | KnownType::Symbol | KnownType::String | KnownType::Bytes
+                )
+            )
+        );
+        handle
+            && !self.func.bindings.iter().any(|(_, b)| match &b.expr {
+                Expr::Binary { lhs, rhs, .. } => *lhs == vid || *rhs == vid,
+                Expr::Unary { value, .. } => *value == vid,
+                _ => false,
+            })
+    }
+
     fn has_machine_type(&self, vid: ValueId) -> bool {
         matches!(
             self.func.bindings.get(vid).map(|b| &b.ty),
@@ -564,7 +593,9 @@ impl<'a> FnCtx<'a> {
                 if self.escaping.contains(&vid) {
                     // The hoisted declaration already carries the type.
                     out.push(parse_quote!(#name = #value;));
-                } else if Self::is_hole_expr(&value) && self.has_machine_type(vid) {
+                } else if Self::is_hole_expr(&value)
+                    && (self.has_machine_type(vid) || self.has_handle_type_untouched(vid))
+                {
                     // `todo!(…)` has type `!`, so an unannotated `let` leaves
                     // the binding's type to inference. Where the uses pin it,
                     // inference does *better* than we can — it reads the
