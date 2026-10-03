@@ -115,7 +115,16 @@ fn try_abi_sweep(id: ValueId, expr: &Expr) -> Option<Rewrite> {
                     kind,
                     args: args.clone(),
                 },
-                val_abi::crypto_kind_result_type(kind),
+                // The ABI returns a `BytesObject`; a 256-bit digest is always
+                // 32 of them, and the SDK hands it back as `Hash<32>`, which
+                // the backend spells `.to_bytes()` — a `BytesN<32>`. Typing it
+                // the wider `Bytes` puts a `Bytes` where the emitted code
+                // holds a `BytesN<32>`.
+                match kind {
+                    sordec_ir::CryptoOpKind::ComputeHashSha256
+                    | sordec_ir::CryptoOpKind::ComputeHashKeccak256 => sordec_ir::KnownType::BytesN(32),
+                    _ => val_abi::crypto_kind_result_type(kind),
+                },
                 val_abi::crypto_kind_name(kind),
                 M_CRYPTO,
             )
@@ -248,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn crypto_sha256_recognized_with_bytes_result() {
+    fn crypto_sha256_recognized_with_a_32_byte_result() {
         let mut func = func_with(vec![val(0), host("c", "_", vec![v(0)])]);
         let (changed, metrics) = run(&mut func);
         assert!(changed);
@@ -260,9 +269,11 @@ mod tests {
             }
             other => panic!("expected CryptoOp, got {other:?}"),
         }
+        // A digest is always 32 bytes: `BytesN<32>`, the `.to_bytes()` of
+        // the SDK's `Hash<32>`, not the ABI's unsized `BytesObject`.
         assert_eq!(
             func.bindings.get(v(1)).unwrap().ty,
-            IrType::Known(KnownType::Bytes)
+            IrType::Known(KnownType::BytesN(32))
         );
     }
 

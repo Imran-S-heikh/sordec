@@ -203,7 +203,7 @@ fn site(func: &HighFunction, call: ValueId, converters: &HashMap<FuncId, u32>) -
     let [frame, value] = args[..] else {
         return None;
     };
-    let frame = resolve_use(func, frame);
+    let (base, at) = address(func, frame, 0);
     let read = resolve_use(func, value);
     // A storage read: its typed spelling is the conversion.
     if !matches!(
@@ -212,25 +212,58 @@ fn site(func: &HighFunction, call: ValueId, converters: &HashMap<FuncId, u32>) -
     ) {
         return None;
     }
-    // Every access to the frame is the result's two words, read back.
+    // The result's two words, read back after the call and before anything
+    // writes them again — the slot is often reused by the next conversion.
+    let order = emission_order(func);
+    let from = order.iter().position(|v| *v == call)?;
     let mut discs = Vec::new();
     let mut payloads = Vec::new();
-    for id in emission_order(func) {
+    for &id in &order[from + 1..] {
         let Some(b) = func.bindings.get(id) else { continue };
         match &b.expr {
-            Expr::Load { addr, offset, .. } if resolve_use(func, *addr) == frame => match offset {
-                0 => discs.push(id),
-                8 => payloads.push(id),
-                _ => return None,
-            },
-            Expr::Store { addr, .. } if resolve_use(func, *addr) == frame => return None,
-            Expr::Call { args, .. } if id != call && args.iter().any(|a| resolve_use(func, *a) == frame) => {
-                return None;
+            Expr::Load { addr, offset, .. } => {
+                let (b2, o) = address(func, *addr, i64::from(*offset));
+                if b2 != base {
+                    continue;
+                }
+                if o == at {
+                    discs.push(id);
+                } else if o == at + 8 {
+                    payloads.push(id);
+                }
+            }
+            Expr::Store { addr, offset, .. } => {
+                let (b2, o) = address(func, *addr, i64::from(*offset));
+                if b2 == base && (at..at + 16).contains(&o) {
+                    break;
+                }
+            }
+            Expr::Call { args, .. } => {
+                let writes_slot = args.iter().any(|a| {
+                    let (b2, o) = address(func, *a, 0);
+                    b2 == base && (at..at + 16).contains(&o)
+                });
+                if writes_slot {
+                    break;
+                }
             }
             _ => {}
         }
     }
     (!discs.is_empty() && !payloads.is_empty()).then_some(Site { call, read, width, discs, payloads })
+}
+
+/// `value + offset` as a base and a constant displacement, folding
+/// `base + k` — a slot passed as `frame + 64` and read back as
+/// `load frame offset=64` is one address.
+fn address(func: &HighFunction, value: ValueId, offset: i64) -> (ValueId, i64) {
+    let v = resolve_use(func, value);
+    if let Some(Expr::Binary { op: BinaryOp::Add, lhs, rhs }) = func.bindings.get(v).map(|b| &b.expr)
+        && let Some(k) = trace_int(func, *rhs).and_then(|k| i64::try_from(k).ok())
+    {
+        return (resolve_use(func, *lhs), offset + k);
+    }
+    (v, offset)
 }
 
 fn apply(func: &mut HighFunction, s: &Site) {

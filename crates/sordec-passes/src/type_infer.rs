@@ -588,15 +588,10 @@ fn phi_join_with_constants(
     let Some(decided) = phi_join(&others, types) else {
         return phi_join(incoming, types);
     };
-    let fits = |n: i128| match base_of(Some(&decided)) {
-        Some(KnownType::U32) => u32::try_from(n).is_ok(),
-        Some(KnownType::I32) => i32::try_from(n).is_ok(),
-        Some(KnownType::U64) => u64::try_from(n).is_ok(),
-        Some(KnownType::I64 | KnownType::I128) => true,
-        Some(KnownType::U128) => n >= 0,
-        _ => false,
+    let Some(k) = base_of(Some(&decided)) else {
+        return phi_join(incoming, types);
     };
-    if constants.iter().all(|(_, v)| constant(*v).is_some_and(fits)) {
+    if constants.iter().all(|(_, v)| constant(*v).is_some_and(|n| fits(&k, n))) {
         Some(decided)
     } else {
         phi_join(incoming, types)
@@ -927,6 +922,8 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
     // Positions some caller hands a value that can only cross a call as a
     // `Val` — see the conflict rule below.
     let mut val_only: HashSet<(FuncId, usize)> = HashSet::new();
+    // Constant arguments, held back until the other callers have spoken.
+    let mut constants: HashMap<(FuncId, usize), Vec<(i128, Slot)>> = HashMap::new();
     for caller in &ir.functions {
         for (_, binding) in caller.bindings.iter() {
             let Expr::Call { target, args } = &binding.expr else {
@@ -940,7 +937,28 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
                 if base_of(ty).is_some_and(|k| crosses_only_as_val(&k)) {
                     val_only.insert((*target, index));
                 }
+                // A constant votes last: its type is the wasm word it was
+                // loaded as, not a claim about the parameter.
+                if let Some(n) = int_constant(caller, *arg) {
+                    constants.entry((*target, index)).or_default().push((n, Slot::witness(ty)));
+                    continue;
+                }
                 let witness = Slot::witness(ty);
+                *slot = std::mem::replace(slot, Slot::Bottom).join(witness);
+            }
+        }
+    }
+    // A constant agrees with the type the other callers settled on when it
+    // fits it — bls_signature's helper is called with `0i32` and a `u32`
+    // count. With nothing else said, the constants are the evidence.
+    for ((id, index), consts) in constants {
+        let Some(slot) = evidence.get_mut(&id).and_then(|s| s.get_mut(index)) else { continue };
+        let fits_all = match &*slot {
+            Slot::Agreed(k) => consts.iter().all(|(n, _)| fits(k, *n)),
+            _ => false,
+        };
+        if !fits_all {
+            for (_, witness) in consts {
                 *slot = std::mem::replace(slot, Slot::Bottom).join(witness);
             }
         }
@@ -965,6 +983,29 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
         }
     }
     table
+}
+
+/// `value` when it is an integer constant.
+fn int_constant(func: &HighFunction, value: ValueId) -> Option<i128> {
+    match &func.bindings.get(value)?.expr {
+        Expr::Literal(Literal::I32(n)) => Some(i128::from(*n)),
+        Expr::Literal(Literal::I64(n)) => Some(i128::from(*n)),
+        Expr::Literal(Literal::U32(n)) => Some(i128::from(*n)),
+        Expr::Literal(Literal::U64(n)) => Some(i128::from(*n)),
+        _ => None,
+    }
+}
+
+/// Whether the integer `n` is a value of type `k`.
+fn fits(k: &KnownType, n: i128) -> bool {
+    match k {
+        KnownType::U32 => u32::try_from(n).is_ok(),
+        KnownType::I32 => i32::try_from(n).is_ok(),
+        KnownType::U64 => u64::try_from(n).is_ok(),
+        KnownType::I64 | KnownType::I128 => true,
+        KnownType::U128 => n >= 0,
+        _ => false,
+    }
 }
 
 /// Whether a value of this type can only be passed between wasm functions

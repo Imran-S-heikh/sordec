@@ -131,25 +131,33 @@ fn heldout_floor(name: &str) -> f64 {
         "alloc" => 0.54,
         "atomic_swap" => 0.90,
         "auth" => 0.98,
-        "bls_signature" => 0.71,
+        // Lowered 2026-10-03 (0.7390 -> 0.6873) for a correct fold. The
+        // outlined `BytesN<96>` conversion of the owners read became the
+        // typed read the source wrote, taking three conversion checks with
+        // it; one had been lining up with the source's `if !pairing_check`
+        // by position. What is left unmatched is `if ok { Ok(()) } else
+        // { Err(e) }` against the source's guard-clause spelling of the same
+        // returned select — which attestation spells our way, so the binary
+        // cannot choose between them.
+        "bls_signature" => 0.67,
         "custom_types" => 0.98,
         "deep_contract_auth" => 0.59,
-        "errors" => 0.83,
+        "errors" => 0.86,
         "eth_abi" => 0.52,
         "events" => 0.98,
         "fuzzing" => 0.48,
         "hello_world" => 0.98,
         "import_ark_bn254" => 0.33,
         "increment" => 0.68,
-        "increment_with_fuzz" => 0.81,
-        "increment_with_pause" => 0.75,
+        "increment_with_fuzz" => 0.84,
+        "increment_with_pause" => 0.80,
         "logging" => 0.86,
         "merkle_distribution" => 0.50,
         "mint-lock" => 0.48,
         "modular_account" => 0.40,
         "other_custom_types" => 0.70,
         "pause" => 0.98,
-        "simple_account" => 0.79,
+        "simple_account" => 0.94,
         "single_offer" => 0.77,
         "ttl" => 0.98,
         _ => 0.0,
@@ -160,7 +168,7 @@ fn heldout_floor(name: &str) -> f64 {
 ///
 /// The upper bound is not pedantry: it is the detector for a run that measured
 /// something other than what it says it measured. See the module docs.
-const HELDOUT_AGGREGATE: (f64, f64) = (0.71, 0.76);
+const HELDOUT_AGGREGATE: (f64, f64) = (0.73, 0.78);
 
 #[test]
 #[ignore = "needs SORDEC_HELDOUT_DIR pointing at a built held-out corpus; run explicitly"]

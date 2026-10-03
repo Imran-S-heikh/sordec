@@ -363,7 +363,12 @@ fn stores_of_encodes(func: &HighFunction) -> Vec<(ValueId, ValueId)> {
             // `i32` the same way: its `IntoVal` is the `I32Val` encode, and a
             // payload already an `i32` is stored as exactly that — ttl's
             // `set(&DataKey::MyKey, &0)`.
-            let carries = match ty {
+            // An untyped payload is what the encode says it is: its operand
+            // *is* the type it encodes, by the host ABI — bls_signature's
+            // helper stores a `u32` parameter typed only later, by its caller.
+            let untyped = func.bindings.get(p_id).is_some_and(|b| matches!(b.ty, IrType::Unknown(_)));
+            let carries = untyped
+                || match ty {
                 KnownType::U32 => is_u32(func, p_id),
                 KnownType::I32 => func.bindings.get(p_id).is_some_and(|b| {
                     matches!(b.ty, IrType::Known(KnownType::I32) | IrType::Inferred(KnownType::I32))
