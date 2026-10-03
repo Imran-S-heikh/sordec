@@ -371,11 +371,24 @@ fn try_masked_value(
         return None;
     }
     let m = u32::try_from(bits >> val_abi::MAJOR_SHIFT).ok()?;
-    // An all-ones mask is the identity on the payload and the whole
-    // expression is a rename; leave it to the sweep rather than emit
-    // `x & u32::MAX`.
+    // An all-ones mask is the identity on the payload, so the expression
+    // *is* the value. Declining left `expiration_ledger & -4294967292i64`
+    // standing — the same `0xFFFFFFFF_00000004` written as a negative
+    // `i64` — on the assumption some sweep would take it; none does, and
+    // a rename says it outright.
     if m == u32::MAX {
-        return None;
+        return Some(Site {
+            rewrites: vec![Rewrite {
+                id: and,
+                expr: Expr::Use(value),
+                ty: Some(IrType::Known(KnownType::U32)),
+                source: ProvenanceSource::SdkPattern,
+                note: "val-packed-compare: `& (u32::MAX << 32 | tag)` keeps every payload                        bit, so the masked value is the value"
+                    .to_string(),
+                metric: M_MASKED_VALUE,
+            }],
+            metric: M_MASKED_VALUE,
+        });
     }
     Some(Site {
         rewrites: vec![
@@ -1068,6 +1081,28 @@ mod tests {
                 Expr::Literal(Literal::U32(31))
             ),
             "the mask reads as its payload"
+        );
+    }
+
+    /// An all-ones payload mask keeps every bit, so the expression is the
+    /// value. token-v22 writes it as the negative `i64`
+    /// `-4294967292` — the same `0xFFFFFFFF_00000004`.
+    #[test]
+    fn an_all_ones_mask_is_a_rename() {
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            bytes_len(v(0)),
+            Expr::Literal(Literal::I64(-4_294_967_292)),
+            Expr::Binary { op: BinaryOp::BitAnd, lhs: v(1), rhs: v(2) },
+        ]);
+        assert_eq!(run(&mut func).get(M_MASKED_VALUE), Some(1));
+        assert!(
+            matches!(
+                func.bindings.get(v(3)).expect("the mask").expr,
+                Expr::Use(u) if u == v(1)
+            ),
+            "the masked value is the value, got {:?}",
+            func.bindings.get(v(3)).map(|b| &b.expr)
         );
     }
 
