@@ -72,6 +72,7 @@ pub mod vec_elements;
 pub mod option_sret;
 pub mod option_unwrap;
 pub mod spec_from_guards;
+pub mod storage_value_type;
 pub mod dead_store;
 pub mod folded_encode;
 pub mod forward;
@@ -111,6 +112,7 @@ pub use vec_elements::VecElementsPass;
 pub use option_sret::OptionSretPass;
 pub use option_unwrap::OptionUnwrapPass;
 pub use spec_from_guards::SpecFromGuardsPass;
+pub use storage_value_type::StorageValueTypePass;
 pub use wide_return::WideReturnPass;
 
 use sordec_common::{Provenance, ProvenanceSource, ValueId};

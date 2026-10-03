@@ -297,9 +297,20 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             kind: CryptoOpKind::VerifySigEd25519,
             args,
         } => {
-            let [key, msg, sig] = args[..] else { return None };
-            let (key, msg, sig) = (ctx.value_ref(key), ctx.value_ref(msg), ctx.value_ref(sig));
-            Some(parse_quote!(#e.crypto().ed25519_verify(&#key, &#msg, &#sig)))
+            let [key, msg_id, sig] = args[..] else { return None };
+            let (key, msg, sig) = (ctx.value_ref(key), ctx.value_ref(msg_id), ctx.value_ref(sig));
+            // The message is `&Bytes`. A fixed-size `BytesN` handed to it is
+            // the same host object, and the SDK converts with `into` — what
+            // `simple_account` writes, `&signature_payload.into()`.
+            let fixed = matches!(
+                ctx.func.bindings.get(msg_id).map(|b| &b.ty),
+                Some(IrType::Known(KnownType::BytesN(_)) | IrType::Inferred(KnownType::BytesN(_)))
+            );
+            if fixed {
+                Some(parse_quote!(#e.crypto().ed25519_verify(&#key, &#msg.into(), &#sig)))
+            } else {
+                Some(parse_quote!(#e.crypto().ed25519_verify(&#key, &#msg, &#sig)))
+            }
         }
 
         // ---- PRNG ----

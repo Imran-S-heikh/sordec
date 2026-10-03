@@ -97,7 +97,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    KeyFieldTypePass, MuxedAddressPass, ContractEventPass,
+    KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass,
     BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
@@ -764,6 +764,9 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the values its construction sites put in them are the
             // evidence the declaration lacks.
             Box::new(KeyFieldTypePass),
+            // And a read nothing converted takes the type every write under
+            // its key stores.
+            Box::new(StorageValueTypePass),
             Box::new(TreeifyStatsPass),
             Box::new(StructuringCensusPass),
         ],

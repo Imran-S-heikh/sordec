@@ -692,11 +692,24 @@ impl<'a> FnCtx<'a> {
     /// declared types. Only a `UserDefined` type qualifies: it is one the
     /// reconstruction also declares, so naming it cannot conflict with
     /// what rustc would have inferred.
+    ///
+    /// An SDK handle type too — `Address`, `Symbol`, the byte types: the
+    /// SDK's own, so naming it cannot conflict either, and a read handed
+    /// straight on (an address only a placeholder call consumes) has
+    /// nothing else to pin it.
     fn reads_a_recovered_type(binding: &Binding) -> bool {
-        matches!(
-            binding.ty,
-            IrType::Known(KnownType::UserDefined(_)) | IrType::Inferred(KnownType::UserDefined(_))
-        ) && matches!(
+        let named = |k: &KnownType| {
+            matches!(
+                k,
+                KnownType::UserDefined(_)
+                    | KnownType::Address
+                    | KnownType::Symbol
+                    | KnownType::String
+                    | KnownType::Bytes
+                    | KnownType::BytesN(_)
+            )
+        };
+        matches!(&binding.ty, IrType::Known(k) | IrType::Inferred(k) if named(k)) && matches!(
             binding.expr,
             Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. }))
         )

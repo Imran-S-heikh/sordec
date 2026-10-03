@@ -317,6 +317,18 @@ fn fold_decodes(func: &HighFunction, region: Region, decoded: &mut Vec<(ValueId,
                 decoded.push((value, chain));
                 return Region::Return { values: vec![value] };
             }
+            if let Some((value, chain)) = branched_bool(func, index, &arms, &default) {
+                let mut arms = arms;
+                let on_true = arms.pop().map(|a| a.body);
+                let on_false = arms.pop().map(|a| a.body);
+                if let (Some(t), Some(f)) = (on_true, on_false) {
+                    let then_region = Box::new(recurse(t));
+                    let else_region = Some(Box::new(recurse(f)));
+                    decoded.push((value, chain));
+                    return Region::If { cond: value, then_region, else_region };
+                }
+                unreachable!("branched_bool matched exactly two arms");
+            }
             Region::Switch {
                 index,
                 arms: arms
@@ -365,6 +377,40 @@ fn decoded_bool(
     };
     (returned(a, u32::from(TAG_FALSE), TAG_FALSE) && returned(b, u32::from(TAG_TRUE), TAG_TRUE))
         .then_some((value, chain))
+}
+
+/// A dispatch on a value's tag byte that *branches* on it as a `bool`:
+/// case `False` and case `True`, each doing its own work, and every other
+/// tag trapping — `if pause.paused() { … }` on a cross-contract result.
+///
+/// That is `bool::try_from_val` and an `if` on the answer, so it is the
+/// `if`, on the value read as a `bool`. Only when nothing but the
+/// dispatch reads the value: retyping one someone else reads as a `Val`
+/// would change what that reader means, and the branch would then test
+/// a `Val`. Arms ordered by case, `False` first.
+fn branched_bool(
+    func: &HighFunction,
+    index: ValueId,
+    arms: &[sordec_ir::SwitchArm],
+    default: &Region,
+) -> Option<(ValueId, Vec<ValueId>)> {
+    if !matches!(default, Region::Unreachable) && !traps(default) {
+        return None;
+    }
+    let [a, b] = arms else {
+        return None;
+    };
+    if a.cases != vec![u32::from(TAG_FALSE)] || b.cases != vec![u32::from(TAG_TRUE)] {
+        return None;
+    }
+    let mut chain = Vec::new();
+    let value = tag_byte_chain(func, index, &mut chain)?;
+    let read_elsewhere = func.bindings.iter().any(|(id, b)| {
+        let mut reads = false;
+        b.expr.for_each_value_use(|u| reads |= resolve_use(func, u) == value);
+        reads && !chain.contains(&id) && !matches!(b.expr, Expr::Use(_))
+    });
+    (!read_elsewhere).then_some((value, chain))
 }
 
 /// An arm that only traps: the conversion error on a tag that is neither.
@@ -607,12 +653,18 @@ mod tests {
         assert!(matches!(&m.functions[0].region, Region::Return { values } if values == &vec![v(0)]));
     }
 
-    /// An arm that yields something other than the re-encoding is a real
-    /// dispatch on a tag, not a round trip.
+    /// An arm that yields something other than the re-encoding is not a
+    /// round trip, so the value is not what is returned — but it is still
+    /// a branch on the value as a `bool`, every other tag trapping.
     #[test]
-    fn a_dispatch_that_is_not_a_round_trip_stays() {
+    fn a_dispatch_that_is_not_a_round_trip_is_a_branch() {
         let mut m = decode_shape(7);
-        assert!(!BoolCodecPass.run(&mut m).changed);
+        assert!(BoolCodecPass.run(&mut m).changed);
+        assert!(
+            matches!(&m.functions[0].region, Region::If { cond, .. } if *cond == v(0)),
+            "not the round trip's `return v0`, the `if`: {:?}",
+            m.functions[0].region
+        );
     }
 
     /// `b == 1` on a `bool` is `b`, `b == 0` its negation — the SDK's
@@ -658,5 +710,44 @@ mod tests {
         let mut ir = module(vec![f]);
         BoolCodecPass.run(&mut ir);
         assert!(matches!(ir.functions[0].bindings.get(v(2)).map(|b| &b.expr), Some(Expr::Binary { .. })));
+    }
+
+    /// `match tag_byte(v) { 0 => A, 1 => B, _ => trap }` with arms that do
+    /// their own work is `if v { B } else { A }` on `v` read as a `bool`.
+    #[test]
+    fn a_tag_dispatch_with_working_arms_is_an_if_on_the_bool() {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                // v0 the Val
+                Expr::Unary { op: UnaryOp::Wrap32, value: v(0) },              // v1
+                Expr::Literal(Literal::I32(0xFF)),                             // v2
+                Expr::Binary { op: BinaryOp::BitAnd, lhs: v(1), rhs: v(2) },   // v3
+            ],
+            vec![v(0)],
+            vec![1, 2, 3],
+        );
+        f.region = Region::Sequence(vec![
+            Region::Basic(<sordec_common::BlockId as sordec_common::IrId>::from_index(0)),
+            Region::Switch {
+                index: v(3),
+                arms: vec![
+                    SwitchArm { cases: vec![0], body: Region::Return { values: vec![v(2)] } },
+                    SwitchArm { cases: vec![1], body: Region::Panic { kind: PanicKind::Bare } },
+                ],
+                default: Box::new(Region::Unreachable),
+                dispatch: None,
+            },
+        ]);
+        let mut ir = module(vec![f]);
+        assert!(BoolCodecPass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        let Region::Sequence(items) = &f.region else { panic!("a sequence") };
+        assert!(
+            matches!(&items[1], Region::If { cond, then_region, .. }
+                if *cond == v(0) && matches!(**then_region, Region::Panic { .. })),
+            "the true arm is the `then`: {:?}",
+            items[1]
+        );
+        assert!(matches!(f.bindings.get(v(0)).map(|b| &b.ty), Some(IrType::Inferred(KnownType::Bool))));
     }
 }

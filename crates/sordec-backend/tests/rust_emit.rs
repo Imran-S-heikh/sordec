@@ -170,7 +170,8 @@ fn token_v23_names_locals_from_structure() {
 
     // Storage reads named after their resolved key variant.
     assert!(
-        src.contains("let admin = e.storage().instance().get(&DataKey::Admin)"),
+        // Annotated: the type every write under `Admin` stores.
+        src.contains("let admin: Address = e.storage().instance().get(&DataKey::Admin)"),
         "storage read named `admin`:\n{src}"
     );
     // Bound by an `if let` pattern rather than a `let`: the source tests
