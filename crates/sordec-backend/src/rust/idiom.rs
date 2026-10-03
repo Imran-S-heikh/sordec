@@ -35,8 +35,7 @@ use syn::parse_quote;
 
 use sordec_ir::{
     BufOpKind, ClientInterface, CryptoOpKind, EnumKey, KnownOp, KnownTier, PrngOpKind, StorageTier,
-    VecOpKind,
-};
+    VecOpKind, KnownType, IrType};
 
 use crate::rust::body::FnCtx;
 use crate::rust::ty::ident;
@@ -61,9 +60,18 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             elements: Some(values),
             ..
         } => {
-            let items: Vec<syn::Expr> = values.iter().map(|v| ctx.arg_ref(*v)).collect();
+            let (items, converted) = vec_items(ctx, values);
             let e = ctx.env_borrow();
-            Some(parse_quote!(soroban_sdk::vec![#e, #(#items),*]))
+            if converted {
+                // `Vec::from_array`, not the macro: a macro's tokens are
+                // opaque to `imports::collapse`, so a qualified path
+                // written inside `vec![…]` can never shorten, and the
+                // module is required to carry none. The array form puts
+                // the conversions somewhere the collapser can see.
+                Some(parse_quote!(soroban_sdk::Vec::from_array(#e, [#(#items),*])))
+            } else {
+                Some(parse_quote!(soroban_sdk::vec![#e, #(#items),*]))
+            }
         }
         KnownOp::VecOp { kind, args } => {
             let v = ctx.value_ref(*args.first()?);
@@ -468,6 +476,56 @@ fn key_expr(ctx: &FnCtx, key: sordec_common::ValueId, resolved: &Option<EnumKey>
         }
         parse_quote!(#enum_name::#variant(#(#payload),*))
     }
+}
+
+/// A vec's elements, with the conversion a mixed one needs.
+///
+/// `soroban_sdk::vec!` builds a `Vec<T>` from an array, so every element
+/// has to be the same `T`. Where the recovered types agree that is what
+/// they are, and the elements render plainly. Where they do not — an event
+/// topic vec holding a `Symbol` and two `Address`es — the vec is a
+/// `Vec<Val>` and each element converts into one.
+///
+/// A value we could not type is left alone: it renders as a hole, whose
+/// `!` already coerces to anything, and converting it would claim a
+/// conversion of nothing.
+///
+/// The path is written out in full; [`crate::rust::imports`] shortens it
+/// and adds the `use` when it collapses the module's paths.
+fn vec_items(ctx: &FnCtx, values: &[sordec_common::ValueId]) -> (Vec<syn::Expr>, bool) {
+    // An untyped element counts as a `Val`, because that is what it is
+    // emitted as — the hole policy names an unrecovered type `Val`, and a
+    // parameter carrying one is declared `Val` in the helper's signature.
+    // Reading it as "no information" instead let a vec of
+    // `Val, Address, Address` look uniform, and `vec!` then picked
+    // `Address`.
+    let base = |v: &sordec_common::ValueId| match ctx.func.bindings.get(*v).map(|b| &b.ty) {
+        Some(IrType::Known(k) | IrType::Inferred(k)) => k.clone(),
+        _ => KnownType::Val,
+    };
+    let known: Vec<KnownType> = values.iter().map(&base).collect();
+    let mixed = known.windows(2).any(|w| w[0] != w[1]);
+    let items = values
+        .iter()
+        .map(|v| {
+            let x = ctx.arg_ref(*v);
+            match base(v) {
+                k if mixed && k != KnownType::Val => {
+                    // `into_val` takes `&Env`; `env_borrow` is the one that
+                    // spells the borrow where this function owns its env
+                    // and the bare name where it was handed a reference.
+                    let e = ctx.env_borrow();
+                    parse_quote!(
+                        soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(
+                            &#x, #e
+                        )
+                    )
+                }
+                _ => x,
+            }
+        })
+        .collect();
+    (items, mixed)
 }
 
 /// The struct a key variant's single declared field names, and that

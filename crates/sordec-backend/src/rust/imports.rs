@@ -44,6 +44,17 @@ const TYPE_NAMES: &[&str] = &[
     "Duration",
 ];
 
+/// soroban-sdk traits the emitter names in a qualified call.
+///
+/// `IntoVal` is written with its parameters spelled out —
+/// `IntoVal::<Env, Val>::into_val(&x, e)` — because the bare method needs
+/// its target type pinned from context, and the positions that need the
+/// conversion are exactly the ones with no context to pin it (see
+/// `idiom::vec_items`). Collapsing it is the same decision as for a type:
+/// the name shortens and the `use` carries it, and `shadowed` is what
+/// keeps a contract defining its own `IntoVal` safe.
+const TRAIT_NAMES: &[&str] = &["IntoVal"];
+
 /// soroban-sdk macros the emitter writes as `soroban_sdk::<macro>!(…)`.
 const MACRO_NAMES: &[&str] = &["panic_with_error", "symbol_short", "vec"];
 
@@ -130,6 +141,7 @@ impl VisitMut for Collapser {
                         // that, not the qualified spelling, is the defence
                         // against a module defining its own `Symbol`.
                         || TYPE_NAMES.contains(&name.as_str())
+                        || TRAIT_NAMES.contains(&name.as_str())
                         // A macro path has no trailing segments, so it must
                         // be the leaf.
                         || (leaf && MACRO_NAMES.contains(&name.as_str()))
