@@ -634,6 +634,10 @@ fn plan(
     let mut metrics = PassMetrics::new();
     // Only an entrypoint carries the ABI guarantee the collapse rests on.
     if func.signature.is_none() {
+        elisions.extend(host_decodes(func));
+        for el in &elisions {
+            metrics.increment(el.metric, 1);
+        }
         return (elisions, metrics);
     }
 
@@ -758,6 +762,7 @@ fn plan(
         });
     }
     elisions.extend(inline_decodes(func));
+    elisions.extend(host_decodes(func));
     for el in &elisions {
         metrics.increment(el.metric, 1);
     }
@@ -865,6 +870,10 @@ fn inline_decodes(func: &HighFunction) -> Vec<Elision> {
             let Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })) = &func.bindings.get(id)?.expr else {
                 return None;
             };
+            // A host result's decode is `host_decodes`'s.
+            if typed_host_u32(func, resolve_use(func, *value)).is_some() {
+                return None;
+            }
             let param = resolve_use(func, *value);
             let declared = declared_param_type(func, param)?;
             matches!(declared, KnownType::U32 | KnownType::I32).then(|| Elision {
@@ -876,6 +885,58 @@ fn inline_decodes(func: &HighFunction) -> Vec<Elision> {
             })
         })
         .collect()
+}
+
+/// The decode of a host result the SDK hands back already typed —
+/// `e.ledger().sequence()` is a `u32` — is that result: the
+/// backend spells the typed call, so a decode after it would decode twice
+/// (`sequence >> 32` on the `u32` the call returns is `0`). As a
+/// `ValDecodeSmall`, or as the `>> 32` it inlines to. No ABI is needed, so
+/// helpers too.
+fn host_decodes(func: &HighFunction) -> Vec<Elision> {
+    sret::emission_order(func)
+        .into_iter()
+        .filter_map(|id| {
+            let value = match &func.bindings.get(id)?.expr {
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })) => *value,
+                Expr::Binary { op: sordec_ir::BinaryOp::Shr, lhs, rhs }
+                    if crate::dataflow::trace_int(func, *rhs) == Some(32) =>
+                {
+                    *lhs
+                }
+                _ => return None,
+            };
+            let value = resolve_use(func, value);
+            let ty = typed_host_u32(func, value)?;
+            Some(Elision {
+                id,
+                expr: Expr::Use(value),
+                ty: Some(IrType::Known(ty)),
+                note: "decode of a host result the SDK returns already typed: the result".to_string(),
+                metric: metrics::DECODE_COLLAPSED,
+            })
+        })
+        .collect()
+}
+
+/// The `u32` a host operation's typed SDK call returns, when `value` is
+/// one: the ledger sequence or protocol version.
+///
+/// Not yet a length (`bytes.len()`, `vec.len()`), though the same holds of
+/// it. A length is what a loop counter is compared against, and the counter
+/// starts from a constant typed by its wasm word (`0i64`); a `u32` length
+/// leaves the counter untyped and costs more errors than the hole it
+/// removes. Measured on the held-out set: 119 error lines without lengths,
+/// 129 with. Lengths come in with loop-counter typing.
+fn typed_host_u32(func: &HighFunction, value: ValueId) -> Option<KnownType> {
+    let Expr::Semantic(SemanticOp::Known(op)) = &func.bindings.get(value)?.expr else {
+        return None;
+    };
+    let ty = match op {
+        KnownOp::GetLedgerSequence | KnownOp::GetLedgerProtocolVersion => KnownType::U32,
+        _ => return None,
+    };
+    matches!(ty, KnownType::U32 | KnownType::I32).then_some(ty)
 }
 
 /// The `contractspecv0` type of `value`, when it is one of this
@@ -1300,5 +1361,23 @@ mod census {
                 println!("{reason}");
             }
         }
+    }
+
+    /// `e.ledger().sequence() >> 32` decodes a value the typed SDK call
+    /// already returns as a `u32`: the decode is the call.
+    #[test]
+    fn a_ledger_sequence_decode_is_the_sequence() {
+        let f = crate::marshalling::test_support::func_with(
+            vec![
+                Expr::Semantic(SemanticOp::Known(KnownOp::GetLedgerSequence)), // v0
+                Expr::Literal(Literal::I64(32)),                               // v1
+                Expr::Binary { op: sordec_ir::BinaryOp::Shr, lhs: crate::marshalling::test_support::v(0), rhs: crate::marshalling::test_support::v(1) }, // v2
+            ],
+            vec![],
+            vec![0, 1, 2],
+        );
+        let elisions = host_decodes(&f);
+        assert_eq!(elisions.len(), 1);
+        assert!(matches!(elisions[0].expr, Expr::Use(x) if x == crate::marshalling::test_support::v(0)));
     }
 }

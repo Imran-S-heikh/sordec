@@ -841,10 +841,68 @@ impl<'a> FnCtx<'a> {
                         .or_else(|| expr::unsuffixed_against(self, source, &b.ty))
                         .or_else(|| expr::val_constant(self, source, phi))
                         .or_else(|| expr::sign_cast(self, source, &b.ty))
+                        .or_else(|| self.val_merge_input(source, phi))
+                        .or_else(|| expr::bool_to_int(self, source, &b.ty))
                 })
                 .unwrap_or_else(|| self.value_ref(source));
             out.push(parse_quote!(#lhs = #rhs;));
         }
+    }
+
+    /// A host object merged into a `Val` — declared one, or untyped and so
+    /// declared one — converted on the way in: the merge holds the encoded
+    /// word, `Option<Address>` as its `Val` with the `Void` beside it.
+    fn val_merge_input(&self, source: ValueId, phi: ValueId) -> Option<syn::Expr> {
+        let merge = self.func.bindings.get(phi)?;
+        if !matches!(
+            merge.ty,
+            IrType::Unknown(_) | IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val)
+        ) {
+            return None;
+        }
+        let src = self.func.bindings.get(self.fold_target(source))?;
+        let object = matches!(
+            &src.ty,
+            IrType::Known(
+                KnownType::Address
+                    | KnownType::Symbol
+                    | KnownType::String
+                    | KnownType::Bytes
+                    | KnownType::BytesN(_)
+                    | KnownType::Vec(_)
+                    | KnownType::Map(_, _)
+            ) | IrType::Inferred(
+                KnownType::Address
+                    | KnownType::Symbol
+                    | KnownType::String
+                    | KnownType::Bytes
+                    | KnownType::BytesN(_)
+                    | KnownType::Vec(_)
+                    | KnownType::Map(_, _)
+            )
+        );
+        if object {
+            let x = self.arg_ref(source);
+            let e = self.env_borrow();
+            return Some(parse_quote!(soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#x, #e)));
+        }
+        // The constant beside such an object is its encoding already.
+        let has_object_input = matches!(&merge.expr, Expr::Phi { incoming } if incoming.iter().any(|(_, v)| {
+            self.func.bindings.get(self.fold_target(*v)).is_some_and(|b| matches!(
+                &b.ty,
+                IrType::Known(KnownType::Address | KnownType::Symbol | KnownType::String | KnownType::Bytes)
+                    | IrType::Inferred(KnownType::Address | KnownType::Symbol | KnownType::String | KnownType::Bytes)
+            ))
+        }));
+        if has_object_input && let Expr::Literal(sordec_ir::Literal::I64(bits)) = src.expr {
+            return Some(if bits == 2 {
+                parse_quote!(soroban_sdk::Val::VOID.into())
+            } else {
+                let lit = proc_macro2::Literal::u64_suffixed(bits as u64);
+                parse_quote!(soroban_sdk::Val::from_payload(#lit))
+            });
+        }
+        None
     }
 
     /// A value merged into the function's `Result`, wrapped the way a
@@ -867,6 +925,14 @@ impl<'a> FnCtx<'a> {
                 && matches!(binding.expr, Expr::Literal(sordec_ir::Literal::I64(2))) =>
             {
                 Some(parse_quote!(Ok(())))
+            }
+            // The `Ok` payload itself, typed as the `Result`'s `Ok` side.
+            IrType::Known(k) | IrType::Inferred(k)
+                if matches!(merge_ty, IrType::Known(KnownType::Result(ok, _)) | IrType::Inferred(KnownType::Result(ok, _))
+                    if matches!(&**ok, IrType::Known(o) | IrType::Inferred(o) if o == k)) =>
+            {
+                let v = self.value_ref(source);
+                Some(parse_quote!(Ok(#v)))
             }
             _ => None,
         }

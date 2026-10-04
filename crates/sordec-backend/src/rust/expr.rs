@@ -63,6 +63,43 @@ pub(crate) fn sign_cast(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -
     Some(parse_quote!((#x as #ty)))
 }
 
+/// A `bool` assigned where an integer goes: it is `0` or `1` in the wasm,
+/// which is what the cast yields.
+pub(crate) fn bool_to_int(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<syn::Expr> {
+    let (IrType::Known(to) | IrType::Inferred(to)) = want else { return None };
+    if !matches!(to, KnownType::I32 | KnownType::U32 | KnownType::I64 | KnownType::U64) {
+        return None;
+    }
+    if !bool_like(ctx, ctx.fold_target(v), 0) {
+        return None;
+    }
+    let x = ctx.value_ref(v);
+    let ty = crate::rust::ty::ir_type(want, ctx.reg, ctx.policy);
+    Some(parse_quote!((#x as #ty)))
+}
+
+/// A `bool` by type, or by construction: a comparison, or a bitwise
+/// combination of `bool`s — whatever it has been typed.
+fn bool_like(ctx: &FnCtx, v: sordec_common::ValueId, depth: u32) -> bool {
+    if ctx.is_boolean(v) {
+        return true;
+    }
+    if depth > 4 {
+        return false;
+    }
+    match ctx.func.bindings.get(v).map(|b| &b.expr) {
+        Some(Expr::Binary { op, lhs, rhs }) => match op {
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => true,
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                bool_like(ctx, ctx.fold_target(*lhs), depth + 1) && bool_like(ctx, ctx.fold_target(*rhs), depth + 1)
+            }
+            _ => false,
+        },
+        Some(Expr::Unary { op: sordec_ir::UnaryOp::Eqz, .. }) => true,
+        _ => false,
+    }
+}
+
 /// A negative constant compared for equality with an unsigned value,
 /// written as the unsigned number with the same bits.
 fn same_bits(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common::ValueId) -> Option<syn::Expr> {
@@ -331,7 +368,16 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 // overflow test `count == -1i32` on a `u32` is `u32::MAX`.
                 BinaryOp::Eq | BinaryOp::Ne => (
                     unsuffixed(ctx, *lhs, *rhs).or_else(|| same_bits(ctx, *lhs, *rhs)),
-                    unsuffixed(ctx, *rhs, *lhs).or_else(|| same_bits(ctx, *rhs, *lhs)),
+                    unsuffixed(ctx, *rhs, *lhs)
+                        .or_else(|| same_bits(ctx, *rhs, *lhs))
+                        // Equality on bits survives a sign change: the right
+                        // side takes the left's signedness.
+                        .or_else(|| {
+                            ctx.func
+                                .bindings
+                                .get(ctx.fold_target(*lhs))
+                                .and_then(|b| sign_cast(ctx, *rhs, &b.ty))
+                        }),
                 ),
                 BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt
                 | BinaryOp::Ge | BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
