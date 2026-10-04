@@ -41,6 +41,52 @@ fn unsuffixed(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common
     unsuffixed_against(ctx, value, &other.ty)
 }
 
+/// An integer handed to a parameter of the same width and the other
+/// signedness, cast. Wasm integers carry no sign — a frame address is an
+/// `i32` to the arithmetic that made it and a `u32` to the host call it
+/// feeds — so the cast keeps every bit, and only Rust needed it written.
+fn sign_cast(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<syn::Expr> {
+    let width = |k: &KnownType| match k {
+        KnownType::I32 | KnownType::U32 => Some(32),
+        KnownType::I64 | KnownType::U64 => Some(64),
+        _ => None,
+    };
+    let (IrType::Known(to) | IrType::Inferred(to)) = want else { return None };
+    let (IrType::Known(from) | IrType::Inferred(from)) = &ctx.func.bindings.get(ctx.fold_target(v))?.ty else {
+        return None;
+    };
+    if from == to || width(from)? != width(to)? {
+        return None;
+    }
+    let x = ctx.value_ref(v);
+    let ty = crate::rust::ty::ir_type(want, ctx.reg, ctx.policy);
+    Some(parse_quote!((#x as #ty)))
+}
+
+/// A negative constant compared for equality with an unsigned value,
+/// written as the unsigned number with the same bits.
+fn same_bits(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common::ValueId) -> Option<syn::Expr> {
+    let other = ctx.func.bindings.get(ctx.fold_target(against))?;
+    let binding = ctx.func.bindings.get(ctx.fold_target(value))?;
+    let unsigned = match &other.ty {
+        IrType::Known(k) | IrType::Inferred(k) => k.clone(),
+        IrType::Unknown(_) => return None,
+    };
+    let lit = match (&binding.expr, unsigned) {
+        (Expr::Literal(Literal::I32(n)), KnownType::U32) if *n < 0 => {
+            proc_macro2::Literal::u32_unsuffixed(*n as u32)
+        }
+        (Expr::Literal(Literal::I64(n)), KnownType::U64) if *n < 0 => {
+            proc_macro2::Literal::u64_unsuffixed(*n as u64)
+        }
+        (Expr::Literal(Literal::I64(n)), KnownType::U32) if *n < 0 && i32::try_from(*n).is_ok() => {
+            proc_macro2::Literal::u32_unsuffixed(*n as i32 as u32)
+        }
+        _ => return None,
+    };
+    Some(parse_quote!(#lit))
+}
+
 /// `value` as a suffix-free integer literal, inferred against a type
 /// rather than against another value in this function.
 ///
@@ -280,7 +326,14 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             // on a `u32` reaches us as `count + 1i64`, the constant still the
             // wasm word it was loaded as.
             let (l, r) = match op {
-                BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt
+                // Equality compares bits, so a negative constant against an
+                // unsigned value is the same bits read unsigned: the `+ 1`
+                // overflow test `count == -1i32` on a `u32` is `u32::MAX`.
+                BinaryOp::Eq | BinaryOp::Ne => (
+                    unsuffixed(ctx, *lhs, *rhs).or_else(|| same_bits(ctx, *lhs, *rhs)),
+                    unsuffixed(ctx, *rhs, *lhs).or_else(|| same_bits(ctx, *rhs, *lhs)),
+                ),
+                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt
                 | BinaryOp::Ge | BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
                     (unsuffixed(ctx, *lhs, *rhs), unsuffixed(ctx, *rhs, *lhs))
                 }
@@ -316,6 +369,7 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                     want.as_ref()
                         .and_then(|ty| unsuffixed_against(ctx, *v, ty))
                         .or_else(|| want.as_ref().and_then(|ty| val_coerced(ctx, *v, ty)))
+                        .or_else(|| want.as_ref().and_then(|ty| sign_cast(ctx, *v, ty)))
                         .unwrap_or_else(|| ctx.arg_ref(*v))
                 })
                 .collect();
