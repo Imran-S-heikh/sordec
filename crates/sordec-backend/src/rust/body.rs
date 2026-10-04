@@ -840,6 +840,7 @@ impl<'a> FnCtx<'a> {
                     self.result_wrapped(source, &b.ty)
                         .or_else(|| expr::unsuffixed_against(self, source, &b.ty))
                         .or_else(|| expr::val_constant(self, source, phi))
+                        .or_else(|| expr::sign_cast(self, source, &b.ty))
                 })
                 .unwrap_or_else(|| self.value_ref(source));
             out.push(parse_quote!(#lhs = #rhs;));
@@ -900,7 +901,9 @@ impl<'a> FnCtx<'a> {
                 // returns, as a merge's constant input does.
                 let v = self
                     .helper_return_type()
-                    .and_then(|ty| expr::unsuffixed_against(self, *one, &ty))
+                    .and_then(|ty| {
+                        expr::unsuffixed_against(self, *one, &ty).or_else(|| expr::sign_cast(self, *one, &ty))
+                    })
                     .unwrap_or_else(|| self.return_expr(*one));
                 parse_quote!(return #v;)
             }

@@ -45,7 +45,7 @@ fn unsuffixed(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common
 /// signedness, cast. Wasm integers carry no sign — a frame address is an
 /// `i32` to the arithmetic that made it and a `u32` to the host call it
 /// feeds — so the cast keeps every bit, and only Rust needed it written.
-fn sign_cast(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<syn::Expr> {
+pub(crate) fn sign_cast(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<syn::Expr> {
     let width = |k: &KnownType| match k {
         KnownType::I32 | KnownType::U32 => Some(32),
         KnownType::I64 | KnownType::U64 => Some(64),
