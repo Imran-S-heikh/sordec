@@ -421,6 +421,39 @@ impl<'a> FnCtx<'a> {
             })
     }
 
+    /// The machine type of an untyped memory read that only arithmetic and
+    /// comparisons read: `i64` for an 8-byte read, `i32` for a full 4-byte
+    /// one. Left untyped, the hole's `!` falls back to `()` and every one
+    /// of those readers fails (`() == i32`). A read anything else consumes
+    /// may be a host handle, which the width says nothing about, and is
+    /// left to inference.
+    fn raw_load_word(&self, vid: ValueId) -> Option<syn::Type> {
+        let b = self.func.bindings.get(vid)?;
+        if !matches!(b.ty, IrType::Unknown(_)) {
+            return None;
+        }
+        let Expr::Load { width, signed, .. } = &b.expr else {
+            return None;
+        };
+        let ty: syn::Type = match (width, signed) {
+            (sordec_ir::MemWidth::W8, _) => parse_quote!(i64),
+            (sordec_ir::MemWidth::W4, None) => parse_quote!(i32),
+            _ => return None,
+        };
+        let mut readers = 0;
+        let mut only_arith = true;
+        for (_, r) in self.func.bindings.iter() {
+            let mut reads = false;
+            r.expr.for_each_value_use(|u| reads |= u == vid);
+            if !reads || self.liveness.is_unused(r.id) && !matches!(r.expr, Expr::Binary { .. }) {
+                continue;
+            }
+            readers += 1;
+            only_arith &= matches!(r.expr, Expr::Binary { .. });
+        }
+        (readers > 0 && only_arith).then_some(ty)
+    }
+
     fn has_machine_type(&self, vid: ValueId) -> bool {
         matches!(
             self.func.bindings.get(vid).map(|b| &b.ty),
@@ -459,11 +492,67 @@ impl<'a> FnCtx<'a> {
     /// recovered, so it is left alone to fail visibly.
     fn cond_ref(&self, vid: ValueId) -> syn::Expr {
         let expr = self.value_ref(vid);
-        if self.is_machine_integer(vid) {
+        if self.is_machine_integer(vid) || self.is_untyped_arithmetic(vid) {
             parse_quote!(#expr != 0)
         } else {
             expr
         }
+    }
+
+    /// A result of integer arithmetic not typed as an integer: an integer,
+    /// whatever its width, so the truth test is `!= 0` on it as on a typed
+    /// one. Untyped, or typed `bool` by the branch that tests it — which
+    /// arithmetic in Rust never yields.
+    fn is_untyped_arithmetic(&self, vid: ValueId) -> bool {
+        // Through renames: the branch often tests a copy of the result.
+        let mut at = vid;
+        for _ in 0..8 {
+            match self.func.bindings.get(at).map(|b| &b.expr) {
+                Some(Expr::Use(next)) => at = *next,
+                _ => break,
+            }
+        }
+        let Some(b) = self.func.bindings.get(at) else { return false };
+        // On `bool`s the bitwise operators are the logical ones, so a
+        // `bool`-typed `a | b` is a `bool`; only arithmetic proper is not.
+        if matches!(b.ty, IrType::Known(KnownType::Bool) | IrType::Inferred(KnownType::Bool)) {
+            return matches!(
+                b.expr,
+                Expr::Binary {
+                    op: sordec_ir::BinaryOp::Add
+                        | sordec_ir::BinaryOp::Sub
+                        | sordec_ir::BinaryOp::Mul
+                        | sordec_ir::BinaryOp::Shl
+                        | sordec_ir::BinaryOp::Shr,
+                    ..
+                }
+            );
+        }
+        // Untyped, a bitwise op on a `bool` operand is logical as well:
+        // `(a != 0) | (b < c)` is a `bool` whatever it has been typed.
+        if let Expr::Binary {
+            op: sordec_ir::BinaryOp::BitAnd | sordec_ir::BinaryOp::BitOr | sordec_ir::BinaryOp::BitXor,
+            lhs,
+            rhs,
+        } = &b.expr
+            && (self.is_boolean(*lhs) || self.is_boolean(*rhs))
+        {
+            return false;
+        }
+        matches!(b.ty, IrType::Unknown(_)) && matches!(
+                b.expr,
+                Expr::Binary {
+                    op: sordec_ir::BinaryOp::Add
+                        | sordec_ir::BinaryOp::Sub
+                        | sordec_ir::BinaryOp::Mul
+                        | sordec_ir::BinaryOp::BitAnd
+                        | sordec_ir::BinaryOp::BitOr
+                        | sordec_ir::BinaryOp::BitXor
+                        | sordec_ir::BinaryOp::Shl
+                        | sordec_ir::BinaryOp::Shr,
+                    ..
+                }
+            )
     }
 
     /// Whether a binding is an integer the wasm truth test was applied to
@@ -631,6 +720,12 @@ impl<'a> FnCtx<'a> {
                 if self.escaping.contains(&vid) {
                     // The hoisted declaration already carries the type.
                     out.push(parse_quote!(#name = #value;));
+                } else if Self::is_hole_expr(&value)
+                    && let Some(ty) = self.raw_load_word(vid)
+                {
+                    // An untyped memory read nothing reads but arithmetic is
+                    // the machine word its width says; see `raw_load_word`.
+                    out.push(parse_quote!(let #name: #ty = #value;));
                 } else if Self::is_hole_expr(&value)
                     && (self.has_machine_type(vid) || self.has_handle_type_untouched(vid))
                 {

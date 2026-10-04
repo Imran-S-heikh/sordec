@@ -206,7 +206,18 @@ fn known(k: &KnownType, reg: &TypeRegistry, policy: &dyn HolePolicy) -> syn::Typ
         }
         KnownType::Result(t, e) => {
             let ok = ir_type(t, reg, policy);
-            let err = ir_type(e, reg, policy);
+            // The error side the way the signature spells it (see
+            // `result_error`): a value merged into the returned `Result`
+            // has to be the same type the function returns.
+            let err = match &**e {
+                IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error) => {
+                    match reg.sole_error_enum() {
+                        Some(name) => named(name),
+                        None => ir_type(e, reg, policy),
+                    }
+                }
+                _ => ir_type(e, reg, policy),
+            };
             parse_quote!(Result<#ok, #err>)
         }
         KnownType::Vec(t) => {

@@ -96,7 +96,9 @@ struct WideDecoder {
 struct WideEncoder {
     lo_index: usize,
     hi_index: usize,
-    disc_index: usize,
+    /// Which returned component is the status, when the helper returns
+    /// one. Some SDK versions return the encoded `Val` alone.
+    disc_index: Option<usize>,
     payload_index: usize,
     ty: KnownType,
 }
@@ -390,11 +392,32 @@ fn tested_tags(func: &HighFunction, param: ValueId) -> Vec<u8> {
 }
 
 fn classify_encoder(func: &HighFunction) -> Option<WideEncoder> {
+    classify_encoder_inner(func)
+}
+
+fn classify_encoder_inner(func: &HighFunction) -> Option<WideEncoder> {
     if func.params.len() != 2 {
         return None;
     }
-    let shape = sret::analyze_returns(func)?;
-    if shape.arity() != 2 {
+    // Two components (status, `Val`), or the `Val` alone — a shape the
+    // multi-value analysis leaves to ordinary returns, so read here.
+    let single: Option<Vec<ValueId>> = if func.signature.is_none() {
+        let mut values = Vec::new();
+        let mut ok = true;
+        func.region.for_each_node(|node| {
+            if let sordec_ir::Region::Return { values: v } = node {
+                match v.as_slice() {
+                    [one] => values.push(*one),
+                    _ => ok = false,
+                }
+            }
+        });
+        (ok && !values.is_empty()).then_some(values)
+    } else {
+        None
+    };
+    let shape = sret::analyze_returns(func);
+    if shape.as_ref().is_some_and(|s| s.arity() != 2) || (shape.is_none() && single.is_none()) {
         return None;
     }
     for id in sret::emission_order(func) {
@@ -407,15 +430,19 @@ fn classify_encoder(func: &HighFunction) -> Option<WideEncoder> {
     }
     let all_zero = |index: usize| {
         shape
-            .component(index)
+            .as_ref()
+            .and_then(|s| s.component(index))
             .is_some_and(|vs| vs.iter().all(|v| trace_int(func, *v) == Some(0)))
     };
-    let disc_index = match (all_zero(0), all_zero(1)) {
-        (true, false) => 0,
-        (false, true) => 1,
-        _ => return None,
+    let (disc_index, payload_index) = if shape.is_none() {
+        (None, 0)
+    } else {
+        match (all_zero(0), all_zero(1)) {
+            (true, false) => (Some(0), 1),
+            (false, true) => (Some(1), 0),
+            _ => return None,
+        }
     };
-    let payload_index = 1 - disc_index;
     let (p0, p1) = (func.params[0], func.params[1]);
 
     // Every arm of the payload is one of the two encodings of the same
@@ -426,7 +453,11 @@ fn classify_encoder(func: &HighFunction) -> Option<WideEncoder> {
     let mut lo: Option<ValueId> = None;
     let mut hi: Option<ValueId> = None;
     let mut arms: Vec<ValueId> = Vec::new();
-    for v in shape.component(payload_index)? {
+    let payloads: Vec<ValueId> = match &shape {
+        Some(s) => s.component(payload_index)?,
+        None => single?,
+    };
+    for v in payloads {
         arms.extend(arms_of(func, v)?);
     }
     if arms.is_empty() {
@@ -687,6 +718,21 @@ fn rewrite_encodes(func: &mut HighFunction, encoders: &HashMap<FuncId, WideEncod
         .collect();
     let mut count = 0;
     for (call, enc, args) in sites {
+        // A helper returning the encoded `Val` alone: the call *is* the
+        // value, joined from the limbs it was handed.
+        if enc.disc_index.is_none() {
+            if let Some(b) = func.bindings.get_mut(call) {
+                b.expr = Expr::WideJoin { lo: args[enc.lo_index], hi: args[enc.hi_index] };
+                b.ty = IrType::Known(enc.ty.clone());
+                b.add_provenance(Provenance::new(
+                    PASS_NAME,
+                    ProvenanceSource::SdkPattern,
+                    "call to a wide IntoVal helper: the value it encodes, joined from its limbs",
+                ));
+            }
+            count += 1;
+            continue;
+        }
         let projections: Vec<(ValueId, u32)> = func
             .bindings
             .iter()
@@ -714,7 +760,7 @@ fn rewrite_encodes(func: &mut HighFunction, encoders: &HashMap<FuncId, WideEncod
         }
         for (id, index) in projections {
             let Some(b) = func.bindings.get_mut(id) else { continue };
-            if index as usize == enc.disc_index {
+            if Some(index as usize) == enc.disc_index {
                 b.expr = Expr::Literal(Literal::I64(0));
                 b.add_provenance(Provenance::new(
                     PASS_NAME,
@@ -916,7 +962,7 @@ mod tests {
     #[test]
     fn the_i128_encoder_is_classified() {
         let e = classify_encoder(&i128_encoder(0)).expect("encoder");
-        assert_eq!((e.lo_index, e.hi_index, e.disc_index, e.payload_index), (0, 1, 0, 1));
+        assert_eq!((e.lo_index, e.hi_index, e.disc_index, e.payload_index), (0, 1, Some(0), 1));
         assert_eq!(e.ty, KnownType::I128);
     }
 

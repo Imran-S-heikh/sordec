@@ -81,10 +81,17 @@ impl Pass<HighIr> for WideParamPass {
 }
 
 /// Helpers every caller hands two halves of one value.
+///
+/// Only callers that can run vote: a scheduled call, in a function some
+/// entrypoint reaches. A wrapper inlined at every site stays in the module
+/// with its own calls still passing its raw parameters — atomic_swap's
+/// `move_token` — and counting it vetoed every live caller's agreement.
 fn candidates(ir: &HighIr) -> HashMap<FuncId, Halves> {
+    let live = super::live_functions(ir);
     let mut seen: HashMap<FuncId, Option<Halves>> = HashMap::new();
-    for caller in &ir.functions {
-        for (_, binding) in caller.bindings.iter() {
+    for caller in ir.functions.iter().filter(|f| live.contains(&f.id)) {
+        for id in crate::marshalling::sret::emission_order(caller) {
+            let Some(binding) = caller.bindings.get(id) else { continue };
             let Expr::Call { target, args } = &binding.expr else {
                 continue;
             };

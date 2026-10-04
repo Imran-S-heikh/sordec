@@ -129,7 +129,7 @@ fn heldout_floor(name: &str) -> f64 {
     match name {
         "account" => 0.54,
         "alloc" => 0.54,
-        "atomic_swap" => 0.90,
+        "atomic_swap" => 0.98,
         "auth" => 0.98,
         // Lowered 2026-10-03 (0.7390 -> 0.6873) for a correct fold. The
         // outlined `BytesN<96>` conversion of the owners read became the

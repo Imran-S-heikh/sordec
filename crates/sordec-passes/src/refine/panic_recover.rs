@@ -39,7 +39,8 @@ use sordec_common::{
     Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, ValueId,
 };
 use sordec_ir::{
-    BinaryOp, Expr, HighFunction, HighIr, KnownOp, Literal, PanicKind, Region, SemanticOp, UnaryOp,
+    BinaryOp, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, PanicKind, Region,
+    SemanticOp, UnaryOp,
 };
 
 use super::debug_validate;
@@ -526,6 +527,21 @@ fn is_overflow_test(func: &HighFunction, x: ValueId, y: ValueId) -> bool {
         return true;
     }
     // sub borrow — the compared pair are the operands of one subtraction.
+    //
+    // Only on unsigned values: rustc's signed subtraction overflows by sign,
+    // which the mask test above reads, so `a < b` before a signed `a - b` is
+    // the author's own check. atomic_swap's `if amount_a < min_a_for_b {
+    // panic!(..) }` precedes `amount_a - min_a_for_b` on `i128`s, and reading
+    // it as the borrow test deleted it.
+    let signed = |v: ValueId| {
+        matches!(
+            func.bindings.get(v).map(|b| &b.ty),
+            Some(IrType::Known(KnownType::I128 | KnownType::I256) | IrType::Inferred(KnownType::I128 | KnownType::I256))
+        )
+    };
+    if signed(x) || signed(y) {
+        return false;
+    }
     func.bindings.iter().any(|(_, binding)| {
         matches!(
             &binding.expr,
@@ -839,6 +855,34 @@ mod tests {
             }
         });
         found
+    }
+
+    /// `a < b` in front of `a - b`: rustc's borrow test on unsigned values,
+    /// and the author's own check on signed ones, which overflow by sign.
+    fn compare_then_subtract(ty: KnownType) -> HighFunction {
+        let mut a = binding(0, Expr::Phi { incoming: vec![] });
+        let mut b = binding(1, Expr::Phi { incoming: vec![] });
+        a.ty = IrType::Known(ty.clone());
+        b.ty = IrType::Known(ty);
+        let bindings = vec![
+            a,
+            b,
+            binding(2, Expr::Binary { op: BinaryOp::Lt, lhs: v(0), rhs: v(1) }),
+            binding(3, Expr::Binary { op: BinaryOp::Sub, lhs: v(0), rhs: v(1) }),
+        ];
+        func_of(bindings, Region::Sequence(vec![Region::Basic(bb(0)), guard(2, Region::Unreachable)]))
+    }
+
+    #[test]
+    fn an_unsigned_compare_before_its_subtraction_is_the_borrow_check() {
+        assert_eq!(kind_of(compare_then_subtract(KnownType::U64)), PanicKind::ArithOverflow);
+    }
+
+    /// atomic_swap's `if amount_a < min_a_for_b { panic!(..) }` on `i128`s:
+    /// the author's check, kept.
+    #[test]
+    fn a_signed_compare_before_its_subtraction_is_the_authors() {
+        assert_eq!(kind_of(compare_then_subtract(KnownType::I128)), PanicKind::Bare);
     }
 
     /// `d == 0` in front of `n / d`.

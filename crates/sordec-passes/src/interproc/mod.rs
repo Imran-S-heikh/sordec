@@ -30,3 +30,30 @@ pub use struct_arg::StructArgPass;
 pub use symbol_args::SymbolArgsPass;
 pub use wide_param::WideParamPass;
 pub use wide_promote::WideReturnPromotePass;
+
+
+/// The functions some entrypoint can reach through scheduled calls.
+///
+/// Roots are the functions with an ABI signature or an export name; a
+/// helper inlined at every site it had is in the module still, and its
+/// own calls are not evidence about anyone's parameters.
+pub(crate) fn live_functions(ir: &sordec_ir::HighIr) -> std::collections::HashSet<sordec_common::FuncId> {
+    let mut live: std::collections::HashSet<sordec_common::FuncId> = ir
+        .functions
+        .iter()
+        .filter(|f| f.signature.is_some() || f.name.is_some())
+        .map(|f| f.id)
+        .collect();
+    let mut frontier: Vec<sordec_common::FuncId> = live.iter().copied().collect();
+    while let Some(id) = frontier.pop() {
+        let Some(func) = ir.function(id) else { continue };
+        for v in crate::marshalling::sret::emission_order(func) {
+            if let Some(sordec_ir::Expr::Call { target, .. }) = func.bindings.get(v).map(|b| &b.expr)
+                && live.insert(*target)
+            {
+                frontier.push(*target);
+            }
+        }
+    }
+    live
+}
