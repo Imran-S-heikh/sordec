@@ -7,17 +7,29 @@
 //!
 //! ## Scope, stated rather than implied
 //!
-//! Only entrypoints whose every parameter is a **scalar** are drivable
-//! here: `bool`, `u32`, `i32`, `u64`, `i64`, `u128`, `i128`. An
-//! `Address`, `Symbol`, `Vec`, `Map`, or user-defined type needs values
-//! constructed against a live host, which is a larger task.
+//! Every argument is built as XDR, which is the value itself and needs no
+//! live host, so both sides receive byte-identical inputs. Covered: the
+//! scalars, `Address` and `MuxedAddress` (a fixed set of harness accounts,
+//! [`ACCOUNTS`]), `String`, `Symbol`, `Bytes`, `BytesN<N>`, `Option`,
+//! `Vec`, `Map`, tuples, and the contract's own `#[contracttype]` structs,
+//! unions and integer enums, read from the same spec section.
 //!
-//! That limit is load-bearing to report honestly, because it is *not*
-//! small: virtually every real Soroban entrypoint takes an `Address`. A
-//! harness that quietly skipped them and published the pass rate over
-//! what remained would be reporting on the stateless-arithmetic slice
-//! while sounding like it covered the contract. So every skip is recorded
-//! with its reason and [`DrivePlan`] always answers `drivable of total`.
+//! Still declined: `Result`, an untyped `Val`, an error enum as an input,
+//! and a type nested deeper than [`MAX_DEPTH`]. Every skip is recorded with
+//! its reason and [`DrivePlan`] always answers `drivable of total`, so a
+//! report never reads as covering more of the contract than it drove.
+//!
+//! An argument the harness builds is not necessarily one the contract can
+//! *use*: an `Address` parameter that the contract calls as a token is
+//! handed an account, the call traps on both sides, and the comparison
+//! buckets it as a trivial agreement rather than a match.
+//!
+//! ## The constructor
+//!
+//! Registration runs `__constructor`, so its arguments are planned like any
+//! entrypoint's but only the first case is kept: a contract is constructed
+//! once per session. [`DrivePlan::constructor_args`] hands them to
+//! [`crate::exec::Session::register_with`].
 //!
 //! ## Determinism
 //!
@@ -34,8 +46,12 @@
 //! reconstruction that wraps where the original traps fails on the first
 //! case rather than never.
 
+use std::collections::BTreeMap;
+
 use soroban_sdk::xdr::{
-    Limited, Limits, ReadXdr, ScSpecEntry, ScSpecFunctionV0, ScSpecTypeDef, ScVal,
+    AccountId, Limited, Limits, MuxedEd25519Account, PublicKey, ReadXdr, ScAddress, ScBytes, ScMap,
+    ScMapEntry, ScSpecEntry, ScSpecFunctionV0, ScSpecTypeDef, ScSpecUdtUnionCaseV0, ScString,
+    ScSymbol, ScVal, ScVec, Uint256,
 };
 
 use crate::exec::Call;
@@ -48,6 +64,54 @@ use crate::wasm;
 /// seeded values; small enough that a corpus run stays interactive, since
 /// each call executes twice in a fresh host.
 const CASES_PER_FN: usize = 12;
+
+/// How many times the whole call list runs against one session.
+///
+/// State only flows forward through a session. In a single pass, an
+/// entrypoint declared before the one that creates its state — `transfer`
+/// before `mint` in the token — only ever sees an empty ledger, fails on
+/// both sides, and tests nothing. A second pass replays every call against
+/// the state the first one left behind.
+pub const ROUNDS: usize = 2;
+
+/// How deep a generated value may nest. A recursive `#[contracttype]` would
+/// otherwise never terminate.
+pub const MAX_DEPTH: usize = 4;
+
+/// The accounts the harness passes wherever an `Address` is declared, by
+/// role label.
+///
+/// Three, so a call taking two addresses sees both "same party" and
+/// "different parties" as the cases sweep. The labels double as
+/// [`crate::canon::AddressBook`] roles, so an argument swap between the two
+/// sides surfaces as `user_0` against `user_1`.
+pub const ACCOUNTS: [&str; 3] = ["user_0", "user_1", "user_2"];
+
+/// The muxed id the harness attaches to its one muxed address.
+const MUXED_ID: u64 = 7;
+
+/// The account address the harness passes for role `label`.
+///
+/// The key bytes spell the label, so the address is the same in every run and
+/// on both sides, and the accounts sort in label order — the liquidity pool's
+/// constructor requires `token_a < token_b`.
+#[must_use]
+pub fn account(label: &str) -> ScAddress {
+    ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(Uint256(
+        account_key(label),
+    ))))
+}
+
+fn account_key(label: &str) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    for (slot, byte) in key
+        .iter_mut()
+        .zip(b"sordec-account:".iter().chain(label.as_bytes()))
+    {
+        *slot = *byte;
+    }
+    key
+}
 
 /// One declared entrypoint and what can be done with it.
 #[derive(Debug, Clone)]
@@ -63,18 +127,51 @@ pub struct Entrypoint {
 /// Every entrypoint a contract declares, with per-entrypoint coverage.
 #[derive(Debug, Clone)]
 pub struct DrivePlan {
+    /// The constructor, when the contract declares one, planned with at most
+    /// one call. Not counted among the entrypoints: a caller never drives it.
+    pub constructor: Option<Entrypoint>,
     /// In declaration order.
     pub entrypoints: Vec<Entrypoint>,
 }
 
 impl DrivePlan {
-    /// Every call across every drivable entrypoint, in declaration order.
+    /// Every call across every drivable entrypoint, in declaration order,
+    /// repeated [`ROUNDS`] times.
     #[must_use]
     pub fn calls(&self) -> Vec<Call> {
-        self.entrypoints
+        let round: Vec<Call> = self
+            .entrypoints
             .iter()
             .flat_map(|e| e.calls.iter().cloned())
+            .collect();
+        round
+            .iter()
+            .cycle()
+            .take(round.len() * ROUNDS)
+            .cloned()
             .collect()
+    }
+
+    /// The arguments to register the contract with.
+    ///
+    /// Empty when there is no constructor.
+    ///
+    /// # Errors
+    ///
+    /// Why the constructor's arguments could not be built. Nothing can run
+    /// then, since registration is what invokes it.
+    pub fn constructor_args(&self) -> Result<Vec<ScVal>, String> {
+        let Some(constructor) = &self.constructor else {
+            return Ok(Vec::new());
+        };
+        if let Some(why) = &constructor.skipped {
+            return Err(format!("`{}`: {why}", wasm::CONSTRUCTOR_EXPORT));
+        }
+        Ok(constructor
+            .calls
+            .first()
+            .map(|call| call.args.clone())
+            .unwrap_or_default())
     }
 
     /// Entrypoints that could be driven.
@@ -133,37 +230,51 @@ pub fn plan(wasm: &[u8]) -> Result<DrivePlan, Unavailable> {
         });
     };
 
-    let mut entrypoints = Vec::new();
-    let mut reader = Limited::new(spec, Limits::none());
     // The section is a concatenation of entries; read until it runs out.
+    // Read whole before planning: a function can name a type declared after it.
+    let mut entries = Vec::new();
+    let mut reader = Limited::new(spec, Limits::none());
     while let Ok(entry) = ScSpecEntry::read_xdr(&mut reader) {
-        if let ScSpecEntry::FunctionV0(function) = entry {
-            let name = function.name.to_utf8_string_lossy();
-            // Registration invokes the constructor; it is not an
-            // entrypoint a caller drives.
-            if name == wasm::CONSTRUCTOR_EXPORT {
-                continue;
-            }
-            entrypoints.push(plan_function(&name, &function));
+        entries.push(entry);
+    }
+    let types = Types::from_spec(&entries);
+
+    let mut constructor = None;
+    let mut entrypoints = Vec::new();
+    for entry in &entries {
+        let ScSpecEntry::FunctionV0(function) = entry else {
+            continue;
+        };
+        let name = function.name.to_utf8_string_lossy();
+        let mut planned = plan_function(&name, function, &types);
+        // Registration invokes the constructor, once per session; it is not
+        // an entrypoint a caller drives.
+        if name == wasm::CONSTRUCTOR_EXPORT {
+            planned.calls.truncate(1);
+            constructor = Some(planned);
+        } else {
+            entrypoints.push(planned);
         }
     }
 
-    Ok(DrivePlan { entrypoints })
+    Ok(DrivePlan {
+        constructor,
+        entrypoints,
+    })
 }
 
 /// Plan one entrypoint: generate its calls, or record why not.
-fn plan_function(name: &str, function: &ScSpecFunctionV0) -> Entrypoint {
+fn plan_function(name: &str, function: &ScSpecFunctionV0, types: &Types) -> Entrypoint {
     let mut tables = Vec::with_capacity(function.inputs.len());
     for input in function.inputs.iter() {
-        match values_for(&input.type_) {
-            Some(values) => tables.push(values),
-            None => {
+        match values_for(&input.type_, types) {
+            Some(values) if !values.is_empty() => tables.push(values),
+            _ => {
                 return Entrypoint {
                     name: name.to_string(),
                     calls: Vec::new(),
                     skipped: Some(format!(
-                        "parameter `{}` is {}, which needs a value constructed \
-                         against a live host",
+                        "parameter `{}` is {}, which this generator does not construct",
                         input.name.to_utf8_string_lossy(),
                         type_name(&input.type_),
                     )),
@@ -178,14 +289,7 @@ fn plan_function(name: &str, function: &ScSpecFunctionV0) -> Entrypoint {
     // simultaneously — and miss `(MAX, 1)`, which is what actually
     // overflows.
     let calls = (0..CASES_PER_FN)
-        .map(|case| {
-            let args = tables
-                .iter()
-                .enumerate()
-                .map(|(position, table)| table[(case + position) % table.len()].clone())
-                .collect();
-            Call::new(name, args)
-        })
+        .map(|case| Call::new(name, sweep(&tables, case)))
         .collect();
 
     Entrypoint {
@@ -195,9 +299,221 @@ fn plan_function(name: &str, function: &ScSpecFunctionV0) -> Entrypoint {
     }
 }
 
-/// Candidate values for a parameter type, or `None` when it is not a
-/// scalar this module can construct.
-fn values_for(ty: &ScSpecTypeDef) -> Option<Vec<ScVal>> {
+/// The spec's own `#[contracttype]` definitions, which a `Udt` parameter
+/// names.
+#[derive(Debug, Default)]
+struct Types {
+    by_name: BTreeMap<String, ScSpecEntry>,
+}
+
+impl Types {
+    fn from_spec(entries: &[ScSpecEntry]) -> Self {
+        let by_name = entries
+            .iter()
+            .filter_map(|entry| {
+                let name = match entry {
+                    ScSpecEntry::UdtStructV0(s) => s.name.to_utf8_string_lossy(),
+                    ScSpecEntry::UdtUnionV0(u) => u.name.to_utf8_string_lossy(),
+                    ScSpecEntry::UdtEnumV0(e) => e.name.to_utf8_string_lossy(),
+                    _ => return None,
+                };
+                Some((name, entry.clone()))
+            })
+            .collect();
+        Self { by_name }
+    }
+}
+
+/// Candidate values for a parameter type, or `None` when it is not one
+/// this module can construct.
+fn values_for(ty: &ScSpecTypeDef, types: &Types) -> Option<Vec<ScVal>> {
+    values_at(ty, types, 0)
+}
+
+fn values_at(ty: &ScSpecTypeDef, types: &Types, depth: usize) -> Option<Vec<ScVal>> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    if let Some(scalars) = scalar_values(ty) {
+        return Some(scalars);
+    }
+    let inner = |ty: &ScSpecTypeDef| values_at(ty, types, depth + 1).filter(|v| !v.is_empty());
+    Some(match ty {
+        ScSpecTypeDef::Address => ACCOUNTS
+            .iter()
+            .map(|label| ScVal::Address(account(label)))
+            .collect(),
+        // A `MuxedAddress` parameter accepts a plain address too; one muxed
+        // case reaches the branch that reads the id.
+        ScSpecTypeDef::MuxedAddress => {
+            let mut v: Vec<ScVal> = ACCOUNTS[..2]
+                .iter()
+                .map(|label| ScVal::Address(account(label)))
+                .collect();
+            v.push(ScVal::Address(ScAddress::MuxedAccount(
+                MuxedEd25519Account {
+                    id: MUXED_ID,
+                    ed25519: Uint256(account_key(ACCOUNTS[2])),
+                },
+            )));
+            v
+        }
+        ScSpecTypeDef::String => ["", "a", "sordec-harness"]
+            .into_iter()
+            .map(|s| Some(ScVal::String(ScString(s.try_into().ok()?))))
+            .collect::<Option<_>>()?,
+        ScSpecTypeDef::Symbol => ["a", "sordec", "Abc_123"]
+            .into_iter()
+            .map(|s| Some(ScVal::Symbol(ScSymbol(s.try_into().ok()?))))
+            .collect::<Option<_>>()?,
+        ScSpecTypeDef::Bytes => [vec![], vec![0], (0..32).collect::<Vec<u8>>()]
+            .into_iter()
+            .map(bytes_val)
+            .collect::<Option<_>>()?,
+        ScSpecTypeDef::BytesN(n) => {
+            let n = n.n as usize;
+            [
+                vec![0; n],
+                vec![0xff; n],
+                (0..n).map(|i| (i * 37 + 1) as u8).collect(),
+            ]
+            .into_iter()
+            .map(bytes_val)
+            .collect::<Option<_>>()?
+        }
+        ScSpecTypeDef::Option(option) => {
+            let some = inner(&option.value_type)?;
+            vec![ScVal::Void, some[0].clone(), some[1 % some.len()].clone()]
+        }
+        ScSpecTypeDef::Vec(vec) => {
+            let items = inner(&vec.element_type)?;
+            let n = items.len();
+            [
+                vec![],
+                vec![items[0].clone()],
+                vec![items[1 % n].clone(), items[2 % n].clone()],
+            ]
+            .into_iter()
+            .map(vec_val)
+            .collect::<Option<_>>()?
+        }
+        ScSpecTypeDef::Map(map) => {
+            let keys = inner(&map.key_type)?;
+            let values = inner(&map.value_type)?;
+            [vec![], vec![(keys[0].clone(), values[0].clone())]]
+                .into_iter()
+                .map(map_val)
+                .collect::<Option<_>>()?
+        }
+        ScSpecTypeDef::Tuple(tuple) => {
+            let tables: Vec<Vec<ScVal>> =
+                tuple.value_types.iter().map(inner).collect::<Option<_>>()?;
+            (0..3)
+                .map(|case| vec_val(sweep(&tables, case)))
+                .collect::<Option<_>>()?
+        }
+        ScSpecTypeDef::Udt(udt) => {
+            udt_values(types.by_name.get(&udt.name.to_utf8_string_lossy())?, &inner)?
+        }
+        _ => return None,
+    })
+}
+
+/// Values for one `#[contracttype]`, encoded the way the SDK encodes it.
+fn udt_values(
+    entry: &ScSpecEntry,
+    inner: &dyn Fn(&ScSpecTypeDef) -> Option<Vec<ScVal>>,
+) -> Option<Vec<ScVal>> {
+    match entry {
+        // A tuple struct (fields `0`, `1`, …) is a vector; a named one is a map
+        // keyed by field name, which the host requires sorted.
+        ScSpecEntry::UdtStructV0(s) => {
+            let names: Vec<String> = s
+                .fields
+                .iter()
+                .map(|f| f.name.to_utf8_string_lossy())
+                .collect();
+            let tables: Vec<Vec<ScVal>> = s
+                .fields
+                .iter()
+                .map(|f| inner(&f.type_))
+                .collect::<Option<_>>()?;
+            let tuple = names.iter().all(|n| n.chars().all(|c| c.is_ascii_digit()));
+            (0..3)
+                .map(|case| {
+                    let values = sweep(&tables, case);
+                    if tuple {
+                        return vec_val(values);
+                    }
+                    let mut fields: Vec<(ScVal, ScVal)> = names
+                        .iter()
+                        .zip(values)
+                        .map(|(name, value)| {
+                            Some((
+                                ScVal::Symbol(ScSymbol(name.as_str().try_into().ok()?)),
+                                value,
+                            ))
+                        })
+                        .collect::<Option<_>>()?;
+                    fields.sort_by(|a, b| a.0.cmp(&b.0));
+                    map_val(fields)
+                })
+                .collect()
+        }
+        // A union case is a vector: its name, then its payload.
+        ScSpecEntry::UdtUnionV0(u) => u
+            .cases
+            .iter()
+            .enumerate()
+            .map(|(index, case)| {
+                let (name, payload) = match case {
+                    ScSpecUdtUnionCaseV0::VoidV0(v) => (v.name.to_utf8_string_lossy(), Vec::new()),
+                    ScSpecUdtUnionCaseV0::TupleV0(t) => {
+                        let tables: Vec<Vec<ScVal>> =
+                            t.type_.iter().map(inner).collect::<Option<_>>()?;
+                        (t.name.to_utf8_string_lossy(), sweep(&tables, index))
+                    }
+                };
+                let mut items = vec![ScVal::Symbol(ScSymbol(name.as_str().try_into().ok()?))];
+                items.extend(payload);
+                vec_val(items)
+            })
+            .collect(),
+        ScSpecEntry::UdtEnumV0(e) => {
+            Some(e.cases.iter().map(|case| ScVal::U32(case.value)).collect())
+        }
+        _ => None,
+    }
+}
+
+/// One value from each table, offset by position — the same sweep
+/// [`plan_function`] applies to a call's arguments.
+fn sweep(tables: &[Vec<ScVal>], case: usize) -> Vec<ScVal> {
+    tables
+        .iter()
+        .enumerate()
+        .map(|(position, table)| table[(case + position) % table.len()].clone())
+        .collect()
+}
+
+fn bytes_val(bytes: Vec<u8>) -> Option<ScVal> {
+    Some(ScVal::Bytes(ScBytes(bytes.try_into().ok()?)))
+}
+
+fn vec_val(items: Vec<ScVal>) -> Option<ScVal> {
+    Some(ScVal::Vec(Some(ScVec(items.try_into().ok()?))))
+}
+
+fn map_val(entries: Vec<(ScVal, ScVal)>) -> Option<ScVal> {
+    let entries: Vec<ScMapEntry> = entries
+        .into_iter()
+        .map(|(key, val)| ScMapEntry { key, val })
+        .collect();
+    Some(ScVal::Map(Some(ScMap(entries.try_into().ok()?))))
+}
+
+/// Candidate values for a scalar type, or `None` when `ty` is not one.
+fn scalar_values(ty: &ScSpecTypeDef) -> Option<Vec<ScVal>> {
     let mut rng = Lcg::new(ty_seed(ty));
     Some(match ty {
         ScSpecTypeDef::Bool => vec![ScVal::Bool(false), ScVal::Bool(true)],
@@ -315,28 +631,88 @@ mod tests {
         // 2^56 is where Soroban stops packing a u64 into the Val body and
         // hands out an object handle. The emitter collapses that branch,
         // so a case on each side of it is what proves the collapse right.
-        let values = values_for(&ScSpecTypeDef::U64).expect("u64 is a scalar");
+        let values = values_for(&ScSpecTypeDef::U64, &Types::default()).expect("u64 is a scalar");
         assert!(values.contains(&ScVal::U64((1 << 56) - 1)));
         assert!(values.contains(&ScVal::U64(1 << 56)));
     }
 
     #[test]
     fn signed_tables_include_the_overflow_boundaries() {
-        let values = values_for(&ScSpecTypeDef::I64).expect("i64 is a scalar");
+        let values = values_for(&ScSpecTypeDef::I64, &Types::default()).expect("i64 is a scalar");
         assert!(values.contains(&ScVal::I64(i64::MIN)));
         assert!(values.contains(&ScVal::I64(i64::MAX)));
     }
 
     #[test]
-    fn a_non_scalar_parameter_is_declined_with_a_reason() {
-        assert!(values_for(&ScSpecTypeDef::Address).is_none());
-        assert_eq!(type_name(&ScSpecTypeDef::Address), "an Address");
+    fn an_unsupported_parameter_is_declined_with_a_reason() {
+        assert!(values_for(&ScSpecTypeDef::Val, &Types::default()).is_none());
+        assert_eq!(type_name(&ScSpecTypeDef::Val), "an untyped Val");
+    }
+
+    #[test]
+    fn addresses_are_the_harness_accounts_in_label_order() {
+        let values = values_for(&ScSpecTypeDef::Address, &Types::default()).unwrap();
+        let expected: Vec<ScVal> = ACCOUNTS
+            .iter()
+            .map(|l| ScVal::Address(account(l)))
+            .collect();
+        assert_eq!(values, expected);
+        // The liquidity pool's constructor rejects `token_a >= token_b`.
+        assert!(account(ACCOUNTS[0]) < account(ACCOUNTS[1]));
+    }
+
+    #[test]
+    fn a_struct_is_a_map_with_sorted_field_keys() {
+        use soroban_sdk::xdr::{ScSpecTypeUdt, ScSpecUdtStructFieldV0, ScSpecUdtStructV0};
+        let field = |name: &str| ScSpecUdtStructFieldV0 {
+            doc: "".try_into().unwrap(),
+            name: name.try_into().unwrap(),
+            type_: ScSpecTypeDef::U32,
+        };
+        let entry = ScSpecEntry::UdtStructV0(ScSpecUdtStructV0 {
+            doc: "".try_into().unwrap(),
+            lib: "".try_into().unwrap(),
+            name: "Bound".try_into().unwrap(),
+            // Declared out of order: the encoding must not follow declaration.
+            fields: vec![field("timestamp"), field("kind")].try_into().unwrap(),
+        });
+        let types = Types::from_spec(&[entry]);
+        let ty = ScSpecTypeDef::Udt(ScSpecTypeUdt {
+            name: "Bound".try_into().unwrap(),
+        });
+        let values = values_for(&ty, &types).expect("a struct of scalars is constructible");
+        let ScVal::Map(Some(map)) = &values[0] else {
+            panic!("a named struct encodes as a map: {:?}", values[0]);
+        };
+        let keys: Vec<&ScVal> = map.0.iter().map(|e| &e.key).collect();
+        assert_eq!(
+            keys,
+            [
+                &ScVal::Symbol(ScSymbol("kind".try_into().unwrap())),
+                &ScVal::Symbol(ScSymbol("timestamp".try_into().unwrap()))
+            ]
+        );
+    }
+
+    #[test]
+    fn every_call_runs_once_per_round() {
+        let call = Call::new("f", vec![]);
+        let plan = DrivePlan {
+            constructor: None,
+            entrypoints: vec![Entrypoint {
+                name: "f".into(),
+                calls: vec![call.clone()],
+                skipped: None,
+            }],
+        };
+        assert_eq!(plan.calls(), vec![call; ROUNDS]);
+        assert_eq!(plan.constructor_args(), Ok(vec![]));
     }
 
     #[test]
     fn generation_is_deterministic() {
-        let a = values_for(&ScSpecTypeDef::U64).unwrap();
-        let b = values_for(&ScSpecTypeDef::U64).unwrap();
+        let a = values_for(&ScSpecTypeDef::U64, &Types::default()).unwrap();
+        let b = values_for(&ScSpecTypeDef::U64, &Types::default()).unwrap();
         assert_eq!(a, b, "two runs must produce identical inputs");
     }
 
@@ -364,7 +740,7 @@ mod tests {
             .unwrap(),
             outputs: vec![ScSpecTypeDef::U64].try_into().unwrap(),
         };
-        let planned = plan_function("add", &f);
+        let planned = plan_function("add", &f, &Types::default());
         assert!(planned.skipped.is_none());
         assert_eq!(planned.calls.len(), CASES_PER_FN);
         assert!(
@@ -376,6 +752,7 @@ mod tests {
     #[test]
     fn coverage_names_what_was_skipped() {
         let plan = DrivePlan {
+            constructor: None,
             entrypoints: vec![
                 Entrypoint { name: "add".into(), calls: vec![], skipped: None },
                 Entrypoint {

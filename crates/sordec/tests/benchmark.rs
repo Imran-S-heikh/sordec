@@ -93,7 +93,31 @@ fn score_options(behavior: BehaviorInput, abi_declared: bool) -> ScoreOptions {
 fn measure_inner(name: &'static str, want_behavior: bool) -> Result<Measured, String> {
     let wasm_path = samples_dir().join(name).join(format!("{name}.wasm"));
     let wasm = std::fs::read(&wasm_path).map_err(|e| format!("read wasm: {e}"))?;
-    measure_wasm(name, &wasm, want_behavior.then_some(wasm_path.as_path()), name)
+    let oracle = want_behavior.then(|| behavior_oracle(name, &wasm));
+    measure_wasm(name, &wasm, oracle.as_deref(), name)
+}
+
+/// The wasm a fixture's behaviour is measured against: normally its own.
+///
+/// `token-v23-stripped` is the exception. The host refuses any module without
+/// `contractenvmetav0`, and stripping removed it — but stripping removes custom
+/// sections only, so `token-v23`'s wasm is the same code with its metadata intact,
+/// and runs exactly what the stripped one would. Checked rather than assumed: if the
+/// two fixtures were ever rebuilt apart, the oracle would silently be another
+/// contract.
+fn behavior_oracle(name: &str, wasm: &[u8]) -> PathBuf {
+    let own = samples_dir().join(name).join(format!("{name}.wasm"));
+    if name != "token-v23-stripped" {
+        return own;
+    }
+    let full = samples_dir().join("token-v23").join("token-v23.wasm");
+    let full_bytes = std::fs::read(&full).expect("token-v23 is a committed fixture");
+    assert!(
+        sordec_diffexec::wasm::same_code(wasm, &full_bytes),
+        "token-v23-stripped no longer carries token-v23's code, so token-v23 cannot \
+         stand in as its behaviour oracle — rebuild the stripped fixture from it"
+    );
+    full
 }
 
 /// Decompile `wasm` and score it against fixture `name`'s vendored source.
@@ -942,14 +966,12 @@ fn render_markdown(measured: &[Measured], agg: &Aggregates) -> String {
          covers interface, structure and semantic; it is the figure comparable with \
          the committed accuracy bands and with every earlier measurement, so it stays \
          the headline. The second adds `behavior` — differential execution of the \
-         recompiled reconstruction against the original wasm — which is measurable on \
-         {} of {} fixtures today, because the other {} do not yet compile. An \
-         unmeasurable category is reported `n/a` and renormalises out of that \
-         fixture's mean; it is never a zero, since \"does not build\" and \"does the \
-         wrong thing\" are different findings.\n\n",
-        agg.behavior_measured,
-        agg.fixtures,
-        agg.fixtures - agg.behavior_measured,
+         recompiled reconstruction against the original wasm — which is measured on \
+         {} of {} fixtures; each fixture's detail below says what was driven, and for \
+         any `n/a`, why not. An unmeasurable category is reported `n/a` and \
+         renormalises out of that fixture's mean; it is never a zero, since \"could \
+         not be run\" and \"does the wrong thing\" are different findings.\n\n",
+        agg.behavior_measured, agg.fixtures,
     ));
     s.push_str("| fixture | overall (AST) | interface | structure | semantic | behavior |\n");
     s.push_str("|---|---|---|---|---|---|\n");
@@ -1039,7 +1061,12 @@ fn render_behavior_detail(report: &ScoreReport) -> String {
 fn render_json(measured: &[Measured], agg: &Aggregates) -> String {
     let fixtures: serde_json::Map<String, serde_json::Value> = measured
         .iter()
-        .map(|m| (m.name.to_string(), serde_json::to_value(&m.report).expect("serialize")))
+        .map(|m| {
+            (
+                m.name.to_string(),
+                serde_json::to_value(&m.report).expect("serialize"),
+            )
+        })
         .collect();
     let doc = serde_json::json!({
         "scorer_version": sordec_score::SCORER_VERSION,

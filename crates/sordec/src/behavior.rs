@@ -52,10 +52,11 @@ pub fn toolchain_ready() -> Result<(), String> {
 /// toolchain says nothing of the kind, and conflating them would let an environment
 /// problem read as a decompiler failure.
 ///
-/// The last stage is the honest wall: even when both modules build and load, driving
-/// an entrypoint needs arguments constructed for its signature, and that is not built
-/// yet. So this reports how far it got. The stages are worth distinguishing because
-/// each names a different piece of work.
+/// One failure is *not* a non-verdict: when the original registers with the
+/// harness's constructor arguments and the reconstruction does not, the reconstruction
+/// has changed what the contract does, and that scores `0`. Otherwise this reports how
+/// far it got. The stages are worth distinguishing because each names a different
+/// piece of work.
 #[must_use]
 pub fn measure(reconstructed: &Path, original_wasm: &Path) -> BehaviorInput {
     use sordec_diffexec::{diff, drive, exec, preflight, recompile, wasm};
@@ -98,19 +99,37 @@ pub fn measure(reconstructed: &Path, original_wasm: &Path) -> BehaviorInput {
         Err(failure) => return unavailable(failure.reason()),
     };
 
-    // 4. Both sides have to load before anything can be compared.
-    if let Err(refused) = exec::Session::register(&original) {
-        return unavailable(format!("original wasm: {refused}"));
-    }
-    if let Err(refused) = exec::Session::register(&rebuilt) {
-        return unavailable(format!("recompiled reconstruction: {refused}"));
-    }
-
-    // 5. Arguments, built from the contract's own declared ABI.
+    // 4. Arguments, built from the contract's own declared ABI — the
+    //    constructor's included, since registration is what runs it.
     let plan = match drive::plan(&original) {
         Ok(plan) => plan,
         Err(missing) => return unavailable(missing.reason),
     };
+    let constructor_args = match plan.constructor_args() {
+        Ok(args) => args,
+        Err(why) => return unavailable(why),
+    };
+
+    // 5. Both sides have to load, and construct, before anything can be compared.
+    if let Err(refused) = exec::Session::register_with(&original, &constructor_args) {
+        return unavailable(format!("original wasm: {refused}"));
+    }
+    if let Err(refused) = exec::Session::register_with(&rebuilt, &constructor_args) {
+        // The original accepted these arguments and the reconstruction did not.
+        // That is a behavioural difference, not a harness limit, so it scores.
+        return BehaviorInput::Measured(
+            sordec_score::Behavior::new(
+                0.0,
+                sordec_score::BSide::Reconstruction,
+                plan.drivable(),
+                plan.total(),
+            )
+            .with_note(format!(
+                "the original registered and the recompiled reconstruction did not: {refused}"
+            ))
+            .with_note(plan.coverage()),
+        );
+    }
     let calls = plan.calls();
     if calls.is_empty() {
         // Not a zero: nothing was tested, which is a different statement
@@ -122,8 +141,8 @@ pub fn measure(reconstructed: &Path, original_wasm: &Path) -> BehaviorInput {
     }
 
     // 6. Drive both sides with identical arguments and compare.
-    let original_run = observe(&original, &calls);
-    let reconstruction_run = observe(&rebuilt, &calls);
+    let original_run = observe(&original, &plan, &calls);
+    let reconstruction_run = observe(&rebuilt, &plan, &calls);
     let comparison = diff::compare(&calls, &original_run, &reconstruction_run);
 
     let exercised = comparison.exercised();
@@ -176,14 +195,21 @@ pub fn measure(reconstructed: &Path, original_wasm: &Path) -> BehaviorInput {
 /// modules disagree on every address even when the contracts are identical.
 fn observe(
     wasm: &[u8],
+    plan: &sordec_diffexec::drive::DrivePlan,
     calls: &[sordec_diffexec::exec::Call],
 ) -> Vec<sordec_diffexec::exec::Observation> {
     use sordec_diffexec::canon::{AddressBook, Canonicalizer, SELF_LABEL};
+    use sordec_diffexec::drive::{ACCOUNTS, account};
     use sordec_diffexec::exec::Session;
 
-    let mut session = Session::register(wasm).expect("checked loadable above");
+    let constructor_args = plan.constructor_args().expect("built above");
+    let mut session = Session::register_with(wasm, &constructor_args)
+        .expect("registered above with these arguments");
     let mut book = AddressBook::new();
     book.bind(SELF_LABEL, session.contract_address());
+    for label in ACCOUNTS {
+        book.bind(label, account(label));
+    }
     let mut canon = Canonicalizer::new(&book);
     calls
         .iter()

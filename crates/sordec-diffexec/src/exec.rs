@@ -54,6 +54,15 @@ pub const LEDGER_SEQUENCE: u32 = 1_000;
 /// `timelock` does exactly that.
 pub const LEDGER_TIMESTAMP: u64 = 1_700_000_000;
 
+/// A fresh host with the ledger pinned to the constants above.
+fn seeded_env() -> Env {
+    let env = Env::default();
+    env.ledger().set_protocol_version(PROTOCOL_VERSION);
+    env.ledger().set_sequence_number(LEDGER_SEQUENCE);
+    env.ledger().set_timestamp(LEDGER_TIMESTAMP);
+    env
+}
+
 /// One invocation to perform.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Call {
@@ -224,8 +233,8 @@ impl Session {
     ///   custom sections at all.
     /// - **A constructor.** Registration runs `__constructor`, and it takes
     ///   arguments on every corpus contract that has one, so registering with none
-    ///   fails inside the VM with `MismatchingParameterLen`. Supplying them needs
-    ///   input generation.
+    ///   fails inside the VM with `MismatchingParameterLen`. [`Self::register_with`]
+    ///   supplies them.
     ///
     /// A module malformed in some *other* way will still panic inside the SDK. That
     /// has not been observed, and pre-validating the whole module format to rule it
@@ -251,12 +260,67 @@ impl Session {
             });
         }
 
-        let env = Env::default();
-        env.ledger().set_protocol_version(PROTOCOL_VERSION);
-        env.ledger().set_sequence_number(LEDGER_SEQUENCE);
-        env.ledger().set_timestamp(LEDGER_TIMESTAMP);
-
+        let env = seeded_env();
         let contract = env.register(wasm, ());
+        Ok(Self {
+            env,
+            contract,
+            events_seen: 0,
+        })
+    }
+
+    /// Register `wasm`, running its constructor with `constructor_args`.
+    ///
+    /// What [`Self::register`] cannot do: every corpus contract with a constructor
+    /// takes arguments. The arguments come from the caller, normally
+    /// [`crate::drive::DrivePlan::constructor_args`], so both sides of a comparison
+    /// are constructed identically. With no constructor, pass none.
+    ///
+    /// Authorizations are mocked *before* registering, so a constructor that calls
+    /// `require_auth` runs rather than failing, and the session stays mocked — see
+    /// [`Self::mock_all_auths`] for why a comparison wants that anyway.
+    ///
+    /// # Errors
+    ///
+    /// [`Unavailable`] when the module has no `contractenvmetav0`, when an argument
+    /// is not representable in the host, or when registration fails — with a
+    /// constructor, that means it trapped on these arguments. The SDK reports a
+    /// failed registration by panicking; it is caught here, so one contract cannot
+    /// abort a corpus run.
+    pub fn register_with(wasm: &[u8], constructor_args: &[ScVal]) -> Result<Self, Unavailable> {
+        if !wasm::is_loadable(wasm) {
+            return Err(Unavailable {
+                reason: format!(
+                    "wasm has no `{}` section, which the host requires on every \
+                     module load, so this contract can never be executed",
+                    wasm::ENV_META_SECTION
+                ),
+            });
+        }
+
+        let env = seeded_env();
+        env.mock_all_auths();
+        let mut args = soroban_sdk::Vec::<Val>::new(&env);
+        for (index, arg) in constructor_args.iter().enumerate() {
+            let val = Val::try_from_val(&env, arg).map_err(|_| Unavailable {
+                reason: format!(
+                    "constructor argument {index} ({arg:?}) is not representable in the host"
+                ),
+            })?;
+            args.push_back(val);
+        }
+
+        let registered =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| env.register(wasm, args)));
+        let Ok(contract) = registered else {
+            return Err(Unavailable {
+                reason: format!(
+                    "registration failed: the constructor trapped on {} harness-supplied \
+                     argument(s)",
+                    constructor_args.len()
+                ),
+            });
+        };
         Ok(Self {
             env,
             contract,

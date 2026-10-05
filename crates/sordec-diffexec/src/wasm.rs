@@ -95,6 +95,24 @@ pub fn custom_section<'wasm>(wasm: &'wasm [u8], name: &str) -> Option<&'wasm [u8
         .map(|(_, contents)| contents)
 }
 
+/// Whether two modules carry the same code, ignoring custom sections.
+///
+/// Custom sections hold metadata and nothing the VM executes, so two modules that
+/// agree on every other section behave identically. That is what lets
+/// `token-v23-stripped` borrow `token-v23` as its behaviour oracle: stripping
+/// removed `contractenvmetav0`, which the host refuses to load without, and
+/// touched nothing else.
+#[must_use]
+pub fn same_code(a: &[u8], b: &[u8]) -> bool {
+    let code = |wasm| -> Vec<(u8, &[u8])> {
+        sections(wasm)
+            .into_iter()
+            .filter(|(id, _)| *id != CUSTOM_SECTION_ID)
+            .collect()
+    };
+    a.get(..WASM_HEADER_LEN) == b.get(..WASM_HEADER_LEN) && code(a) == code(b)
+}
+
 /// Every custom section as `(name, contents)`, in module order.
 fn custom_sections(wasm: &[u8]) -> Vec<(String, &[u8])> {
     sections(wasm)
@@ -291,6 +309,17 @@ mod tests {
             "the memory export is not an entrypoint"
         );
         assert!(has_constructor(&wasm));
+    }
+
+    #[test]
+    fn same_code_ignores_custom_sections_and_nothing_else() {
+        let bare = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        let with_meta = module_with_custom_section(ENV_META_SECTION);
+        assert!(same_code(&bare, &with_meta), "metadata is not code");
+
+        let mut with_export = bare.clone();
+        with_export.extend_from_slice(&[EXPORT_SECTION_ID, 0x01, 0x00]);
+        assert!(!same_code(&bare, &with_export), "an export section is code");
     }
 
     #[test]
