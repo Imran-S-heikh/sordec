@@ -205,11 +205,17 @@ fn site(func: &HighFunction, call: ValueId, converters: &HashMap<FuncId, u32>) -
     };
     let (base, at) = address(func, frame, 0);
     let read = resolve_use(func, value);
-    // A storage read: its typed spelling is the conversion.
-    if !matches!(
-        func.bindings.get(read).map(|b| &b.expr),
-        Some(Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. })))
-    ) {
+    // A source whose typed spelling *is* the conversion: a storage read, or
+    // an element of a vector already typed `Vec<BytesN<N>>` — whose `get`
+    // runs this same `try_from_val` on the element.
+    let typed_source = match &func.bindings.get(read)?.expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. })) => true,
+        Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::Get, args })) => {
+            args.first().is_some_and(|v| vec_of_bytes_n(func, resolve_use(func, *v)) == Some(width))
+        }
+        _ => false,
+    };
+    if !typed_source {
         return None;
     }
     // The result's two words, read back after the call and before anything
@@ -251,6 +257,29 @@ fn site(func: &HighFunction, call: ValueId, converters: &HashMap<FuncId, u32>) -
         }
     }
     (!discs.is_empty() && !payloads.is_empty()).then_some(Site { call, read, width, discs, payloads })
+}
+
+/// `N`, when `v` is a `Vec<BytesN<N>>` — by its recovered type, or by the
+/// spec declaring the entrypoint parameter it is.
+fn vec_of_bytes_n(func: &HighFunction, v: ValueId) -> Option<u32> {
+    let elem_n = |t: &IrType| match t {
+        IrType::Known(KnownType::Vec(e)) | IrType::Inferred(KnownType::Vec(e)) => match &**e {
+            IrType::Known(KnownType::BytesN(n)) | IrType::Inferred(KnownType::BytesN(n)) => Some(*n),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(n) = func.bindings.get(v).and_then(|b| elem_n(&b.ty)) {
+        return Some(n);
+    }
+    let index = func.params.iter().position(|p| *p == v)?;
+    match &func.signature.as_ref()?.inputs.get(index)?.ty {
+        sordec_ir::TypeRef::Composite(sordec_ir::CompositeType::Vec(e)) => match &**e {
+            sordec_ir::TypeRef::Composite(sordec_ir::CompositeType::BytesN(n)) => Some(*n),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// `value + offset` as a base and a constant displacement, folding

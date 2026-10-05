@@ -401,6 +401,7 @@ impl<'a> FnCtx<'a> {
                         | KnownType::Symbol
                         | KnownType::String
                         | KnownType::Bytes
+                        | KnownType::BytesN(_)
                         | KnownType::Map(_, _)
                         | KnownType::Vec(_)
                 ) | IrType::Inferred(
@@ -408,6 +409,7 @@ impl<'a> FnCtx<'a> {
                         | KnownType::Symbol
                         | KnownType::String
                         | KnownType::Bytes
+                        | KnownType::BytesN(_)
                         | KnownType::Map(_, _)
                         | KnownType::Vec(_)
                 )
@@ -433,9 +435,13 @@ impl<'a> FnCtx<'a> {
             return None;
         }
         let ty: syn::Type = match &b.expr {
-            Expr::Load { width, signed, .. } => match (width, signed) {
-                (sordec_ir::MemWidth::W8, _) => parse_quote!(i64),
-                (sordec_ir::MemWidth::W4, None) => parse_quote!(i32),
+            // The word the opcode produced, recorded at lowering; failing
+            // that, what the width alone settles.
+            Expr::Load { width, signed, ty, .. } => match (ty, width, signed) {
+                (IrType::Known(KnownType::I32), ..) => parse_quote!(i32),
+                (IrType::Known(KnownType::I64), ..) => parse_quote!(i64),
+                (_, sordec_ir::MemWidth::W8, _) => parse_quote!(i64),
+                (_, sordec_ir::MemWidth::W4, None) => parse_quote!(i32),
                 _ => return None,
             },
             // An unrecovered small-value decode is the word the shift leaves.

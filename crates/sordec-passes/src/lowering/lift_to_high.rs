@@ -494,7 +494,26 @@ fn lower_operator(op: &WasmOp, args: &[ValueId], ctx: &LowerCtx<'_>) -> Expr {
                 offset: memory.offset,
                 width,
                 signed,
-                ty: IrType::Unknown(UnknownReason::InsufficientEvidence),
+                // The machine word the opcode produces — `i32.load8_u` and
+                // `i64.load8_u` read the same byte into different words, and
+                // nothing downstream can tell which once the opcode is gone.
+                // A fact about the instruction, not a claim about the value:
+                // the binding stays untyped for inference to decide.
+                ty: match &op.0 {
+                    W::I32Load { .. }
+                    | W::I32Load8S { .. }
+                    | W::I32Load8U { .. }
+                    | W::I32Load16S { .. }
+                    | W::I32Load16U { .. } => IrType::Known(sordec_ir::KnownType::I32),
+                    W::I64Load { .. }
+                    | W::I64Load8S { .. }
+                    | W::I64Load8U { .. }
+                    | W::I64Load16S { .. }
+                    | W::I64Load16U { .. }
+                    | W::I64Load32S { .. }
+                    | W::I64Load32U { .. } => IrType::Known(sordec_ir::KnownType::I64),
+                    _ => IrType::Unknown(UnknownReason::InsufficientEvidence),
+                },
             },
             _ => unknown(op, args),
         },
