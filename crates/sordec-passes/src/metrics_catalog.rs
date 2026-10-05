@@ -454,6 +454,12 @@ pub const MARSHALLING_OPTIONS_UNWRAPPED: &str = "marshalling_options_unwrapped";
 /// Calls to an SDK `Option` out-parameter storage helper replaced by the
 /// `get(..).unwrap()` it makes.
 pub const MARSHALLING_OPTION_HELPERS_COLLAPSED: &str = "marshalling_option_helpers_collapsed";
+/// Helpers proven to return `Option<T>` through an out-parameter.
+pub const MARSHALLING_OPTIONAL_OUT_HELPERS: &str = "marshalling_optional_out_helpers";
+/// Call sites of those helpers whose every read of the result qualifies.
+pub const MARSHALLING_OPTIONAL_OUT_SITES: &str = "marshalling_optional_out_sites";
+/// Call sites of those helpers refused, for any reason.
+pub const MARSHALLING_OPTIONAL_OUT_SITES_REFUSED: &str = "marshalling_optional_out_sites_refused";
 /// Storage reads whose SDK `Option` branch folded into
 /// `.unwrap_or(default)`.
 pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defaults_recovered";
@@ -959,6 +965,9 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_UDT_HELPERS_COLLAPSED,
         MARSHALLING_OPTIONS_UNWRAPPED,
         MARSHALLING_OPTION_HELPERS_COLLAPSED,
+        MARSHALLING_OPTIONAL_OUT_HELPERS,
+        MARSHALLING_OPTIONAL_OUT_SITES,
+        MARSHALLING_OPTIONAL_OUT_SITES_REFUSED,
         MARSHALLING_OPTION_DEFAULTS_RECOVERED,
         MARSHALLING_OPTION_DEFAULT_DECLINED_READ_ON_FALL_THROUGH,
         MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS,

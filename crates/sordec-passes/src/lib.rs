@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
-    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -530,6 +530,9 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // value by its `u32`.
             Box::new(FoldedEncodePass),
             Box::new(OptionSretPass),
+            // The same shape for any `Option` a helper hands back through
+            // its caller's frame — census only for now; see the module.
+            Box::new(OptionalOutParamPass),
             // `get(&k).unwrap_or(d)`: the probe's branch whose other arm
             // only merges constants. The read takes the default and the
             // probe becomes `true`, which the constant-branch fold at the
@@ -812,7 +815,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 32..78],
+        vec![1..7, 32..79],
     )
 }
 
@@ -888,6 +891,7 @@ mod tests {
                 marshalling::scalar_decode::PASS_NAME,
                 marshalling::folded_encode::PASS_NAME,
                 marshalling::option_sret::PASS_NAME,
+                marshalling::optional_out::PASS_NAME,
                 marshalling::option_default::PASS_NAME,
                 marshalling::udt_decode::PASS_NAME,
                 marshalling::udt_encode::PASS_NAME,
