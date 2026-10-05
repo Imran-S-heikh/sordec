@@ -197,10 +197,33 @@ struct SretPlan {
     out_index: usize,
     /// Slots in ascending offset order; component `i` is `slots[i]`.
     slots: Vec<Slot>,
-    /// Value stored in each slot, parallel to `slots`.
-    values: Vec<ValueId>,
-    /// The store instructions, removed once the values are returned.
+    /// What each slot returns, parallel to `slots`.
+    values: Vec<SlotValue>,
+    /// The store instructions, and the address arithmetic that fed them,
+    /// removed once the values are returned.
     stores: Vec<ValueId>,
+}
+
+/// Where a slot's returned value comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SlotValue {
+    /// One store, dominating every return: its value is the slot's value.
+    Direct(ValueId),
+    /// Written on every path to a return, by a different store on each —
+    /// `read_allowance` writes its three fields once on each of three arms.
+    /// `(store, value)` pairs, threaded to each return by
+    /// [`thread_slot`].
+    Threaded(Vec<(ValueId, ValueId)>),
+}
+
+/// One store through the out-pointer, as [`plan_for`] found it.
+#[derive(Debug, Clone, Copy)]
+struct StoreSite {
+    slot: Slot,
+    value: ValueId,
+    id: ValueId,
+    block: BlockId,
+    position: usize,
 }
 
 /// Converts `sret` out-parameters into multi-value returns.
@@ -444,12 +467,12 @@ fn plan_for(
     // early-returning version reported whenever the candidate really is an
     // out-pointer.
     let mut escape: Option<&'static str> = None;
-    let mut slots: BTreeMap<u32, (Slot, ValueId, ValueId)> = BTreeMap::new();
+    let mut sites: BTreeMap<u32, Vec<StoreSite>> = BTreeMap::new();
     for (block_id, block) in func.blocks.iter() {
         if !cfg.is_reachable(block_id) {
             continue;
         }
-        for &id in &block.instructions {
+        for (position, &id) in block.instructions.iter().enumerate() {
             let Some(value) = func.values.get(id) else {
                 continue;
             };
@@ -457,6 +480,13 @@ fn plan_for(
                 continue;
             };
             let Some(memarg) = store_memarg(op) else {
+                // `out + 16`, computed into its own value before a store
+                // through it, is a slot address rather than a use — the same
+                // reading `reads_outside_stores` gives its address closure,
+                // which then checks that only stores consume it.
+                if canon_addr(func, id).0 == out_param {
+                    continue;
+                }
                 // Not a store; the out-pointer must not appear in it at all.
                 if args
                     .iter()
@@ -475,21 +505,19 @@ fn plan_for(
                 }
                 continue;
             }
-            // Every storing block must dominate every return, or "the value
-            // in this slot at return" is path-dependent.
-            if !returns.iter().all(|r| cfg.dominates(block_id, *r)) {
-                escape = escape.or(Some(DECLINED_PATH_DEPENDENT));
-            }
             let stored = *args.get(1)?;
             let slot = Slot {
                 offset: delta.checked_add(memarg.offset)?,
                 store_op: op.0,
                 ty: *func.values.get(stored)?.types.first()?,
             };
-            // Two stores to one offset make the slot's value ambiguous.
-            if slots.insert(slot.offset, (slot, stored, id)).is_some() {
-                escape = escape.or(Some(DECLINED_TWO_STORES));
-            }
+            sites.entry(slot.offset).or_default().push(StoreSite {
+                slot,
+                value: stored,
+                id,
+                block: block_id,
+                position,
+            });
         }
     }
     // **First**, because every gate below is about an out-pointer and this one
@@ -497,38 +525,99 @@ fn plan_for(
     // ordinary argument, and reporting one as an escape is what made 228 of
     // 237 declines read "the out-pointer reached another call" when not one of
     // the 228 was a pointer at all.
-    if slots.is_empty() {
+    if sites.is_empty() {
         decline!(DECLINED_NOT_AN_OUT_POINTER);
     }
     if let Some(why) = escape {
-        // Narrow the path-dependent reason to the two-slot case, which is
-        // the recoverable one. Done here rather than where `escape` is set
-        // because the slot map is only complete once every block has been
-        // walked.
-        let why = if why == DECLINED_PATH_DEPENDENT
-            && slots.len() == 2
-            && slots.contains_key(&0)
-            && slots.contains_key(&8)
-        {
-            DECLINED_PATH_DEPENDENT_TWO_SLOT
-        } else {
-            why
-        };
         decline!(why);
+    }
+
+    let mut values = Vec::with_capacity(sites.len());
+    let mut path_dependent = false;
+    for stores in sites.values() {
+        let first = stores[0];
+        // Two stores to one offset make the slot's value ambiguous when they
+        // disagree on width, or when one is on the way to the other — a
+        // value overwritten on its own path.
+        let same_width = stores.iter().all(|s| {
+            std::mem::discriminant(&s.slot.store_op) == std::mem::discriminant(&first.slot.store_op)
+                && s.slot.ty == first.slot.ty
+        });
+        let shadowed = stores.iter().any(|a| {
+            stores.iter().any(|b| {
+                a.id != b.id
+                    && if a.block == b.block {
+                        a.position < b.position
+                    } else {
+                        cfg.dominates(a.block, b.block)
+                    }
+            })
+        });
+        if !same_width || shadowed {
+            decline!(DECLINED_TWO_STORES);
+        }
+        if stores.len() == 1 && returns.iter().all(|r| cfg.dominates(first.block, *r)) {
+            values.push(SlotValue::Direct(first.value));
+        } else if written_on_every_path(func, stores, returns) {
+            // Each arm writes its own value; which one reaches a return is
+            // the path, so it is threaded rather than read off one store.
+            // No arm returns without writing, so no value is invented.
+            values.push(SlotValue::Threaded(stores.iter().map(|s| (s.id, s.value)).collect()));
+        } else {
+            path_dependent = true;
+        }
+    }
+    if path_dependent {
+        // Narrow the path-dependent reason to the two-slot case, which is
+        // the recoverable one.
+        if sites.len() == 2 && sites.contains_key(&0) && sites.contains_key(&8) {
+            decline!(DECLINED_PATH_DEPENDENT_TWO_SLOT);
+        }
+        decline!(DECLINED_PATH_DEPENDENT);
     }
 
     // The entry parameter must not be read anywhere else — including by the
     // terminators, which is how a pointer gets returned or branched on.
-    if reads_outside_stores(func, out_param, &slots) {
+    let store_ids: Vec<ValueId> = sites.values().flatten().map(|s| s.id).collect();
+    if reads_outside_stores(func, out_param, &store_ids) {
         decline!(DECLINED_READ_OUTSIDE_STORES);
     }
 
+    // The address arithmetic goes with the stores it fed: nothing else reads
+    // it (checked just above), and left scheduled it would name the
+    // parameter the conversion removes.
+    let mut retired = store_ids;
+    retired.extend(address_closure(func, out_param).into_iter().filter(|a| *a != out_param));
+
     Some(SretPlan {
         out_index,
-        slots: slots.values().map(|(s, _, _)| *s).collect(),
-        values: slots.values().map(|(_, v, _)| *v).collect(),
-        stores: slots.values().map(|(_, _, id)| *id).collect(),
+        slots: sites.values().map(|stores| stores[0].slot).collect(),
+        values,
+        stores: retired,
     })
+}
+
+/// Whether every path from the entry to a return passes one of `stores`.
+///
+/// A path that reaches a return without writing the slot would return
+/// whatever the caller's memory held, and there is no honest value to put
+/// there — that is the `Option`/`Result` conditional payload, still declined.
+fn written_on_every_path(func: &LiftedFunction, stores: &[StoreSite], returns: &[BlockId]) -> bool {
+    let writing: HashSet<BlockId> = stores.iter().map(|s| s.block).collect();
+    let mut seen: HashSet<BlockId> = HashSet::new();
+    let mut work = vec![func.entry];
+    while let Some(block_id) = work.pop() {
+        if !seen.insert(block_id) || writing.contains(&block_id) {
+            continue;
+        }
+        if returns.contains(&block_id) {
+            return false;
+        }
+        if let Some(block) = func.blocks.get(block_id) {
+            crate::dataflow::for_each_target(&block.terminator, |t| work.push(t.block));
+        }
+    }
+    true
 }
 
 /// Whether `out_param` reaches anywhere but the address operand of one of
@@ -539,13 +628,8 @@ fn plan_for(
 /// is written at all, so the check works over the **address closure** —
 /// `out_param` plus every `add addr, const` derived from it — and asks
 /// whether anything outside that closure consumes a member of it.
-fn reads_outside_stores(
-    func: &LiftedFunction,
-    out_param: ValueId,
-    slots: &BTreeMap<u32, (Slot, ValueId, ValueId)>,
-) -> bool {
+fn reads_outside_stores(func: &LiftedFunction, out_param: ValueId, store_ids: &[ValueId]) -> bool {
     let addresses = address_closure(func, out_param);
-    let store_ids: Vec<ValueId> = slots.values().map(|(_, _, id)| *id).collect();
 
     for (id, value) in func.values.iter() {
         // A store we accounted for reads the address legitimately; only its
@@ -735,6 +819,19 @@ fn drop_frame_arg(func: &mut LiftedFunction, call: ValueId, out_index: usize) ->
 /// Drop the out-parameter, return the slot values, and neutralise the
 /// stores that used to write them.
 fn convert_callee(func: &mut LiftedFunction, plan: &SretPlan) {
+    // Threaded first, while the stores are still in the blocks the walk
+    // reads them from.
+    let cfg = CfgFacts::build(func);
+    let threaded: Vec<Option<Threading>> = plan
+        .values
+        .iter()
+        .zip(&plan.slots)
+        .map(|(value, slot)| match value {
+            SlotValue::Direct(_) => None,
+            SlotValue::Threaded(writes) => Some(thread_slot(func, &cfg, slot.ty, writes)),
+        })
+        .collect();
+
     // Entry parameters are the function's ABI; dropping one changes the
     // signature every caller was just rewritten against.
     let entry = func.entry;
@@ -745,14 +842,120 @@ fn convert_callee(func: &mut LiftedFunction, plan: &SretPlan) {
     }
     renumber_entry_params(func);
 
-    for (_, block) in func.blocks.iter_mut() {
+    for (block_id, block) in func.blocks.iter_mut() {
         if let LiftedTerminator::Return { values } = &mut block.terminator {
-            values.clone_from(&plan.values);
+            *values = plan
+                .values
+                .iter()
+                .zip(&threaded)
+                .map(|(value, threading)| match (value, threading) {
+                    (SlotValue::Direct(v), _) => *v,
+                    (SlotValue::Threaded(_), Some(t)) => t.at_exit(block_id),
+                    // Unreachable by construction: every threaded value
+                    // was threaded above.
+                    (SlotValue::Threaded(writes), None) => writes[0].1,
+                })
+                .collect();
         }
         // The stores are gone from the schedule, but the arena is push-only
         // so their definitions stay as honest, use-free residue.
         block.instructions.retain(|id| !plan.stores.contains(id));
     }
+}
+
+/// A threaded slot: its value at the end of every reachable block.
+struct Threading {
+    outgoing: HashMap<BlockId, ValueId>,
+    initial: ValueId,
+}
+
+impl Threading {
+    /// The slot's value as `block` exits. An unreachable block never
+    /// returns, so it takes the placeholder.
+    fn at_exit(&self, block: BlockId) -> ValueId {
+        self.outgoing.get(&block).copied().unwrap_or(self.initial)
+    }
+}
+
+/// Thread a slot written by different stores on different paths to the
+/// end of every block — `promote`'s maximal-SSA construction, applied to an
+/// out-parameter slot rather than a frame slot.
+///
+/// Every reachable block but the entry gets a parameter for the slot, every
+/// edge into one passes the value current at the edge's source, and each
+/// store redefines the current value. `PruneTrivialPhisPass` then removes
+/// the parameters that carry a single value, as it does after `promote`.
+///
+/// The entry value is a zero, and it is a placeholder rather than a claim:
+/// [`written_on_every_path`] proved no return is reached without a store,
+/// so the zero can flow only into blocks a store later overwrites.
+fn thread_slot(
+    func: &mut LiftedFunction,
+    cfg: &CfgFacts,
+    ty: LiftedType,
+    writes: &[(ValueId, ValueId)],
+) -> Threading {
+    let reachable: Vec<BlockId> = func
+        .blocks
+        .iter()
+        .map(|(id, _)| id)
+        .filter(|id| cfg.is_reachable(*id))
+        .collect();
+
+    let initial = super::promote::push_zero(func, ty);
+    if let Some(entry) = func.blocks.get_mut(func.entry) {
+        entry.instructions.insert(0, initial);
+    }
+
+    let mut incoming: HashMap<BlockId, ValueId> = HashMap::new();
+    let mut parameterised: HashSet<BlockId> = HashSet::new();
+    for &block_id in &reachable {
+        if block_id == func.entry {
+            incoming.insert(block_id, initial);
+            continue;
+        }
+        let index = func.blocks.get(block_id).map_or(0, |b| b.params.len() as u32);
+        let param = func.values.push(LiftedValue {
+            def: LiftedValueDef::BlockParam {
+                block: block_id,
+                index,
+            },
+            types: vec![ty],
+        });
+        if let Some(block) = func.blocks.get_mut(block_id) {
+            block.params.push(param);
+        }
+        parameterised.insert(block_id);
+        incoming.insert(block_id, param);
+    }
+
+    let mut outgoing: HashMap<BlockId, ValueId> = HashMap::new();
+    for &block_id in &reachable {
+        let mut current = incoming[&block_id];
+        if let Some(block) = func.blocks.get(block_id) {
+            for id in &block.instructions {
+                if let Some((_, value)) = writes.iter().find(|(store, _)| store == id) {
+                    current = *value;
+                }
+            }
+        }
+        outgoing.insert(block_id, current);
+    }
+
+    // Only edges into a block that gained a parameter, positionally; an edge
+    // from an unreachable block carries the placeholder to keep the arity.
+    let block_ids: Vec<BlockId> = func.blocks.iter().map(|(id, _)| id).collect();
+    for block_id in block_ids {
+        let arg = outgoing.get(&block_id).copied().unwrap_or(initial);
+        if let Some(block) = func.blocks.get_mut(block_id) {
+            crate::declutter::for_each_target_mut(&mut block.terminator, |t| {
+                if parameterised.contains(&t.block) {
+                    t.args.push(arg);
+                }
+            });
+        }
+    }
+    Threading { outgoing, initial }
 }
 
 /// Re-index the entry block's `BlockParam` definitions after a removal.
@@ -901,7 +1104,7 @@ mod tests {
             plan.slots.iter().map(|s| s.offset).collect::<Vec<_>>(),
             vec![0, 8]
         );
-        assert_eq!(plan.values, vec![v(2), v(3)]);
+        assert_eq!(plan.values, vec![SlotValue::Direct(v(2)), SlotValue::Direct(v(3))]);
     }
 
     #[test]
@@ -983,7 +1186,7 @@ mod tests {
         );
         let plan = convertible(&func).expect("convertible");
         assert_eq!(plan.out_index, 1);
-        assert_eq!(plan.values, vec![v(2), v(3)]);
+        assert_eq!(plan.values, vec![SlotValue::Direct(v(2)), SlotValue::Direct(v(3))]);
     }
 
     #[test]
@@ -1120,6 +1323,59 @@ mod tests {
             ],
         );
         assert_eq!(decline_reason(&func), Some(DECLINED_PATH_DEPENDENT));
+    }
+
+    #[test]
+    fn a_slot_written_on_every_path_is_threaded_to_the_return() {
+        // token-v22's `read_allowance`: each arm writes the slot, so the
+        // value at return is whichever arm ran — a merge, not a guess.
+        //
+        //   b0: cond ? b1 : b2      b1: store out+0 <- 7   b2: store out+0 <- 9
+        //                           both -> b3: return
+        let mut func = func_with(
+            vec![
+                param(0, 0),                 // v0 the out-pointer
+                i32_const(1),                // v1 the condition
+                i32_const(7),                // v2
+                i32_const(9),                // v3
+                store(mem(), 0, v(0), v(2)), // v4 one arm
+                store(mem(), 0, v(0), v(3)), // v5 the other
+            ],
+            vec![
+                block(
+                    0,
+                    vec![v(0)],
+                    vec![v(1), v(2), v(3)],
+                    LiftedTerminator::BranchIf {
+                        cond: v(1),
+                        if_true: crate::test_util::target(1, vec![]),
+                        if_false: crate::test_util::target(2, vec![]),
+                    },
+                ),
+                block(1, vec![], vec![v(4)], LiftedTerminator::Branch(crate::test_util::target(3, vec![]))),
+                block(2, vec![], vec![v(5)], LiftedTerminator::Branch(crate::test_util::target(3, vec![]))),
+                block(3, vec![], vec![], LiftedTerminator::Return { values: vec![] }),
+            ],
+        );
+        let plan = convertible(&func).expect("written on both arms");
+        assert_eq!(plan.values, vec![SlotValue::Threaded(vec![(v(4), v(2)), (v(5), v(3))])]);
+        convert_callee(&mut func, &plan);
+
+        let join = func.blocks.get(BlockId::from_index(3)).unwrap();
+        let [merged] = join.params[..] else {
+            panic!("the join gains one parameter for the slot: {:?}", join.params);
+        };
+        assert_eq!(join.terminator, LiftedTerminator::Return { values: vec![merged] });
+        let args_from = |b: u32| {
+            let mut args = Vec::new();
+            crate::dataflow::for_each_target(
+                &func.blocks.get(BlockId::from_index(b)).unwrap().terminator,
+                |t| args.extend(t.args.iter().copied()),
+            );
+            args
+        };
+        assert_eq!(args_from(1), vec![v(2)], "the first arm passes what it wrote");
+        assert_eq!(args_from(2), vec![v(3)], "and the second its own");
     }
 
     #[test]

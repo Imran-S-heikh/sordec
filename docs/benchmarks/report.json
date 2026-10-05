@@ -1,6 +1,6 @@
 {
   "aggregate_overall": 0.9388772335090335,
-  "aggregate_overall_with_behavior": 0.9330661325857316,
+  "aggregate_overall_with_behavior": 0.9395921753503063,
   "behavior_measured_fixtures": 6,
   "fixtures": {
     "attestation": {
@@ -322,22 +322,22 @@
         "notes": [
           "12 of 12 entrypoints drivable"
         ],
-        "score": 0.8881118881118881,
+        "score": 1.0,
         "trivial_agreements": 114,
         "tuples": [
           {
             "exercised": 174,
-            "matched": 142,
+            "matched": 174,
             "name": "return"
           },
           {
             "exercised": 27,
-            "matched": 19,
+            "matched": 27,
             "name": "events"
           },
           {
             "exercised": 54,
-            "matched": 46,
+            "matched": 54,
             "name": "auth"
           },
           {
@@ -353,7 +353,7 @@
           "notes": [
             "differential execution over 12 of 12 entrypoints"
           ],
-          "score": 0.8881118881118881,
+          "score": 1.0,
           "weight": 0.15
         },
         "interface": {
@@ -393,7 +393,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 3 types recovered"
       ],
-      "overall": 0.9334674097831993,
+      "overall": 0.9502506265664161,
       "passed": true,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,
@@ -410,22 +410,22 @@
         "notes": [
           "12 of 12 entrypoints drivable"
         ],
-        "score": 0.8899082568807339,
+        "score": 1.0,
         "trivial_agreements": 112,
         "tuples": [
           {
             "exercised": 176,
-            "matched": 144,
+            "matched": 176,
             "name": "return"
           },
           {
             "exercised": 28,
-            "matched": 20,
+            "matched": 28,
             "name": "events"
           },
           {
             "exercised": 56,
-            "matched": 48,
+            "matched": 56,
             "name": "auth"
           },
           {
@@ -441,7 +441,7 @@
           "notes": [
             "differential execution over 12 of 12 entrypoints"
           ],
-          "score": 0.8899082568807339,
+          "score": 1.0,
           "weight": 0.15
         },
         "interface": {
@@ -481,7 +481,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.8801654365270976,
+      "overall": 0.8966791979949875,
       "passed": false,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,
@@ -498,22 +498,22 @@
         "notes": [
           "12 of 12 entrypoints drivable"
         ],
-        "score": 0.5229357798165137,
+        "score": 0.6055045871559633,
         "trivial_agreements": 112,
         "tuples": [
           {
             "exercised": 176,
-            "matched": 140,
+            "matched": 168,
             "name": "return"
           },
           {
             "exercised": 28,
-            "matched": 16,
+            "matched": 20,
             "name": "events"
           },
           {
             "exercised": 56,
-            "matched": 44,
+            "matched": 48,
             "name": "auth"
           },
           {
@@ -529,7 +529,7 @@
           "notes": [
             "differential execution over 12 of 12 entrypoints"
           ],
-          "score": 0.5229357798165137,
+          "score": 0.6055045871559633,
           "weight": 0.15
         },
         "interface": {
@@ -571,7 +571,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.7778441795341844,
+      "overall": 0.7902295006351019,
       "passed": false,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,

@@ -670,7 +670,7 @@ fn every_load_is_written_first(slot: &SlotAccess, cfg: &CfgFacts) -> bool {
 }
 
 /// A zero constant of `ty`, appended to the value arena.
-fn push_zero(func: &mut LiftedFunction, ty: LiftedType) -> ValueId {
+pub(super) fn push_zero(func: &mut LiftedFunction, ty: LiftedType) -> ValueId {
     let op = match ty {
         LiftedType::I32 => waffle::Operator::I32Const { value: 0 },
         LiftedType::F32 => waffle::Operator::F32Const { value: 0 },

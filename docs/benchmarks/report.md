@@ -7,14 +7,14 @@ Scorer `score-2.1.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | fixture | overall (AST) | interface | structure | semantic | behavior |
 |---|---|---|---|---|---|
 | hello-add | 1.0000 | 1.0000 | 0.0000 | 0.0000 | 1.0000 |
-| token-v22 | 0.9415 | 0.9286 | 0.9724 | 0.9286 | 0.8881 |
-| token-v23 | 0.8784 | 0.7500 | 0.9724 | 0.9286 | 0.8899 |
-| token-v23-stripped | 0.8228 | 0.6429 | 0.9119 | 0.9286 | 0.5229 |
+| token-v22 | 0.9415 | 0.9286 | 0.9724 | 0.9286 | 1.0000 |
+| token-v23 | 0.8784 | 0.7500 | 0.9724 | 0.9286 | 1.0000 |
+| token-v23-stripped | 0.8228 | 0.6429 | 0.9119 | 0.9286 | 0.6055 |
 | timelock | 1.0000 | 1.0000 | 1.0000 | 1.0000 | n/a |
 | dex-liquidity-pool | 0.9294 | 1.0000 | 0.7599 | 1.0000 | 1.0000 |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
 | **aggregate (mean, AST)** | **0.9389** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.9331** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.9396** | | | | |
 
 ## Per-fixture detail
 
@@ -30,21 +30,21 @@ Scorer `score-2.1.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 - **interface** 0.9286 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.8571  precision=0.7500 recall=1.0000 (3 original, 4 reconstructed) — types extra: type TokenMetadata
 - **structure** 0.9724 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.9167 recall=1.0000 (33 original tokens, 36 reconstructed) — bloat 1.1x, dice ceiling ~0.9565
 - **semantic** 0.9286 — precision=0.8667 recall=1.0000 (13 original facts, 15 reconstructed) — over-recovered: storage:get:instance:?, storage:set:instance:?
-- **behavior** 0.8881 — 12 of 12 entrypoints driven; return 142/174, events 19/27, auth 46/54, storage 174/174; 114 trivial agreement(s) excluded
+- **behavior** 1.0000 — 12 of 12 entrypoints driven; return 174/174, events 27/27, auth 54/54, storage 174/174; 114 trivial agreement(s) excluded
 
 ### token-v23
 
 - **interface** 0.7500 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.5000  precision=0.3333 recall=1.0000 (4 original, 12 reconstructed) — types extra: type Approve, type Burn, type Clawback, type Mint, type MintWithAmountOnly, type TokenMetadata, type Transfer, type TransferWithAmountOnly
 - **structure** 0.9724 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (1 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.9167 recall=1.0000 (33 original tokens, 36 reconstructed) — bloat 1.1x, dice ceiling ~0.9565
 - **semantic** 0.9286 — precision=0.8667 recall=1.0000 (13 original facts, 15 reconstructed) — over-recovered: storage:get:instance:?, storage:set:instance:?
-- **behavior** 0.8899 — 12 of 12 entrypoints driven; return 144/176, events 20/28, auth 48/56, storage 176/176; 112 trivial agreement(s) excluded
+- **behavior** 1.0000 — 12 of 12 entrypoints driven; return 176/176, events 28/28, auth 56/56, storage 176/176; 112 trivial agreement(s) excluded
 
 ### token-v23-stripped
 
 - **interface** 0.6429 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed) — types 0.2857  precision=0.3333 recall=0.2500 (4 original, 3 reconstructed) — types missing: type SetAdmin, type struct{from:Address,spender:Address}, type union{Allowance(AllowanceDataKey),Balance(Address),State(Address),Admin} — types extra: type struct{decimal:u32,name:String,symbol:String}, type union{Allowance(Address,Address),Balance(Address),State(Val),Admin}
 - **structure** 0.9119 — 13 entrypoints (0 unreconstructed, 4 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.7674 recall=1.0000 (33 original tokens, 43 reconstructed) — bloat 1.3x, dice ceiling ~0.8684 — low-similarity: transfer(0.55)
 - **semantic** 0.9286 — precision=0.8667 recall=1.0000 (13 original facts, 15 reconstructed) — over-recovered: storage:get:instance:?, storage:set:instance:?
-- **behavior** 0.5229 — 12 of 12 entrypoints driven; return 140/176, events 16/28, auth 44/56, storage 28/176; 112 trivial agreement(s) excluded
+- **behavior** 0.6055 — 12 of 12 entrypoints driven; return 168/176, events 20/28, auth 48/56, storage 28/176; 112 trivial agreement(s) excluded
 
 ### timelock
 
