@@ -247,6 +247,12 @@ const OPTION_DEFAULT_COUNTERS: &[&str] = &[
 pub const DEAD_FRAME_STORE_AFTER_VEC: &str = "dead-frame-store-after-vec";
 /// [`FrameElisionPass`] re-run after the `Vec` elements are recovered.
 pub const FRAME_ELISION_AFTER_VEC: &str = "frame-elision-after-vec";
+/// [`DeadFrameStorePass`] re-run after the event and muxed-address folds.
+pub const DEAD_FRAME_STORE_AFTER_EVENTS: &str = "dead-frame-store-after-events";
+/// [`FrameElisionPass`] re-run after the event and muxed-address folds.
+pub const FRAME_ELISION_AFTER_EVENTS: &str = "frame-elision-after-events";
+/// [`SymbolArgsPass`] re-run on the positions the recovered elements prove.
+pub const SYMBOL_ARGS_AFTER_VEC: &str = "symbol-args-after-vec";
 /// Name of the declared-type recovery re-run inside the elision group,
 /// where a struct recovered from its key table first has fields to type.
 pub const SPEC_FROM_GUARDS_ON_FIELDS: &str = "spec-from-guards-on-fields";
@@ -730,6 +736,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
                 FRAME_ELISION_AFTER_VEC,
                 &[],
             )),
+            // A packed symbol a helper stores straight into the vector it
+            // builds, as an event helper does with the event's name. The
+            // elements that prove the position were only recovered above,
+            // after the group's own run of this pass; the typing below then
+            // sees call sites that agree.
+            Box::new(pass::Rerun::new(SymbolArgsPass, SYMBOL_ARGS_AFTER_VEC, &[])),
             // After the group, on settled IR: a returned `select` becomes
             // the `if`/`else` it compiled from, so each arm can be the
             // `Ok`/`Err` it is.
@@ -765,6 +777,21 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // with the publish it feeds.
             Box::new(ContractEventPass),
             Box::new(MuxedAddressPass),
+            // The two above remove the last readers of frames that held a
+            // muxed address's parts and an event's fields, after the frame
+            // collection has run. Collected again, or the bracket survives
+            // with nothing in it: `todo!("global.get 0")` at the top of
+            // token-v23's `transfer`, which traps on every call.
+            Box::new(pass::Rerun::new(
+                DeadFrameStorePass,
+                DEAD_FRAME_STORE_AFTER_EVENTS,
+                &[],
+            )),
+            Box::new(pass::Rerun::new(
+                FrameElisionPass,
+                FRAME_ELISION_AFTER_EVENTS,
+                &[],
+            )),
             Box::new(TypeInferPass),
             // After the types settle, and outside the group: a stripped
             // module's key union is synthesized with untyped fields, and

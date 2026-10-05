@@ -1,7 +1,7 @@
 {
-  "aggregate_overall": 0.9359021273826669,
-  "aggregate_overall_with_behavior": 0.9359021273826669,
-  "behavior_measured_fixtures": 2,
+  "aggregate_overall": 0.9388772335090335,
+  "aggregate_overall_with_behavior": 0.9330661325857316,
+  "behavior_measured_fixtures": 6,
   "fixtures": {
     "attestation": {
       "basis_profile": "rfp-default",
@@ -9,17 +9,17 @@
         "b_side": {
           "kind": "reconstruction"
         },
-        "entrypoints_driven": 2,
+        "entrypoints_driven": 6,
         "entrypoints_total": 6,
         "notes": [
-          "2 of 6 entrypoints drivable (skipped — attest: parameter `signer` is a Bytes value, which needs a value constructed against a live host; check: parameter `message` is a Bytes value, which needs a value constructed against a live host; digest: parameter `message` is a Bytes value, which needs a value constructed against a live host; digest_keccak: parameter `message` is a Bytes value, which needs a value constructed against a live host)"
+          "6 of 6 entrypoints drivable"
         ],
         "score": 1.0,
-        "trivial_agreements": 4,
+        "trivial_agreements": 64,
         "tuples": [
           {
-            "exercised": 20,
-            "matched": 20,
+            "exercised": 80,
+            "matched": 80,
             "name": "return"
           },
           {
@@ -43,7 +43,7 @@
         "behavior": {
           "checked": true,
           "notes": [
-            "differential execution over 2 of 6 entrypoints"
+            "differential execution over 6 of 6 entrypoints"
           ],
           "score": 1.0,
           "weight": 0.15
@@ -91,13 +91,47 @@
     },
     "dex-liquidity-pool": {
       "basis_profile": "rfp-default",
+      "behavior": {
+        "b_side": {
+          "kind": "reconstruction"
+        },
+        "entrypoints_driven": 5,
+        "entrypoints_total": 5,
+        "notes": [
+          "5 of 5 entrypoints drivable"
+        ],
+        "score": 1.0,
+        "trivial_agreements": 72,
+        "tuples": [
+          {
+            "exercised": 48,
+            "matched": 48,
+            "name": "return"
+          },
+          {
+            "exercised": 0,
+            "matched": 0,
+            "name": "events"
+          },
+          {
+            "exercised": 0,
+            "matched": 0,
+            "name": "auth"
+          },
+          {
+            "exercised": 48,
+            "matched": 48,
+            "name": "storage"
+          }
+        ]
+      },
       "categories": {
         "behavior": {
-          "checked": false,
+          "checked": true,
           "notes": [
-            "behavior unavailable: crate does not build: error[E0308]: mismatched types"
+            "differential execution over 5 of 5 entrypoints"
           ],
-          "score": 0.0,
+          "score": 1.0,
           "weight": 0.15
         },
         "interface": {
@@ -122,10 +156,10 @@
           "notes": [
             "6 entrypoints (0 unreconstructed, 2 without control flow)",
             "ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.4872 recall=0.9500 (20 original tokens, 39 reconstructed) — bloat 1.9x, dice ceiling ~0.6780",
+            "control flow: precision=0.4634 recall=0.9500 (20 original tokens, 41 reconstructed) — bloat 2.0x, dice ceiling ~0.6557",
             "low-similarity: deposit(0.40)"
           ],
-          "score": 0.805921052631579,
+          "score": 0.7599436090225564,
           "weight": 0.25
         }
       },
@@ -136,7 +170,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 6 entrypoints, 1 types recovered"
       ],
-      "overall": 0.9429179566563467,
+      "overall": 0.939985902255639,
       "passed": true,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,
@@ -154,11 +188,11 @@
           "1 of 1 entrypoints drivable"
         ],
         "score": 1.0,
-        "trivial_agreements": 3,
+        "trivial_agreements": 6,
         "tuples": [
           {
-            "exercised": 9,
-            "matched": 9,
+            "exercised": 18,
+            "matched": 18,
             "name": "return"
           },
           {
@@ -231,7 +265,7 @@
         "behavior": {
           "checked": false,
           "notes": [
-            "behavior unavailable: both modules build and load, but no entrypoint could be driven — 0 of 2 entrypoints drivable (skipped — claim: parameter `claimant` is an Address, which needs a value constructed against a live host; deposit: parameter `from` is an Address, which needs a value constructed against a live host)"
+            "behavior unavailable: both modules ran, but every call was a trivial agreement (both sides failed identically), so nothing was actually compared — 2 of 2 entrypoints drivable"
           ],
           "score": 0.0,
           "weight": 0.15
@@ -279,13 +313,47 @@
     },
     "token-v22": {
       "basis_profile": "rfp-default",
+      "behavior": {
+        "b_side": {
+          "kind": "reconstruction"
+        },
+        "entrypoints_driven": 12,
+        "entrypoints_total": 12,
+        "notes": [
+          "12 of 12 entrypoints drivable"
+        ],
+        "score": 0.8881118881118881,
+        "trivial_agreements": 114,
+        "tuples": [
+          {
+            "exercised": 174,
+            "matched": 142,
+            "name": "return"
+          },
+          {
+            "exercised": 27,
+            "matched": 19,
+            "name": "events"
+          },
+          {
+            "exercised": 54,
+            "matched": 46,
+            "name": "auth"
+          },
+          {
+            "exercised": 174,
+            "matched": 174,
+            "name": "storage"
+          }
+        ]
+      },
       "categories": {
         "behavior": {
-          "checked": false,
+          "checked": true,
           "notes": [
-            "behavior unavailable: crate does not build: error[E0308]: mismatched types"
+            "differential execution over 12 of 12 entrypoints"
           ],
-          "score": 0.0,
+          "score": 0.8881118881118881,
           "weight": 0.15
         },
         "interface": {
@@ -325,7 +393,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 3 types recovered"
       ],
-      "overall": 0.9414713253722541,
+      "overall": 0.9334674097831993,
       "passed": true,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,
@@ -333,13 +401,47 @@
     },
     "token-v23": {
       "basis_profile": "rfp-default",
+      "behavior": {
+        "b_side": {
+          "kind": "reconstruction"
+        },
+        "entrypoints_driven": 12,
+        "entrypoints_total": 12,
+        "notes": [
+          "12 of 12 entrypoints drivable"
+        ],
+        "score": 0.8899082568807339,
+        "trivial_agreements": 112,
+        "tuples": [
+          {
+            "exercised": 176,
+            "matched": 144,
+            "name": "return"
+          },
+          {
+            "exercised": 28,
+            "matched": 20,
+            "name": "events"
+          },
+          {
+            "exercised": 56,
+            "matched": 48,
+            "name": "auth"
+          },
+          {
+            "exercised": 176,
+            "matched": 176,
+            "name": "storage"
+          }
+        ]
+      },
       "categories": {
         "behavior": {
-          "checked": false,
+          "checked": true,
           "notes": [
-            "behavior unavailable: crate does not build: error[E0308]: mismatched types"
+            "differential execution over 12 of 12 entrypoints"
           ],
-          "score": 0.0,
+          "score": 0.8899082568807339,
           "weight": 0.15
         },
         "interface": {
@@ -366,10 +468,9 @@
           "notes": [
             "13 entrypoints (0 unreconstructed, 4 without control flow)",
             "ambiguous names (1 original, 2 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.7500 recall=1.0000 (33 original tokens, 44 reconstructed) — bloat 1.3x, dice ceiling ~0.8571",
-            "low-similarity: transfer(0.50)"
+            "control flow: precision=0.9167 recall=1.0000 (33 original tokens, 36 reconstructed) — bloat 1.1x, dice ceiling ~0.9565"
           ],
-          "score": 0.9068504594820386,
+          "score": 0.9724310776942358,
           "weight": 0.25
         }
       },
@@ -380,7 +481,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.8591576981669861,
+      "overall": 0.8801654365270976,
       "passed": false,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,
@@ -388,26 +489,58 @@
     },
     "token-v23-stripped": {
       "basis_profile": "rfp-default",
+      "behavior": {
+        "b_side": {
+          "kind": "reconstruction"
+        },
+        "entrypoints_driven": 12,
+        "entrypoints_total": 12,
+        "notes": [
+          "12 of 12 entrypoints drivable"
+        ],
+        "score": 0.5229357798165137,
+        "trivial_agreements": 112,
+        "tuples": [
+          {
+            "exercised": 176,
+            "matched": 140,
+            "name": "return"
+          },
+          {
+            "exercised": 28,
+            "matched": 16,
+            "name": "events"
+          },
+          {
+            "exercised": 56,
+            "matched": 44,
+            "name": "auth"
+          },
+          {
+            "exercised": 176,
+            "matched": 28,
+            "name": "storage"
+          }
+        ]
+      },
       "categories": {
         "behavior": {
-          "checked": false,
+          "checked": true,
           "notes": [
-            "behavior unavailable: samples/contracts/token-v23-stripped/token-v23-stripped.wasm has no `contractenvmetav0` section, so the host cannot load it and it cannot serve as a behaviour oracle"
+            "differential execution over 12 of 12 entrypoints"
           ],
-          "score": 0.0,
+          "score": 0.5229357798165137,
           "weight": 0.15
         },
         "interface": {
           "checked": true,
           "notes": [
-            "entrypoints 0.9231  precision=0.9231 recall=0.9231 (13 original, 13 reconstructed)",
-            "entrypoints missing: fn transfer",
-            "entrypoints extra: fn transfer",
+            "entrypoints 1.0000  precision=1.0000 recall=1.0000 (13 original, 13 reconstructed)",
             "types 0.2857  precision=0.3333 recall=0.2500 (4 original, 3 reconstructed)",
             "types missing: type SetAdmin, type struct{from:Address,spender:Address}, type union{Allowance(AllowanceDataKey),Balance(Address),State(Address),Admin}",
-            "types extra: type struct{decimal:u32,name:String,symbol:String}, type union{Allowance(Val,Val),Balance(Val),State(Val),Admin}"
+            "types extra: type struct{decimal:u32,name:String,symbol:String}, type union{Allowance(Address,Address),Balance(Address),State(Val),Admin}"
           ],
-          "score": 0.6043956043956045,
+          "score": 0.6428571428571429,
           "weight": 0.3
         },
         "semantic": {
@@ -424,10 +557,10 @@
           "notes": [
             "13 entrypoints (0 unreconstructed, 4 without control flow)",
             "ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=0.7500 recall=1.0000 (33 original tokens, 44 reconstructed) — bloat 1.3x, dice ceiling ~0.8571",
-            "low-similarity: transfer(0.50)"
+            "control flow: precision=0.7674 recall=1.0000 (33 original tokens, 43 reconstructed) — bloat 1.3x, dice ceiling ~0.8684",
+            "low-similarity: transfer(0.55)"
           ],
-          "score": 0.9068504594820386,
+          "score": 0.9119009645325435,
           "weight": 0.25
         }
       },
@@ -438,7 +571,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 13 entrypoints, 4 types recovered"
       ],
-      "overall": 0.8077679114830818,
+      "overall": 0.7778441795341844,
       "passed": false,
       "scorer_version": "score-2.1.0",
       "threshold": 0.9,

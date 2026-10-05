@@ -164,15 +164,12 @@ fn helper_layout(ir: &HighIr, h: &HighFunction, events: &[EventDef]) -> Option<L
     for &id in &order {
         if let Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics, data })) =
             &h.bindings.get(id)?.expr
-            && publish.replace((topics.clone(), *data)).is_some()
+            && publish.replace((*topics, *data)).is_some()
         {
             return None;
         }
     }
-    let (topics, _data) = publish?;
-    let [topic_vec] = topics[..] else {
-        return None;
-    };
+    let (topic_vec, _data) = publish?;
     let (topic_values, builder) = topic_elements(ir, h, topic_vec)?;
 
     // Nothing else with a host effect: the helper publishes, and builds
@@ -811,7 +808,7 @@ mod tests {
                 load(8),                                     // v4
                 load(16),                                    // v5
                 Expr::WideJoin { lo: v(4), hi: v(5) },       // v6 amount
-                Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics: vec![v(3)], data: v(6) })), // v7
+                Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics: v(3), data: v(6) })), // v7
             ],
             vec![v(0)],
             (1..8).collect(),

@@ -181,13 +181,12 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
 
         // ---- Events ----
         KnownOp::PublishEvent { topics, data } => {
-            let topics: Vec<syn::Expr> = topics.iter().map(|v| ctx.value_ref(*v)).collect();
+            // The topics are the vector itself — `Topics` is implemented for
+            // `Vec<T>` — never a tuple around it, which would publish one
+            // topic that is a vector.
+            let topics = ctx.arg_ref(*topics);
             let data = ctx.value_ref(*data);
-            // Topics are a tuple. The trailing comma is what makes a single
-            // topic the 1-tuple `(t,)` Soroban's `Topics` needs, rather than
-            // a parenthesised expression `(t)`; it is equally valid for the
-            // multi-topic `(a, b,)` and zero-topic `()` forms.
-            Some(parse_quote!(#e.events().publish((#(#topics,)*), #data)))
+            Some(parse_quote!(#e.events().publish(#topics, #data)))
         }
         // The struct literal the source built, published. Values by
         // `arg_ref`: a field takes its value by move, so one read again
@@ -311,6 +310,35 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             } else {
                 Some(parse_quote!(#e.crypto().ed25519_verify(&#key, &#msg, &#sig)))
             }
+        }
+
+        // ---- Comparison ----
+        // `obj_cmp` is the host's total order on two objects, as -1/0/1.
+        // The SDK's `Ord` for its object types calls exactly that, and
+        // `Ordering` casts to the same three values, so the cast is the
+        // call. Only for two operands of one such type: an untyped `Val`
+        // has no `Ord`, and the hole is the honest answer then.
+        KnownOp::ValCompare { a, b } => {
+            let ty = |v| match ctx.func.bindings.get(v).map(|b| &b.ty) {
+                Some(IrType::Known(t) | IrType::Inferred(t))
+                    if matches!(
+                        t,
+                        KnownType::Address
+                            | KnownType::Symbol
+                            | KnownType::String
+                            | KnownType::Bytes
+                            | KnownType::BytesN(_)
+                    ) =>
+                {
+                    Some(t)
+                }
+                _ => None,
+            };
+            if ty(*a).is_none() || ty(*a) != ty(*b) {
+                return None;
+            }
+            let (a, b) = (ctx.value_ref(*a), ctx.value_ref(*b));
+            Some(parse_quote!((#a.cmp(&#b) as i64)))
         }
 
         // ---- PRNG ----

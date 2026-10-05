@@ -1042,11 +1042,7 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io:
         KnownOp::GetLedgerNetworkId => write!(out, "get_ledger_network_id()"),
         KnownOp::GetMaxLiveUntilLedger => write!(out, "get_max_live_until_ledger()"),
         KnownOp::PublishEvent { topics, data } => {
-            write!(out, "publish_event(")?;
-            for t in topics {
-                write!(out, "{}, ", ctx.operand(*t))?;
-            }
-            write!(out, "{})", ctx.operand(*data))
+            write!(out, "publish_event({}, {})", ctx.operand(*topics), ctx.operand(*data))
         }
         KnownOp::PublishContractEvent { event, fields } => {
             write!(out, "{event} {{ ")?;
@@ -1963,7 +1959,7 @@ mod tests {
     #[test]
     fn publish_event_renders_topics_and_data() {
         let expr = Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent {
-            topics: vec![v(21)],
+            topics: v(21),
             data: v(33),
         }));
         let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));

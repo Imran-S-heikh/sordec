@@ -1367,7 +1367,7 @@ mod tests {
                 "d",
                 "0",
             ),
-            (KnownOp::PublishEvent { topics: vec![v(0)], data: v(1) }, "x", "1"),
+            (KnownOp::PublishEvent { topics: v(0), data: v(1) }, "x", "1"),
             (KnownOp::ValCompare { a: v(0), b: v(1) }, "x", "0"),
             (KnownOp::PanicWithError { error: v(0) }, "x", "5"),
             (KnownOp::GetLedgerProtocolVersion, "x", "2"),

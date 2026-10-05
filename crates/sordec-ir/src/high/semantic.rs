@@ -503,8 +503,12 @@ pub enum KnownOp {
     // ---- Events ----
     /// `env.events().publish(topics, data)`.
     PublishEvent {
-        /// Event topics.
-        topics: Vec<ValueId>,
+        /// The topics vector — one `VecObject`, as `contract_event` receives
+        /// it. One value, not a list of topics: the SDK builds the vector
+        /// before the call, often in a helper, so the elements are not in
+        /// hand here, and a list holding the vector would read as one topic
+        /// that is itself a vector.
+        topics: ValueId,
         /// Event data payload.
         data: ValueId,
     },
@@ -1038,9 +1042,7 @@ impl KnownOp {
                 }
             }
             KnownOp::PublishEvent { topics, data } => {
-                for &value in topics {
-                    f(value);
-                }
+                f(*topics);
                 f(*data);
             }
             KnownOp::PublishContractEvent { event: _, fields } => {
@@ -1311,9 +1313,7 @@ impl KnownOp {
                 }
             }
             KnownOp::PublishEvent { topics, data } => {
-                for value in topics {
-                    f(value);
-                }
+                f(topics);
                 f(data);
             }
             KnownOp::PublishContractEvent { event: _, fields } => {

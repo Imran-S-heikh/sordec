@@ -32,7 +32,16 @@
 //!
 //! So the gate is deliberately *not* "this literal looks like a symbol".
 //! Nothing is decoded on a parameter every caller passes a literal to,
-//! however symbol-shaped those literals are.
+//! however symbol-shaped those literals are — unless the callee proves it.
+//!
+//! **The callee storing it as a `Val`.** A parameter the callee writes,
+//! unconverted, into the array `vec_new_from_linear_memory` reads is a raw
+//! `Val`: the SDK encodes an integer before storing it, so the bits that
+//! arrive are already tagged. Read as a `Val`, a tag-14 literal is a
+//! `SymbolSmall` exactly — `270` there is `"_"`, not the integer 270, which
+//! would have arrived encoded. token-v22's `burn` event helper takes its
+//! name this way from every caller, so no sibling exists to witness it, and
+//! the literal reached the vector as an `i64` and published as a number.
 //!
 //! ## What it does not do
 //!
@@ -43,9 +52,10 @@
 use std::collections::{HashMap, HashSet};
 
 use sordec_common::{FuncId, Provenance, ProvenanceSource, ValueId};
-use sordec_ir::{Expr, HighIr, IrType, KnownType, Literal};
+use sordec_ir::{Expr, HighIr, IrType, KnownOp, KnownType, Literal, SemanticOp};
 
 use crate::dataflow::resolve_use;
+use crate::marshalling::sret::emission_order;
 use crate::pass::{Pass, PassResult};
 use crate::val_abi::decode_small_symbol;
 
@@ -70,9 +80,10 @@ impl Pass<HighIr> for SymbolArgsPass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
         let witnessed = witnessed_positions(ir);
+        let stored_as_val = val_positions(ir);
         // Collected over an immutable view: the rewrite is per function,
         // but the evidence spans the module.
-        let mut planned: HashMap<FuncId, Vec<(ValueId, String)>> = HashMap::new();
+        let mut planned: HashMap<FuncId, Vec<(ValueId, String, &'static str)>> = HashMap::new();
         for caller in &ir.functions {
             for (_, binding) in caller.bindings.iter() {
                 let Expr::Call { target, args } = &binding.expr else {
@@ -82,12 +93,18 @@ impl Pass<HighIr> for SymbolArgsPass {
                     let Some(text) = packed_symbol(caller, *arg) else {
                         continue;
                     };
-                    if witnessed.contains(&(*target, index)) {
-                        let id = resolve_use(caller, *arg);
-                        planned.entry(caller.id).or_default().push((id, text));
+                    let why = if witnessed.contains(&(*target, index)) {
+                        "a sibling call site passes a proven `Symbol` at this parameter, so the \
+                         position is a symbol"
+                    } else if stored_as_val.contains(&(*target, index)) {
+                        "the callee stores this parameter unconverted into a host vector, so \
+                         its bits are a `Val`, and this one is tagged `SymbolSmall`"
                     } else {
                         result.metrics.increment(M_UNWITNESSED, 1);
-                    }
+                        continue;
+                    };
+                    let id = resolve_use(caller, *arg);
+                    planned.entry(caller.id).or_default().push((id, text, why));
                 }
             }
         }
@@ -96,7 +113,7 @@ impl Pass<HighIr> for SymbolArgsPass {
             let Some(rewrites) = planned.get(&func.id) else {
                 continue;
             };
-            for (id, text) in rewrites {
+            for (id, text, why) in rewrites {
                 let Some(binding) = func.bindings.get_mut(*id) else {
                     continue;
                 };
@@ -107,10 +124,7 @@ impl Pass<HighIr> for SymbolArgsPass {
                 binding.add_provenance(Provenance::new(
                     PASS_NAME,
                     ProvenanceSource::SdkPattern,
-                    format!(
-                        "packed `SymbolSmall` read as `{text}`: a sibling call site passes a \
-                         proven `Symbol` at this parameter, so the position is a symbol"
-                    ),
+                    format!("packed `SymbolSmall` read as `{text}`: {why}"),
                 ));
                 result.metrics.increment(M_DECODED, 1);
                 result.changed = true;
@@ -132,6 +146,33 @@ fn witnessed_positions(ir: &HighIr) -> HashSet<(FuncId, usize)> {
             for (index, arg) in args.iter().enumerate() {
                 if proven_symbol(caller, *arg) {
                     out.insert((*target, index));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `(callee, parameter index)` pairs where the callee stores the parameter,
+/// unconverted, as an element of a vector it builds — which makes the
+/// parameter's bits a `Val`. Live bindings only: an unscheduled one is
+/// residue that no longer describes the program.
+fn val_positions(ir: &HighIr) -> HashSet<(FuncId, usize)> {
+    let mut out = HashSet::new();
+    for func in &ir.functions {
+        let params: HashMap<ValueId, usize> =
+            func.params.iter().enumerate().map(|(index, p)| (*p, index)).collect();
+        for id in emission_order(func) {
+            let Some(Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                elements: Some(elements),
+                ..
+            }))) = func.bindings.get(id).map(|b| &b.expr)
+            else {
+                continue;
+            };
+            for element in elements {
+                if let Some(&index) = params.get(&resolve_use(func, *element)) {
+                    out.insert((func.id, index));
                 }
             }
         }
@@ -243,6 +284,50 @@ mod tests {
         let result = SymbolArgsPass.run(&mut ir);
         assert!(!result.changed, "nothing proves this is a symbol");
         assert_eq!(result.metrics.get(M_UNWITNESSED), Some(1), "and it says so");
+    }
+
+    /// No sibling at all — every caller passes the literal — but the callee
+    /// stores the parameter unconverted into the vector it builds, which
+    /// makes its bits a `Val`. token-v22's `burn` event helper.
+    #[test]
+    fn a_parameter_stored_into_a_vector_is_a_val() {
+        let caller = func_with(
+            vec![
+                Expr::Literal(Literal::I64(TRANSFER)), // v0
+                call(1, vec![v(0)]),                   // v1
+            ],
+            vec![],
+            (0..2).collect(),
+        );
+        let callee = at(
+            1,
+            func_with(
+                vec![
+                    Expr::Phi { incoming: vec![] }, // v0, the parameter
+                    Expr::Literal(Literal::I32(16)), // v1
+                    Expr::Literal(Literal::I32(1)),  // v2
+                    Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                        vals_pos: v(1),
+                        len: v(2),
+                        elements: Some(vec![v(0)]),
+                    })), // v3
+                ],
+                vec![v(0)],
+                (0..4).collect(),
+            ),
+        );
+        let mut ir = module(vec![caller, callee]);
+
+        assert!(SymbolArgsPass.run(&mut ir).changed, "the callee proves the position");
+        let f = ir.functions.first().expect("the caller");
+        assert!(
+            matches!(
+                &f.bindings.get(v(0)).expect("the constant").expr,
+                Expr::Literal(Literal::Symbol(s)) if s == "transfer"
+            ),
+            "read back as its symbol, got {:?}",
+            f.bindings.get(v(0)).map(|b| &b.expr)
+        );
     }
 
     /// A second run finds nothing: the decoded literal is no longer a

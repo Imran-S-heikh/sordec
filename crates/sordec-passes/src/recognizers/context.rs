@@ -19,8 +19,8 @@
 //! - No `log_from_linear_memory` (x._) — needs a rodata tracer + a
 //!   heterogeneous `Val`-array reconstruction; deferred, and absent
 //!   from the corpus.
-//! - No event-topic vec expansion — `PublishEvent.topics` holds the
-//!   single `VecObject` handle; the collections recognizer expands it.
+//! - No event-topic vec expansion — `PublishEvent.topics` is the
+//!   single `VecObject` handle, and is rendered as the vector it is.
 //! - No full panic recovery — only the `fail_with_error(code)` host
 //!   call; bare `panic!()` (control-flow `unreachable`) and formatted
 //!   panics are the separate panic recognizer's scope.
@@ -117,9 +117,7 @@ fn try_context(id: ValueId, expr: &Expr) -> Option<Rewrite> {
             ),
             ("1", 2) => (
                 KnownOp::PublishEvent {
-                    // Single VecObject handle; collections recognizer
-                    // expands it into the topic list later.
-                    topics: vec![args[0]],
+                    topics: args[0],
                     data: args[1],
                 },
                 KnownType::Unit,
@@ -307,7 +305,7 @@ mod tests {
         assert_eq!(metrics.get(M_PUBLISH_EVENT), Some(1));
         match expr_at(&func, v(2)) {
             Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics, data })) => {
-                assert_eq!(topics.as_slice(), &[v(0)], "single VecObject handle");
+                assert_eq!(*topics, v(0), "the topics vector itself");
                 assert_eq!(*data, v(1));
             }
             other => panic!("expected PublishEvent, got {other:?}"),

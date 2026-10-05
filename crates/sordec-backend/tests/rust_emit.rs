@@ -151,13 +151,14 @@ fn token_v23_emits_soroban_idioms() {
     assert!(flat.contains(".set(&DataKey::"), "a keyed set:\n{src}");
     // Auth, events, ledger context.
     assert!(src.contains(".require_auth()"), "require_auth:\n{src}");
-    // R1: topics are a tuple. A single topic must render the 1-tuple
-    // `(t,)` (trailing comma), not the parenthesised expr `(t)`.
+    // The topics are the vector the SDK built, passed as it is. Wrapping it
+    // in a 1-tuple `(v,)` compiles and publishes one topic that is a vector —
+    // differential execution caught exactly that on both tokens.
     assert!(
-        src.lines()
-            .any(|l| l.contains(".events().publish((") && l.contains(",),")),
-        "single-topic publish renders a 1-tuple:\n{src}"
+        src.lines().any(|l| l.contains(".events().publish(v")),
+        "publish takes the topics vector itself:\n{src}"
     );
+    assert!(!src.contains(".events().publish(("), "no tuple around the topics vector:\n{src}");
 }
 
 /// R2: local temporaries are named from unambiguous structure — a storage

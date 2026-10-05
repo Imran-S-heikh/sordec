@@ -137,7 +137,7 @@ pub(crate) fn label_known_op(op: &KnownOp) -> String {
             arity_label(arg_count),
             interface_label(interface)
         ),
-        KnownOp::PublishEvent { topics, .. } => format!("publish_event topics={}", topics.len()),
+        KnownOp::PublishEvent { .. } => "publish_event".to_string(),
         KnownOp::PublishContractEvent { event, .. } => format!("publish_contract_event {event}"),
         KnownOp::MuxedAddressId { .. } => "muxed_address_id".to_string(),
         KnownOp::GetCurrentContractAddress => "current_contract_address".to_string(),
