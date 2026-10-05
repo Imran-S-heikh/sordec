@@ -22,8 +22,8 @@ about the first.
 
 ## 1. Soroban protocol versions
 
-The host-function catalog is vendored from `soroban-env-common 26.1.2` —
-192 functions across 11 modules. It carries each function's
+The host-function catalog is vendored from `soroban-env-common 27.0.1` —
+194 functions across 11 modules. It carries each function's
 `min_supported_protocol`, so per-protocol coverage is a fact read out of the
 data rather than an estimate:
 
@@ -37,15 +37,16 @@ data rather than an estimate:
 | 24 | 165 | named | untested |
 | 25 | 170 | named | untested |
 | 26 | 191 | named | untested |
-| ≥ 27 | — | **not named** | untested |
+| 27 | 193 | named | held-out set (soroban-examples, SDK 27) |
+| ≥ 28 | — | **not named** | untested |
 
 **Why an older contract is safe.** The Soroban host ABI is append-only —
-functions are added, never removed or renamed — so a catalog vendored at 26.1.2
+functions are added, never removed or renamed — so a catalog vendored at 27.0.1
 covers everything below it. The single exception is visible in the table: one
 function carries `max_supported_protocol: 19` and is gone from protocol 20
 onward, which is why the count *drops* by one between 19 and 20.
 
-**What happens above 26.** A host call the catalog does not know is not guessed.
+**What happens above 27.** A host call the catalog does not know is not guessed.
 It resolves to `SemanticOp::Unknown` carrying the `(module, name)` pair and an
 `UnknownReason`, surfaces as a diagnostic, and shows up in `sordec coverage` as
 an unrecognised call. The reconstruction admits the gap rather than inventing a
@@ -54,14 +55,14 @@ name for it. Re-vendoring is a documented, mechanical procedure — see
 
 **Measured recognition** on the corpus is 100% — 2/2 on hello-add, 31/31 on
 token-v22, 35/35 on token-v23, 12/12 on attestation. That is the catalog doing
-its job on protocols 21–23; it is not a claim about 24–26.
+its job on protocols 21–23; it is not a claim about 24–27.
 
 ```bash
 # per-protocol availability, from the vendored catalog
 python3 -c "
 import json
 d = json.load(open('crates/sordec-passes/src/host_calls/env.json'))
-for p in range(19, 27):
+for p in range(19, 28):
     n = sum(1 for m in d['modules'] for f in m.get('functions', [])
             if f.get('min_supported_protocol', 0) <= p
             and f.get('max_supported_protocol', 99) >= p)
@@ -179,7 +180,7 @@ Stated rather than implied.
   express it, so this never fires on real compiler output; the guard
   (`UnknownReason::IrreducibleControlFlow`) exists for exotic producers and
   hand-written modules.
-- **Protocols above 26** — see §1. Named calls stop at the vendored catalog.
+- **Protocols above 27** — see §1. Named calls stop at the vendored catalog.
 - **Non-Soroban WASM.** sordec is specialised for Soroban's conventions. A plain
   WASM module parses, but the metadata, host-call and idiom recovery that make
   the output readable have nothing to work with.

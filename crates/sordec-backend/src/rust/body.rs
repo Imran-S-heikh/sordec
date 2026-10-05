@@ -934,6 +934,14 @@ impl<'a> FnCtx<'a> {
                 parse_quote!(soroban_sdk::Val::from_payload(#lit))
             });
         }
+        // A computed 64-bit word beside them is a `Val` built by hand — a
+        // small symbol assembled as `(chars << 8) | 14` — and is those bits.
+        if has_object_input
+            && matches!(&src.ty, IrType::Known(KnownType::I64 | KnownType::U64) | IrType::Inferred(KnownType::I64 | KnownType::U64))
+        {
+            let x = self.value_ref(source);
+            return Some(parse_quote!(soroban_sdk::Val::from_payload(#x as u64)));
+        }
         None
     }
 

@@ -469,6 +469,12 @@ fn address_effects(name: &str) -> Option<Effects> {
         // malformed strkeys / wrong object types (judgment #2: reading
         // object contents is not a host read).
         "1" | "2" | "4" | "5" | "6" | "7" | "8" => TRAP,
+        // Protocol 27, custom-account delegation. Reading the delegated
+        // signers reads the current auth check's state (mutable host
+        // state, trapping outside `__check_auth`); delegating consumes
+        // and records auth like `require_auth` does.
+        "9" => TRAP_READ_HOST,
+        "a" => TRAP_RW_HOST,
         _ => return None,
     })
 }

@@ -71,12 +71,15 @@ pub struct HostCall {
     pub module_name: &'static str,
     /// Lowest Soroban protocol version exposing this function.
     pub min_protocol: u32,
+    /// The ABI return type as `env.json` names it (`"VecObject"`,
+    /// `"U32Val"`, `"Void"`, …).
+    pub return_type: &'static str,
 }
 
 /// Identifier of the upstream `soroban-env-common` release whose
 /// `env.json` we have vendored. Bump when re-vendoring; the catalog
 /// tests use this implicitly via the catalog size assertion.
-pub const CATALOG_VERSION: &str = "soroban-env-common 26.1.2";
+pub const CATALOG_VERSION: &str = "soroban-env-common 27.0.1";
 
 /// Resolve a `(module, name)` byte-pair to a [`HostCall`].
 ///
@@ -150,6 +153,9 @@ struct EnvFunction {
     /// the function has been available since launch (i.e. protocol 0).
     #[serde(default)]
     min_supported_protocol: u32,
+    /// ABI return type, e.g. `"VecObject"`.
+    #[serde(rename = "return", default)]
+    return_type: String,
 }
 
 const ENV_JSON: &str = include_str!("env.json");
@@ -171,6 +177,7 @@ static CATALOG: LazyLock<Vec<HostCall>> = LazyLock::new(|| {
         for func in &module.functions {
             let name: &'static str = Box::leak(func.export.clone().into_boxed_str());
             let friendly: &'static str = Box::leak(func.name.clone().into_boxed_str());
+            let return_type: &'static str = Box::leak(func.return_type.clone().into_boxed_str());
 
             let entry = HostCall {
                 module: module_export,
@@ -178,6 +185,7 @@ static CATALOG: LazyLock<Vec<HostCall>> = LazyLock::new(|| {
                 friendly_name: friendly,
                 module_name,
                 min_protocol: func.min_supported_protocol,
+                return_type,
             };
 
             // Reject duplicate (module, name) pairs — would indicate
@@ -281,7 +289,7 @@ mod tests {
     fn catalog_version_string_is_present() {
         // Smoke check that we updated the constant when re-vendoring.
         assert!(CATALOG_VERSION.contains("soroban-env-common"));
-        assert!(CATALOG_VERSION.contains("26."));
+        assert!(CATALOG_VERSION.contains("27."));
     }
 
     /// `docs/compatibility.md` states which catalog it was written against, and

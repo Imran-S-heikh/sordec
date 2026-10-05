@@ -472,6 +472,23 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
         Expr::Unary { op, value } => unary_result(*op, types.get(value)),
         Expr::Binary { op, lhs, rhs } => binary_result(*op, types.get(lhs), types.get(rhs)),
         Expr::Phi { incoming } => phi_join(incoming, types),
+        // A host call no recogniser named still has the catalog's return
+        // type. Only an object: an object's handle *is* its `Val`, while a
+        // small scalar result arrives encoded and is decoded after.
+        Expr::Semantic(SemanticOp::Unknown { host_module, host_fn, .. }) => {
+            let call = crate::host_calls::resolve(host_module, host_fn)?;
+            Some(IrType::Known(match call.return_type {
+                "AddressObject" => KnownType::Address,
+                "VecObject" => KnownType::Vec(Box::new(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence))),
+                "MapObject" => KnownType::Map(
+                    Box::new(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)),
+                    Box::new(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)),
+                ),
+                "BytesObject" => KnownType::Bytes,
+                "StringObject" => KnownType::String,
+                _ => return None,
+            }))
+        }
         // A `select` is a value, whatever the lowering could not name it
         // as: it yields one of its two arms, so when they agree on a type
         // it has that type. Without this the binding is untyped, the
@@ -1425,7 +1442,7 @@ mod tests {
     use sordec_ir::{Binding, FunctionParam, HighBlock, Region};
 
     fn unknown() -> IrType {
-        IrType::Unknown(UnknownReason::InsufficientEvidence)
+        IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)
     }
 
     /// Run only the intra-procedural half: no inter-procedural evidence, so
@@ -1517,7 +1534,7 @@ mod tests {
         let mut ev = Evidence::default();
         let id = ValueId::from_index(0);
         let vec_unknown =
-            IrType::Known(KnownType::Vec(Box::new(IrType::Unknown(UnknownReason::InsufficientEvidence))));
+            IrType::Known(KnownType::Vec(Box::new(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence))));
         m.insert(id, vec_unknown);
         let named = IrType::Inferred(KnownType::Vec(Box::new(IrType::Inferred(KnownType::Symbol))));
         assert!(improve(&mut m, &mut ev, id, named), "the element is named");
