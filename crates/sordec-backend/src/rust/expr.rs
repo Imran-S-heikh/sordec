@@ -52,8 +52,13 @@ pub(crate) fn sign_cast(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -
         _ => None,
     };
     let (IrType::Known(to) | IrType::Inferred(to)) = want else { return None };
-    let (IrType::Known(from) | IrType::Inferred(from)) = &ctx.func.bindings.get(ctx.fold_target(v))?.ty else {
-        return None;
+    let b = ctx.func.bindings.get(ctx.fold_target(v))?;
+    // An untyped narrowing is still an `i32`: it is printed `as i32`.
+    let narrowed = KnownType::I32;
+    let from = match (&b.ty, &b.expr) {
+        (IrType::Known(k) | IrType::Inferred(k), _) => k,
+        (IrType::Unknown(_), Expr::Unary { op: sordec_ir::UnaryOp::Wrap32, .. }) => &narrowed,
+        _ => return None,
     };
     if from == to || width(from)? != width(to)? {
         return None;

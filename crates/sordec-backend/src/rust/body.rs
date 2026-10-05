@@ -432,12 +432,14 @@ impl<'a> FnCtx<'a> {
         if !matches!(b.ty, IrType::Unknown(_)) {
             return None;
         }
-        let Expr::Load { width, signed, .. } = &b.expr else {
-            return None;
-        };
-        let ty: syn::Type = match (width, signed) {
-            (sordec_ir::MemWidth::W8, _) => parse_quote!(i64),
-            (sordec_ir::MemWidth::W4, None) => parse_quote!(i32),
+        let ty: syn::Type = match &b.expr {
+            Expr::Load { width, signed, .. } => match (width, signed) {
+                (sordec_ir::MemWidth::W8, _) => parse_quote!(i64),
+                (sordec_ir::MemWidth::W4, None) => parse_quote!(i32),
+                _ => return None,
+            },
+            // An unrecovered small-value decode is the word the shift leaves.
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { .. })) => parse_quote!(i64),
             _ => return None,
         };
         // Live readers only: a rename a rewrite left unscheduled is read by
