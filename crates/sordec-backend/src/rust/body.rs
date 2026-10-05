@@ -440,18 +440,42 @@ impl<'a> FnCtx<'a> {
             (sordec_ir::MemWidth::W4, None) => parse_quote!(i32),
             _ => return None,
         };
+        // Live readers only: a rename a rewrite left unscheduled is read by
+        // nothing and is not a reader, but a merge is.
+        let scheduled: HashSet<ValueId> =
+            self.func.blocks.iter().flat_map(|(_, b)| b.bindings.iter().copied()).collect();
         let mut readers = 0;
         let mut only_arith = true;
-        for (_, r) in self.func.bindings.iter() {
+        for (id, r) in self.func.bindings.iter() {
             let mut reads = false;
             r.expr.for_each_value_use(|u| reads |= u == vid);
-            if !reads || self.liveness.is_unused(r.id) && !matches!(r.expr, Expr::Binary { .. }) {
+            if !reads {
+                continue;
+            }
+            let live = scheduled.contains(&id) || matches!(r.expr, Expr::Phi { .. });
+            // Arithmetic in the wide sense: binary ops, a zero test
+            // (`x == 0` is `eqz`), and the integer width moves.
+            let arith = matches!(
+                r.expr,
+                Expr::Binary { .. }
+                    | Expr::Unary {
+                        op: sordec_ir::UnaryOp::Eqz
+                            | sordec_ir::UnaryOp::BitNot
+                            | sordec_ir::UnaryOp::Wrap32
+                            | sordec_ir::UnaryOp::ExtendU32
+                            | sordec_ir::UnaryOp::ExtendS32,
+                        ..
+                    }
+            );
+            if !live || self.liveness.is_unused(id) && !arith {
                 continue;
             }
             readers += 1;
-            only_arith &= matches!(r.expr, Expr::Binary { .. });
+            only_arith &= arith;
         }
-        (readers > 0 && only_arith).then_some(ty)
+        let mut region_reads = 0;
+        self.func.region.for_each_value_use(|u| region_reads += usize::from(u == vid));
+        (readers > 0 && only_arith && region_reads == 0).then_some(ty)
     }
 
     fn has_machine_type(&self, vid: ValueId) -> bool {
