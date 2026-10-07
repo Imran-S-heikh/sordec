@@ -456,6 +456,34 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             let field = syn::Index::from(*index as usize);
             parse_quote!(#base.#field)
         }
+        // The `Option` a helper hands back. Components move into it, so
+        // one read again later is cloned, as for any by-value position.
+        Expr::Optional { payload: None } => parse_quote!(None),
+        Expr::Optional { payload: Some(values) } => match values.as_slice() {
+            [one] => {
+                let one = ctx.arg_ref(*one);
+                parse_quote!(Some(#one))
+            }
+            many => {
+                let many: Vec<syn::Expr> = many.iter().map(|v| ctx.arg_ref(*v)).collect();
+                parse_quote!(Some((#(#many),*)))
+            }
+        },
+        Expr::IsSome { value } => {
+            let value = ctx.value_ref(*value);
+            parse_quote!(#value.is_some())
+        }
+        // Presence is proven where this sits. `unwrap` takes the `Option`
+        // by value, so one read again later is cloned first.
+        Expr::Unwrap { value, index, arity } => {
+            let value = ctx.arg_ref(*value);
+            if *arity == 1 {
+                parse_quote!(#value.unwrap())
+            } else {
+                let field = syn::Index::from(*index as usize);
+                parse_quote!(#value.unwrap().#field)
+            }
+        }
         // Two limbs read as one 128-bit integer. This spelling is the
         // fallback for a join the fold pass could not cancel against its
         // own limbs; the sign of the high limb is what the shift-and-or

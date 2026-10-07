@@ -731,6 +731,25 @@ fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Resu
         Expr::Project { value, index } => {
             write!(out, "{}.{index}", ctx.operand(*value))
         }
+        Expr::Optional { payload: None } => write!(out, "None"),
+        Expr::Optional { payload: Some(values) } => {
+            write!(out, "Some(")?;
+            for (i, v) in values.iter().enumerate() {
+                if i > 0 {
+                    write!(out, ", ")?;
+                }
+                write!(out, "{}", ctx.operand(*v))?;
+            }
+            write!(out, ")")
+        }
+        Expr::IsSome { value } => write!(out, "is_some({})", ctx.operand(*value)),
+        Expr::Unwrap { value, index, arity } => {
+            if *arity == 1 {
+                write!(out, "unwrap({})", ctx.operand(*value))
+            } else {
+                write!(out, "unwrap({}).{index}", ctx.operand(*value))
+            }
+        }
         Expr::WideJoin { lo, hi } => {
             write!(out, "wide({}, {})", ctx.operand(*lo), ctx.operand(*hi))
         }

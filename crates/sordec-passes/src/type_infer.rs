@@ -498,6 +498,42 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
             let (a, b) = (base_of(types.get(&args[0]))?, base_of(types.get(&args[1]))?);
             (a == b).then_some(IrType::Inferred(a))
         }
+        // `Some(x)` is an `Option` of whatever `x` is; several components
+        // make a tuple payload. `None` says nothing of its payload, so it
+        // takes its type from the merge it flows into (`phi_join` skips an
+        // untyped arm) rather than voting `Option<?>` against `Some`.
+        // An `Option` even before its payload is typed: what it holds can
+        // be `Unknown` and named later (`merge_partial`), but whether it is
+        // an `Option` is not in doubt, and a call or merge typed as anything
+        // else does not have `is_some`.
+        Expr::Optional { payload: Some(values) } => {
+            let items: Vec<IrType> = values
+                .iter()
+                .map(|v| {
+                    base_of(types.get(v))
+                        .map_or(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence), IrType::Inferred)
+                })
+                .collect();
+            let payload = match items.as_slice() {
+                [one] => one.clone(),
+                _ => IrType::Inferred(KnownType::Tuple(items)),
+            };
+            Some(IrType::Inferred(KnownType::Option(Box::new(payload))))
+        }
+        Expr::Optional { payload: None } => None,
+        Expr::IsSome { .. } => Some(IrType::Known(KnownType::Bool)),
+        Expr::Unwrap { value, index, arity } => {
+            let KnownType::Option(payload) = base_of(types.get(value))? else {
+                return None;
+            };
+            if *arity == 1 {
+                return base_of(Some(payload.as_ref())).map(IrType::Inferred);
+            }
+            let KnownType::Tuple(items) = base_of(Some(payload.as_ref()))? else {
+                return None;
+            };
+            base_of(items.get(*index as usize)).map(IrType::Inferred)
+        }
         // Two limbs read as one integer. `i128` is the guess only because
         // it is what Soroban contracts overwhelmingly use; a recognizer
         // that knows the value is a `u128` plants `Known` and wins.
@@ -568,7 +604,7 @@ fn phi_join(
         match &agreed {
             None => agreed = Some(base),
             Some(prev) if *prev == base => {}
-            Some(_) => return None, // conflict
+            Some(prev) => agreed = Some(merge_partial(prev, &base)?), // or conflict
         }
     }
     agreed.map(IrType::Inferred)
@@ -787,13 +823,10 @@ impl Slot {
             // other.
             (Slot::Agreed(KnownType::Val), s @ Slot::Agreed(_))
             | (s @ Slot::Agreed(_), Slot::Agreed(KnownType::Val)) => s,
-            (Slot::Agreed(a), Slot::Agreed(b)) => {
-                if a == b {
-                    Slot::Agreed(a)
-                } else {
-                    Slot::Conflict
-                }
-            }
+            (Slot::Agreed(a), Slot::Agreed(b)) => match merge_partial(&a, &b) {
+                Some(merged) => Slot::Agreed(merged),
+                None => Slot::Conflict,
+            },
         }
     }
 
@@ -1215,6 +1248,45 @@ fn refine_element(slot: &IrType, cand: &IrType) -> Option<IrType> {
         {
             Some(rewrap(KnownType::Vec(got)))
         }
+        (have @ KnownType::Option(_), got @ KnownType::Option(_)) => {
+            let merged = merge_partial(&have, &got)?;
+            (merged != have).then(|| rewrap(merged))
+        }
+        _ => None,
+    }
+}
+
+/// Two types that agree wherever both say something, as the one saying
+/// more — `None` when they disagree somewhere.
+///
+/// Only an `Option` and a tuple have parts that can be partly known here:
+/// `Option<?>` and `Option<u32>` are one type with less and more said about
+/// it, not two. A rewritten `Option` helper's `None` arm says nothing of the
+/// payload and its `Some` arm may not know it yet either, so without this
+/// the merge and the return conflict and the `Option` loses its type
+/// entirely. Every other pair merges only when equal.
+fn merge_partial(a: &KnownType, b: &KnownType) -> Option<KnownType> {
+    if a == b {
+        return Some(a.clone());
+    }
+    let part = |x: &IrType, y: &IrType| -> Option<IrType> {
+        match (base_of(Some(x)), base_of(Some(y))) {
+            (None, _) => Some(y.clone()),
+            (_, None) => Some(x.clone()),
+            (Some(p), Some(q)) => {
+                let m = merge_partial(&p, &q)?;
+                Some(match x {
+                    IrType::Known(_) => IrType::Known(m),
+                    _ => IrType::Inferred(m),
+                })
+            }
+        }
+    };
+    match (a, b) {
+        (KnownType::Option(x), KnownType::Option(y)) => Some(KnownType::Option(Box::new(part(x, y)?))),
+        (KnownType::Tuple(xs), KnownType::Tuple(ys)) if xs.len() == ys.len() => Some(KnownType::Tuple(
+            xs.iter().zip(ys).map(|(x, y)| part(x, y)).collect::<Option<_>>()?,
+        )),
         _ => None,
     }
 }
@@ -1260,6 +1332,14 @@ fn improve(
     // below would take it for. Letting it through erased the named type —
     // which is the same mistake in the opposite direction.
     if refines_val(&cand, slot) {
+        return false;
+    }
+    // Likewise a candidate that says less of the same `Option`: the slot
+    // already holds everything it says.
+    if let (Some(have), Some(got)) = (base_of(Some(&*slot)), base_of(Some(&cand)))
+        && have != got
+        && merge_partial(&have, &got).as_ref() == Some(&have)
+    {
         return false;
     }
     // Same certainty rank but a different base = conflicting evidence.

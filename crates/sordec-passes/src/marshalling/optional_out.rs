@@ -24,13 +24,20 @@
 //! a live path, and a zero is a claim about every caller. The answer is the
 //! sum type the source wrote.
 //!
-//! # Status: census
+//! # The rewrite
 //!
-//! This pass classifies helpers and call sites and counts what it finds,
-//! by reason; it rewrites nothing yet. The rewrite — the helper returning
-//! `Option<T>`, its callers testing `is_some()` and reading `unwrap()`
-//! where presence is proven — is built only if the census shows enough in
-//! reach.
+//! The helper returns `Option<T>`: each path builds its `Some(..)` or
+//! `None` where it leaves, the merged tag carries it to the one `return`,
+//! and the writes through the out-pointer retire with the parameter. Each
+//! caller stops passing its frame: a read of the tag becomes the tag read
+//! back from `is_some()` (or the test itself, when it is only branched on),
+//! and a read of the value becomes `unwrap()` — placed only where a test on
+//! the tag proves it present, so it never traps.
+//!
+//! A signature changes, so it is every call site or none, and nothing when
+//! the module has an indirect call. It runs after the elision group, so
+//! [`super::option_sret`]'s `get(..).unwrap()` keeps every helper it can
+//! take.
 //!
 //! # What makes a helper
 //!
@@ -41,7 +48,9 @@
 //!   the result: the stores through the out-pointer on that path are its
 //!   payload. Arms with a payload are *present*, arms without *absent*; one
 //!   tag constant each, and different.
-//! - Every present arm writes the same slots, with values of a known type.
+//! - Every present arm writes the same slots, and none of the values is a
+//!   raw memory read: inside an `Option` its type would be pinned to a
+//!   storage width the caller did not use.
 //! - After the merge, nothing but the tag store, constant stores and the
 //!   shadow-stack epilogue.
 //!
@@ -56,15 +65,15 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use sordec_common::{BlockId, FuncId, IrId, ValueId};
-use sordec_ir::{BinaryOp, Expr, HighFunction, HighIr, IrType, Literal, Region, UnaryOp};
+use sordec_common::{BlockId, FuncId, IrId, Provenance, ProvenanceSource, UnknownReason, ValueId};
+use sordec_ir::{BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownType, Literal, Region, UnaryOp};
 
 use super::sret::emission_order;
 use crate::dataflow::{block_containing, canon_addr, resolve_use, trace_int};
 use crate::effects::expr_effects;
 use crate::metrics_catalog::{
-    MARSHALLING_OPTIONAL_OUT_HELPERS as M_HELPERS, MARSHALLING_OPTIONAL_OUT_SITES as M_SITES,
-    MARSHALLING_OPTIONAL_OUT_SITES_REFUSED as M_SITES_REFUSED,
+    MARSHALLING_OPTIONAL_OUT_HELPERS as M_HELPERS, MARSHALLING_OPTIONAL_OUT_REWRITTEN as M_REWRITTEN,
+    MARSHALLING_OPTIONAL_OUT_SITES as M_SITES, MARSHALLING_OPTIONAL_OUT_SITES_REFUSED as M_SITES_REFUSED,
 };
 use crate::pass::{Pass, PassResult};
 
@@ -74,7 +83,7 @@ pub const PASS_NAME: &str = "marshalling-optional-out";
 /// How deep a tag test may be evaluated (`t & 1`, `== 0`, a rename, …).
 const EVAL_DEPTH: usize = 6;
 
-/// Classifies `Option` out-parameter helpers and their call sites.
+/// Rewrites `Option` out-parameter helpers to return `Option<T>`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OptionalOutParamPass;
 
@@ -102,27 +111,82 @@ impl Pass<HighIr> for OptionalOutParamPass {
             })
             .collect();
         result.metrics.increment(M_HELPERS, helpers.len() as i64);
-        let frames = Frames { ir, helpers: &helpers, extents: RefCell::new(HashMap::new()) };
-        for caller in &ir.functions {
-            let order = emission_order(caller);
-            for &id in &order {
-                let Some(Expr::Call { target, args }) = caller.bindings.get(id).map(|b| &b.expr) else {
-                    continue;
-                };
-                let Some(helper) = helpers.get(target) else {
-                    continue;
-                };
-                match site(&frames, caller, &order, id, args, helper) {
-                    Ok(()) => {
-                        trace(caller, &format!("site v{} -> func_{} ok", id.index(), target.index()));
-                        result.metrics.increment(M_SITES, 1);
-                    }
-                    Err(why) => {
-                        trace(caller, &format!("site v{} -> func_{}: {why}", id.index(), target.index()));
-                        result.metrics.increment(M_SITES_REFUSED, 1);
+        if helpers.is_empty() {
+            return result;
+        }
+
+        // Census: every call site of every helper, planned or refused.
+        let mut plans: HashMap<FuncId, Vec<(usize, SitePlan)>> = HashMap::new();
+        let mut refused: HashSet<FuncId> = HashSet::new();
+        {
+            let frames = Frames { ir, helpers: &helpers, extents: RefCell::new(HashMap::new()) };
+            for (index, caller) in ir.functions.iter().enumerate() {
+                let order = emission_order(caller);
+                for &id in &order {
+                    let Some(Expr::Call { target, args }) = caller.bindings.get(id).map(|b| &b.expr) else {
+                        continue;
+                    };
+                    let Some(helper) = helpers.get(target) else {
+                        continue;
+                    };
+                    let planned = if *target == caller.id {
+                        Err("the helper calls itself")
+                    } else {
+                        site(&frames, caller, &order, id, args, helper)
+                    };
+                    match planned {
+                        Ok(plan) => {
+                            trace(caller, &format!("site v{} -> func_{} ok", id.index(), target.index()));
+                            result.metrics.increment(M_SITES, 1);
+                            plans.entry(*target).or_default().push((index, plan));
+                        }
+                        Err(why) => {
+                            trace(caller, &format!("site v{} -> func_{}: {why}", id.index(), target.index()));
+                            result.metrics.increment(M_SITES_REFUSED, 1);
+                            refused.insert(*target);
+                        }
                     }
                 }
             }
+        }
+
+        // The rewrite changes a signature, so it is every site or none. An
+        // indirect call anywhere means callers this pass cannot see.
+        let indirect = ir
+            .functions
+            .iter()
+            .any(|f| f.bindings.iter().any(|(_, b)| matches!(b.expr, Expr::IndirectCall { .. })));
+        if indirect {
+            return result;
+        }
+        let mut targets: Vec<FuncId> = plans.keys().copied().filter(|t| !refused.contains(t)).collect();
+        targets.sort_unstable();
+        for target in targets {
+            let helper = &helpers[&target];
+            let Some(at) = ir.functions.iter().position(|f| f.id == target) else {
+                continue;
+            };
+            let arity = ir.functions[at].params.len();
+            for (index, plan) in &plans[&target] {
+                if let Some(caller) = ir.functions.get_mut(*index) {
+                    rewrite_site(caller, plan, helper);
+                }
+            }
+            // A call no block schedules still names the old signature, and
+            // the type pass reads every binding: drop its frame too.
+            for func in &mut ir.functions {
+                for (_, binding) in func.bindings.iter_mut() {
+                    if let Expr::Call { target: t, args } = &mut binding.expr
+                        && *t == target
+                        && args.len() == arity
+                    {
+                        args.remove(helper.out);
+                    }
+                }
+            }
+            rewrite_helper(&mut ir.functions[at], helper);
+            result.metrics.increment(M_REWRITTEN, 1);
+            result.changed = true;
         }
         result
     }
@@ -164,10 +228,12 @@ impl Slot {
 /// A store through the out-pointer: the binding, its slot, the value.
 type Store = (ValueId, Slot, ValueId);
 
-/// One path to the result: the tag it sets and the stores on its way.
+/// One path to the result: the tag it sets, the stores on its way, and the
+/// block it leaves from — where the rewrite builds its `Option`.
 struct Arm {
     tag: i128,
     stores: Vec<Store>,
+    pred: BlockId,
 }
 
 /// A helper proven to return `Option<T>` through an out-parameter.
@@ -181,9 +247,12 @@ struct Helper {
     payload: Vec<(Slot, IrType)>,
     /// Slots written with the same constant whatever the path.
     consts: Vec<(Slot, Literal)>,
-    /// Kept for the rewrite.
-    #[allow(dead_code)]
     arms: Vec<Arm>,
+    /// The merged tag, which becomes the returned `Option`.
+    tag_phi: ValueId,
+    /// Everything that writes through the out-pointer or computes an
+    /// address into it, retired by the rewrite.
+    retired: Vec<ValueId>,
 }
 
 impl Helper {
@@ -236,9 +305,20 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
         arms: Vec::new(),
         pending: HashMap::new(),
         tail: None,
+        last: None,
     };
     walk.region(&func.region, Flow::Falls(Vec::new()))?;
     let tail = walk.tail.ok_or("no merge after the arms")?;
+    let Some(Expr::Phi { incoming }) = func.bindings.get(tag_phi).map(|b| &b.expr) else {
+        return Err("the tag is not a phi");
+    };
+    let mut preds: Vec<BlockId> = walk.arms.iter().map(|a| a.pred).collect();
+    let mut inputs: Vec<BlockId> = incoming.iter().map(|(b, _)| *b).collect();
+    preds.sort_unstable();
+    inputs.sort_unstable();
+    if preds != inputs || preds.windows(2).any(|w| w[0] == w[1]) {
+        return Err("the merge's inputs do not match its arms");
+    }
 
     let (present, absent): (Vec<&Arm>, Vec<&Arm>) = walk.arms.iter().partition(|a| !a.stores.is_empty());
     let present_tag = single(present.iter().map(|a| a.tag)).ok_or("present arms disagree on the tag")?;
@@ -277,12 +357,45 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
             return Err("present arms store different types in one slot");
         }
     }
+    // A value read raw out of memory has no type of its own. As a hole it
+    // takes whatever its use needs; inside an `Option` it is pinned to a
+    // storage width (`i32` where the field is a `u32`, `Val` where it is a
+    // limb), and the caller stops compiling. Left as it is until the
+    // memory it comes from is recovered.
+    let raw = |v: ValueId| {
+        matches!(
+            func.bindings.get(resolve_use(func, v)).map(|b| &b.expr),
+            Some(Expr::Load { .. } | Expr::Unknown { .. })
+        )
+    };
+    if present.iter().flat_map(|a| &a.stores).any(|(_, _, v)| raw(*v)) {
+        return Err("a value read raw out of memory");
+    }
     if tail.iter().any(|(s, _)| payload.iter().any(|(p, _)| p.overlaps(*s)) || s.overlaps(tag_slot)) {
         return Err("a constant store overlaps the result");
     }
 
     let arms = walk.arms;
-    Ok(Helper { out, tag: tag_slot, present: present_tag, absent: absent_tag, payload, consts: tail, arms })
+    let retired = order
+        .iter()
+        .copied()
+        .filter(|id| match func.bindings.get(*id).map(|b| &b.expr) {
+            Some(Expr::Store { addr, .. }) => canon_addr(func, *addr).0 == out_param,
+            Some(Expr::Binary { op: BinaryOp::Add, .. }) => *id != out_param && canon_addr(func, *id).0 == out_param,
+            _ => false,
+        })
+        .collect();
+    Ok(Helper {
+        out,
+        tag: tag_slot,
+        present: present_tag,
+        absent: absent_tag,
+        payload,
+        consts: tail,
+        arms,
+        tag_phi,
+        retired,
+    })
 }
 
 /// The one value an iterator yields, if it yields exactly one (repeats
@@ -375,6 +488,8 @@ struct Walk<'f> {
     pending: HashMap<BlockId, Vec<Vec<Store>>>,
     /// The constant stores after the merge, once the merge is walked.
     tail: Option<Vec<(Slot, Literal)>>,
+    /// The last block on the current path: the source of an edge met next.
+    last: Option<BlockId>,
 }
 
 impl Walk<'_> {
@@ -407,6 +522,7 @@ impl Walk<'_> {
                     return Err("a path reaches the merge without setting the tag");
                 }
                 let mut path = path;
+                self.last = Some(*b);
                 for &id in &self.func.blocks.get(*b).ok_or("a missing block")?.bindings {
                     if let Some(store) = self.store(id)? {
                         path.push(store);
@@ -430,22 +546,29 @@ impl Walk<'_> {
                 for p in self.pending.remove(out).unwrap_or_default() {
                     flow = merge(flow, Flow::Falls(p))?;
                 }
+                self.last = None;
                 Ok(flow)
             }
             Region::If { then_region, else_region, .. } => {
+                let entry = self.last;
                 let t = self.region(then_region, Flow::Falls(path.clone()))?;
+                self.last = entry;
                 let e = match else_region {
                     Some(e) => self.region(e, Flow::Falls(path))?,
                     None => Flow::Falls(path),
                 };
+                self.last = None;
                 merge(t, e)
             }
             Region::Switch { arms, default, .. } => {
+                let entry = self.last;
                 let mut flow = self.region(default, Flow::Falls(path.clone()))?;
                 for arm in arms {
+                    self.last = entry;
                     let f = self.region(&arm.body, Flow::Falls(path.clone()))?;
                     flow = merge(flow, f)?;
                 }
+                self.last = None;
                 Ok(flow)
             }
             Region::Break { target, transfer } | Region::Transfer { target, transfer } => {
@@ -454,8 +577,12 @@ impl Walk<'_> {
                         return Err("the tag merges in two places");
                     }
                     self.join = Some(*target);
+                    if transfer.len() != 1 {
+                        return Err("the merge carries more than the tag");
+                    }
                     let tag = trace_int(self.func, v).ok_or("the tag is not a constant")?;
-                    self.arms.push(Arm { tag, stores: path });
+                    let pred = self.last.ok_or("an edge into the merge from an unknown block")?;
+                    self.arms.push(Arm { tag, stores: path, pred });
                     return Ok(Flow::Joined);
                 }
                 if Some(*target) == self.join {
@@ -472,6 +599,7 @@ impl Walk<'_> {
                 if self.writes_inside(body) {
                     return Err("the out-pointer is written inside a loop");
                 }
+                self.last = None;
                 Ok(Flow::Falls(path))
             }
             Region::Continue { .. } | Region::Panic { .. } | Region::Unreachable => Ok(Flow::Leaves),
@@ -540,6 +668,261 @@ fn literal(func: &HighFunction, value: ValueId) -> Option<Literal> {
     match &func.bindings.get(resolve_use(func, value))?.expr {
         Expr::Literal(lit) => Some(lit.clone()),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------
+// The rewrite
+// ---------------------------------------------------------------------
+
+/// A new binding in `func`, unscheduled; the caller places it.
+fn push(func: &mut HighFunction, expr: Expr, ty: IrType, note: &str) -> ValueId {
+    let id = ValueId::from_index(func.bindings.len() as u32);
+    func.bindings.push(Binding::new(
+        id,
+        ty,
+        expr,
+        Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note.to_string()),
+    ));
+    id
+}
+
+/// Schedule `new` next to `anchor` in `anchor`'s block, before or after it.
+fn place(func: &mut HighFunction, anchor: ValueId, new: ValueId, after: bool) {
+    let Some(block) = block_containing(func, anchor).and_then(|b| func.blocks.get_mut(b)) else {
+        return;
+    };
+    if let Some(at) = block.bindings.iter().position(|b| *b == anchor) {
+        block.bindings.insert(at + usize::from(after), new);
+    }
+}
+
+/// Replace `id`'s expression, resetting its type for `type_infer` to settle.
+fn rewrite(func: &mut HighFunction, id: ValueId, expr: Expr, ty: Option<IrType>, note: &str) {
+    if let Some(binding) = func.bindings.get_mut(id) {
+        binding.expr = expr;
+        if let Some(ty) = ty {
+            binding.ty = ty;
+        }
+        binding.add_provenance(Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note.to_string()));
+    }
+}
+
+fn untyped() -> IrType {
+    IrType::Unknown(UnknownReason::InsufficientEvidence)
+}
+
+/// The helper returns its `Option` instead of writing it.
+fn rewrite_helper(func: &mut HighFunction, helper: &Helper) {
+    // One `Option` per arm, built where the arm leaves.
+    let mut by_pred: HashMap<BlockId, ValueId> = HashMap::new();
+    for arm in &helper.arms {
+        let payload = (!arm.stores.is_empty()).then(|| {
+            let mut stores = arm.stores.clone();
+            stores.sort_by_key(|(_, slot, _)| *slot);
+            stores.into_iter().map(|(_, _, value)| value).collect()
+        });
+        let note = if payload.is_some() {
+            "the value this path wrote through the out-pointer, returned as `Some`"
+        } else {
+            "this path wrote no value through the out-pointer: `None`"
+        };
+        let id = push(func, Expr::Optional { payload }, untyped(), note);
+        if let Some(block) = func.blocks.get_mut(arm.pred) {
+            block.bindings.push(id);
+        }
+        by_pred.insert(arm.pred, id);
+    }
+
+    // The merged tag becomes the merged `Option`.
+    if let Some(binding) = func.bindings.get_mut(helper.tag_phi)
+        && let Expr::Phi { incoming } = &mut binding.expr
+    {
+        for (pred, value) in incoming.iter_mut() {
+            if let Some(option) = by_pred.get(pred) {
+                *value = *option;
+            }
+        }
+        binding.ty = untyped();
+        binding.add_provenance(Provenance::new(
+            PASS_NAME,
+            ProvenanceSource::SdkPattern,
+            "the out-parameter's tag, merged as the `Option` it encoded",
+        ));
+    }
+    retarget(&mut func.region, &mut None, helper.tag_phi, &by_pred);
+
+    for &id in &helper.retired {
+        rewrite(
+            func,
+            id,
+            Expr::Literal(Literal::Unit),
+            Some(IrType::Known(KnownType::Unit)),
+            "out-parameter write, now the returned `Option`",
+        );
+    }
+    give_back(&mut func.region, helper.tag_phi);
+    for site in &mut func.returns {
+        *site = vec![helper.tag_phi];
+    }
+    if helper.out < func.params.len() {
+        func.params.remove(helper.out);
+    }
+}
+
+/// Point every edge into the merge at its arm's `Option` instead of a tag.
+fn retarget(region: &mut Region, last: &mut Option<BlockId>, tag_phi: ValueId, by_pred: &HashMap<BlockId, ValueId>) {
+    match region {
+        Region::Basic(b) => *last = Some(*b),
+        Region::Sequence(items) => {
+            for item in items {
+                retarget(item, last, tag_phi, by_pred);
+            }
+        }
+        Region::Scope { body, .. } | Region::Loop { body, .. } => {
+            retarget(body, last, tag_phi, by_pred);
+            *last = None;
+        }
+        Region::If { then_region, else_region, .. } => {
+            let entry = *last;
+            retarget(then_region, last, tag_phi, by_pred);
+            *last = entry;
+            if let Some(e) = else_region {
+                retarget(e, last, tag_phi, by_pred);
+            }
+            *last = None;
+        }
+        Region::Switch { arms, default, .. } => {
+            let entry = *last;
+            retarget(default, last, tag_phi, by_pred);
+            for arm in arms {
+                *last = entry;
+                retarget(&mut arm.body, last, tag_phi, by_pred);
+            }
+            *last = None;
+        }
+        Region::Break { transfer, .. } | Region::Transfer { transfer, .. } => {
+            for (phi, value) in transfer.iter_mut() {
+                if *phi == tag_phi
+                    && let Some(option) = last.and_then(|b| by_pred.get(&b))
+                {
+                    *value = *option;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every bare `return` hands the `Option` back.
+fn give_back(region: &mut Region, value: ValueId) {
+    match region {
+        Region::Return { values } if values.is_empty() => values.push(value),
+        Region::Sequence(items) => items.iter_mut().for_each(|r| give_back(r, value)),
+        Region::Scope { body, .. } | Region::Loop { body, .. } => give_back(body, value),
+        Region::If { then_region, else_region, .. } => {
+            give_back(then_region, value);
+            if let Some(e) = else_region {
+                give_back(e, value);
+            }
+        }
+        Region::Switch { arms, default, .. } => {
+            arms.iter_mut().for_each(|a| give_back(&mut a.body, value));
+            give_back(default, value);
+        }
+        _ => {}
+    }
+}
+
+/// The call yields the `Option`; its reads become questions about it.
+fn rewrite_site(func: &mut HighFunction, plan: &SitePlan, helper: &Helper) {
+    if let Some(binding) = func.bindings.get_mut(plan.call)
+        && let Expr::Call { args, .. } = &mut binding.expr
+        && helper.out < args.len()
+    {
+        args.remove(helper.out);
+    }
+    rewrite_ty(func, plan.call, "the call yields the `Option` its frame used to receive");
+
+    let is_some = push(func, Expr::IsSome { value: plan.call }, IrType::Known(KnownType::Bool), "whether the call returned a value");
+    place(func, plan.call, is_some, true);
+
+    // The tag, read back exactly: the present tag when it holds a value.
+    // A tag only ever branched on is that question itself, as a `bool` —
+    // a wasm `br_if` on an integer is a test for non-zero.
+    for &tag in &plan.tags {
+        if cond_only(func, tag) {
+            let (expr, note) = match (helper.present != 0, helper.absent != 0) {
+                (true, false) => (Expr::Use(is_some), "the tag, tested: whether the call returned a value"),
+                (false, true) => (
+                    Expr::Unary { op: UnaryOp::Not, value: is_some },
+                    "the tag, tested: whether the call returned nothing",
+                ),
+                _ => (Expr::Literal(Literal::Bool(helper.present != 0)), "the tag, tested, is the same either way"),
+            };
+            rewrite(func, tag, expr, Some(IrType::Known(KnownType::Bool)), note);
+            continue;
+        }
+        let wide = matches!(func.bindings.get(tag).map(|b| &b.expr), Some(Expr::Load { width: sordec_ir::MemWidth::W8, .. }));
+        let lit = |n: i128| {
+            if wide {
+                (Literal::I64(n as i64), IrType::Known(KnownType::I64))
+            } else {
+                (Literal::I32(n as i32), IrType::Known(KnownType::I32))
+            }
+        };
+        let (p, pt) = lit(helper.present);
+        let (a, at) = lit(helper.absent);
+        let present = push(func, Expr::Literal(p), pt, "the tag the helper wrote when it had a value");
+        let absent = push(func, Expr::Literal(a), at, "the tag the helper wrote when it had none");
+        place(func, tag, present, false);
+        place(func, tag, absent, false);
+        rewrite(
+            func,
+            tag,
+            Expr::Select { cond: is_some, if_true: present, if_false: absent },
+            None,
+            "the out-parameter's tag, read from the returned `Option`",
+        );
+    }
+    let arity = helper.payload.len() as u32;
+    for &(load, index) in &plan.values {
+        rewrite(
+            func,
+            load,
+            Expr::Unwrap { value: plan.call, index: index as u32, arity },
+            Some(untyped()),
+            "the out-parameter's value, read from the returned `Option` where it is proven present",
+        );
+    }
+    for (load, lit) in &plan.consts {
+        rewrite(func, *load, Expr::Literal(lit.clone()), None, "a slot the helper always wrote this constant to");
+    }
+}
+
+/// Whether `value` is read only as the condition of an `if`.
+fn cond_only(func: &HighFunction, value: ValueId) -> bool {
+    let mut bound = false;
+    for id in emission_order(func) {
+        if let Some(b) = func.bindings.get(id) {
+            b.expr.for_each_value_use(|u| bound |= u == value);
+        }
+    }
+    let mut all = 0usize;
+    func.region.for_each_value_use(|u| all += usize::from(u == value));
+    let mut conds = 0usize;
+    func.region.for_each_node(|node| {
+        if let Region::If { cond, .. } = node {
+            conds += usize::from(*cond == value);
+        }
+    });
+    !bound && conds > 0 && conds == all
+}
+
+fn rewrite_ty(func: &mut HighFunction, id: ValueId, note: &str) {
+    if let Some(binding) = func.bindings.get_mut(id) {
+        binding.ty = untyped();
+        binding.add_provenance(Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note.to_string()));
     }
 }
 
@@ -714,7 +1097,7 @@ fn site(
     call: ValueId,
     args: &[ValueId],
     helper: &Helper,
-) -> Result<(), &'static str> {
+) -> Result<SitePlan, &'static str> {
     let ptr = *args.get(helper.out).ok_or("the call has no out-pointer argument")?;
     let (base, at) = canon_addr(func, ptr);
     let tag = helper.tag.shifted(at).ok_or("an offset overflows")?;
@@ -765,6 +1148,7 @@ fn site(
 
     let mut tag_loads = Vec::new();
     let mut payload_loads = Vec::new();
+    let mut const_loads = Vec::new();
     for &id in order {
         let Some(Expr::Load { addr, offset, width, .. }) = func.bindings.get(id).map(|b| &b.expr) else {
             continue;
@@ -793,19 +1177,32 @@ fn site(
             && low_bits(helper.absent);
         if slot == tag || tag_prefix {
             tag_loads.push(id);
-        } else if payload.contains(&slot) {
-            payload_loads.push(id);
-        } else if !all.contains(&slot) {
+        } else if let Some(index) = payload.iter().position(|s| *s == slot) {
+            payload_loads.push((id, index));
+        } else if let Some((_, lit)) = helper.consts.iter().find(|(s, _)| s.shifted(at) == Some(slot)) {
+            const_loads.push((id, lit.clone()));
+        } else {
             trace(func, &format!("  read v{} at {:?}; slots {:?}", id.index(), slot, all));
             return Err("a read that is not one of the result's slots");
         }
     }
-    for &load in &payload_loads {
+    for &(load, _) in &payload_loads {
         if !guarded(func, load, &tag_loads, helper) {
             return Err("a value read not proven present");
         }
     }
-    Ok(())
+    Ok(SitePlan { call, tags: tag_loads, values: payload_loads, consts: const_loads })
+}
+
+/// What a qualifying call site reads of the result, for the rewrite.
+struct SitePlan {
+    call: ValueId,
+    /// Reads of the tag (or its low bytes).
+    tags: Vec<ValueId>,
+    /// Reads of the value, each with its payload component.
+    values: Vec<(ValueId, usize)>,
+    /// Reads of a slot the helper always writes the same constant to.
+    consts: Vec<(ValueId, Literal)>,
 }
 
 /// Whether `binding` writes memory at `base` that may overlap `range`: a
@@ -1130,7 +1527,7 @@ mod tests {
         let Some(Expr::Call { args, .. }) = f.bindings.get(v(2)).map(|b| &b.expr) else {
             panic!("v2 is the call");
         };
-        site(&frames, f, &order, v(2), args, &helpers[&FuncId::from_index(1)])
+        site(&frames, f, &order, v(2), args, &helpers[&FuncId::from_index(1)]).map(|_| ())
     }
 
     #[test]
@@ -1158,5 +1555,56 @@ mod tests {
     #[test]
     fn a_value_read_before_the_test_is_refused() {
         assert_eq!(site_of(caller(true)), Err("a value read not proven present"));
+    }
+
+    #[test]
+    fn the_helper_returns_an_option_and_its_caller_asks_it() {
+        let mut ir = module(vec![caller(false), helper(false)]);
+        let result = OptionalOutParamPass.run(&mut ir);
+        assert!(result.changed, "every site qualifies, so the helper is rewritten");
+
+        // The helper: no out-pointer, one returned `Option`, built per arm.
+        let h = &ir.functions[1];
+        assert_eq!(h.params, vec![v(1)], "the out-pointer is no longer a parameter");
+        let Region::Sequence(items) = &h.region else { panic!("a sequence") };
+        assert_eq!(items.last(), Some(&Region::Return { values: vec![v(6)] }), "the merge is returned");
+        let Some(Expr::Phi { incoming }) = h.bindings.get(v(6)).map(|b| &b.expr) else {
+            panic!("the tag phi stays a phi");
+        };
+        let arms: Vec<&Expr> = incoming.iter().map(|(_, o)| &h.bindings.get(*o).unwrap().expr).collect();
+        assert!(
+            matches!(arms.as_slice(), [Expr::Optional { payload: None }, Expr::Optional { payload: Some(p) }] if p == &vec![v(1)]),
+            "the failing arm is None, the other Some(value)"
+        );
+        for store in [v(5), v(7)] {
+            assert!(
+                matches!(h.bindings.get(store).unwrap().expr, Expr::Literal(Literal::Unit)),
+                "out-pointer writes retire"
+            );
+        }
+
+        // The caller: the call drops its frame, the reads ask the `Option`.
+        let c = &ir.functions[0];
+        let Some(Expr::Call { args, .. }) = c.bindings.get(v(2)).map(|b| &b.expr) else { panic!("v2 is the call") };
+        assert_eq!(args, &vec![v(1)]);
+        assert!(matches!(c.bindings.get(v(3)).unwrap().expr, Expr::Select { .. }), "the tag read is exact");
+        assert!(
+            matches!(c.bindings.get(v(5)).unwrap().expr, Expr::Unwrap { value, index: 0, arity: 1 } if value == v(2)),
+            "the value read unwraps where it is proven present"
+        );
+
+        // Idempotent: nothing left to classify.
+        assert!(!OptionalOutParamPass.run(&mut ir).changed);
+    }
+
+    #[test]
+    fn one_refused_site_keeps_the_helper_as_it_is() {
+        // The same helper, called once properly and once with the value
+        // read before the test: the signature cannot change for one caller.
+        let mut early = caller(true);
+        early.id = FuncId::from_index(2);
+        let mut ir = module(vec![caller(false), helper(false), early]);
+        assert!(!OptionalOutParamPass.run(&mut ir).changed);
+        assert_eq!(ir.functions[1].params.len(), 2, "the helper keeps its out-pointer");
     }
 }

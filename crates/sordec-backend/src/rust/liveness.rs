@@ -219,7 +219,10 @@ fn is_effectful(expr: &Expr) -> bool {
         | Expr::Field { .. }
         | Expr::Struct { .. }
         | Expr::Select { .. }
-        | Expr::Variant { .. } => false,
+        | Expr::Variant { .. }
+        | Expr::Optional { .. }
+        | Expr::IsSome { .. }
+        | Expr::Unwrap { .. } => false,
     }
 }
 

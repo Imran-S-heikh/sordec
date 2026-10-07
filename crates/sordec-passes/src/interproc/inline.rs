@@ -343,6 +343,8 @@ fn copyable(expr: &Expr, this: FuncId) -> bool {
         | Expr::Struct { .. }
         | Expr::Select { .. }
         | Expr::Variant { .. }
+        | Expr::Optional { .. }
+        | Expr::IsSome { .. }
         | Expr::Semantic(_) => true,
         Expr::Call { target, .. } => *target != this,
         // A width conversion or a select is a pure operator the lowering
@@ -355,7 +357,10 @@ fn copyable(expr: &Expr, this: FuncId) -> bool {
         // Frame traffic, globals, projections of multi-value calls,
         // phis and other unrecovered operators all reach state the
         // caller cannot see through a copy.
+        // An `Unwrap`'s proof of presence is a test in the function it sits
+        // in, which a copy does not take along.
         Expr::Project { .. }
+        | Expr::Unwrap { .. }
         | Expr::IndirectCall { .. }
         | Expr::Phi { .. }
         | Expr::GlobalGet { .. }

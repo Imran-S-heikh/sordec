@@ -460,6 +460,8 @@ pub const MARSHALLING_OPTIONAL_OUT_HELPERS: &str = "marshalling_optional_out_hel
 pub const MARSHALLING_OPTIONAL_OUT_SITES: &str = "marshalling_optional_out_sites";
 /// Call sites of those helpers refused, for any reason.
 pub const MARSHALLING_OPTIONAL_OUT_SITES_REFUSED: &str = "marshalling_optional_out_sites_refused";
+/// Those helpers rewritten to return `Option<T>`, every call site with them.
+pub const MARSHALLING_OPTIONAL_OUT_REWRITTEN: &str = "marshalling_optional_out_rewritten";
 /// Storage reads whose SDK `Option` branch folded into
 /// `.unwrap_or(default)`.
 pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defaults_recovered";
@@ -968,6 +970,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_OPTIONAL_OUT_HELPERS,
         MARSHALLING_OPTIONAL_OUT_SITES,
         MARSHALLING_OPTIONAL_OUT_SITES_REFUSED,
+        MARSHALLING_OPTIONAL_OUT_REWRITTEN,
         MARSHALLING_OPTION_DEFAULTS_RECOVERED,
         MARSHALLING_OPTION_DEFAULT_DECLINED_READ_ON_FALL_THROUGH,
         MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS,

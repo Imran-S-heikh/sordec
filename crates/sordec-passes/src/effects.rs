@@ -781,7 +781,13 @@ pub fn expr_effects(expr: &Expr) -> Effects {
         // A choice between two values already computed: the arms'
         // effects are theirs, accounted where they are.
         | Expr::Select { .. }
-        | Expr::Variant { .. } => Effects::PURE,
+        | Expr::Variant { .. }
+        // Building an `Option` and asking whether it holds a value are
+        // total. Taking the value out would trap on `None`, but an
+        // `Unwrap` is only placed where a test proves the value present.
+        | Expr::Optional { .. }
+        | Expr::IsSome { .. }
+        | Expr::Unwrap { .. } => Effects::PURE,
         // All lowered unary operators are total (the trapping float→int
         // truncations never lower to `Unary`; they stay
         // `Unknown{Conversion}`) — pinned by test.

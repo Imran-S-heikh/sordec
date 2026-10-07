@@ -530,9 +530,6 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // value by its `u32`.
             Box::new(FoldedEncodePass),
             Box::new(OptionSretPass),
-            // The same shape for any `Option` a helper hands back through
-            // its caller's frame — census only for now; see the module.
-            Box::new(OptionalOutParamPass),
             // `get(&k).unwrap_or(d)`: the probe's branch whose other arm
             // only merges constants. The read takes the default and the
             // probe becomes `true`, which the constant-branch fold at the
@@ -677,6 +674,13 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // `Result`, folded into the read it converts. Here so the
             // constant-branch fold below drops the `unwrap`'s trap.
             Box::new(BytesNConvertPass),
+            // Any other `Option` a helper hands back through its caller's
+            // frame. After the group, not in it: the group's own
+            // `get(..).unwrap()` collapse is the better recovery wherever it
+            // applies, and in an early iteration — before its shapes settle —
+            // this would take helpers it is about to claim. The late folds
+            // and frame clean-ups below run after it.
+            Box::new(OptionalOutParamPass),
             Box::new(pass::Rerun::new(
                 OptionProbePass,
                 OPTION_PROBE_AFTER_ELISION,
@@ -815,7 +819,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 32..79],
+        vec![1..7, 32..78],
     )
 }
 
@@ -891,7 +895,6 @@ mod tests {
                 marshalling::scalar_decode::PASS_NAME,
                 marshalling::folded_encode::PASS_NAME,
                 marshalling::option_sret::PASS_NAME,
-                marshalling::optional_out::PASS_NAME,
                 marshalling::option_default::PASS_NAME,
                 marshalling::udt_decode::PASS_NAME,
                 marshalling::udt_encode::PASS_NAME,

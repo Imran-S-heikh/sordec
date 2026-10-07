@@ -145,7 +145,7 @@ fn heldout_floor(name: &str) -> f64 {
         "errors" => 0.86,
         "eth_abi" => 0.52,
         "events" => 0.98,
-        "fuzzing" => 0.48,
+        "fuzzing" => 0.51, // 0.5350: Option helpers returned as `Option<T>`
         "hello_world" => 0.98,
         "import_ark_bn254" => 0.33,
         "increment" => 0.68,

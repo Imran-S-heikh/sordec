@@ -154,6 +154,34 @@ pub enum Expr {
         index: u32,
     },
 
+    /// `Some(..)` or `None`: the `Option` a helper hands back, once the
+    /// out-parameter it was compiled to write is recovered as the sum type
+    /// the source returned. One payload component renders `Some(x)`,
+    /// several `Some((a, b, ..))`.
+    Optional {
+        /// The value's components; `None` for the absent variant.
+        payload: Option<Vec<ValueId>>,
+    },
+
+    /// Whether an `Option` holds a value: `r.is_some()`.
+    IsSome {
+        /// The `Option`.
+        value: ValueId,
+    },
+
+    /// Component `index` of an `Option` proven present: `r.unwrap()`, or
+    /// `r.unwrap().N` for a payload of several components. Placed only
+    /// where a test on the same `Option` proves it present, so it never
+    /// traps.
+    Unwrap {
+        /// The `Option`.
+        value: ValueId,
+        /// Zero-based payload component.
+        index: u32,
+        /// How many components the payload has.
+        arity: u32,
+    },
+
     /// Indirect call via WASM table.
     IndirectCall {
         /// Function table index.
@@ -267,6 +295,12 @@ impl Expr {
                 }
             }
             Expr::Project { value, index: _ } => f(*value),
+            Expr::Optional { payload } => {
+                for &value in payload.iter().flatten() {
+                    f(value);
+                }
+            }
+            Expr::IsSome { value } | Expr::Unwrap { value, .. } => f(*value),
             Expr::WideJoin { lo, hi } => {
                 f(*lo);
                 f(*hi);
@@ -370,6 +404,12 @@ impl Expr {
                 }
             }
             Expr::Project { value, index: _ } => f(value),
+            Expr::Optional { payload } => {
+                for value in payload.iter_mut().flatten() {
+                    f(value);
+                }
+            }
+            Expr::IsSome { value } | Expr::Unwrap { value, .. } => f(value),
             Expr::WideJoin { lo, hi } => {
                 f(lo);
                 f(hi);
