@@ -157,7 +157,7 @@ fn heldout_floor(name: &str) -> f64 {
         "increment_with_pause" => 0.80,
         "logging" => 0.86,
         "merkle_distribution" => 0.50,
-        "mint-lock" => 0.48,
+        "mint-lock" => 0.55, // 0.5678: Admin keys named, struct decode and encode helpers collapsed
         "modular_account" => 0.40,
         "other_custom_types" => 0.70,
         "pause" => 0.98,

@@ -419,10 +419,15 @@ fn try_name_key_at(
     // Gate 3: per-callsite discriminant, through the channel the
     // constructor was proven to use.
     let (d, payload, channel_note) = match &summary.disc {
-        DiscChannel::ByPointer { param, .. } => {
+        DiscChannel::ByPointer { param, offset, width } => {
             let Some(ptr_arg) = args.get(*param) else {
                 return Naming::Unresolved;
             };
+            // `&DataKey::Admin`: a unit variant rustc promoted to a
+            // constant, handed over as its address in the data segment.
+            if let Some(d) = promoted_disc(ir, func, *ptr_arg, *offset, *width) {
+                (d, vec![], "a promoted constant in the data segment")
+            } else {
             let Some(slots) = slot_values(ir, calls, func, terminal, *ptr_arg, summary, true)
             else {
                 return Naming::Unresolved;
@@ -441,6 +446,7 @@ fn try_name_key_at(
                 (slots.payload, "via frame slot")
             };
             (d, payload, note)
+            }
         }
         DiscChannel::ByValue { param: Some(p) } => {
             // The argument the constructor dispatches on is the
@@ -546,6 +552,19 @@ fn try_name_key_at(
         },
         note,
     )
+}
+
+/// The discriminant of a key the pointer argument addresses in the
+/// module's own data: a constant address, read at the constructor's
+/// discriminant offset and width. The initial image is what a promoted
+/// constant holds — nothing writes rodata — the same footing the
+/// constant-load fold stands on.
+fn promoted_disc(ir: &HighIr, func: &HighFunction, ptr: ValueId, offset: u32, width: MemWidth) -> Option<i128> {
+    let addr = u32::try_from(trace_int(func, ptr)?).ok()?.checked_add(offset)?;
+    let bytes = ir.memory.read(addr, width.bytes())?;
+    let mut word = [0u8; 8];
+    word.get_mut(..bytes.len())?.copy_from_slice(bytes);
+    Some(i128::from(u64::from_le_bytes(word)))
 }
 
 /// The number of word (8-byte) frame slots a variant's fields occupy in
@@ -1344,6 +1363,29 @@ mod tests {
         let func = &ir.functions[0];
         let note = &func.bindings.get(storage_id).unwrap().latest_provenance().note;
         assert!(note.contains("decl-order mapping"), "{note}");
+    }
+
+    #[test]
+    fn a_promoted_constant_key_is_read_from_the_data_segment() {
+        // `ctor(&DataKey::Admin)` with the key promoted to rodata at 2000.
+        let caller = func(
+            0,
+            None,
+            0,
+            vec![
+                i32c(2000),        // v0 the constant's address
+                call(1, vec![v(0)]), // v1
+                storage_get(1),    // v2
+            ],
+        );
+        let mut ir = module(vec![caller, ctor(1, 2), symbol_wrapper(2)], vec![data_key_union()]);
+        let mut segments = ir.memory.segments().to_vec();
+        segments.push(DataSegment { offset: 2000, bytes: 1u64.to_le_bytes().to_vec() });
+        ir.memory = MemoryImage::from_segments(segments);
+        assert!(run(&mut ir).changed);
+        let key = resolved_key_of(&ir, 0, v(2)).expect("named");
+        assert_eq!(key.variant, "Admin");
+        assert!(key.payload.is_empty());
     }
 
     #[test]
