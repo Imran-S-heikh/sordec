@@ -458,6 +458,13 @@ fn backward(
             // `Val` stays a `u32`, it does not become a conflict → `Unknown`).
             Expr::Semantic(SemanticOp::Known(op)) => {
                 for (arg, ty) in semantic_arg_types(op) {
+                    // A shadow-stack address handed to the host as a
+                    // `U32Val` (the SDK's buffer pointers) is `ptr as u32`
+                    // there; the address itself stays the wasm word every
+                    // other use of it computes in.
+                    if matches!(op, KnownOp::ValEncodeSmall { .. }) && is_frame_address(func, arg) {
+                        continue;
+                    }
                     changed |= improve(types, ev, arg, IrType::Known(ty));
                 }
             }
@@ -473,6 +480,20 @@ fn backward(
         }
     }
     changed
+}
+
+/// Whether `value` is an address in the shadow-stack frame: an offset from
+/// `global.get 0` minus the frame size.
+fn is_frame_address(func: &HighFunction, value: ValueId) -> bool {
+    let (base, _) = crate::dataflow::canon_addr(func, value);
+    let global = |v: ValueId| {
+        matches!(func.bindings.get(resolve_use(func, v)).map(|b| &b.expr), Some(Expr::GlobalGet { index: 0 }))
+    };
+    match func.bindings.get(base).map(|b| &b.expr) {
+        Some(Expr::GlobalGet { index: 0 }) => true,
+        Some(Expr::Binary { op: BinaryOp::Sub, lhs, .. }) => global(*lhs),
+        _ => false,
+    }
 }
 
 /// `x + 1`, `x - 1`, `x * 2` on an `x` whose numeric type is proven: that
@@ -2101,6 +2122,30 @@ mod tests {
             b.ty = IrType::Inferred(KnownType::I32);
         }
         crate::marshalling::test_support::module(vec![caller, callee])
+    }
+
+    /// The SDK hands the host a frame buffer as `U32Val::from(ptr as u32)`;
+    /// the address itself is not the `u32`.
+    #[test]
+    fn a_frame_address_encoded_for_the_host_stays_a_word() {
+        let f = func_at(
+            0,
+            vec![
+                Expr::GlobalGet { index: 0 },                                                                      // v0
+                Expr::Literal(Literal::I32(16)),                                                                   // v1
+                Expr::Binary { op: BinaryOp::Sub, lhs: ValueId::from_index(0), rhs: ValueId::from_index(1) }, // v2 frame
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall {
+                    ty: KnownType::U32,
+                    value: ValueId::from_index(2),
+                })),                                                                                               // v3
+            ],
+            vec![],
+            vec![0, 1, 2, 3],
+            vec![vec![ValueId::from_index(3)]],
+        );
+        let mut ir = crate::marshalling::test_support::module(vec![f]);
+        TypeInferPass.run(&mut ir);
+        assert_ne!(ty_of(&ir, 0, 2), IrType::Known(KnownType::U32));
     }
 
     #[test]

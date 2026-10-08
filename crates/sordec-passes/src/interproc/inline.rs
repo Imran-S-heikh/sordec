@@ -31,6 +31,12 @@
 //! (a load or store means the body has state the caller cannot see) and
 //! no recursion. It may return one value or none.
 //!
+//! Or the same behind one argument check that traps when it fails —
+//! `map_unpack_to_linear_memory`'s wrapper tests `keys.len() ==
+//! vals.len()` first. Such a wrapper is pasted only where the call's own
+//! constants make the check hold, so the trap is unreachable there and
+//! goes with the branch.
+//!
 //! # Why the copy is exact
 //!
 //! The bindings are copied in the callee's own emission order, parameters
@@ -150,6 +156,91 @@ struct Wrapper {
     /// `(id, type, expression)` in emission order, dependencies first.
     items: Vec<(ValueId, IrType, Expr)>,
     ret: Option<ValueId>,
+    /// The check a guarded wrapper traps on when it fails; inlined only
+    /// where the call's own constants make it hold.
+    guard: Option<Guard>,
+}
+
+/// A comparison of two parameters or constants: the SDK's argument check
+/// in front of an otherwise straight-line wrapper — `map_unpack`'s
+/// `keys.len() == vals.len()`, which every derived decode passes two equal
+/// literals.
+struct Guard {
+    op: sordec_ir::BinaryOp,
+    lhs: GuardArg,
+    rhs: GuardArg,
+}
+
+#[derive(Clone, Copy)]
+enum GuardArg {
+    Param(usize),
+    Const(i128),
+}
+
+impl Guard {
+    /// Whether the check holds for these arguments: only when both sides
+    /// are constants at the call and the comparison is true.
+    fn holds(&self, caller: &HighFunction, args: &[ValueId]) -> bool {
+        use sordec_ir::BinaryOp as B;
+        let value = |a: GuardArg| match a {
+            GuardArg::Const(n) => Some(n),
+            GuardArg::Param(i) => crate::dataflow::trace_int(caller, *args.get(i)?),
+        };
+        let (Some(l), Some(r)) = (value(self.lhs), value(self.rhs)) else {
+            return false;
+        };
+        match self.op {
+            B::Eq => l == r,
+            B::Ne => l != r,
+            _ => false,
+        }
+    }
+}
+
+/// `if guard { ..; return } <trap>`: the blocks that run when the guard
+/// holds, its return, and the guard. Anything else is not this shape.
+fn guarded_shape(func: &HighFunction) -> Option<(Vec<sordec_common::BlockId>, Vec<ValueId>, Guard)> {
+    let Region::Sequence(items) = &func.region else {
+        return None;
+    };
+    let at = items.iter().position(|r| matches!(r, Region::If { .. }))?;
+    let Region::If { cond, then_region, else_region: None } = &items[at] else {
+        return None;
+    };
+    let basic = |r: &Region| match r {
+        Region::Basic(b) => Some(*b),
+        _ => None,
+    };
+    let mut blocks: Vec<sordec_common::BlockId> = items[..at].iter().map(basic).collect::<Option<_>>()?;
+    let arm: &[Region] = match then_region.as_ref() {
+        Region::Sequence(arm) => arm,
+        other => std::slice::from_ref(other),
+    };
+    let [arm_blocks @ .., Region::Return { values }] = arm else {
+        return None;
+    };
+    blocks.extend(arm_blocks.iter().map(basic).collect::<Option<Vec<_>>>()?);
+    // After the branch: nothing but the trap, and blocks leading to it.
+    let tail = &items[at + 1..];
+    let [lead @ .., Region::Panic { .. } | Region::Unreachable] = tail else {
+        return None;
+    };
+    if !lead.iter().all(|r| matches!(r, Region::Basic(_))) {
+        return None;
+    }
+    let Some(Expr::Binary { op, lhs, rhs }) = func.bindings.get(crate::dataflow::resolve_use(func, *cond)).map(|b| &b.expr)
+    else {
+        return None;
+    };
+    let arg = |v: ValueId| -> Option<GuardArg> {
+        let v = crate::dataflow::resolve_use(func, v);
+        match func.params.iter().position(|p| *p == v) {
+            Some(i) => Some(GuardArg::Param(i)),
+            None => crate::dataflow::trace_int(func, v).map(GuardArg::Const),
+        }
+    };
+    let guard = Guard { op: *op, lhs: arg(*lhs)?, rhs: arg(*rhs)? };
+    Some((blocks, values.clone(), guard))
 }
 
 fn classify(func: &HighFunction) -> Option<Wrapper> {
@@ -157,7 +248,7 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
         return None;
     }
     // Straight-line: only sequences, basic blocks and at most one return
-    // at the tail.
+    // at the tail — or that behind one argument check, see [`Guard`].
     let mut returns: Vec<Vec<ValueId>> = Vec::new();
     let mut shape_ok = true;
     func.region.for_each_node(|node| match node {
@@ -170,7 +261,20 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
             shape_ok = false;
         }
     });
-    if !shape_ok || returns.len() > 1 {
+    let mut guard = None;
+    let scheduled = if shape_ok {
+        emission_order(func)
+    } else {
+        let (blocks, values, g) = guarded_shape(func)?;
+        returns = vec![values];
+        guard = Some(g);
+        blocks
+            .iter()
+            .filter_map(|b| func.blocks.get(*b))
+            .flat_map(|b| b.bindings.iter().copied())
+            .collect()
+    };
+    if returns.len() > 1 {
         return None;
     }
     let ret = match returns.first() {
@@ -179,7 +283,6 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
         Some(_) => return None,
     };
 
-    let scheduled = emission_order(func);
     // Judged by what the body still computes. Every elision leaves pure
     // values nothing reads — a struct encode collapsed to its literal
     // leaves the `Val` encodes, their shifts and the frame arithmetic
@@ -240,7 +343,7 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
     {
         return None;
     }
-    Some(Wrapper { id: func.id, params: func.params.clone(), items, ret })
+    Some(Wrapper { id: func.id, params: func.params.clone(), items, ret, guard })
 }
 
 /// Whether `func` is a body worth keeping shared: one the source wrote
@@ -378,6 +481,9 @@ fn inline_site(func: &mut HighFunction, call: ValueId, w: &Wrapper) -> bool {
         return false;
     };
     if args.len() != w.params.len() {
+        return false;
+    }
+    if w.guard.as_ref().is_some_and(|g| !g.holds(func, &args)) {
         return false;
     }
     // A multi-value reader of a single-value wrapper is a shape this
@@ -565,5 +671,67 @@ mod tests {
         let mut m = module(vec![has_wrapper(0), caller(1, 0)]);
         assert!(WrapperInlinePass.run(&mut m).changed);
         assert!(!WrapperInlinePass.run(&mut m).changed);
+    }
+
+    /// `map_unpack`'s wrapper: `fn(n, m) { if n == m { has(n); return } panic }`.
+    fn guarded_wrapper(id: u32) -> HighFunction {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                              // v0 n
+                Expr::Phi { incoming: vec![] },                                              // v1 m
+                Expr::Binary { op: sordec_ir::BinaryOp::Eq, lhs: v(0), rhs: v(1) },          // v2
+                Expr::Literal(Literal::I64(2)),                                              // v3 durability
+                has(v(0), v(3)),                                                             // v4
+            ],
+            vec![v(0), v(1)],
+            vec![2],
+        );
+        f.id = FuncId::from_index(id);
+        f.blocks.push(sordec_ir::HighBlock { id: BlockId::from_index(1), bindings: vec![v(3), v(4)] });
+        f.region = Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::If {
+                cond: v(2),
+                then_region: Box::new(Region::Sequence(vec![
+                    Region::Basic(BlockId::from_index(1)),
+                    Region::Return { values: vec![] },
+                ])),
+                else_region: None,
+            },
+            Region::Panic { kind: sordec_ir::PanicKind::Bare },
+        ]);
+        f
+    }
+
+    /// A caller handing the wrapper `(a, b)`.
+    fn guarded_caller(a: i32, b: i32) -> HighFunction {
+        let mut f = func_with(
+            vec![
+                Expr::Literal(Literal::I32(a)),                                                     // v0
+                Expr::Literal(Literal::I32(b)),                                                     // v1
+                Expr::Call { target: FuncId::from_index(0), args: vec![v(0), v(1)] },              // v2
+            ],
+            vec![],
+            vec![2],
+        );
+        f.id = FuncId::from_index(1);
+        f
+    }
+
+    #[test]
+    fn a_guarded_wrapper_is_inlined_where_its_check_holds() {
+        let mut m = module(vec![guarded_wrapper(0), guarded_caller(2, 2)]);
+        assert!(WrapperInlinePass.run(&mut m).changed);
+        let has_copied = m.function(FuncId::from_index(1)).unwrap().bindings.iter().any(|(_, b)| {
+            matches!(&b.expr, Expr::Semantic(SemanticOp::Known(KnownOp::StorageHas { .. })))
+        });
+        assert!(has_copied, "the guarded body is pasted");
+    }
+
+    #[test]
+    fn a_guarded_wrapper_stays_a_call_where_its_check_may_fail() {
+        let mut m = module(vec![guarded_wrapper(0), guarded_caller(2, 3)]);
+        assert!(!WrapperInlinePass.run(&mut m).changed);
+        assert!(matches!(expr_at(&m, 1, 2), Expr::Call { .. }));
     }
 }

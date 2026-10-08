@@ -105,7 +105,7 @@ impl Pass<HighIr> for UdtDecodePass {
             for key in &planned.declines {
                 result.metrics.increment(key, 1);
             }
-            if planned.elisions.is_empty() {
+            if planned.elisions.is_empty() && planned.limbs.is_empty() {
                 continue;
             }
             result.changed = true;
@@ -123,6 +123,10 @@ impl Pass<HighIr> for UdtDecodePass {
                 result.metrics.increment(metrics::GUARDS_ELIDED, stripped);
             }
             apply_elisions(func, PASS_NAME, planned.elisions);
+            for (load, base, field, ty, half) in planned.limbs {
+                result.metrics.increment(metrics::UDT_FIELDS_RECOVERED, 1);
+                apply_limb(func, load, base, field, ty, half);
+            }
             // Type-only: the value's own latest note stays the recognizer
             // that produced it.
             for (v, ty) in planned.typed {
@@ -146,6 +150,10 @@ struct Planned {
     /// Guard conditions (in `guard::strip`'s shape) that test a niche
     /// discriminant the collapse has just made a field.
     guards: HashMap<ValueId, String>,
+    /// Loads of one half of a wide field: `(load, struct value, field,
+    /// field type, WideLo/WideHi)`. Each needs the field as a binding of
+    /// its own, which an [`Elision`] cannot create.
+    limbs: Vec<(ValueId, ValueId, String, KnownType, sordec_ir::UnaryOp)>,
 }
 
 /// One decode whose result is live in the caller's frame: an unpack's
@@ -160,15 +168,21 @@ struct Frame<'a> {
     def: &'a StructDef,
     /// Byte offset -> field name.
     fields: BTreeMap<u32, String>,
+    /// Offsets holding one half of a wide field, and which half.
+    limbs: BTreeMap<u32, sordec_ir::UnaryOp>,
     /// Offsets holding a `Result` discriminant, read as the Ok value.
     discs: Vec<u32>,
     consumed: bool,
 }
 
-/// `(helper, parameter index) -> the struct type every caller passes`.
-fn caller_param_types(ir: &HighIr) -> HashMap<(FuncId, usize), TypeId> {
+/// What every caller hands each helper parameter, when they agree: a
+/// value proven to be one struct (`Some`), or — `None` — only host
+/// operation results and fields, whose stored type the helper's own decode
+/// is the proof of, exactly as it is for a decode in the caller's body. A
+/// parameter some caller feeds anything else has no entry.
+fn caller_param_types(ir: &HighIr) -> HashMap<(FuncId, usize), Option<TypeId>> {
     let calls = CallIndex::build(ir);
-    let mut out: HashMap<(FuncId, usize), TypeId> = HashMap::new();
+    let mut out: HashMap<(FuncId, usize), Option<TypeId>> = HashMap::new();
     for callee in &ir.functions {
         let sites = calls.callers_of(callee.id);
         if sites.is_empty() || callee.signature.is_some() {
@@ -186,22 +200,35 @@ fn caller_param_types(ir: &HighIr) -> HashMap<(FuncId, usize), TypeId> {
                     ok = false;
                     break;
                 };
-                let ty = args.get(index).and_then(|a| udt_of(caller, resolve_use(caller, *a)));
-                match (ty, agreed) {
+                let Some(arg) = args.get(index).map(|a| resolve_use(caller, *a)) else {
+                    ok = false;
+                    break;
+                };
+                match (udt_of(caller, arg), agreed) {
                     (Some(t), None) => agreed = Some(t),
                     (Some(t), Some(prev)) if t == prev => {}
+                    (None, _) if host_result(caller, arg) => {}
                     _ => {
                         ok = false;
                         break;
                     }
                 }
             }
-            if ok && let Some(t) = agreed {
-                out.insert((callee.id, index), t);
+            if ok {
+                out.insert((callee.id, index), agreed);
             }
         }
     }
     out
+}
+
+/// A host operation's result or a recovered field: a value whose stored
+/// type a struct decode of it proves.
+fn host_result(func: &HighFunction, value: ValueId) -> bool {
+    matches!(
+        func.bindings.get(value).map(|b| &b.expr),
+        Some(Expr::Semantic(SemanticOp::Known(_)) | Expr::Field { .. })
+    )
 }
 
 /// The struct a caller's value is known to be: typed on its binding by an
@@ -226,7 +253,7 @@ fn plan<'a>(
     memory: &sordec_ir::MemoryImage,
     structs: &'a [StructDef],
     unions: &[UnionDef],
-    param_types: &HashMap<(FuncId, usize), TypeId>,
+    param_types: &HashMap<(FuncId, usize), Option<TypeId>>,
     helpers: &HashMap<FuncId, DecoderHelper>,
 ) -> Planned {
     let mut elisions = Vec::new();
@@ -237,6 +264,7 @@ fn plan<'a>(
     let mut finished: Vec<Frame<'a>> = Vec::new();
     // Loads rebound to a field, with the field's type, for the niche test.
     let mut rebound: Vec<(ValueId, KnownType)> = Vec::new();
+    let mut limbs = Vec::new();
     let overlaps = |f: &Frame<'_>, base: ValueId, off: u32| {
         f.base == base && off >= f.start && off < f.start + f.size
     };
@@ -252,19 +280,23 @@ fn plan<'a>(
             })) => {
                 let Some((map, keys_pos, vals, len)) = unpack_operands(func, args) else {
                     declines.push(metrics::UDT_DECLINED_OPERANDS);
+                    trace(func, "unpack operands not resolved");
                     continue;
                 };
                 let Some(keys) = read_keys(memory, keys_pos, len) else {
                     declines.push(metrics::UDT_DECLINED_KEYS);
+                    trace(func, "key table not readable");
                     continue;
                 };
                 let Some(def) = struct_for(structs, &keys) else {
                     declines.push(metrics::UDT_DECLINED_NO_STRUCT);
+                    trace(func, "no struct has exactly these keys");
                     continue;
                 };
                 let map = resolve_use(func, map);
                 let Some(evidence) = value_evidence(func, map, def.id, param_types) else {
                     declines.push(metrics::UDT_DECLINED_EVIDENCE);
+                    trace(func, "map value not proven to be the struct");
                     continue;
                 };
                 let (base, start) = canon_addr(func, vals);
@@ -283,6 +315,7 @@ fn plan<'a>(
                     map,
                     def,
                     fields,
+                    limbs: BTreeMap::new(),
                     discs: Vec::new(),
                     consumed: false,
                 });
@@ -303,9 +336,17 @@ fn plan<'a>(
                     continue;
                 }
                 let map = resolve_use(func, args[1]);
-                if udt_of(func, map) != Some(h.ty) {
-                    trace(func, &format!("helper call: value {:?} is {:?}, wanted {:?}", map, udt_of(func, map), h.ty));
-                    continue;
+                match udt_of(func, map) {
+                    Some(t) if t == h.ty => {}
+                    // A host result the helper decodes: the decode is the
+                    // proof of what was stored, as it is in a body.
+                    None if host_result(func, map) => {
+                        typed.push((map, IrType::Known(KnownType::UserDefined(h.ty))));
+                    }
+                    other => {
+                        trace(func, &format!("helper call: value {map:?} is {other:?}, wanted {:?}", h.ty));
+                        continue;
+                    }
                 }
                 let Some(def) = structs.iter().find(|s| s.id == h.ty) else { trace(func, "helper struct missing"); continue };
                 trace(func, &format!("helper frame claimed for func_{}", sordec_common::IrId::index(*target)));
@@ -318,6 +359,7 @@ fn plan<'a>(
                     map,
                     def,
                     fields: h.fields.clone(),
+                    limbs: h.limbs.clone(),
                     discs: h.discs.clone(),
                     consumed: false,
                 });
@@ -350,6 +392,12 @@ fn plan<'a>(
                     .iter()
                     .find(|f| f.name == *field)
                     .and_then(|f| known_of_type_ref(&f.ty));
+                if let Some(&half) = frame.limbs.get(&rel) {
+                    let Some(k) = known else { continue };
+                    frame.consumed = true;
+                    limbs.push((id, frame.map, field.clone(), k, half));
+                    continue;
+                }
                 if let Some(k) = &known {
                     rebound.push((id, k.clone()));
                 }
@@ -420,7 +468,7 @@ fn plan<'a>(
             }
         }
     }
-    Planned { elisions, declines, typed, guards }
+    Planned { elisions, declines, typed, guards, limbs }
 }
 
 /// A zero discriminant in the width the load claimed.
@@ -585,7 +633,7 @@ fn value_evidence(
     func: &HighFunction,
     map: ValueId,
     id: TypeId,
-    param_types: &HashMap<(FuncId, usize), TypeId>,
+    param_types: &HashMap<(FuncId, usize), Option<TypeId>>,
 ) -> Option<IrType> {
     let ty = IrType::Known(KnownType::UserDefined(id));
     if let Some(index) = func.params.iter().position(|p| *p == map) {
@@ -594,9 +642,11 @@ fn value_evidence(
             return (declared == KnownType::UserDefined(id)).then_some(ty);
         }
         // A helper parameter: every caller passes a value already proven
-        // to be this struct.
-        if param_types.get(&(func.id, index)) == Some(&id) {
-            return Some(ty);
+        // to be this struct, or one whose type only this decode can prove.
+        match param_types.get(&(func.id, index)) {
+            Some(Some(known)) if *known == id => return Some(ty),
+            Some(None) => return Some(ty),
+            _ => {}
         }
     }
     let binding = func.bindings.get(map)?;
@@ -608,10 +658,7 @@ fn value_evidence(
     {
         return Some(ty);
     }
-    match &binding.expr {
-        Expr::Semantic(SemanticOp::Known(_)) | Expr::Field { .. } => Some(ty),
-        _ => None,
-    }
+    host_result(func, map).then_some(ty)
 }
 
 // ---------------------------------------------------------------------
@@ -632,6 +679,9 @@ fn value_evidence(
 struct DecoderHelper {
     ty: TypeId,
     fields: BTreeMap<u32, String>,
+    /// Slots holding one half of a wide field: an `i128` crosses the
+    /// out-parameter as two words.
+    limbs: BTreeMap<u32, sordec_ir::UnaryOp>,
     discs: Vec<u32>,
     size: u32,
 }
@@ -691,6 +741,7 @@ fn classify_helper(func: &HighFunction, structs: &[StructDef], unions: &[UnionDe
     }
 
     let mut fields: BTreeMap<u32, String> = BTreeMap::new();
+    let mut limbs: BTreeMap<u32, sordec_ir::UnaryOp> = BTreeMap::new();
     let mut discs: Vec<u32> = Vec::new();
     for (offset, values) in &slots {
         let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -717,6 +768,25 @@ fn classify_helper(func: &HighFunction, structs: &[StructDef], unions: &[UnionDe
         }
         match names.len() {
             1 => {
+                // Every arm the same half of the field, or every arm the
+                // whole of it.
+                let mut halves: Vec<Option<sordec_ir::UnaryOp>> = Vec::new();
+                for a in arms.iter().filter(|a| field_source(func, **a, val).is_some()) {
+                    let half = half_of(func, *a, val);
+                    if !halves.contains(&half) {
+                        halves.push(half);
+                    }
+                }
+                match halves.as_slice() {
+                    [None] => {}
+                    [Some(half)] => {
+                        limbs.insert(*offset, *half);
+                    }
+                    _ => {
+                        trace(func, &format!("slot +{offset}: arms disagree on which half of the field"));
+                        return None;
+                    }
+                }
                 fields.insert(*offset, names.pop_first()?);
             }
             // Every arm a constant. A unit enum's codes with its niche —
@@ -738,8 +808,8 @@ fn classify_helper(func: &HighFunction, structs: &[StructDef], unions: &[UnionDe
     if fields.is_empty() || fields.values().any(|n| !def.fields.iter().any(|f| f.name == *n)) {
         { trace(func, "no slot names a declared field"); return None; }
     }
-    trace(func, &format!("decoder helper for {}: fields {fields:?} discs {discs:?} size {size}", def.name));
-    Some(DecoderHelper { ty, fields, discs, size })
+    trace(func, &format!("decoder helper for {}: fields {fields:?} halves {limbs:?} discs {discs:?} size {size}", def.name));
+    Some(DecoderHelper { ty, fields, limbs, discs, size })
 }
 
 /// Trace for the helper classifier and the call-site walk, printed when
@@ -829,6 +899,49 @@ fn touches_state(expr: &Expr) -> bool {
 /// backwards through the field's own decode (tag checks, object
 /// extractors, vector reads, symbol dispatch, phis). `None` when it
 /// reaches no field, or more than one.
+/// Which half of a wide field of `val` this value is, when it is exactly
+/// `wide_lo(val.f)` or `wide_hi(val.f)`; `None` for anything else.
+fn half_of(func: &HighFunction, value: ValueId, val: ValueId) -> Option<sordec_ir::UnaryOp> {
+    use sordec_ir::UnaryOp;
+    let Expr::Unary { op: op @ (UnaryOp::WideLo | UnaryOp::WideHi), value } =
+        &func.bindings.get(resolve_use(func, value))?.expr
+    else {
+        return None;
+    };
+    let field = func.bindings.get(resolve_use(func, *value))?;
+    matches!(&field.expr, Expr::Field { base, .. } if resolve_use(func, *base) == val).then_some(*op)
+}
+
+/// Rewrite `load` as one half of `base.field`: the field becomes a binding
+/// of its own, scheduled just before the load, and the load its half.
+fn apply_limb(func: &mut HighFunction, load: ValueId, base: ValueId, field: String, ty: KnownType, half: sordec_ir::UnaryOp) {
+    use sordec_common::{Provenance, ProvenanceSource};
+    let id = ValueId::from_index(func.bindings.len() as u32);
+    let note = format!("{field}: the wide field one half of which a decode helper's slot holds");
+    func.bindings.push(sordec_ir::Binding::new(
+        id,
+        IrType::Known(ty),
+        Expr::Field { base, field: field.clone() },
+        Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note),
+    ));
+    let Some(block) = crate::dataflow::block_containing(func, load).and_then(|b| func.blocks.get_mut(b)) else {
+        return;
+    };
+    let Some(at) = block.bindings.iter().position(|b| *b == load) else {
+        return;
+    };
+    block.bindings.insert(at, id);
+    if let Some(b) = func.bindings.get_mut(load) {
+        b.expr = Expr::Unary { op: half, value: id };
+        b.ty = IrType::Inferred(KnownType::I64);
+        b.add_provenance(Provenance::new(
+            PASS_NAME,
+            ProvenanceSource::SdkPattern,
+            format!("one half of {field}, slot of the derived decode helper"),
+        ));
+    }
+}
+
 fn field_source(func: &HighFunction, value: ValueId, val: ValueId) -> Option<String> {
     let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut seen: std::collections::HashSet<ValueId> = std::collections::HashSet::new();
@@ -1033,6 +1146,64 @@ mod tests {
         assert!(matches!(caller.bindings.get(v(4)).unwrap().expr, Expr::Literal(Literal::I32(0))));
         assert!(matches!(caller.bindings.get(v(2)).unwrap().expr, Expr::Literal(Literal::Unit)));
         assert_eq!(r.metrics.get(metrics::UDT_HELPERS_COLLAPSED), Some(1));
+    }
+
+    /// The same helper storing `val.amount`, an `i128`, as its two halves
+    /// at `out+16` / `out+24`; the caller passes a storage read.
+    #[test]
+    fn a_wide_field_crosses_a_helper_as_its_halves() {
+        let mut helper = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                          // v0 out
+                Expr::Phi { incoming: vec![] },                                          // v1 val
+                Expr::Field { base: v(1), field: "amount".to_string() },                // v2
+                Expr::Unary { op: sordec_ir::UnaryOp::WideLo, value: v(2) },            // v3
+                Expr::Unary { op: sordec_ir::UnaryOp::WideHi, value: v(2) },            // v4
+                store(v(0), v(3), 16),                                                   // v5
+                store(v(0), v(4), 24),                                                   // v6
+                Expr::Literal(Literal::I64(0)),                                          // v7
+                store(v(0), v(7), 0),                                                    // v8
+            ],
+            vec![v(0), v(1)],
+            vec![2, 3, 4, 5, 6, 7, 8],
+        );
+        helper.id = FuncId::from_index(1);
+        helper.bindings.get_mut(v(1)).unwrap().ty = IrType::Known(KnownType::UserDefined(TypeId::new(7)));
+        let mut caller = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                          // v0 fp
+                Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+                    tier: StorageTier::Known(KnownTier::Instance),
+                    durability: v(0),
+                    key: v(0),
+                    resolved_key: None,
+                    missing: sordec_ir::Missing::Unwrap,
+                })),                                                                     // v1 the read
+                Expr::Call { target: FuncId::from_index(1), args: vec![v(0), v(1)] },   // v2
+                load(v(0), 16),                                                          // v3 lo
+                load(v(0), 24),                                                          // v4 hi
+            ],
+            vec![v(0)],
+            vec![1, 2, 3, 4],
+        );
+        caller.id = FuncId::from_index(0);
+        let mut m = ir(caller);
+        m.functions.push(helper);
+        assert!(UdtDecodePass.run(&mut m).changed);
+        let c = m.function(FuncId::from_index(0)).unwrap();
+        let half = |id: u32| match &c.bindings.get(v(id)).unwrap().expr {
+            Expr::Unary { op, value } => match &c.bindings.get(*value).unwrap().expr {
+                Expr::Field { base, field } if *base == v(1) && field == "amount" => Some(*op),
+                _ => None,
+            },
+            _ => None,
+        };
+        assert_eq!(half(3), Some(sordec_ir::UnaryOp::WideLo));
+        assert_eq!(half(4), Some(sordec_ir::UnaryOp::WideHi));
+        assert!(
+            matches!(c.bindings.get(v(1)).unwrap().ty, IrType::Known(KnownType::UserDefined(id)) if id == TypeId::new(7)),
+            "the read the helper decodes is the struct"
+        );
     }
 
     #[test]
