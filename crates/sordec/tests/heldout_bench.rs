@@ -149,7 +149,11 @@ fn heldout_floor(name: &str) -> f64 {
         "hello_world" => 0.98,
         "import_ark_bn254" => 0.33,
         "increment" => 0.68,
-        "increment_with_fuzz" => 0.84,
+        // 0.7059, as `increment` (the same source): no branch left, and the
+        // one the yardstick counts is `log!`'s `if cfg!(debug_assertions)`,
+        // which a release wasm does not contain. 0.8655 before, when a
+        // spurious overflow guard and `if let` paired with it.
+        "increment_with_fuzz" => 0.68,
         "increment_with_pause" => 0.80,
         "logging" => 0.86,
         "merkle_distribution" => 0.50,

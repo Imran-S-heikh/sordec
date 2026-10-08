@@ -468,7 +468,7 @@ fn read_count(func: &HighFunction, value: ValueId) -> usize {
 /// A constant that is a returned value's encoding already: the bits of a
 /// small `Val` of the declared type, read back as its payload. Only a raw
 /// 64-bit constant — one already given a narrower type has been decoded.
-fn encoded_constant(func: &HighFunction, value: ValueId, declared: &KnownType) -> Option<Literal> {
+pub(super) fn encoded_constant(func: &HighFunction, value: ValueId, declared: &KnownType) -> Option<Literal> {
     let binding = func.bindings.get(resolve_use(func, value))?;
     let bits = match &binding.expr {
         Expr::Literal(Literal::I64(n)) => *n as u64,

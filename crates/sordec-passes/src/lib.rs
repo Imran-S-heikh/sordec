@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
-    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, OptionUnwrapPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -681,6 +681,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // this would take helpers it is about to claim. The late folds
             // and frame clean-ups below run after it.
             Box::new(OptionalOutParamPass),
+            // The same sum type handed back in two registers, `(tag, value)`,
+            // and the caller's choice between the value and a fallback made
+            // on the tag. Before the return-encode re-run below, which takes
+            // the encode of the `unwrap_or` this leaves at a return.
+            Box::new(OptionalPairPass),
             Box::new(pass::Rerun::new(
                 OptionProbePass,
                 OPTION_PROBE_AFTER_ELISION,

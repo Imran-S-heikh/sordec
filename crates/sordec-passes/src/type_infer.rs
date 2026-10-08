@@ -176,6 +176,9 @@ fn infer_function(func: &mut HighFunction, sigs: &SigTable) -> (bool, u64) {
         for (id, binding) in func.bindings.iter() {
             let cand = match &binding.expr {
                 Expr::Phi { incoming } => phi_join_with_constants(func, incoming, &types),
+                Expr::Binary { op, lhs, rhs } => {
+                    offset_of_known(func, *op, *lhs, *rhs, &types).or_else(|| infer_expr(&binding.expr, &types))
+                }
                 other => infer_expr(other, &types),
             };
             if let Some(cand) = cand {
@@ -275,10 +278,13 @@ fn seed_params(
 /// which is the shape [`crate::SretReturnPass`] produces.
 fn infer_call_result(func: &HighFunction, expr: &Expr, sigs: &SigTable) -> Option<IrType> {
     match expr {
-        Expr::Call { target, .. } => match sigs.get(target)?.returns.as_slice() {
-            [only] => only.to_ir(Certainty::Inferred),
-            _ => None,
-        },
+        Expr::Call { target, .. } => {
+            let sig = sigs.get(target)?;
+            match sig.returns.as_slice() {
+                [only] => sig.declared.clone().or_else(|| only.to_ir(Certainty::Inferred)),
+                _ => None,
+            }
+        }
         Expr::Project { value, index } => {
             let call = resolve_use(func, *value);
             let Expr::Call { target, .. } = &func.bindings.get(call)?.expr else {
@@ -455,10 +461,48 @@ fn backward(
                     changed |= improve(types, ev, arg, IrType::Known(ty));
                 }
             }
+            // The fallback stands in for the payload, so it is one.
+            Expr::UnwrapOr { value, default } => {
+                if let Some(KnownType::Option(payload)) = base_of(types.get(value))
+                    && let Some(base) = base_of(Some(payload.as_ref()))
+                {
+                    changed |= improve(types, ev, *default, IrType::Inferred(base));
+                }
+            }
             _ => {}
         }
     }
     changed
+}
+
+/// `x + 1`, `x - 1`, `x * 2` on an `x` whose numeric type is proven: that
+/// type, proven too. A bare literal takes its type from the other operand
+/// in Rust, so the sum is the operand's type whatever word the wasm
+/// computed it in — and only a proven candidate displaces the word the
+/// lowering seeded (`count + 1` stayed the `i32` it was added in).
+///
+/// Only the three operators that offset a number. A mask or a shift is
+/// where the wasm word is the type the source meant.
+fn offset_of_known(
+    func: &HighFunction,
+    op: BinaryOp,
+    lhs: ValueId,
+    rhs: ValueId,
+    types: &HashMap<ValueId, IrType>,
+) -> Option<IrType> {
+    if !matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) {
+        return None;
+    }
+    let literal = |v: ValueId| matches!(func.bindings.get(resolve_use(func, v)).map(|b| &b.expr), Some(Expr::Literal(_)));
+    let proven = |v: ValueId| match types.get(&v) {
+        Some(IrType::Known(k)) if k.is_numeric() => Some(IrType::Known(k.clone())),
+        _ => None,
+    };
+    match (literal(lhs), literal(rhs)) {
+        (false, true) => proven(lhs),
+        (true, false) => proven(rhs),
+        _ => None,
+    }
 }
 
 /// A candidate type for a binding derived from its own expression, or
@@ -533,6 +577,15 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
                 return None;
             };
             base_of(items.get(*index as usize)).map(IrType::Inferred)
+        }
+        // At the payload's own certainty: the value *is* the payload, so a
+        // payload the ABI proved is not outvoted by the word of the literal
+        // it is then added to.
+        Expr::UnwrapOr { value, .. } => {
+            let KnownType::Option(payload) = base_of(types.get(value))? else {
+                return None;
+            };
+            (!matches!(payload.as_ref(), IrType::Unknown(_))).then(|| payload.as_ref().clone())
         }
         // Two limbs read as one integer. `i128` is the guess only because
         // it is what Soroban contracts overwhelmingly use; a recognizer
@@ -858,6 +911,11 @@ impl Slot {
 struct FnSig {
     params: Vec<Slot>,
     returns: Vec<Slot>,
+    /// A helper's one return value as the emitter declares it — the type of
+    /// the value at its first computed return site — when that type is
+    /// proven. A call to it is then exactly that, whatever the slots say:
+    /// it is what the reconstruction's own signature hands back.
+    declared: Option<IrType>,
 }
 
 /// Signature evidence for every function in the module.
@@ -883,6 +941,22 @@ fn return_arity(func: &HighFunction) -> Option<usize> {
     arity
 }
 
+/// The proven type of a helper's one returned value, read from the site
+/// the emitter declares its return type from: the first that returns
+/// something other than a constant. A helper returning only constants has
+/// none — a literal's type is the wasm word it was loaded as, not a proof.
+fn declared_return(func: &HighFunction) -> Option<IrType> {
+    let constant = |v: &ValueId| matches!(func.bindings.get(*v).map(|b| &b.expr), Some(Expr::Literal(_)));
+    let site = func.returns.iter().find(|vals| !vals.is_empty() && !vals.iter().all(constant))?;
+    let [one] = site.as_slice() else {
+        return None;
+    };
+    match &func.bindings.get(*one)?.ty {
+        known @ IrType::Known(_) => Some(known.clone()),
+        _ => None,
+    }
+}
+
 /// The table's starting point: `contractspecv0` types where a function has
 /// a signature, `Bottom` everywhere else.
 ///
@@ -894,6 +968,7 @@ fn seed_signatures(ir: &HighIr) -> SigTable {
         let mut sig = FnSig {
             params: vec![Slot::Bottom; func.params.len()],
             returns: vec![Slot::Bottom; return_arity(func).unwrap_or(0)],
+            declared: None,
         };
         if let Some(spec) = &func.signature {
             for (slot, input) in sig.params.iter_mut().zip(&spec.inputs) {
@@ -965,6 +1040,7 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
             }
         }
         entry.returns = slots;
+        entry.declared = declared_return(func);
     }
 
     // Parameters: one pass over every call in the module.
@@ -2001,6 +2077,44 @@ mod tests {
             IrType::Inferred(KnownType::I64),
             "the call result is the callee's return type"
         );
+    }
+
+    /// `fn1() -> u32 { let c = <proven u32>; let n = c + 1i32; return n }`,
+    /// `fn0() { v0 = fn1() }`, every binding seeded with the `i32` word.
+    fn increment_helper() -> HighIr {
+        let mut callee = func_at(
+            1,
+            vec![
+                Expr::GlobalGet { index: 0 },                                                   // v0 the count
+                Expr::Literal(Literal::I32(1)),                                                 // v1
+                Expr::Binary { op: BinaryOp::Add, lhs: ValueId::from_index(0), rhs: ValueId::from_index(1) }, // v2
+            ],
+            vec![],
+            vec![0, 1, 2],
+            vec![vec![ValueId::from_index(2)]],
+        );
+        for (id, b) in callee.bindings.iter_mut() {
+            b.ty = if id.index() == 0 { IrType::Known(KnownType::U32) } else { IrType::Inferred(KnownType::I32) };
+        }
+        let mut caller = func_at(0, vec![Expr::Call { target: FuncId::from_index(1), args: vec![] }], vec![], vec![0], vec![]);
+        if let Some(b) = caller.bindings.get_mut(ValueId::from_index(0)) {
+            b.ty = IrType::Inferred(KnownType::I32);
+        }
+        crate::marshalling::test_support::module(vec![caller, callee])
+    }
+
+    #[test]
+    fn a_proven_number_plus_a_literal_is_that_number_proven() {
+        let mut ir = increment_helper();
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 1, 2), IrType::Known(KnownType::U32), "`count + 1` is the count's type, not the word's");
+    }
+
+    #[test]
+    fn a_call_to_a_helper_returning_a_proven_value_is_that_type() {
+        let mut ir = increment_helper();
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::U32), "the call is what the helper declares");
     }
 
     #[test]

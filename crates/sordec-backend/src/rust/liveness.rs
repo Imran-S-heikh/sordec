@@ -222,7 +222,8 @@ fn is_effectful(expr: &Expr) -> bool {
         | Expr::Variant { .. }
         | Expr::Optional { .. }
         | Expr::IsSome { .. }
-        | Expr::Unwrap { .. } => false,
+        | Expr::Unwrap { .. }
+        | Expr::UnwrapOr { .. } => false,
     }
 }
 

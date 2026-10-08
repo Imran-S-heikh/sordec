@@ -182,6 +182,16 @@ pub enum Expr {
         arity: u32,
     },
 
+    /// The value of a one-component `Option`, or `default` when it holds
+    /// none: `r.unwrap_or(default)`. What a choice between the payload and
+    /// a fallback, made on the `Option`'s own tag, says.
+    UnwrapOr {
+        /// The `Option`.
+        value: ValueId,
+        /// The value taken when the `Option` is `None`.
+        default: ValueId,
+    },
+
     /// Indirect call via WASM table.
     IndirectCall {
         /// Function table index.
@@ -301,6 +311,10 @@ impl Expr {
                 }
             }
             Expr::IsSome { value } | Expr::Unwrap { value, .. } => f(*value),
+            Expr::UnwrapOr { value, default } => {
+                f(*value);
+                f(*default);
+            }
             Expr::WideJoin { lo, hi } => {
                 f(*lo);
                 f(*hi);
@@ -410,6 +424,10 @@ impl Expr {
                 }
             }
             Expr::IsSome { value } | Expr::Unwrap { value, .. } => f(value),
+            Expr::UnwrapOr { value, default } => {
+                f(value);
+                f(default);
+            }
             Expr::WideJoin { lo, hi } => {
                 f(lo);
                 f(hi);

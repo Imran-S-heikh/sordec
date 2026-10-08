@@ -787,7 +787,8 @@ pub fn expr_effects(expr: &Expr) -> Effects {
         // `Unwrap` is only placed where a test proves the value present.
         | Expr::Optional { .. }
         | Expr::IsSome { .. }
-        | Expr::Unwrap { .. } => Effects::PURE,
+        | Expr::Unwrap { .. }
+        | Expr::UnwrapOr { .. } => Effects::PURE,
         // All lowered unary operators are total (the trapping float→int
         // truncations never lower to `Unary`; they stay
         // `Unknown{Conversion}`) — pinned by test.

@@ -458,6 +458,9 @@ fn classify_other(cond: ValueId, func: &HighFunction) -> PanicKind {
             lhs,
             rhs,
         } if is_overflow_test(func, *lhs, *rhs) => PanicKind::ArithOverflow,
+        Expr::Binary { op: BinaryOp::Eq, lhs, rhs } if is_increment_overflow_test(func, *lhs, *rhs) => {
+            PanicKind::ArithOverflow
+        }
         _ => PanicKind::Bare,
     }
 }
@@ -482,8 +485,34 @@ fn inverted_guard_kind(prev: &Region, func: &HighFunction) -> Option<PanicKind> 
         {
             Some(PanicKind::ArithOverflow)
         }
+        Expr::Binary { op: BinaryOp::Ne, lhs, rhs } if is_increment_overflow_test(func, *lhs, *rhs) => {
+            Some(PanicKind::ArithOverflow)
+        }
         _ => None,
     }
+}
+
+/// Whether comparing `x` against `y` is the overflow test of an unsigned
+/// `v + 1`: `v` against all ones, where the function also computes `v + 1`.
+///
+/// LLVM folds the carry test `v + 1 <u v` to `v == MAX`, so the sum is no
+/// longer one of the compared values and [`is_overflow_test`] cannot see
+/// it. Derivation is still the discriminator: the compared value is one
+/// addend of an increment the function performs.
+fn is_increment_overflow_test(func: &HighFunction, x: ValueId, y: ValueId) -> bool {
+    let all_ones = |c: ValueId| matches!(trace_int(func, c), Some(-1) | Some(0xFFFF_FFFF) | Some(0xFFFF_FFFF_FFFF_FFFF));
+    let incremented = |v: ValueId| {
+        func.bindings.iter().any(|(_, b)| {
+            matches!(
+                &b.expr,
+                Expr::Binary { op: BinaryOp::Add, lhs, rhs }
+                    if (resolve_use(func, *lhs) == v && trace_int(func, *rhs) == Some(1))
+                        || (resolve_use(func, *rhs) == v && trace_int(func, *lhs) == Some(1))
+            )
+        })
+    };
+    let (x, y) = (resolve_use(func, x), resolve_use(func, y));
+    (all_ones(y) && incremented(x)) || (all_ones(x) && incremented(y))
 }
 
 /// Whether comparing `x` against `y` is rustc's arithmetic overflow test.

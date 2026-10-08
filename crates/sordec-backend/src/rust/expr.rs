@@ -484,6 +484,13 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 parse_quote!(#value.unwrap().#field)
             }
         }
+        // By value like `unwrap`; a constant fallback is spelled against
+        // the payload's type, as the source wrote it (`unwrap_or(0)`).
+        Expr::UnwrapOr { value, default } => {
+            let value = ctx.arg_ref(*value);
+            let default = unsuffixed_against(ctx, *default, &binding.ty).unwrap_or_else(|| ctx.value_ref(*default));
+            parse_quote!(#value.unwrap_or(#default))
+        }
         // Two limbs read as one 128-bit integer. This spelling is the
         // fallback for a join the fold pass could not cancel against its
         // own limbs; the sign of the high limb is what the shift-and-or
