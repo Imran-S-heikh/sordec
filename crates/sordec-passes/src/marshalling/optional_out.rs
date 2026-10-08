@@ -94,7 +94,7 @@ impl Pass<HighIr> for OptionalOutParamPass {
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
-        let helpers: HashMap<FuncId, Helper> = ir
+        let mut helpers: HashMap<FuncId, Helper> = ir
             .functions
             .iter()
             .filter_map(|f| match classify(f) {
@@ -113,6 +113,27 @@ impl Pass<HighIr> for OptionalOutParamPass {
         result.metrics.increment(M_HELPERS, helpers.len() as i64);
         if helpers.is_empty() {
             return result;
+        }
+        let structs = ir.soroban_facts.as_ref().map(|f| f.types.structs.clone()).unwrap_or_default();
+        for (id, helper) in &mut helpers {
+            let (Some(parts), Some(func)) = (&helper.whole, ir.functions.iter().find(|f| f.id == *id)) else {
+                continue;
+            };
+            let def = helper.arms.iter().find_map(|a| whole_of(func, a)).and_then(|base| {
+                match &func.bindings.get(base)?.ty {
+                    IrType::Known(KnownType::UserDefined(t)) | IrType::Inferred(KnownType::UserDefined(t)) => {
+                        structs.iter().find(|s| s.id == *t)
+                    }
+                    _ => None,
+                }
+            });
+            helper.part_types = parts
+                .iter()
+                .map(|(field, _)| {
+                    let f = def?.fields.iter().find(|f| f.name == *field)?;
+                    crate::type_infer::known_of_type_ref(&f.ty)
+                })
+                .collect();
         }
 
         // Census: every call site of every helper, planned or refused.
@@ -253,6 +274,13 @@ struct Helper {
     /// Everything that writes through the out-pointer or computes an
     /// address into it, retired by the rewrite.
     retired: Vec<ValueId>,
+    /// When every present arm writes nothing but fields of one struct
+    /// value — a decoded `MinterConfig` copied out field by field, an
+    /// `i128` field as its two halves — that struct is the payload, and
+    /// each slot is a part of it: `(field, half)`, by payload component.
+    whole: Option<Vec<(String, Option<UnaryOp>)>>,
+    /// The declared type of each of those fields, filled from the spec.
+    part_types: Vec<Option<KnownType>>,
 }
 
 impl Helper {
@@ -375,6 +403,7 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
         return Err("a constant store overlaps the result");
     }
 
+    let whole = struct_parts(func, &present);
     let arms = walk.arms;
     let retired = order
         .iter()
@@ -395,7 +424,52 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
         arms,
         tag_phi,
         retired,
+        whole,
+        part_types: Vec::new(),
     })
+}
+
+/// A field of a struct value, or one half of a wide one: `(value, field,
+/// half)`.
+fn part_of(func: &HighFunction, value: ValueId) -> Option<(ValueId, String, Option<UnaryOp>)> {
+    let field = |v: ValueId| match &func.bindings.get(resolve_use(func, v))?.expr {
+        Expr::Field { base, field } => Some((resolve_use(func, *base), field.clone())),
+        _ => None,
+    };
+    match &func.bindings.get(resolve_use(func, value))?.expr {
+        Expr::Unary { op: op @ (UnaryOp::WideLo | UnaryOp::WideHi), value } => {
+            field(*value).map(|(base, f)| (base, f, Some(*op)))
+        }
+        _ => field(value).map(|(base, f)| (base, f, None)),
+    }
+}
+
+/// The parts of one struct value every present arm writes, in payload
+/// order, when each arm writes nothing else — see [`Helper::whole`].
+fn struct_parts(func: &HighFunction, present: &[&Arm]) -> Option<Vec<(String, Option<UnaryOp>)>> {
+    let mut agreed: Option<Vec<(String, Option<UnaryOp>)>> = None;
+    for arm in present {
+        let mut stores = arm.stores.clone();
+        stores.sort_by_key(|(_, slot, _)| *slot);
+        let mut base: Option<ValueId> = None;
+        let mut parts = Vec::new();
+        for (_, _, value) in &stores {
+            let (b, field, half) = part_of(func, *value)?;
+            if base.replace(b).is_some_and(|prev| prev != b) {
+                return None;
+            }
+            parts.push((field, half));
+        }
+        if agreed.replace(parts.clone()).is_some_and(|prev| prev != parts) {
+            return None;
+        }
+    }
+    agreed.filter(|p| !p.is_empty())
+}
+
+/// The struct value an arm's stores are parts of.
+fn whole_of(func: &HighFunction, arm: &Arm) -> Option<ValueId> {
+    arm.stores.first().and_then(|(_, _, v)| part_of(func, *v)).map(|(base, _, _)| base)
 }
 
 /// The one value an iterator yields, if it yields exactly one (repeats
@@ -717,10 +791,13 @@ fn rewrite_helper(func: &mut HighFunction, helper: &Helper) {
     // One `Option` per arm, built where the arm leaves.
     let mut by_pred: HashMap<BlockId, ValueId> = HashMap::new();
     for arm in &helper.arms {
-        let payload = (!arm.stores.is_empty()).then(|| {
-            let mut stores = arm.stores.clone();
-            stores.sort_by_key(|(_, slot, _)| *slot);
-            stores.into_iter().map(|(_, _, value)| value).collect()
+        let payload = (!arm.stores.is_empty()).then(|| match (&helper.whole, whole_of(func, arm)) {
+            (Some(_), Some(value)) => vec![value],
+            _ => {
+                let mut stores = arm.stores.clone();
+                stores.sort_by_key(|(_, slot, _)| *slot);
+                stores.into_iter().map(|(_, _, value)| value).collect()
+            }
         });
         let note = if payload.is_some() {
             "the value this path wrote through the out-pointer, returned as `Some`"
@@ -887,6 +964,29 @@ fn rewrite_site(func: &mut HighFunction, plan: &SitePlan, helper: &Helper) {
     }
     let arity = helper.payload.len() as u32;
     for &(load, index) in &plan.values {
+        if let Some((field, half)) = helper.whole.as_ref().and_then(|w| w.get(index)) {
+            let whole = push(
+                func,
+                Expr::Unwrap { value: plan.call, index: 0, arity: 1 },
+                untyped(),
+                "the struct the helper returned, where the `Option` is proven present",
+            );
+            place(func, load, whole, false);
+            let declared = helper.part_types.get(index).cloned().flatten();
+            let part = push(
+                func,
+                Expr::Field { base: whole, field: field.clone() },
+                declared.map_or_else(untyped, IrType::Known),
+                "the field of the returned struct this slot held",
+            );
+            place(func, load, part, false);
+            let (expr, ty) = match half {
+                Some(op) => (Expr::Unary { op: *op, value: part }, Some(IrType::Inferred(KnownType::I64))),
+                None => (Expr::Use(part), Some(untyped())),
+            };
+            rewrite(func, load, expr, ty, "the out-parameter's slot, read from the returned struct");
+            continue;
+        }
         rewrite(
             func,
             load,

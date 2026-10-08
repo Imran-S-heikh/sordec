@@ -493,26 +493,43 @@ fn inverted_guard_kind(prev: &Region, func: &HighFunction) -> Option<PanicKind> 
 }
 
 /// Whether comparing `x` against `y` is the overflow test of an unsigned
-/// `v + 1`: `v` against all ones, where the function also computes `v + 1`.
+/// `v + 1` or `v - 1`: `v` against all ones where the function also
+/// computes `v + 1`, or against zero where it computes `v - 1` (which the
+/// wasm spells `v + -1`).
 ///
-/// LLVM folds the carry test `v + 1 <u v` to `v == MAX`, so the sum is no
-/// longer one of the compared values and [`is_overflow_test`] cannot see
-/// it. Derivation is still the discriminator: the compared value is one
-/// addend of an increment the function performs.
+/// LLVM folds the carry test `v + 1 <u v` to `v == MAX`, and the borrow
+/// test `v <u 1` to `v == 0`, so neither the sum nor the subtrahend is one
+/// of the compared values and [`is_overflow_test`] cannot see them.
+/// Derivation is still the discriminator: the compared value is the
+/// operand of a step by one the function performs.
 fn is_increment_overflow_test(func: &HighFunction, x: ValueId, y: ValueId) -> bool {
     let all_ones = |c: ValueId| matches!(trace_int(func, c), Some(-1) | Some(0xFFFF_FFFF) | Some(0xFFFF_FFFF_FFFF_FFFF));
-    let incremented = |v: ValueId| {
-        func.bindings.iter().any(|(_, b)| {
-            matches!(
-                &b.expr,
-                Expr::Binary { op: BinaryOp::Add, lhs, rhs }
-                    if (resolve_use(func, *lhs) == v && trace_int(func, *rhs) == Some(1))
-                        || (resolve_use(func, *rhs) == v && trace_int(func, *lhs) == Some(1))
-            )
+    let zero = |c: ValueId| trace_int(func, c) == Some(0);
+    let stepped = |v: ValueId, by: i128| {
+        func.bindings.iter().any(|(_, b)| match &b.expr {
+            Expr::Binary { op: BinaryOp::Add, lhs, rhs } => {
+                (resolve_use(func, *lhs) == v && trace_int(func, *rhs) == Some(by))
+                    || (resolve_use(func, *rhs) == v && trace_int(func, *lhs) == Some(by))
+            }
+            Expr::Binary { op: BinaryOp::Sub, lhs, rhs } => {
+                resolve_use(func, *lhs) == v && trace_int(func, *rhs) == Some(-by)
+            }
+            _ => false,
         })
     };
+    // A signed value steps past zero without overflowing: only unsigned
+    // or untyped words.
+    let signed = |v: ValueId| {
+        matches!(
+            func.bindings.get(v).map(|b| &b.ty),
+            Some(IrType::Known(KnownType::I32 | KnownType::I64 | KnownType::I128 | KnownType::I256))
+        )
+    };
+    let test = |v: ValueId, c: ValueId| {
+        (all_ones(c) && stepped(v, 1)) || (zero(c) && !signed(v) && stepped(v, -1))
+    };
     let (x, y) = (resolve_use(func, x), resolve_use(func, y));
-    (all_ones(y) && incremented(x)) || (all_ones(x) && incremented(y))
+    test(x, y) || test(y, x)
 }
 
 /// Whether comparing `x` against `y` is rustc's arithmetic overflow test.
@@ -905,6 +922,36 @@ mod tests {
     #[test]
     fn an_unsigned_compare_before_its_subtraction_is_the_borrow_check() {
         assert_eq!(kind_of(compare_then_subtract(KnownType::U64)), PanicKind::ArithOverflow);
+    }
+
+    /// `if x == c { trap }` beside `x + step`: the increment's carry test
+    /// (`c` all ones, step 1) or the decrement's borrow test (`c` zero,
+    /// step -1), as LLVM folds them.
+    fn compare_then_step(ty: IrType, against: i64, step: i64) -> HighFunction {
+        let mut x = binding(0, Expr::Phi { incoming: vec![] });
+        x.ty = ty;
+        let bindings = vec![
+            x,
+            binding(1, Expr::Literal(Literal::I64(against))),
+            binding(2, Expr::Binary { op: BinaryOp::Eq, lhs: v(0), rhs: v(1) }),
+            binding(3, Expr::Literal(Literal::I64(step))),
+            binding(4, Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(3) }),
+        ];
+        func_of(bindings, Region::Sequence(vec![Region::Basic(bb(0)), guard(2, Region::Unreachable)]))
+    }
+
+    #[test]
+    fn a_step_by_one_guarded_at_its_limit_is_the_overflow_check() {
+        let word = || IrType::Inferred(KnownType::I64);
+        assert_eq!(kind_of(compare_then_step(word(), -1, 1)), PanicKind::ArithOverflow);
+        assert_eq!(kind_of(compare_then_step(word(), 0, -1)), PanicKind::ArithOverflow);
+    }
+
+    /// A signed value steps below zero without overflowing: `x == 0` before
+    /// `x - 1` on an `i64` is the author's check.
+    #[test]
+    fn a_signed_decrement_guarded_at_zero_is_the_authors() {
+        assert_eq!(kind_of(compare_then_step(IrType::Known(KnownType::I64), 0, -1)), PanicKind::Bare);
     }
 
     /// atomic_swap's `if amount_a < min_a_for_b { panic!(..) }` on `i128`s:

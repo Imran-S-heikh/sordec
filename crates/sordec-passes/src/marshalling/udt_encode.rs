@@ -96,9 +96,56 @@ impl Pass<HighIr> for UdtEncodePass {
                     result.changed = true;
                 }
             }
+            for (at, whole) in rebuilds(func, &structs) {
+                if let Some(b) = func.bindings.get_mut(at) {
+                    b.expr = Expr::Use(whole);
+                    b.add_provenance(Provenance::new(
+                        PASS_NAME,
+                        ProvenanceSource::SdkPattern,
+                        "a struct literal of every field of one value of that struct is the value",
+                    ));
+                    result.changed = true;
+                }
+            }
         }
         result
     }
+}
+
+/// Struct literals that put back together, field for field, a value of the
+/// same struct: `MinterConfig { epoch_length: c.epoch_length, limit:
+/// c.limit }` is `c`. What a decode and an encode helper leave around a
+/// value the source only passed along.
+fn rebuilds(func: &HighFunction, structs: &[StructDef]) -> Vec<(ValueId, ValueId)> {
+    let named = |ty: &IrType| match ty {
+        IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => Some(*id),
+        _ => None,
+    };
+    func.bindings
+        .iter()
+        .filter_map(|(id, b)| {
+            let Expr::Struct { fields } = &b.expr else { return None };
+            let ty = named(&b.ty)?;
+            let def = structs.iter().find(|s| s.id == ty)?;
+            if fields.len() != def.fields.len() {
+                return None;
+            }
+            let mut whole: Option<ValueId> = None;
+            for (name, value) in fields {
+                let Expr::Field { base, field } = &func.bindings.get(resolve_use(func, *value))?.expr else {
+                    return None;
+                };
+                let base = resolve_use(func, *base);
+                if field != name || whole.replace(base).is_some_and(|w| w != base) {
+                    return None;
+                }
+            }
+            let whole = whole?;
+            // Typed on its binding, or declared by the spec when it is one
+            // of the entrypoint's own parameters.
+            (super::udt_decode::udt_of(func, whole) == Some(ty)).then_some((id, whole))
+        })
+        .collect()
 }
 
 /// One recovered construction: the value it binds, the struct it is, and
@@ -299,6 +346,37 @@ mod tests {
     fn the_pass_is_idempotent() {
         let mut m = ir(encoder(2));
         assert!(UdtEncodePass.run(&mut m).changed);
+        assert!(!UdtEncodePass.run(&mut m).changed);
+    }
+
+    /// `State { count: s.count, last_incr: s.last_incr }` is `s`; with one
+    /// field taken from another value it is not.
+    #[test]
+    fn a_struct_rebuilt_from_its_own_fields_is_the_value() {
+        let build = |second_base: u32| {
+            let mut f = func_with(
+                vec![
+                    Expr::Phi { incoming: vec![] },                                  // v0 s
+                    Expr::Phi { incoming: vec![] },                                  // v1 t
+                    Expr::Field { base: v(0), field: "count".to_string() },         // v2
+                    Expr::Field { base: v(second_base), field: "last_incr".to_string() }, // v3
+                    Expr::Struct {
+                        fields: vec![("count".to_string(), v(2)), ("last_incr".to_string(), v(3))],
+                    },                                                               // v4
+                ],
+                vec![v(0), v(1)],
+                vec![2, 3, 4],
+            );
+            let state = IrType::Known(KnownType::UserDefined(TypeId::new(7)));
+            for id in [0, 1, 4] {
+                f.bindings.get_mut(v(id)).unwrap().ty = state.clone();
+            }
+            f
+        };
+        let mut m = ir(build(0));
+        assert!(UdtEncodePass.run(&mut m).changed);
+        assert!(matches!(m.functions[0].bindings.get(v(4)).unwrap().expr, Expr::Use(w) if w == v(0)));
+        let mut m = ir(build(1));
         assert!(!UdtEncodePass.run(&mut m).changed);
     }
 }

@@ -34,6 +34,82 @@ fn variant_path(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<syn::Path>
     Some(parse_quote!(#owner::#variant))
 }
 
+/// A bitwise operator between a `bool` and an integer: the wasm keeps the
+/// `bool` in a byte and masks it. `flag & 1` is the flag; any other
+/// combination casts the flag to the integer's type, which is the `0` or
+/// `1` the wasm held.
+fn bool_with_int(
+    ctx: &FnCtx,
+    op: BinaryOp,
+    lhs: sordec_common::ValueId,
+    rhs: sordec_common::ValueId,
+) -> Option<syn::Expr> {
+    if !matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) {
+        return None;
+    }
+    let int = |v: sordec_common::ValueId| {
+        ctx.func.bindings.get(ctx.fold_target(v)).and_then(|b| match &b.ty {
+            IrType::Known(k @ (KnownType::I32 | KnownType::U32 | KnownType::I64 | KnownType::U64))
+            | IrType::Inferred(k @ (KnownType::I32 | KnownType::U32 | KnownType::I64 | KnownType::U64)) => {
+                Some(IrType::Known(k.clone()))
+            }
+            _ => None,
+        })
+    };
+    let flag_like = |v: sordec_common::ValueId| bool_like(ctx, ctx.fold_target(v), 0);
+    let (flag, other) = match (flag_like(lhs), flag_like(rhs)) {
+        (true, false) => (lhs, rhs),
+        (false, true) => (rhs, lhs),
+        _ => return None,
+    };
+    let other_ty = int(other)?;
+    let one = matches!(
+        ctx.func.bindings.get(ctx.fold_target(other)).map(|b| &b.expr),
+        Some(Expr::Literal(Literal::I32(1) | Literal::I64(1) | Literal::U32(1) | Literal::U64(1)))
+    );
+    if op == BinaryOp::BitAnd && one {
+        let x = ctx.value_ref(flag);
+        let ty = crate::rust::ty::ir_type(&other_ty, ctx.reg, ctx.policy);
+        return Some(parse_quote!((#x as #ty)));
+    }
+    let x = bool_to_int(ctx, flag, &other_ty)?;
+    Some(binary_expr(op, x, ctx.value_ref(other)))
+}
+
+/// `x - n` for an addition of `x` and a negative constant `-n`, either way
+/// round. The constant is written without a suffix where `x` has an
+/// integer type to give it, and with its own word otherwise.
+fn negative_addend(ctx: &FnCtx, lhs: sordec_common::ValueId, rhs: sordec_common::ValueId) -> Option<syn::Expr> {
+    let negative = |v: sordec_common::ValueId| -> Option<(i128, bool)> {
+        let (n, wide) = match &ctx.func.bindings.get(ctx.fold_target(v))?.expr {
+            Expr::Literal(Literal::I32(n)) if *n != i32::MIN => (i128::from(*n), false),
+            Expr::Literal(Literal::I64(n)) if *n != i64::MIN => (i128::from(*n), true),
+            _ => return None,
+        };
+        (n < 0).then_some((-n, wide))
+    };
+    let (x, (n, wide)) = match (negative(rhs), negative(lhs)) {
+        (Some(c), _) => (lhs, c),
+        (None, Some(c)) => (rhs, c),
+        (None, None) => return None,
+    };
+    let typed = ctx.func.bindings.get(ctx.fold_target(x)).is_some_and(|b| {
+        matches!(
+            base_of(&b.ty),
+            Some(KnownType::I32 | KnownType::I64 | KnownType::U32 | KnownType::U64 | KnownType::I128 | KnownType::U128)
+        )
+    });
+    let lit = if typed {
+        proc_macro2::Literal::i128_unsuffixed(n)
+    } else if wide {
+        proc_macro2::Literal::i64_suffixed(n as i64)
+    } else {
+        proc_macro2::Literal::i32_suffixed(n as i32)
+    };
+    let x = ctx.value_ref(x);
+    Some(parse_quote!(#x - #lit))
+}
+
 /// `value` as a suffix-free integer literal, when it is an integer
 /// constant and `against` carries a known integer type to infer from.
 fn unsuffixed(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common::ValueId) -> Option<syn::Expr> {
@@ -101,6 +177,8 @@ fn bool_like(ctx: &FnCtx, v: sordec_common::ValueId, depth: u32) -> bool {
             _ => false,
         },
         Some(Expr::Unary { op: sordec_ir::UnaryOp::Eqz, .. }) => true,
+        // A rename of a `bool` is one.
+        Some(Expr::Use(inner)) => bool_like(ctx, ctx.fold_target(*inner), depth + 1),
         _ => false,
     }
 }
@@ -357,6 +435,16 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             }
         }
         Expr::Binary { op, lhs, rhs } => {
+            // `x + (-1)` is how the wasm spells `x - 1`, and the only
+            // spelling that compiles when `x` is unsigned.
+            if *op == BinaryOp::Add
+                && let Some(sub) = negative_addend(ctx, *lhs, *rhs)
+            {
+                return sub;
+            }
+            if let Some(mixed) = bool_with_int(ctx, *op, *lhs, *rhs) {
+                return mixed;
+            }
             // A constant compared against a typed operand prints without
             // its suffix and takes the type from the comparison, which is
             // where Rust gets it too. The lowering has to pick a

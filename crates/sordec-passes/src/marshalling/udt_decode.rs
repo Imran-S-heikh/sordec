@@ -123,9 +123,10 @@ impl Pass<HighIr> for UdtDecodePass {
                 result.metrics.increment(metrics::GUARDS_ELIDED, stripped);
             }
             apply_elisions(func, PASS_NAME, planned.elisions);
+            let mut shared: HashMap<(ValueId, String), ValueId> = HashMap::new();
             for (load, base, field, ty, half) in planned.limbs {
                 result.metrics.increment(metrics::UDT_FIELDS_RECOVERED, 1);
-                apply_limb(func, load, base, field, ty, half);
+                apply_limb(func, &mut shared, load, base, field, ty, half);
             }
             // Type-only: the value's own latest note stays the recognizer
             // that produced it.
@@ -234,7 +235,7 @@ fn host_result(func: &HighFunction, value: ValueId) -> bool {
 /// The struct a caller's value is known to be: typed on its binding by an
 /// earlier decode, or declared by the caller's own `contractspecv0`
 /// signature when the value is one of its parameters.
-fn udt_of(func: &HighFunction, value: ValueId) -> Option<TypeId> {
+pub(super) fn udt_of(func: &HighFunction, value: ValueId) -> Option<TypeId> {
     if let Some(b) = func.bindings.get(value)
         && let IrType::Known(KnownType::UserDefined(id)) = &b.ty
     {
@@ -913,24 +914,50 @@ fn half_of(func: &HighFunction, value: ValueId, val: ValueId) -> Option<sordec_i
 }
 
 /// Rewrite `load` as one half of `base.field`: the field becomes a binding
-/// of its own, scheduled just before the load, and the load its half.
-fn apply_limb(func: &mut HighFunction, load: ValueId, base: ValueId, field: String, ty: KnownType, half: sordec_ir::UnaryOp) {
+/// of its own, scheduled just before the load, and the load its half. The
+/// other half read earlier in the same block shares that binding, so the
+/// two halves are visibly of one value and a join of them folds.
+fn apply_limb(
+    func: &mut HighFunction,
+    shared: &mut HashMap<(ValueId, String), ValueId>,
+    load: ValueId,
+    base: ValueId,
+    field: String,
+    ty: KnownType,
+    half: sordec_ir::UnaryOp,
+) {
     use sordec_common::{Provenance, ProvenanceSource};
-    let id = ValueId::from_index(func.bindings.len() as u32);
-    let note = format!("{field}: the wide field one half of which a decode helper's slot holds");
-    func.bindings.push(sordec_ir::Binding::new(
-        id,
-        IrType::Known(ty),
-        Expr::Field { base, field: field.clone() },
-        Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note),
-    ));
-    let Some(block) = crate::dataflow::block_containing(func, load).and_then(|b| func.blocks.get_mut(b)) else {
+    let Some(block_id) = crate::dataflow::block_containing(func, load) else {
         return;
     };
-    let Some(at) = block.bindings.iter().position(|b| *b == load) else {
-        return;
+    let earlier = shared.get(&(base, field.clone())).copied().filter(|f| {
+        func.blocks.get(block_id).is_some_and(|b| {
+            let pos = |v: ValueId| b.bindings.iter().position(|x| *x == v);
+            matches!((pos(*f), pos(load)), (Some(a), Some(b)) if a < b)
+        })
+    });
+    let id = match earlier {
+        Some(id) => id,
+        None => {
+            let id = ValueId::from_index(func.bindings.len() as u32);
+            let note = format!("{field}: the wide field one half of which a decode helper's slot holds");
+            func.bindings.push(sordec_ir::Binding::new(
+                id,
+                IrType::Known(ty),
+                Expr::Field { base, field: field.clone() },
+                Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note),
+            ));
+            let Some(block) = func.blocks.get_mut(block_id) else {
+                return;
+            };
+            let Some(at) = block.bindings.iter().position(|b| *b == load) else {
+                return;
+            };
+            block.bindings.insert(at, id);
+            shared.insert((base, field.clone()), id);
+            id
+        }
     };
-    block.bindings.insert(at, id);
     if let Some(b) = func.bindings.get_mut(load) {
         b.expr = Expr::Unary { op: half, value: id };
         b.ty = IrType::Inferred(KnownType::I64);

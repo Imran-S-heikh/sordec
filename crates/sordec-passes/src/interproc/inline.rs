@@ -29,7 +29,9 @@
 //! — no branch, no loop — and short, made only of expressions that can be
 //! copied: literals, arithmetic, calls, host operations. No frame traffic
 //! (a load or store means the body has state the caller cannot see) and
-//! no recursion. It may return one value or none.
+//! no recursion, except a store through a pointer parameter: that is the
+//! helper's result written into its caller's frame, and pasted it writes
+//! the same bytes there. It may return one value or none.
 //!
 //! Or the same behind one argument check that traps when it fails —
 //! `map_unpack_to_linear_memory`'s wrapper tests `keys.len() ==
@@ -298,7 +300,7 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
 
     for id in scheduled {
         let binding = func.bindings.get(id)?;
-        if !copyable(&binding.expr, func.id) {
+        if !copyable(&binding.expr, func.id) && !writes_through_a_param(func, &binding.expr) {
             return None;
         }
         // Every value the expression reads must be a parameter, an
@@ -344,6 +346,18 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
         return None;
     }
     Some(Wrapper { id: func.id, params: func.params.clone(), items, ret, guard })
+}
+
+/// A store through a pointer the caller handed in: the helper's result,
+/// written into the caller's frame. Pasted, it writes the same bytes of
+/// the same frame, and the caller's frame forwarding then reads them back
+/// as the values — the shape the helper has when rustc inlines it itself.
+fn writes_through_a_param(func: &HighFunction, expr: &Expr) -> bool {
+    let Expr::Store { addr, .. } = expr else {
+        return false;
+    };
+    let (base, _) = crate::dataflow::canon_addr(func, *addr);
+    func.params.contains(&base)
 }
 
 /// Whether `func` is a body worth keeping shared: one the source wrote
@@ -733,5 +747,54 @@ mod tests {
         let mut m = module(vec![guarded_wrapper(0), guarded_caller(2, 3)]);
         assert!(!WrapperInlinePass.run(&mut m).changed);
         assert!(matches!(expr_at(&m, 1, 2), Expr::Call { .. }));
+    }
+
+    /// A helper writing its result into the frame its caller hands it:
+    /// pasted, the store writes the caller's frame.
+    #[test]
+    fn a_helper_storing_through_its_pointer_is_inlined() {
+        let mut helper = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },              // v0 out
+                Expr::Phi { incoming: vec![] },              // v1 value
+                Expr::Store { addr: v(0), value: v(1), offset: 8, width: sordec_ir::MemWidth::W8 }, // v2
+            ],
+            vec![v(0), v(1)],
+            vec![2],
+        );
+        helper.id = FuncId::from_index(0);
+        let mut caller = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                                // v0 fp
+                Expr::Literal(Literal::I64(7)),                                                // v1
+                Expr::Call { target: FuncId::from_index(0), args: vec![v(0), v(1)] },         // v2
+            ],
+            vec![v(0)],
+            vec![2],
+        );
+        caller.id = FuncId::from_index(1);
+        let mut m = module(vec![helper, caller]);
+        assert!(WrapperInlinePass.run(&mut m).changed);
+        let pasted = m.function(FuncId::from_index(1)).unwrap().bindings.iter().any(|(_, b)| {
+            matches!(&b.expr, Expr::Store { addr, value, offset: 8, .. } if *addr == v(0) && *value == v(1))
+        });
+        assert!(pasted, "the store lands in the caller's frame");
+    }
+
+    /// A store through the helper's own frame is state the caller cannot
+    /// see: not a wrapper.
+    #[test]
+    fn a_helper_storing_elsewhere_is_not_inlined() {
+        let mut helper = func_with(
+            vec![
+                Expr::GlobalGet { index: 0 },                // v0 frame
+                Expr::Phi { incoming: vec![] },              // v1 value
+                Expr::Store { addr: v(0), value: v(1), offset: 8, width: sordec_ir::MemWidth::W8 }, // v2
+            ],
+            vec![v(1)],
+            vec![0, 2],
+        );
+        helper.id = FuncId::from_index(0);
+        assert!(classify(&helper).is_none());
     }
 }
