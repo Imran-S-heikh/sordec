@@ -5,6 +5,14 @@
 **Date:** September 2026
 **Cut:** `main` at the Phase 4 closeout commit.
 
+> **Update, 2026-10-08.** The numbers below are the acceptance-time record for
+> `v0.1.0-alpha.1` and are kept as they were. Since then, on `main`: the
+> reference corpus recompiles **7 of 7** (was 2 of 7) and scores **0.9389**
+> (was 0.6108), of which about 0.08 is the `score-2.1.0` rule change and the
+> rest decompiler work; 17 of 25 held-out `soroban-examples` contracts recompile,
+> scoring 0.7570; two unseen third-party contracts score 0.53. Current figures and
+> their caveats: [README — Where it actually stands](README.md#where-it-actually-stands).
+
 This document records what Phase 4 was scoped to deliver, what landed, what
 did **not** reach its target, and how to verify all of it end-to-end from a
 clean clone. It mirrors [PHASE_1.md](PHASE_1.md), [PHASE_2.md](PHASE_2.md) and

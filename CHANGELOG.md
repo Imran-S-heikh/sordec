@@ -8,12 +8,52 @@ follow [Semantic Versioning][semver].
 
 ## [Unreleased]
 
+### Reconstruction quality
+
+Measured 2026-10-08 with `score-2.1.0`; the alpha's own numbers are kept in
+its section below.
+
+| | alpha.1 | now |
+|---|---|---|
+| Reference corpus: recompiles | 2 of 7 | **7 of 7** |
+| Reference corpus: overall score | 0.6108 | **0.9389** |
+| Reference corpus: structure | 0.14 | **0.94** |
+| Reference corpus: behaviour measured on | 2 of 7 | **6 of 7** (0.93) |
+| Held-out 25 (`soroban-examples`): recompiles | — | **17 of 25** |
+| Held-out 25: overall score | — | **0.7570** |
+| Third-party unseen (2): overall score | — | **0.53** (0 of 2 recompile) |
+
+About 0.08 of the corpus rise is the scorer change below; the rest is the
+decompiler. The bulk of the work since the alpha:
+
+- **Marshalling elision.** The SDK glue rustc inlines into every function —
+  `Val` encode/decode, tag checks, frame bookkeeping, struct and enum codecs,
+  `Option`/`Result` plumbing — is recognised and removed, which is what took
+  corpus structure from 0.14 to 0.94.
+- **Compiling output.** Type inference, sign and width casts, `bool`/integer
+  boundaries, wide (`i128`) values, `Option` helpers returned as `Option<T>`
+  (through an out-pointer or a register pair), struct decoders and encoders
+  collapsed at their call sites, keys promoted to constant data named.
+- **Behaviour harness** drives `Address`, `String`, `Bytes`, struct and enum
+  parameters and constructors, and found three real output bugs on its first
+  full run (event topics, symbol literals, a constructor hole).
+- **Host catalog** re-vendored to `soroban-env-common` 27.0.1 (protocol 27).
+
+### Scorer: `score-2.1.0`
+
+Six rule changes, one principle: a fact whose only evidence the compiler
+destroys is dropped from both sides rather than scored as a miss — authored
+panic messages, derived-impl bodies, a stripped contract's parameter, enum and
+type names, and how many times a helper was written out. Each is listed with its
+evidence in [`docs/scoring_metric.md` §7.1](docs/scoring_metric.md).
+
 ### Added
 
 - **[`docs/compatibility.md`](docs/compatibility.md)** — which Soroban protocol
   and SDK versions sordec handles, and where the edges are. The host-call
-  catalog names protocols through 26 (read out of its own per-function gating
-  data, not estimated); the corpus exercises 21 through 23, and the document
+  catalog names protocols through 27 (read out of its own per-function gating
+  data, not estimated); the corpus exercises 21 through 23 and the held-out
+  set 27, and the document
   says which is which rather than implying support from a version number. Also
   covers the three-rung SDK recovery ladder, the two Rust toolchains and why
   they are different numbers, what a stripped `contractspecv0` costs, and what

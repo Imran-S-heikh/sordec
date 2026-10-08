@@ -1,7 +1,7 @@
 # Scoring Metric Definition
 
 **Instrument:** `sordec-score` crate + `sordec score` CLI
-**Version:** `score-2.0.0` (M1–M7 built, 2026-07-28; see §6 for limits and §7 for freeze policy)
+**Version:** `score-2.1.0` (2.0.0 built M1–M7, 2026-07-28; 2.1.0 changes listed in §7.1; see §6 for limits and §7 for freeze policy)
 **Status:** the definition of record. Not awaiting anyone's approval — the accepted SCF
 submission specifies no weighting and no per-category threshold, so these are our
 choices, disclosed here and stamped into every report (see
@@ -141,9 +141,11 @@ Every structure score is reported alongside a **control-flow token census** —
 precision, recall, and the ratio between the two sides' token counts. This
 separates two very different situations that one score conflates: control flow
 we failed to recover (low recall) and control flow we invented (low precision).
-On the current corpus recall runs 0.85–1.00 while precision runs 0.03–0.05:
-the reconstruction recovers nearly all the real structure and buries it in
-13×–40× more un-elided marshalling. The census also reports the best
+When `score-2.0.0` was frozen, corpus recall ran 0.85–1.00 while precision ran
+0.03–0.05: the reconstruction recovered nearly all the real structure and buried
+it in 13×–40× more un-elided marshalling. Today the corpus tokens are close to
+1:1 (token-v22: 33 original, 36 reconstructed), while on the held-out set
+precision is still often below 0.1 (see §6). The census also reports the best
 Sørensen–Dice attainable at that token ratio, as an indication of how much of
 the remaining gap is reachable by improving the reconstruction rather than the
 metric.
@@ -311,14 +313,27 @@ bad score; it is the absence of a score, and it renormalizes out of the mean rat
 than dragging it down. A category that could not be measured never poses as a
 category that measured badly.
 
-### The structure number is small for a reason that is not the metric
+### A low structure number is usually volume, not shape
 
-Structure sits near 0.05 corpus-wide. That was investigated at M4 and the metric is
-not the cause: the emitter produces roughly **24× the control flow** of the original
-at 0.85 recall, and token-v23's achievable ceiling under the current dice measure is
-about 0.080. Rewriting the metric does not move it — cutting the bloat to ≤1.9×
-would take structure to ~0.60. Read a low structure score as "the emitter emits too
-much", not as "the comparison is unfair".
+When `score-2.0.0` was frozen, structure sat near 0.05 corpus-wide. That was
+investigated at M4 and the metric was not the cause: the emitter produced roughly
+**24× the control flow** of the original at 0.85 recall. The prediction was that
+cutting the bloat, not rewriting the metric, would move it — and it did: emitter
+work alone took corpus structure to 0.76–1.00 per fixture (0.94 mean, 2026-10-08).
+
+On the 25-contract held-out set structure is 0.29, and the cause is different.
+Many of those contracts compile library code into the wasm (`alloc`, `ark-bn254`,
+`eth-abi`, OpenZeppelin helpers). The reconstruction must emit it, because it is in
+the binary; the yardstick is the contract crate's own source, which never contained
+it. Thirteen of the nineteen measured contracts have two or fewer original
+control-flow tokens, so a handful of emitted library branches dominates the score.
+Widening the yardstick to the dependency closure is an open decision, and would be
+a rule change declared as one.
+
+One known yardstick artefact: the SDK's `log!` expands to `if cfg!(debug_assertions)
+{ … }`, so the macro-expanded original carries an `if` that no release wasm
+contains. A reconstruction that faithfully emits no branch scores 0 structure on
+`increment`, `increment_with_fuzz` and `logging`. Not yet changed.
 
 ### Comparability
 
@@ -368,21 +383,42 @@ would also pass.
 ## 7. Versioning and freeze policy
 
 Every report carries the scorer version and its weights profile. The
-algorithm and default weights are **frozen** at `score-2.0.0`: a golden
+algorithm and default weights are **frozen** at `score-2.1.0` (§7.1 lists what
+changed from `score-2.0.0`): a golden
 calibration vector pins the exact per-category scores for a fixed input
 pair, so any change that could move a score fails the freeze test until the
 snapshot is updated in the same change. Once the Rust emitter is first
 scored against this metric, that discipline guarantees the acceptance number
 is computed the same way at review time as it was when agreed.
 
-`score-2.0.0` is the version under active construction — it realigns the
-metric with the RFP (macro-expanded basis, ABI read from the spec-XDR,
-per-entrypoint structure). While a version is being built, the convention is
-to **re-freeze the golden vector as each definition change lands**, recording
-the new numbers and the reasoning in the same commit, rather than bumping the
-version per task. The freeze test still fails loudly on every such change;
-what it guarantees during construction is that no score moves *silently*.
-The version bumps when the definition is settled and signed off.
+While a version is being built, the convention is to **re-freeze the golden
+vector as each definition change lands**, recording the new numbers and the
+reasoning in the same commit, rather than bumping the version per change. The
+freeze test still fails loudly on every such change; what it guarantees is that no
+score moves *silently*. `score-2.0.0` was built that way (it realigned the metric
+with the RFP: macro-expanded basis, ABI read from the spec-XDR, per-entrypoint
+structure), and so was `score-2.1.0`.
+
+### 7.1 `score-2.1.0`: what the compiler deleted is not a miss
+
+Six rule changes, all one principle. A fact scores a reconstruction on what it
+recovered from a binary; a fact whose only evidence the compiler destroys cannot be
+recovered however good the decompiler is, so it is dropped from **both** sides —
+the same discipline every category already applied to what it cannot measure.
+
+| Change | Category | Why the binary cannot carry it |
+|---|---|---|
+| An authored `panic!("…")` is not a fact | semantic | Its message is the only thing distinguishing it from a bare trap, and 0 of 24 distinct panic messages across the corpus survive into the wasm. `panic_with_error!` and `.unwrap()` still count. |
+| A `#[automatically_derived]` impl's body is not the contract's control flow | structure | Both sides regenerate it from the same `#[derive]`; and whether the author wrote `.clone()` on an SDK handle compiles to nothing. |
+| Parameter names compared only where the module declares its ABI | interface | `contractspecv0` is the only place they are recorded. |
+| A storage key's enum name dropped where no ABI is declared | semantic | The variant is in the binary; the enum's name is only in the spec. |
+| A user-defined type compared by shape where no ABI is declared | interface | Field names and variant names are compiled in; the type's own name is not. |
+| Semantic compares fact presence, not multiplicity | semantic | rustc inlines or outlines helpers at will; how many times an operation is *written out* leaves no trace (dex's transfer helper: once in the binary, four times in the source). |
+
+Three of the six fire only on a stripped build (`token-v23-stripped`). Measured
+together they account for **about +0.08** of the corpus aggregate's rise from 0.61
+(alpha) to 0.94; the rest is reconstruction. Every change carries its before/after
+numbers in its commit, and the golden vector was re-frozen with each.
 
 ## 8. Baseline
 
