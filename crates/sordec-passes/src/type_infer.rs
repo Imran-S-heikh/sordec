@@ -468,6 +468,20 @@ fn backward(
                     changed |= improve(types, ev, arg, IrType::Known(ty));
                 }
             }
+            // A copy is its source: a return encode collapsed onto a `Use`
+            // is typed by the ABI, and the value it copies is that type.
+            // Numbers only, and only to name an untyped source or settle the
+            // 32-bit word's sign: a collapse can also fold a widening — a
+            // `u64` returned where `u128` is declared — and there the copy's
+            // type is the conversion's, not the source's.
+            Expr::Use(source) => {
+                if let Some(base) = base_of(types.get(&id)).filter(KnownType::is_numeric) {
+                    let fits = base_of(types.get(source)).is_none_or(|have| unsigned_word(&have, &base).is_some());
+                    if fits {
+                        changed |= improve(types, ev, *source, IrType::Inferred(base));
+                    }
+                }
+            }
             // Each component is the tuple's declared slot.
             Expr::Tuple { items } => {
                 if let Some(KnownType::Tuple(slots)) = base_of(types.get(&id))
@@ -1452,6 +1466,18 @@ fn improve(
     if refines_val(&cand, slot) {
         return false;
     }
+    // The 32-bit word, signed only because wasm has no other: the `u32` is
+    // the evidence, at the same certainty ([`unsigned_word`]).
+    if cand_rank == slot_rank
+        && let (Some(have), Some(got)) = (base_of(Some(&*slot)), base_of(Some(&cand)))
+        && let Some(word) = unsigned_word(&have, &got)
+    {
+        if have == word {
+            return false;
+        }
+        *slot = cand;
+        return true;
+    }
     // Likewise a candidate that says less of the same `Option`: the slot
     // already holds everything it says.
     if let (Some(have), Some(got)) = (base_of(Some(&*slot)), base_of(Some(&cand)))
@@ -1499,11 +1525,38 @@ fn improve_tracked(
 /// A logical Soroban type never qualifies: masking or shifting an `Address`
 /// extracts a tag, so the logical type must not be carried onto the
 /// arithmetic result. See [`KnownType::is_numeric`].
+///
+/// Two that differ only in sign give the unsigned one, as [`improve`]
+/// resolves them: `count + i` where the wasm word typed `i` is `u32`
+/// arithmetic.
 fn numeric_base(lhs: Option<&IrType>, rhs: Option<&IrType>) -> Option<KnownType> {
-    [base_of(lhs), base_of(rhs)]
-        .into_iter()
-        .flatten()
-        .find(KnownType::is_numeric)
+    let numeric = |t: Option<&IrType>| base_of(t).filter(KnownType::is_numeric);
+    match (numeric(lhs), numeric(rhs)) {
+        (Some(a), Some(b)) => Some(unsigned_word(&a, &b).unwrap_or(a)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// `u32`, when two types are the 32-bit word differing only in sign.
+///
+/// Wasm has one 32-bit integer and no signedness. Every such value starts
+/// out `i32` — a literal is the `i32.const` it was loaded by, arithmetic on
+/// it the `i32.add` that computed it — because that is the opcode's word,
+/// not because anything said the value is signed. A `u32` comes from
+/// evidence: the ABI, a `U32Val` encode, a host call's declared type. So
+/// against an `i32` at the same certainty the `u32` is the one saying more,
+/// as a named type says more than `Val` ([`refines_val`]). Without this the
+/// two read as a conflict and the value loses its type altogether: `alloc`'s
+/// loop counter, compared with a `count: u32` and stepped with `+ 1i32`,
+/// was declared `Val`.
+///
+/// 32-bit only. The 64-bit word is also every `Val`'s bits, and an `i64`
+/// there is not only the opcode's.
+fn unsigned_word(a: &KnownType, b: &KnownType) -> Option<KnownType> {
+    match (a, b) {
+        (KnownType::I32, KnownType::U32) | (KnownType::U32, KnownType::I32) => Some(KnownType::U32),
+        _ => None,
+    }
 }
 
 /// A terse type description for the provenance note.
@@ -1778,6 +1831,36 @@ mod tests {
         // Sticky: not even a later Known resurrects a type.
         assert!(!improve(&mut m, &mut ev, id, IrType::Known(KnownType::U64)));
         assert!(matches!(m[&id], IrType::Unknown(_)), "still Unknown");
+    }
+
+    #[test]
+    fn the_32_bit_word_s_sign_yields_to_u32() {
+        // `i32` is the opcode's word; `u32` is evidence. Same certainty, so
+        // not a conflict: the `u32` wins, and an `i32` after it says less.
+        let mut m = HashMap::new();
+        let mut ev = Evidence::default();
+        let id = ValueId::from_index(0);
+        m.insert(id, IrType::Inferred(KnownType::I32));
+        assert!(improve(&mut m, &mut ev, id, IrType::Inferred(KnownType::U32)));
+        assert_eq!(m[&id], IrType::Inferred(KnownType::U32));
+        assert!(!improve(&mut m, &mut ev, id, IrType::Inferred(KnownType::I32)));
+        assert_eq!(m[&id], IrType::Inferred(KnownType::U32));
+        assert!(!ev.conflicted.contains(&id));
+        assert_eq!(
+            numeric_base(Some(&IrType::Inferred(KnownType::I32)), Some(&IrType::Known(KnownType::U32))),
+            Some(KnownType::U32)
+        );
+    }
+
+    #[test]
+    fn a_64_bit_sign_disagreement_is_still_a_conflict() {
+        // The 64-bit word is every `Val`'s bits too; no side is the default.
+        let mut m = HashMap::new();
+        let mut ev = Evidence::default();
+        let id = ValueId::from_index(0);
+        m.insert(id, IrType::Inferred(KnownType::I64));
+        assert!(improve(&mut m, &mut ev, id, IrType::Inferred(KnownType::U64)));
+        assert!(matches!(m[&id], IrType::Unknown(_)));
     }
 
     // ---- expression rules ----
