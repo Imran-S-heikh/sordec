@@ -461,6 +461,7 @@ fn copyable(expr: &Expr, this: FuncId) -> bool {
         | Expr::Select { .. }
         | Expr::Variant { .. }
         | Expr::Optional { .. }
+        | Expr::Tuple { .. }
         | Expr::IsSome { .. }
         | Expr::UnwrapOr { .. }
         | Expr::Semantic(_) => true,

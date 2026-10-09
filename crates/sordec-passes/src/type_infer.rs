@@ -468,6 +468,18 @@ fn backward(
                     changed |= improve(types, ev, arg, IrType::Known(ty));
                 }
             }
+            // Each component is the tuple's declared slot.
+            Expr::Tuple { items } => {
+                if let Some(KnownType::Tuple(slots)) = base_of(types.get(&id))
+                    && slots.len() == items.len()
+                {
+                    for (item, slot) in items.iter().zip(slots) {
+                        if let Some(base) = base_of(Some(&slot)) {
+                            changed |= improve(types, ev, *item, IrType::Inferred(base));
+                        }
+                    }
+                }
+            }
             // The fallback stands in for the payload, so it is one.
             Expr::UnwrapOr { value, default } => {
                 if let Some(KnownType::Option(payload)) = base_of(types.get(value))
@@ -586,6 +598,15 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
             Some(IrType::Inferred(KnownType::Option(Box::new(payload))))
         }
         Expr::Optional { payload: None } => None,
+        Expr::Tuple { items } => Some(IrType::Inferred(KnownType::Tuple(
+            items
+                .iter()
+                .map(|v| {
+                    base_of(types.get(v))
+                        .map_or(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence), IrType::Inferred)
+                })
+                .collect(),
+        ))),
         Expr::IsSome { .. } => Some(IrType::Known(KnownType::Bool)),
         Expr::Unwrap { value, index, arity } => {
             let KnownType::Option(payload) = base_of(types.get(value))? else {

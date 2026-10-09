@@ -742,6 +742,16 @@ fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Resu
             }
             write!(out, ")")
         }
+        Expr::Tuple { items } => {
+            write!(out, "(")?;
+            for (i, v) in items.iter().enumerate() {
+                if i > 0 {
+                    write!(out, ", ")?;
+                }
+                write!(out, "{}", ctx.operand(*v))?;
+            }
+            write!(out, ")")
+        }
         Expr::IsSome { value } => write!(out, "is_some({})", ctx.operand(*value)),
         Expr::UnwrapOr { value, default } => {
             write!(out, "unwrap_or({}, {})", ctx.operand(*value), ctx.operand(*default))

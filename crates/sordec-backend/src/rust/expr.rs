@@ -557,6 +557,11 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 parse_quote!(Some((#(#many),*)))
             }
         },
+        // Components move into the tuple, as into an `Option`'s payload.
+        Expr::Tuple { items } => {
+            let items: Vec<syn::Expr> = items.iter().map(|v| ctx.arg_ref(*v)).collect();
+            parse_quote!((#(#items,)*))
+        }
         Expr::IsSome { value } => {
             let value = ctx.value_ref(*value);
             parse_quote!(#value.is_some())

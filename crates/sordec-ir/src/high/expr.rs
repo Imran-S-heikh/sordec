@@ -163,6 +163,15 @@ pub enum Expr {
         payload: Option<Vec<ValueId>>,
     },
 
+    /// A tuple built from its components: `(a, b, c)`. A Soroban tuple's
+    /// wire form is a `Vec` of the encoded components, so the SDK builds
+    /// one where the source wrote a tuple; this is that `Vec` recovered as
+    /// what was written, once the declared ABI says the value is a tuple.
+    Tuple {
+        /// The components, in order, each the value before its encode.
+        items: Vec<ValueId>,
+    },
+
     /// Whether an `Option` holds a value: `r.is_some()`.
     IsSome {
         /// The `Option`.
@@ -310,6 +319,11 @@ impl Expr {
                     f(value);
                 }
             }
+            Expr::Tuple { items } => {
+                for &value in items {
+                    f(value);
+                }
+            }
             Expr::IsSome { value } | Expr::Unwrap { value, .. } => f(*value),
             Expr::UnwrapOr { value, default } => {
                 f(*value);
@@ -420,6 +434,11 @@ impl Expr {
             Expr::Project { value, index: _ } => f(value),
             Expr::Optional { payload } => {
                 for value in payload.iter_mut().flatten() {
+                    f(value);
+                }
+            }
+            Expr::Tuple { items } => {
+                for value in items {
                     f(value);
                 }
             }

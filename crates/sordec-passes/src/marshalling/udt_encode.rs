@@ -199,7 +199,7 @@ fn literal_at(
 /// is that number's encoding and the field is the number — which is what
 /// the struct declares it to hold. The derive picks the form again when
 /// the reconstruction writes the literal.
-fn encoded_value(func: &HighFunction, slot: ValueId) -> ValueId {
+pub(super) fn encoded_value(func: &HighFunction, slot: ValueId) -> ValueId {
     strip(func, resolve_use(func, slot), 0)
 }
 

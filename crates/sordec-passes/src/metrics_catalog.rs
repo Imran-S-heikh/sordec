@@ -471,6 +471,11 @@ pub const MARSHALLING_OPTIONAL_PAIR_SITES: &str = "marshalling_optional_pair_sit
 pub const MARSHALLING_OPTIONAL_PAIR_SITES_REFUSED: &str = "marshalling_optional_pair_sites_refused";
 /// Those helpers rewritten to return `Option<T>`, every call site with them.
 pub const MARSHALLING_OPTIONAL_PAIR_REWRITTEN: &str = "marshalling_optional_pair_rewritten";
+/// Returned vecs rewritten to the tuple the spec declares.
+pub const MARSHALLING_TUPLE_RETURNS_RECOVERED: &str = "marshalling_tuple_returns_recovered";
+/// Returned vecs of a tuple-returning function left as vecs: read
+/// elsewhere, or a component of another type.
+pub const MARSHALLING_TUPLE_RETURNS_DECLINED: &str = "marshalling_tuple_returns_declined";
 /// Storage reads whose SDK `Option` branch folded into
 /// `.unwrap_or(default)`.
 pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defaults_recovered";
@@ -984,6 +989,8 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_OPTIONAL_PAIR_SITES,
         MARSHALLING_OPTIONAL_PAIR_SITES_REFUSED,
         MARSHALLING_OPTIONAL_PAIR_REWRITTEN,
+        MARSHALLING_TUPLE_RETURNS_RECOVERED,
+        MARSHALLING_TUPLE_RETURNS_DECLINED,
         MARSHALLING_OPTION_DEFAULTS_RECOVERED,
         MARSHALLING_OPTION_DEFAULT_DECLINED_READ_ON_FALL_THROUGH,
         MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS,

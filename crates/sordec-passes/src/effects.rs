@@ -786,6 +786,7 @@ pub fn expr_effects(expr: &Expr) -> Effects {
         // total. Taking the value out would trap on `None`, but an
         // `Unwrap` is only placed where a test proves the value present.
         | Expr::Optional { .. }
+        | Expr::Tuple { .. }
         | Expr::IsSome { .. }
         | Expr::Unwrap { .. }
         | Expr::UnwrapOr { .. } => Effects::PURE,
