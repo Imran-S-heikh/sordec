@@ -117,7 +117,9 @@ impl Pass<HighIr> for BoolCodecPass {
             // The dispatch proved the value is a `bool`, so the read it came
             // from is one — as long as the dispatch was its only reader.
             // A value someone else still reads as a `Val` keeps its type,
-            // the same gate [`super::typed_read`] makes.
+            // the same gate [`super::typed_read`] makes. Proven, as there:
+            // the dispatch traps on any other tag, and a client declared
+            // from a call trusts only a proven result type.
             for (value, chain) in decoded {
                 let only_reader = !func.bindings.iter().any(|(id, b)| {
                     let mut reads = false;
@@ -125,7 +127,7 @@ impl Pass<HighIr> for BoolCodecPass {
                     reads && !chain.contains(&id)
                 });
                 if only_reader && let Some(b) = func.bindings.get_mut(value) {
-                    b.ty = IrType::Inferred(KnownType::Bool);
+                    b.ty = IrType::Known(KnownType::Bool);
                     b.add_provenance(Provenance::new(
                         PASS_NAME,
                         ProvenanceSource::SdkPattern,
@@ -788,7 +790,7 @@ mod tests {
             "the true arm is the `then`: {:?}",
             items[1]
         );
-        assert!(matches!(f.bindings.get(v(0)).map(|b| &b.ty), Some(IrType::Inferred(KnownType::Bool))));
+        assert!(matches!(f.bindings.get(v(0)).map(|b| &b.ty), Some(IrType::Known(KnownType::Bool))));
     }
 
     /// `(a == b) ^ 1` is `!(a == b)`: a comparison is `0` or `1`, and

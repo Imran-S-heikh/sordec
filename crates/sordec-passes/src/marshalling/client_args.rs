@@ -55,7 +55,7 @@
 //! emitted call renders.
 
 use sordec_common::{Provenance, ProvenanceSource, ValueId};
-use sordec_ir::{Expr, HighFunction, HighIr, KnownOp, Literal, SemanticOp};
+use sordec_ir::{Expr, HighFunction, HighIr, KnownOp, Literal, SemanticOp, VecOpKind};
 
 use crate::dataflow::resolve_use;
 use crate::metrics_catalog::MARSHALLING_CLIENT_ARG_VECS as M_VECS;
@@ -119,10 +119,14 @@ fn resolved_arg_vectors(func: &HighFunction) -> Vec<ValueId> {
             let vec = resolve_use(func, *args.first()?);
             // Only a constructor. A vector that arrived some other way
             // — a parameter, a host result — is not this pass's to
-            // retire, and would take a real value with it.
+            // retire, and would take a real value with it. The host's
+            // empty `vec_new()` is the constructor of a call with no
+            // arguments: nothing to store, so no slab and no pointer.
             matches!(
                 func.bindings.get(vec).map(|b| &b.expr),
-                Some(Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { .. })))
+                Some(Expr::Semantic(SemanticOp::Known(
+                    KnownOp::VecNew { .. } | KnownOp::VecOp { kind: VecOpKind::New, .. }
+                )))
             )
             .then_some(vec)
         })

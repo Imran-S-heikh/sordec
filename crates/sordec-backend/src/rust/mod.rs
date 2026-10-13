@@ -11,6 +11,7 @@
 //! land in W2 at the single body site in [`func`].
 
 mod body;
+mod client;
 mod contract_type;
 mod expr;
 mod fold;
@@ -144,6 +145,7 @@ fn build_file(high: &HighIr, policy: &dyn HolePolicy) -> syn::File {
     let has_impl = !methods.is_empty();
     let mut body: Vec<syn::Item> = Vec::new();
     body.extend(type_items);
+    body.extend(client::trait_item(high, reg, policy));
     if has_impl {
         body.push(scaffold::contract_struct());
         body.push(scaffold::contract_impl(methods));

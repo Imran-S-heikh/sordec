@@ -690,6 +690,11 @@ fn u32val_producer(func: &HighFunction, value: ValueId) -> Option<KnownType> {
     if matches!(op, KnownOp::StorageGet { .. }) && tag_checked_u32(func, id) {
         return Some(KnownType::U32);
     }
+    // A cross-contract call's result, the same way: the client method's
+    // conversion is the check, and the reconstruction calls the method.
+    if matches!(op, KnownOp::InvokeContract { .. }) && tag_checked_u32(func, id) {
+        return Some(KnownType::U32);
+    }
     let ty = match op {
         KnownOp::BufOp { kind, .. } => val_abi::buf_kind_result_type(kind),
         KnownOp::VecOp { kind, .. } => val_abi::vec_kind_result_type(kind),

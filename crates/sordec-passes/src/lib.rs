@@ -104,7 +104,7 @@ pub use marshalling::{
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
-    AbiSweepPass, AuthFlowPass, AuthPass, ClientCallPass, CollectionsPass, ConstPropPass,
+    AbiSweepPass, AuthFlowPass, AuthPass, CallResultPass, ClientCallPass, CollectionsPass, ConstPropPass,
     ContextPass, CrossContractPass, DispatcherPass, EnumKeyPass, ErrorConstPass, LinearMemoryPass,
     StoragePass, TtlPass, UnrecognizedScanPass, ValEncodingPass, ValPackedComparePass,
 };
@@ -378,6 +378,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the pairing is proved on key identity at a proven tier.
             Box::new(OptionProbePass),
             Box::new(ClientCallPass),
+            // A call's result, typed by the check its client conversion made
+            // on it. Before the packed-compare pass, which then reads the
+            // mask rustc folded the conversion into as the value itself.
+            Box::new(CallResultPass),
             Box::new(AuthFlowPass),
             // Last in the recognizer chain: reconciles the two readings of
             // a `U32Val`-returning host call — the ABI type names its
@@ -828,7 +832,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 32..78],
+        vec![1..7, 33..79],
     )
 }
 

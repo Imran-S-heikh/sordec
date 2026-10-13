@@ -154,10 +154,10 @@ fn heldout_floor(name: &str) -> f64 {
         // which a release wasm does not contain. 0.8655 before, when a
         // spurious overflow guard and `if let` paired with it.
         "increment_with_fuzz" => 0.68,
-        "increment_with_pause" => 0.80,
+        "increment_with_pause" => 0.84, // 0.8655: `paused()` through a declared client
         "logging" => 0.86,
         "merkle_distribution" => 0.50,
-        "mint-lock" => 0.55, // 0.5678: Admin keys named, struct decode and encode helpers collapsed
+        "mint-lock" => 0.56, // 0.5882: `mint` through a declared client
         "modular_account" => 0.40,
         "other_custom_types" => 0.70,
         "pause" => 0.98,

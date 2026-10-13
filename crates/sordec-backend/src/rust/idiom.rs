@@ -229,6 +229,24 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             Some(parse_quote!(soroban_sdk::token::Client::new(#eb, &#c).#method(#(&#a),*)))
         }
 
+        // ---- Cross-contract (a client declared from its call sites) ----
+        // See [`super::client`]: the method is declared only when every call
+        // to it agrees on one signature, and a call it does not declare
+        // stays a hole.
+        KnownOp::InvokeContract {
+            contract,
+            resolved_callee: Some(callee),
+            interface: None,
+            resolved_args: Some(args),
+            ..
+        } if super::client::declares(ctx.high, ctx.reg, ctx.policy, callee) => {
+            let c = ctx.value_ref(*contract);
+            let method = ident(callee);
+            let client = ident(super::client::CLIENT);
+            let a: Vec<syn::Expr> = args.iter().map(|v| ctx.value_ref(*v)).collect();
+            Some(parse_quote!(#client::new(#eb, &#c).#method(#(&#a),*)))
+        }
+
         // ---- Address conversions ----
         // `MuxedAddress::address()`. The SDK method, not the bare host
         // function: on a muxed value that wraps a plain address the host
