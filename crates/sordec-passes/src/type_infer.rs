@@ -469,14 +469,28 @@ fn backward(
                 }
             }
             // A copy is its source: a return encode collapsed onto a `Use`
-            // is typed by the ABI, and the value it copies is that type.
-            // Numbers only, and only to name an untyped source or settle the
-            // 32-bit word's sign: a collapse can also fold a widening — a
-            // `u64` returned where `u128` is declared — and there the copy's
-            // type is the conversion's, not the source's.
+            // is typed by the ABI, a receiver by `require_auth`, and the
+            // value either copies is that type. Three cases only:
+            //
+            // - a number naming an untyped source, or settling the 32-bit
+            //   word's sign;
+            // - anything naming a source typed only `Val` — the host's
+            //   settled weakest statement, which a named type refines
+            //   ([`refines_val`]): a storage read used as an `Address`.
+            //
+            // A source with a type of its own keeps it: a collapse can fold
+            // a widening — a `u64` returned where `u128` is declared — and
+            // there the copy's type is the conversion's. And a non-number
+            // does not name an untyped source: untyped *this round* is not
+            // untyped, and a source typed later from its own producer then
+            // conflicts with the guess and loses its type altogether.
             Expr::Use(source) => {
-                if let Some(base) = base_of(types.get(&id)).filter(KnownType::is_numeric) {
-                    let fits = base_of(types.get(source)).is_none_or(|have| unsigned_word(&have, &base).is_some());
+                if let Some(base) = base_of(types.get(&id)).filter(|b| *b != KnownType::Val) {
+                    let fits = match base_of(types.get(source)) {
+                        None => base.is_numeric(),
+                        Some(KnownType::Val) => true,
+                        Some(have) => unsigned_word(&have, &base).is_some(),
+                    };
                     if fits {
                         changed |= improve(types, ev, *source, IrType::Inferred(base));
                     }
@@ -2250,6 +2264,27 @@ mod tests {
         let mut ir = crate::marshalling::test_support::module(vec![f]);
         TypeInferPass.run(&mut ir);
         assert_ne!(ty_of(&ir, 0, 2), IrType::Known(KnownType::U32));
+    }
+
+    #[test]
+    fn a_val_read_copied_into_an_address_is_an_address() {
+        // `let v1 = read; v1.require_auth()`: the read is the host's `Val`,
+        // the copy is proven an `Address`, and the read is that `Address`.
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },               // v0 the read
+                Expr::Use(ValueId::from_index(0)),            // v1 its copy
+                Expr::Semantic(SemanticOp::Known(KnownOp::RequireAuth { address: ValueId::from_index(1) })), // v2
+            ],
+            vec![],
+            vec![0, 1, 2],
+            vec![],
+        );
+        f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = IrType::Known(KnownType::Val);
+        let mut ir = crate::marshalling::test_support::module(vec![f]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Inferred(KnownType::Address));
     }
 
     #[test]
