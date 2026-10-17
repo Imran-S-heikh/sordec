@@ -161,8 +161,8 @@ fn heldout_floor(name: &str) -> f64 {
         "modular_account" => 0.40,
         "other_custom_types" => 0.70,
         "pause" => 0.98,
-        "simple_account" => 0.94,
-        "single_offer" => 0.77,
+        "simple_account" => 0.98, // 1.0000: its `has` check is spelled, not a hole
+        "single_offer" => 0.79, // 0.8186: an unclaimed storage probe spelled as `has`
         "ttl" => 0.98,
         _ => 0.0,
     }
