@@ -53,7 +53,10 @@ const TYPE_NAMES: &[&str] = &[
 /// `idiom::vec_items`). Collapsing it is the same decision as for a type:
 /// the name shortens and the `use` carries it, and `shadowed` is what
 /// keeps a contract defining its own `IntoVal` safe.
-const TRAIT_NAMES: &[&str] = &["IntoVal"];
+///
+/// `FromVal` is written as a bare `FromVal::from_val(&e, &v)` where the
+/// parameter it fills pins the target type (`idiom`'s auth entries).
+const TRAIT_NAMES: &[&str] = &["FromVal", "IntoVal"];
 
 /// soroban-sdk macros the emitter writes as `soroban_sdk::<macro>!(…)`.
 const MACRO_NAMES: &[&str] = &["panic_with_error", "symbol_short", "vec"];

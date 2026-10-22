@@ -174,9 +174,21 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             let args: Vec<syn::Expr> = args.iter().map(|v| ctx.value_ref(*v)).collect();
             Some(parse_quote!(#a.require_auth_for_args(#(#args),*)))
         }
+        // No recovered type spells `Vec<InvokerContractAuthEntry>`: what
+        // reaches here is the vec the entries encode to (`vec![Symbol
+        // "Contract", map]` per entry), so it is decoded at the call. The
+        // parameter type pins `from_val`'s target, and the host receives the
+        // same `Val` either way.
         KnownOp::AuthorizeAsCurrContract { auth_entries } => {
             let entries = ctx.value_ref(*auth_entries);
-            Some(parse_quote!(#e.authorize_as_current_contract(#entries)))
+            let val: syn::Expr = match ctx.func.bindings.get(*auth_entries).map(|b| &b.ty) {
+                Some(IrType::Known(KnownType::Vec(_)) | IrType::Inferred(KnownType::Vec(_))) => {
+                    parse_quote!(#entries.to_val())
+                }
+                Some(IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val)) => entries,
+                _ => parse_quote!(soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#entries, &#e)),
+            };
+            Some(parse_quote!(#e.authorize_as_current_contract(soroban_sdk::FromVal::from_val(&#e, &#val))))
         }
 
         // ---- Events ----
