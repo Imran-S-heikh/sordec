@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
-    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, OptionUnwrapPass, ResidualProbePass, TupleReturnPass, HostLenPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, OptionUnwrapPass, ResidualProbePass, TupleReturnPass, HostLenPass, MaskedEncodePass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -531,6 +531,8 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // A host length's `U32Val` decode and re-encode, which `len()`
             // already names.
             Box::new(HostLenPass),
+            // And a 32-bit value's re-encode folded into one mask.
+            Box::new(MaskedEncodePass),
             // A typed read's `count + 1` arrives folded into the U32Val
             // encode of the result; recover the addition, label its
             // overflow check for the elision above, and name the stored
@@ -840,7 +842,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 33..80],
+        vec![1..7, 33..81],
     )
 }
 
@@ -915,6 +917,7 @@ mod tests {
                 marshalling::typed_read::PASS_NAME,
                 marshalling::scalar_decode::PASS_NAME,
                 marshalling::host_len::PASS_NAME,
+                marshalling::masked_encode::PASS_NAME,
                 marshalling::folded_encode::PASS_NAME,
                 marshalling::option_sret::PASS_NAME,
                 marshalling::option_default::PASS_NAME,

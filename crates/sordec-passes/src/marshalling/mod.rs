@@ -118,6 +118,8 @@ pub use vec_elements::VecElementsPass;
 pub use tuple_return::TupleReturnPass;
 pub mod host_len;
 pub use host_len::HostLenPass;
+pub mod masked_encode;
+pub use masked_encode::MaskedEncodePass;
 pub use residual_probe::ResidualProbePass;
 pub use option_sret::OptionSretPass;
 pub use optional_out::OptionalOutParamPass;
