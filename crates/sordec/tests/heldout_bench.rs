@@ -20,9 +20,12 @@
 //! and the canonical spot is `~/.cache/sordec-heldout`:
 //!
 //! ```bash
-//! git clone --depth 1 https://github.com/stellar/soroban-examples ~/.cache/soroban-examples
-//! tools/build_heldout.sh ~/.cache/soroban-examples ~/.cache/sordec-heldout
+//! git clone https://github.com/stellar/soroban-examples ~/.cache/soroban-examples
+//! git -C ~/.cache/soroban-examples checkout 1f5aeb5
+//! RUSTUP_TOOLCHAIN=1.97 tools/build_heldout.sh ~/.cache/soroban-examples ~/.cache/sordec-heldout
 //! ```
+//!
+//! Both pins matter — the script's header says why.
 //!
 //! Scoring runs inside `cargo test` for the same reason `benchmark.rs` does:
 //! the macro-expanded basis needs `cargo expand`, which only resolves in
