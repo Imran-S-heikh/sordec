@@ -40,6 +40,14 @@ use sordec_ir::{
 use crate::rust::body::FnCtx;
 use crate::rust::ty::ident;
 
+/// A value typed only as the `Val` it is at the ABI, or not at all.
+fn untyped(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
+    matches!(
+        ctx.func.bindings.get(v).map(|b| &b.ty),
+        None | Some(IrType::Unknown(_) | IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val))
+    )
+}
+
 /// The method chain for a recovered op, or `None` when it cannot be
 /// rendered honestly (an unmapped op, or an `Unknown` storage tier).
 pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
@@ -84,6 +92,12 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                 // still absent — their operands are encoded `Val`s with no
                 // such recognizer, and a chain that reads like the source
                 // while being wrong by 2^32 is worse than a hole.
+                // A receiver nothing typed as a `Vec` is the `Val` the host
+                // call was handed; `vec_len` traps unless it is a vec, and so
+                // does the conversion that makes it one here.
+                VecOpKind::Len if untyped(ctx, args[0]) => Some(parse_quote!(
+                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Vec<soroban_sdk::Val>>::into_val(&#v, #eb).len()
+                )),
                 VecOpKind::Len => Some(parse_quote!(#v.len())),
                 VecOpKind::FirstIndexOf => {
                     let x = arg(1)?;
@@ -186,9 +200,9 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                     parse_quote!(#entries.to_val())
                 }
                 Some(IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val)) => entries,
-                _ => parse_quote!(soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#entries, &#e)),
+                _ => parse_quote!(soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#entries, #eb)),
             };
-            Some(parse_quote!(#e.authorize_as_current_contract(soroban_sdk::FromVal::from_val(&#e, &#val))))
+            Some(parse_quote!(#e.authorize_as_current_contract(soroban_sdk::FromVal::from_val(#eb, &#val))))
         }
 
         // ---- Events ----
