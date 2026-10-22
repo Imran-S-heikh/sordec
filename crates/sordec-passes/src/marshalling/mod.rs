@@ -122,6 +122,8 @@ pub mod masked_encode;
 pub use masked_encode::MaskedEncodePass;
 pub mod wide_encode;
 pub use wide_encode::WideEncodePass;
+pub mod option_param;
+pub use option_param::OptionParamPass;
 pub use residual_probe::ResidualProbePass;
 pub use option_sret::OptionSretPass;
 pub use optional_out::OptionalOutParamPass;
