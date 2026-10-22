@@ -480,6 +480,8 @@ pub const MARSHALLING_TUPLE_RETURNS_DECLINED: &str = "marshalling_tuple_returns_
 pub const MARSHALLING_HOST_LEN_CODECS: &str = "marshalling_host_len_codecs";
 /// 32-bit values whose single-mask re-encode was folded into the value.
 pub const MARSHALLING_MASKED_ENCODES: &str = "marshalling_masked_encodes";
+/// Arms of an inlined 128-bit encode folded into the value.
+pub const MARSHALLING_WIDE_ENCODES_INLINE: &str = "marshalling_wide_encodes_inline";
 /// Storage reads whose SDK `Option` branch folded into
 /// `.unwrap_or(default)`.
 pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defaults_recovered";
@@ -997,6 +999,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_TUPLE_RETURNS_DECLINED,
         MARSHALLING_HOST_LEN_CODECS,
         MARSHALLING_MASKED_ENCODES,
+        MARSHALLING_WIDE_ENCODES_INLINE,
         MARSHALLING_OPTION_DEFAULTS_RECOVERED,
         MARSHALLING_OPTION_DEFAULT_DECLINED_READ_ON_FALL_THROUGH,
         MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS,

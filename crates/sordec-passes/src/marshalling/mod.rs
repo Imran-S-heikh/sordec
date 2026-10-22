@@ -120,6 +120,8 @@ pub mod host_len;
 pub use host_len::HostLenPass;
 pub mod masked_encode;
 pub use masked_encode::MaskedEncodePass;
+pub mod wide_encode;
+pub use wide_encode::WideEncodePass;
 pub use residual_probe::ResidualProbePass;
 pub use option_sret::OptionSretPass;
 pub use optional_out::OptionalOutParamPass;
