@@ -34,6 +34,29 @@ fn variant_path(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<syn::Path>
     Some(parse_quote!(#owner::#variant))
 }
 
+/// Arithmetic on two `bool`s: each is the `i32` `0` or `1` a wasm
+/// comparison yields. `(a > b) - (a < b)` is how rustc lowers `Ord::cmp`
+/// to `-1`/`0`/`1`, and Rust has no `bool - bool`.
+fn bools_as_ints(
+    ctx: &FnCtx,
+    op: BinaryOp,
+    lhs: sordec_common::ValueId,
+    rhs: sordec_common::ValueId,
+) -> Option<syn::Expr> {
+    if !matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) {
+        return None;
+    }
+    if !bool_like(ctx, ctx.fold_target(lhs), 0) || !bool_like(ctx, ctx.fold_target(rhs), 0) {
+        return None;
+    }
+    let (l, r) = (ctx.value_ref(lhs), ctx.value_ref(rhs));
+    Some(match op {
+        BinaryOp::Add => parse_quote!((#l as i32) + (#r as i32)),
+        BinaryOp::Sub => parse_quote!((#l as i32) - (#r as i32)),
+        _ => parse_quote!((#l as i32) * (#r as i32)),
+    })
+}
+
 /// A bitwise operator between a `bool` and an integer: the wasm keeps the
 /// `bool` in a byte and masks it. `flag & 1` is the flag; any other
 /// combination casts the flag to the integer's type, which is the `0` or
@@ -482,6 +505,9 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             }
             if let Some(mixed) = bool_with_int(ctx, *op, *lhs, *rhs) {
                 return mixed;
+            }
+            if let Some(counted) = bools_as_ints(ctx, *op, *lhs, *rhs) {
+                return counted;
             }
             // A constant compared against a typed operand prints without
             // its suffix and takes the type from the comparison, which is
