@@ -129,19 +129,57 @@ pub(crate) fn sign_cast(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -
     };
     let (IrType::Known(to) | IrType::Inferred(to)) = want else { return None };
     let b = ctx.func.bindings.get(ctx.fold_target(v))?;
-    // An untyped narrowing is still an `i32`: it is printed `as i32`.
-    let narrowed = KnownType::I32;
-    let from = match (&b.ty, &b.expr) {
-        (IrType::Known(k) | IrType::Inferred(k), _) => k,
-        (IrType::Unknown(_), Expr::Unary { op: sordec_ir::UnaryOp::Wrap32, .. }) => &narrowed,
+    // What Rust will infer for it, which is what the cast is against: an
+    // unannotated arithmetic `let` takes its operands' type, whatever the
+    // binding was typed. An untyped narrowing is still an `i32`: it is
+    // printed `as i32`.
+    let from = match (arithmetic_type(ctx, v, 0), &b.ty, &b.expr) {
+        (Some(k), ..) => k,
+        (None, IrType::Known(k) | IrType::Inferred(k), _) => k.clone(),
+        (None, IrType::Unknown(_), Expr::Unary { op: sordec_ir::UnaryOp::Wrap32, .. }) => KnownType::I32,
         _ => return None,
     };
+    let from = &from;
     if from == to || width(from)? != width(to)? {
         return None;
     }
     let x = ctx.value_ref(v);
     let ty = crate::rust::ty::ir_type(want, ctx.reg, ctx.policy);
     Some(parse_quote!((#x as #ty)))
+}
+
+/// The integer type Rust infers for an arithmetic binding printed without
+/// an annotation: its left operand's (the renderer casts the right one to
+/// match), through nested arithmetic, when that operand is typed. `None`
+/// when it is not arithmetic or nothing typed the operand.
+fn arithmetic_type(ctx: &FnCtx, v: sordec_common::ValueId, depth: u32) -> Option<KnownType> {
+    let b = ctx.func.bindings.get(ctx.fold_target(v))?;
+    let Expr::Binary { op, lhs, rhs } = &b.expr else {
+        return None;
+    };
+    if depth > 4
+        || !matches!(
+            op,
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+        )
+    {
+        return None;
+    }
+    let typed = |x: sordec_common::ValueId| {
+        let x = ctx.fold_target(x);
+        if matches!(ctx.func.bindings.get(x).map(|b| &b.expr), Some(Expr::Literal(_))) {
+            return None;
+        }
+        arithmetic_type(ctx, x, depth + 1).or_else(|| match ctx.func.bindings.get(x).map(|b| &b.ty) {
+            Some(IrType::Known(k) | IrType::Inferred(k))
+                if matches!(k, KnownType::I32 | KnownType::U32 | KnownType::I64 | KnownType::U64) =>
+            {
+                Some(k.clone())
+            }
+            _ => None,
+        })
+    };
+    typed(*lhs).or_else(|| typed(*rhs))
 }
 
 /// A `bool` assigned where an integer goes: it is `0` or `1` in the wasm,
