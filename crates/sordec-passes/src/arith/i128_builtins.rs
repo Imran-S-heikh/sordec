@@ -22,8 +22,9 @@
 //! They are also *not* generic — each is one monomorphic body with a fixed
 //! ABI — which makes a structural match unusually safe here. The gate for
 //! each helper is its arity, its return arity, the constants its algorithm
-//! cannot avoid (`0xFFFF_FFFF` and `32` for the limb split, `63`/`64` for
-//! the shift decomposition, two `clz`s for the division's normalisation),
+//! cannot avoid (`0xFFFF_FFFF` and `32` for the limb split, `64` and a
+//! complementary count — `63 - n`, or `0 - n` mod 64 — for the shift
+//! decomposition, two `clz`s for the division's normalisation),
 //! and a *closed* call set: a division helper may call only the shift
 //! helpers and the multiply. A body holding any host operation is refused
 //! outright — the runtime touches no ledger.
@@ -183,6 +184,9 @@ struct Shape {
     muls: usize,
     xors: usize,
     shifts: usize,
+    /// `0 - x`: how a shift helper spells `64 - n` when wasm's shift
+    /// count is taken mod 64.
+    negations: usize,
     stores: usize,
     /// Component indices this body projects out of each callee's result.
     projections: BTreeMap<FuncId, BTreeSet<u32>>,
@@ -199,6 +203,7 @@ fn shape_of(func: &HighFunction) -> Shape {
         muls: 0,
         xors: 0,
         shifts: 0,
+        negations: 0,
         stores: 0,
         projections: BTreeMap::new(),
     };
@@ -231,6 +236,14 @@ fn shape_of(func: &HighFunction) -> Shape {
             Expr::Binary { op: BinaryOp::Mul, .. } => s.muls += 1,
             Expr::Binary { op: BinaryOp::BitXor, .. } => s.xors += 1,
             Expr::Binary { op: BinaryOp::Shl | BinaryOp::Shr, .. } => s.shifts += 1,
+            Expr::Binary { op: BinaryOp::Sub, lhs, .. }
+                if matches!(
+                    func.bindings.get(resolve_use(func, *lhs)).map(|b| &b.expr),
+                    Some(Expr::Literal(Literal::I32(0) | Literal::I64(0)))
+                ) =>
+            {
+                s.negations += 1;
+            }
             Expr::Store { .. } => s.stores += 1,
             Expr::Project { value, index } => {
                 if let Some(Expr::Call { target, .. }) =
@@ -269,8 +282,10 @@ fn identify(ir: &HighIr) -> HashMap<FuncId, Builtin> {
         } else if s.params == 3
             && s.ret_arity == Some(2)
             && s.shifts >= 3
-            && s.literals.contains(&63)
             && s.literals.contains(&64)
+            // `63 - n` in one build, `0 - n` (the same count mod 64) in
+            // another: rustc 1.97's `__lshrti3` has no 63 at all.
+            && (s.literals.contains(&63) || s.negations >= 1)
         {
             found.insert(*id, Builtin::Shift);
         }
@@ -666,6 +681,43 @@ pub(crate) mod tests {
 
     fn expr_at(ir: &HighIr, func: u32, value: u32) -> &Expr {
         &ir.function(FuncId::from_index(func)).unwrap().bindings.get(v(value)).unwrap().expr
+    }
+
+    /// A `__lshrti3` silhouette as rustc 1.97 builds it: limbs in v0/v1, the
+    /// count in v2, the complementary count spelled `0 - n` (wasm shifts
+    /// mod 64) where older builds wrote `63 - n`.
+    fn lshr_without_63(id: u32) -> HighFunction {
+        let bin = |op, a, b| Expr::Binary { op, lhs: v(a), rhs: v(b) };
+        function_returning(
+            id,
+            3,
+            vec![
+                lit(64),                       // v3
+                lit(0),                        // v4
+                bin(BinaryOp::Sub, 4, 2),      // v5: 0 - n
+                bin(BinaryOp::Shl, 1, 5),      // v6
+                bin(BinaryOp::Shr, 0, 2),      // v7
+                bin(BinaryOp::BitOr, 6, 7),    // v8
+                bin(BinaryOp::Shr, 1, 2),      // v9
+            ],
+            2,
+        )
+    }
+
+    #[test]
+    fn a_shift_helper_spelling_the_complement_as_a_negation_is_identified() {
+        let m = ir(vec![lshr_without_63(0)]);
+        assert_eq!(identify(&m).get(&FuncId::from_index(0)), Some(&Builtin::Shift));
+    }
+
+    /// Neither `63` nor a negation: three shifts and a `64` alone are not
+    /// the helper.
+    #[test]
+    fn a_shift_helper_needs_its_complementary_count() {
+        let mut f = lshr_without_63(0);
+        f.bindings.get_mut(v(5)).unwrap().expr =
+            Expr::Binary { op: BinaryOp::Add, lhs: v(4), rhs: v(2) };
+        assert!(identify(&ir(vec![f])).is_empty());
     }
 
     #[test]
