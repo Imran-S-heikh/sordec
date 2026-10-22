@@ -116,6 +116,8 @@ pub use option_if_let::OptionIfLetPass;
 pub use option_probe::OptionProbePass;
 pub use vec_elements::VecElementsPass;
 pub use tuple_return::TupleReturnPass;
+pub mod host_len;
+pub use host_len::HostLenPass;
 pub use residual_probe::ResidualProbePass;
 pub use option_sret::OptionSretPass;
 pub use optional_out::OptionalOutParamPass;

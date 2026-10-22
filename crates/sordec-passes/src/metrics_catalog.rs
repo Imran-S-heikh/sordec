@@ -476,6 +476,8 @@ pub const MARSHALLING_TUPLE_RETURNS_RECOVERED: &str = "marshalling_tuple_returns
 /// Returned vecs of a tuple-returning function left as vecs: read
 /// elsewhere, or a component of another type.
 pub const MARSHALLING_TUPLE_RETURNS_DECLINED: &str = "marshalling_tuple_returns_declined";
+/// Decodes and re-encodes of a host length folded into the length.
+pub const MARSHALLING_HOST_LEN_CODECS: &str = "marshalling_host_len_codecs";
 /// Storage reads whose SDK `Option` branch folded into
 /// `.unwrap_or(default)`.
 pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defaults_recovered";
@@ -991,6 +993,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_OPTIONAL_PAIR_REWRITTEN,
         MARSHALLING_TUPLE_RETURNS_RECOVERED,
         MARSHALLING_TUPLE_RETURNS_DECLINED,
+        MARSHALLING_HOST_LEN_CODECS,
         MARSHALLING_OPTION_DEFAULTS_RECOVERED,
         MARSHALLING_OPTION_DEFAULT_DECLINED_READ_ON_FALL_THROUGH,
         MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS,
