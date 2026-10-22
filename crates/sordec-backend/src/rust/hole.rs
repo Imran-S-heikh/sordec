@@ -64,8 +64,13 @@ pub(crate) trait HolePolicy {
 pub(crate) struct StrictNoGuess;
 
 impl HolePolicy for StrictNoGuess {
-    fn unknown_type(&self, _reason: Option<&UnknownReason>) -> syn::Type {
-        parse_quote!(soroban_sdk::Val)
+    fn unknown_type(&self, reason: Option<&UnknownReason>) -> syn::Type {
+        match reason {
+            // Not a guess: the wasm word is the one thing known, and no
+            // `Val` fits in it.
+            Some(UnknownReason::MachineWord32) => parse_quote!(i32),
+            _ => parse_quote!(soroban_sdk::Val),
+        }
     }
 
     fn unknown_expr(&self, label: &str) -> syn::Expr {
@@ -131,5 +136,15 @@ mod tests {
             rendered.contains("{{A}}"),
             "the hole must reach the source escaped, got {rendered}"
         );
+    }
+
+    #[test]
+    fn an_untyped_32_bit_word_is_written_as_i32_not_val() {
+        let render = |r: UnknownReason| {
+            let ty = StrictNoGuess.unknown_type(Some(&r));
+            quote::quote!(#ty).to_string()
+        };
+        assert_eq!(render(UnknownReason::MachineWord32), "i32");
+        assert_eq!(render(UnknownReason::InsufficientEvidence), "soroban_sdk :: Val");
     }
 }

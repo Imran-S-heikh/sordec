@@ -29,7 +29,8 @@
 //!
 //! - **Types.** Every binding gets [`IrType::Unknown`]. WASM machine
 //!   types are not Soroban semantic types; guessing would be wrong. Type
-//!   recovery is a later pass.
+//!   recovery is a later pass. A 32-bit entry parameter's reason says
+//!   it is not a `Val` either (`UnknownReason::MachineWord32`).
 //! - **Control-flow interpretation.** Each function's [`Region`] comes
 //!   from [`crate::structuring::structure`] over the lifted CFG (fresh
 //!   [`CfgFacts`], post-declutter) — an exact translation, never a
@@ -47,7 +48,7 @@ use sordec_common::{
 };
 use sordec_ir::{
     Binding, BinaryOp, BlockTarget, Expr, ExportKind, FunctionParam, FunctionSignature, HighBlock,
-    HighFunction, HighIr, ImportKind, Import, IrType, LiftedFunction, LiftedIr, LiftedTerminator,
+    HighFunction, HighIr, ImportKind, Import, IrType, LiftedFunction, LiftedIr, LiftedTerminator, LiftedType,
     LiftedValue, LiftedValueDef, Literal, MemWidth, PrimitiveType, Region, SemanticOp,
     SorobanFacts, TypeRef, UnaryOp, WasmFacts, WasmOp, WasmOpcodeKind, CompositeType, SdkType};
 use waffle::entity::EntityRef as _;
@@ -160,6 +161,20 @@ fn lower_function(
     let mut bindings: Arena<ValueId, Binding> = Arena::new();
     for (value_id, value) in func.values.iter() {
         bindings.push(lower_value(value_id, value, &ctx));
+    }
+
+    // A 32-bit parameter is the one machine type that is also a fact: every
+    // `Val` is 64 bits, so whatever it carries is not one. With no reason
+    // it is emitted as the hole policy's `Val`, and a helper whose callers
+    // pass it only unrecovered loads then compares a `Val` with `0` (alloc).
+    // Still `Unknown`, so a caller's `bool` or a `u32` encode names it.
+    if let Some(entry) = func.blocks.get(func.entry) {
+        for param in &entry.params {
+            let word = func.values.get(*param).is_some_and(|v| v.types.as_slice() == [LiftedType::I32]);
+            if let (true, Some(b)) = (word, bindings.get_mut(*param)) {
+                b.ty = IrType::Unknown(UnknownReason::MachineWord32);
+            }
+        }
     }
 
     // LiftedBlock.instructions → HighBlock.bindings. Block params and
@@ -796,6 +811,26 @@ mod tests {
     fn lower_and_bindings(ir: LiftedIr) -> Arena<ValueId, Binding> {
         let high = LiftToHigh.lower(ir).expect("lowering succeeds");
         high.functions.into_iter().next().unwrap().bindings
+    }
+
+    #[test]
+    fn a_32_bit_entry_param_is_unknown_but_not_a_val() {
+        // v0: i32 and v1: i64 entry params. Only the 32-bit one is ruled out
+        // as a `Val`; the 64-bit word is every `Val`'s bits, so it says
+        // nothing.
+        let mut ir = lifted_one_fn_with_term(
+            facts_with(vec![], vec![]),
+            vec![
+                LiftedValueDef::BlockParam { block: BlockId::from_index(0), index: 0 },
+                LiftedValueDef::BlockParam { block: BlockId::from_index(0), index: 1 },
+            ],
+            LiftedTerminator::Unreachable,
+            vec![v(0), v(1)],
+        );
+        ir.functions[0].values.get_mut(v(0)).unwrap().types = vec![LiftedType::I32];
+        let b = lower_and_bindings(ir);
+        assert_eq!(b.get(v(0)).unwrap().ty, IrType::Unknown(UnknownReason::MachineWord32));
+        assert_eq!(b.get(v(1)).unwrap().ty, IrType::Unknown(UnknownReason::InsufficientEvidence));
     }
 
     // --- direct value-def mappings ---

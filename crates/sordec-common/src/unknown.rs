@@ -71,4 +71,11 @@ pub enum UnknownReason {
     /// so this never fires on real compiler output — it defends against
     /// exotic producers and hand-written modules.
     IrreducibleControlFlow,
+
+    /// A 32-bit WASM function parameter nothing typed. Its Soroban type is
+    /// unknown, but it is not a `Val` — every `Val` is 64 bits — so it is
+    /// written as the `i32` word it arrives in rather than as `Val`. Still
+    /// `Unknown` to inference, so any evidence (a caller's `bool`, a
+    /// `U32Val` encode) names it instead.
+    MachineWord32,
 }

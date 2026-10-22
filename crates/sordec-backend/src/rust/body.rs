@@ -1013,8 +1013,20 @@ impl<'a> FnCtx<'a> {
                     .unwrap_or_else(|| self.return_expr(*one));
                 parse_quote!(return #v;)
             }
+            // Each element is declared by its binding's type (`sig::
+            // helper_return`), and a flag typed as the wasm word it travels
+            // in is still printed as the comparison it is: cast it back.
             many => {
-                let vs: Vec<syn::Expr> = many.iter().map(|v| self.value_ref(*v)).collect();
+                let vs: Vec<syn::Expr> = many
+                    .iter()
+                    .map(|v| {
+                        self.func
+                            .bindings
+                            .get(*v)
+                            .and_then(|b| expr::bool_to_int(self, *v, &b.ty))
+                            .unwrap_or_else(|| self.value_ref(*v))
+                    })
+                    .collect();
                 parse_quote!(return (#(#vs),*);)
             }
         }
