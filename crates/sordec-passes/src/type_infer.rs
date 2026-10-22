@@ -837,8 +837,18 @@ fn binary_result(op: BinaryOp, lhs: Option<&IrType>, rhs: Option<&IrType>) -> Op
 fn semantic_arg_types(op: &KnownOp) -> Vec<(ValueId, KnownType)> {
     use KnownOp as K;
     match op {
-        // Val encode: the packed value IS the tag's payload type.
-        K::ValEncodeSmall { ty, value } => vec![(*value, ty.clone())],
+        // Val encode: the packed value IS the tag's payload type — except
+        // a wide one, whose small form packs only the low limb: the
+        // `val_encode<i128>(lo)` beside `obj_from_i128_pieces(hi, lo)` is
+        // handed an `i64`, and typing it `i128` mixed the limbs' arithmetic.
+        K::ValEncodeSmall { ty, value } => {
+            let limb = match ty {
+                KnownType::I128 | KnownType::I256 => KnownType::I64,
+                KnownType::U128 | KnownType::U256 => KnownType::U64,
+                other => other.clone(),
+            };
+            vec![(*value, limb)]
+        }
         // Auth: the receiver is an Address.
         K::RequireAuth { address } => vec![(*address, KnownType::Address)],
         K::RequireAuthForArgs { address, .. } => vec![(*address, KnownType::Address)],
@@ -1864,6 +1874,17 @@ mod tests {
             numeric_base(Some(&IrType::Inferred(KnownType::I32)), Some(&IrType::Known(KnownType::U32))),
             Some(KnownType::U32)
         );
+    }
+
+    #[test]
+    fn a_wide_small_encode_is_handed_the_low_limb() {
+        let v = ValueId::from_index(0);
+        for (wide, limb) in [(KnownType::I128, KnownType::I64), (KnownType::U128, KnownType::U64)] {
+            let op = KnownOp::ValEncodeSmall { ty: wide, value: v };
+            assert_eq!(semantic_arg_types(&op), vec![(v, limb)]);
+        }
+        let op = KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v };
+        assert_eq!(semantic_arg_types(&op), vec![(v, KnownType::U32)], "a narrow payload is itself");
     }
 
     #[test]
