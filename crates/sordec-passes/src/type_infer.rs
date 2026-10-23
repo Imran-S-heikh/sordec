@@ -1067,6 +1067,11 @@ fn seed_signatures(ir: &HighIr) -> SigTable {
     table
 }
 
+/// Whether `v` is the result of a call.
+fn is_call(func: &HighFunction, v: ValueId) -> bool {
+    matches!(func.bindings.get(resolve_use(func, v)).map(|b| &b.expr), Some(Expr::Call { .. }))
+}
+
 /// Recompute every non-ABI slot as a join over its witnesses.
 ///
 /// Returns are witnessed by the function's own return sites; parameters by
@@ -1091,6 +1096,13 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
         // Constants vote last here too: `return 0i32` beside `return found`
         // is a `bool` function whose constant was loaded as a wasm word.
         let mut held: Vec<Vec<(i128, Slot)>> = vec![Vec::new(); arity];
+        // A call not typed yet has not spoken, but it will: its result is
+        // typed from the callee once the callee's own sites settle, a
+        // round or more later. Until then the constants do not decide
+        // alone — `return 0i32` beside `return check(x)` would
+        // fix the slot as the word before `check` is known to return a
+        // `bool`, and the two then conflict for good.
+        let mut pending = vec![false; arity];
         for site in func.returns.iter().filter(|s| s.len() == arity) {
             for (index, (slot, value)) in slots.iter_mut().zip(site).enumerate() {
                 let witness = Slot::witness(func.bindings.get(*value).map(|b| &b.ty));
@@ -1098,12 +1110,15 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
                     held[index].push((n, witness));
                     continue;
                 }
+                if witness == Slot::Bottom && is_call(func, *value) {
+                    pending[index] = true;
+                }
                 *slot = std::mem::replace(slot, Slot::Bottom).join(witness);
             }
         }
-        for (slot, consts) in slots.iter_mut().zip(held) {
+        for ((slot, consts), pending) in slots.iter_mut().zip(held).zip(pending) {
             let agrees = matches!(&*slot, Slot::Agreed(k) if consts.iter().all(|(n, w)| fits_constant(k, *n, w)));
-            if !agrees {
+            if !agrees && !(pending && *slot == Slot::Bottom) {
                 for (_, witness) in consts {
                     *slot = std::mem::replace(slot, Slot::Bottom).join(witness);
                 }
@@ -2159,6 +2174,39 @@ mod tests {
             IrType::Inferred(KnownType::Bytes),
             "the live call site decides, not the dead mask"
         );
+    }
+
+    /// `func_0` returns `0i32` or `func_1(x)`, and `func_1` returns a
+    /// comparison. The call is untyped until `func_1` settles, so the
+    /// constant must not fix `func_0`'s return as the word first:
+    /// import_ark_bn254's `func71`, which then conflicted for good.
+    #[test]
+    fn a_constant_return_waits_for_a_returned_call() {
+        let v = ValueId::from_index;
+        let caller = func_at(
+            0,
+            vec![
+                Expr::Literal(Literal::I32(0)),                                // v0
+                Expr::Call { target: FuncId::from_index(1), args: vec![] },   // v1
+            ],
+            vec![],
+            vec![0, 1],
+            vec![vec![v(0)], vec![v(1)]],
+        );
+        let callee = func_at(
+            1,
+            vec![
+                Expr::Phi { incoming: vec![] },                               // v0
+                Expr::Literal(Literal::I64(7)),                               // v1
+                Expr::Binary { op: BinaryOp::Lt, lhs: v(0), rhs: v(1) },      // v2
+            ],
+            vec![],
+            vec![1, 2],
+            vec![vec![v(2)]],
+        );
+        let mut ir = crate::marshalling::test_support::module(vec![caller, callee]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Inferred(KnownType::Bool));
     }
 
     #[test]
