@@ -34,6 +34,40 @@ fn variant_path(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<syn::Path>
     Some(parse_quote!(#owner::#variant))
 }
 
+/// A `bool` compared with, or xor'd by, the `0` or `1` it is in the wasm:
+/// `f == 1`, `f != 0` and `f ^ 0` are `f`; `f == 0`, `f != 1` and `f ^ 1`
+/// are `!f`. The flag is a `bool` by construction here — an OR of tag
+/// checks, a helper declared to return one — which is why `bool_codec`,
+/// which needs a typed binding, did not fold it.
+fn bool_against_bit(
+    ctx: &FnCtx,
+    op: BinaryOp,
+    lhs: sordec_common::ValueId,
+    rhs: sordec_common::ValueId,
+) -> Option<syn::Expr> {
+    if !matches!(op, BinaryOp::Eq | BinaryOp::Ne | BinaryOp::BitXor) {
+        return None;
+    }
+    let bit = |v: sordec_common::ValueId| match ctx.func.bindings.get(ctx.fold_target(v)).map(|b| &b.expr) {
+        Some(Expr::Literal(Literal::I32(n))) if (0..=1).contains(n) => Some(*n == 1),
+        Some(Expr::Literal(Literal::I64(n))) if (0..=1).contains(n) => Some(*n == 1),
+        _ => None,
+    };
+    let flag_like = |v: sordec_common::ValueId| bool_like(ctx, ctx.fold_target(v), 0);
+    let (flag, one) = match (bit(rhs), bit(lhs)) {
+        (Some(one), _) if flag_like(lhs) => (lhs, one),
+        (_, Some(one)) if flag_like(rhs) => (rhs, one),
+        _ => return None,
+    };
+    let itself = match op {
+        BinaryOp::Eq => one,
+        BinaryOp::Ne => !one,
+        _ => !one,
+    };
+    let x = ctx.value_ref(flag);
+    Some(if itself { x } else { parse_quote!(!#x) })
+}
+
 /// Arithmetic on two `bool`s: each is the `i32` `0` or `1` a wasm
 /// comparison yields. `(a > b) - (a < b)` is how rustc lowers `Ord::cmp`
 /// to `-1`/`0`/`1`, and Rust has no `bool - bool`.
@@ -238,6 +272,19 @@ fn bool_like(ctx: &FnCtx, v: sordec_common::ValueId, depth: u32) -> bool {
             _ => false,
         },
         Some(Expr::Unary { op: sordec_ir::UnaryOp::Eqz, .. }) => true,
+        // A tag check is a test, printed `: bool` even as a hole.
+        Some(Expr::Semantic(SemanticOp::Known(sordec_ir::KnownOp::ValTagCheck { .. }))) => true,
+        // A call to a helper the emitter declares returning `bool`.
+        Some(Expr::Call { target, .. }) => ctx.high.function(*target).is_some_and(|callee| {
+            callee.signature.is_none()
+                && matches!(
+                    sig::helper_return_site(callee).map(Vec::as_slice),
+                    Some([one]) if matches!(
+                        callee.bindings.get(*one).map(|b| &b.ty),
+                        Some(IrType::Known(KnownType::Bool) | IrType::Inferred(KnownType::Bool))
+                    )
+                )
+        }),
         // A rename of a `bool` is one.
         Some(Expr::Use(inner)) => bool_like(ctx, ctx.fold_target(*inner), depth + 1),
         _ => false,
@@ -480,7 +527,7 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             count_cast(counted, &binding.ty)
         }
         Expr::Unary { op, value } => {
-            unary_expr(*op, ctx.value_ref(*value), ctx.is_boolean(*value))
+            unary_expr(*op, ctx.value_ref(*value), bool_like(ctx, ctx.fold_target(*value), 0))
         }
         // An index-of result tested against `Tag::Void` is the SDK's own
         // "not found": the host returns Void when the element is absent,
@@ -508,6 +555,9 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             }
             if let Some(counted) = bools_as_ints(ctx, *op, *lhs, *rhs) {
                 return counted;
+            }
+            if let Some(flag) = bool_against_bit(ctx, *op, *lhs, *rhs) {
+                return flag;
             }
             // A constant compared against a typed operand prints without
             // its suffix and takes the type from the comparison, which is
