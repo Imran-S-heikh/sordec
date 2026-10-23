@@ -279,6 +279,7 @@ mod tests {
                 function_type_indices: vec![],
                 function_bodies: vec![],
                 function_fingerprints: vec![],
+                table_functions: None,
                 custom_sections: vec![],
             },
             soroban_facts: None,

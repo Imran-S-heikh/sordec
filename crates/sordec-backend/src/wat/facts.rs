@@ -144,6 +144,7 @@ mod tests {
                 // body, so a module claiming none would report none.
                 function_bodies: vec![sordec_ir::ByteRange { start: 0, end: 1 }],
                 function_fingerprints: vec![],
+                table_functions: None,
                 custom_sections: vec![],
             },
             soroban_facts: None,

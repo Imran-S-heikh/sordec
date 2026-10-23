@@ -239,11 +239,6 @@ impl Pass<LiftedIr> for SretReturnPass {
         let mut result = PassResult::default();
 
         let calls = CallIndex::build(ir);
-        // An indirect call anywhere means no caller set is complete, so no
-        // signature in the module may change.
-        if calls.has_indirect_calls() {
-            return result;
-        }
 
         // Why each candidate declined. Counted rather than discarded so
         // "sret converts little" is a breakdown instead of an impression.
@@ -254,6 +249,9 @@ impl Pass<LiftedIr> for SretReturnPass {
             // An exported function's signature is the contract ABI, and its
             // internal call sites are not the complete caller set.
             .filter(|f| !calls.is_exported(f.id))
+            // A function an indirect call may reach has callers no scan can
+            // see, so its signature may not change.
+            .filter(|f| calls.caller_set_complete(f.id))
             .filter_map(|f| {
                 let mut reason = None;
                 let plan = convertible_reporting(f, &mut reason);
@@ -1068,6 +1066,7 @@ mod tests {
                 function_type_indices: vec![],
                 function_bodies: vec![],
                 function_fingerprints: vec![],
+                table_functions: None,
                 custom_sections: vec![],
             },
             soroban_facts: None,

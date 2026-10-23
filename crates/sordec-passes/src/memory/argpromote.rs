@@ -146,15 +146,17 @@ impl Pass<LiftedIr> for ArgPromotionPass {
         let mut result = PassResult::default();
 
         let calls = CallIndex::build(ir);
-        // An indirect call anywhere means no caller set is complete, so no
-        // signature in the module may change.
-        if calls.has_indirect_calls() {
-            return result;
-        }
 
         let mut plans: HashMap<FuncId, ArgPlan> = ir
             .functions
             .iter()
+            // Still module-wide, unlike `sret`'s per-function rule. Enabled
+            // per function on the four contracts with indirect calls, the
+            // promotion was measured at +1,600 holes on import_ark_bn254's
+            // big-integer helpers and a dozen compile errors, against no
+            // gain elsewhere — so the narrower veto waits until it is
+            // understood.
+            .filter(|_| !calls.has_indirect_calls())
             // An exported function's signature is the contract ABI.
             .filter(|f| !calls.is_exported(f.id))
             // A promoted callee has no pointer left for a recursive site to
@@ -607,6 +609,7 @@ mod tests {
                 function_type_indices: vec![],
                 function_bodies: vec![],
                 function_fingerprints: vec![],
+                table_functions: None,
                 custom_sections: vec![],
             },
             soroban_facts: None,

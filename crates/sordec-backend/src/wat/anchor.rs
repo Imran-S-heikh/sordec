@@ -152,6 +152,7 @@ mod tests {
                 .map(|(start, end)| ByteRange { start, end })
                 .collect(),
             function_fingerprints: vec![],
+            table_functions: None,
             custom_sections: vec![],
         }
     }

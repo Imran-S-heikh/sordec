@@ -58,6 +58,8 @@ pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
     let mut function_type_indices = Vec::<u32>::new();
     let mut function_bodies = Vec::<ByteRange>::new();
     let mut custom_sections = Vec::<CustomSection>::new();
+    // `Some` until an element item cannot be read; see `table_functions`.
+    let mut table_functions: Option<Vec<u32>> = Some(Vec::new());
     let mut import_index: u32 = 0;
 
     for payload in Parser::new(0).parse_all(wasm) {
@@ -114,6 +116,18 @@ pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
                 });
             }
 
+            // Element segments — every function any of them declares, the
+            // complete set a `call_indirect` can reach.
+            Payload::ElementSection(reader) => {
+                for element in reader {
+                    let element = element?;
+                    let Some(found) = table_functions.as_mut() else { break };
+                    if !element_functions(&element.items, found)? {
+                        table_functions = None;
+                    }
+                }
+            }
+
             // Code-section bodies — record each local function's byte
             // range so the emitter can anchor annotations to the printed
             // WAT. Bodies appear in declaration order, parallel to
@@ -140,7 +154,6 @@ pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
             | Payload::TagSection(_)
             | Payload::GlobalSection(_)
             | Payload::StartSection { .. }
-            | Payload::ElementSection(_)
             | Payload::DataSection(_)
             | Payload::DataCountSection { .. }
             | Payload::CodeSectionStart { .. }
@@ -175,8 +188,33 @@ pub(crate) fn parse_module(wasm: &[u8]) -> FrontendResult<WasmFacts> {
         function_type_indices,
         function_bodies,
         function_fingerprints,
+        table_functions,
         custom_sections,
     })
+}
+
+/// Append the functions one element segment declares to `found`. `false`
+/// when an item is anything but `ref.func` or `ref.null` — a `global.get`,
+/// say — whose function this parser cannot name.
+fn element_functions(items: &wasmparser::ElementItems<'_>, found: &mut Vec<u32>) -> FrontendResult<bool> {
+    match items {
+        wasmparser::ElementItems::Functions(reader) => {
+            for index in reader.clone() {
+                found.push(index?);
+            }
+        }
+        wasmparser::ElementItems::Expressions(_, reader) => {
+            for expr in reader.clone() {
+                let mut ops = expr?.get_operators_reader();
+                match ops.read()? {
+                    wasmparser::Operator::RefFunc { function_index } => found.push(function_index),
+                    wasmparser::Operator::RefNull { .. } => {}
+                    _ => return Ok(false),
+                }
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Translate `wasmparser::TypeRef` into our typed [`ImportKind`].
@@ -290,5 +328,37 @@ mod fingerprint_tests {
             a.function_fingerprints.iter().any(Option::is_some),
             "the fixture should fingerprint at least one body"
         );
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    /// Two `() -> ()` functions, a two-slot funcref table, and optionally
+    /// an active element segment putting function 1 in slot 0.
+    fn module(with_element: bool) -> Vec<u8> {
+        let mut m = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+        m.extend([0x01, 0x04, 0x01, 0x60, 0x00, 0x00]); // type: () -> ()
+        m.extend([0x03, 0x03, 0x02, 0x00, 0x00]); // two functions of type 0
+        m.extend([0x04, 0x04, 0x01, 0x70, 0x00, 0x02]); // funcref table, min 2
+        if with_element {
+            // active, table 0, offset i32.const 0, [func 1]
+            m.extend([0x09, 0x07, 0x01, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x01]);
+        }
+        m.extend([0x0a, 0x07, 0x02, 0x02, 0x00, 0x0b, 0x02, 0x00, 0x0b]); // two empty bodies
+        m
+    }
+
+    #[test]
+    fn an_element_segment_names_the_functions_a_table_can_hold() {
+        let facts = parse_module(&module(true)).expect("valid module");
+        assert_eq!(facts.table_functions, Some(vec![1]));
+    }
+
+    #[test]
+    fn no_element_segment_means_no_function_can_be_called_indirectly() {
+        let facts = parse_module(&module(false)).expect("valid module");
+        assert_eq!(facts.table_functions, Some(vec![]));
     }
 }

@@ -77,6 +77,19 @@ pub struct WasmFacts {
     /// "not fingerprinted" rather than index into it blindly.
     pub function_fingerprints: Vec<Option<u128>>,
 
+    /// Global indices of every function an element segment declares —
+    /// active, passive or declarative — which is every function that can
+    /// ever be in a table: validation requires a `ref.func` target to be
+    /// declared in one. So these, and only these, can be reached by a
+    /// `call_indirect`; every other local function's callers are all direct
+    /// calls.
+    ///
+    /// `None` when that set is not known: an element expression this
+    /// parser does not read, and hand-built facts. Consumers must then
+    /// assume any function may be an indirect target.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub table_functions: Option<Vec<u32>>,
+
     /// Custom sections in declaration order. Soroban contracts contain at
     /// least one (`contractspecv0`); generic WASM may have none.
     pub custom_sections: Vec<CustomSection>,

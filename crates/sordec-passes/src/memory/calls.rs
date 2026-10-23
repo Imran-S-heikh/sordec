@@ -29,9 +29,14 @@
 //! which every consumer here must treat as a veto:
 //!
 //! - **Indirect calls.** A table-called function has callers no scan can
-//!   see. Their presence anywhere in the module poisons the whole index —
-//!   the same module-wide rule [`crate::dataflow::Resolver`] and
-//!   [`crate::interproc::SpecializePass`] state.
+//!   see. Which functions those can be is bounded by the element segments
+//!   ([`sordec_ir::WasmFacts::table_functions`]): validation requires
+//!   every function that can enter a table to be declared in one. So only
+//!   those are vetoed, and every other function's direct callers are its
+//!   whole caller set. When the segments could not be read the presence of
+//!   any `call_indirect` poisons the whole index, as it once always did —
+//!   the module-wide rule [`crate::dataflow::Resolver`] and
+//!   [`crate::interproc::SpecializePass`] still state.
 //! - **Exports.** A host-invocable function's signature *is* the contract
 //!   ABI. Its internal call sites are not the complete set, and re-aritying
 //!   one would silently change what the contract accepts.
@@ -71,6 +76,9 @@ pub(crate) struct CallIndex {
     callers: Vec<Vec<CallSite>>,
     /// Whether any operator in the module is a `call_indirect`.
     has_indirect: bool,
+    /// Local functions an element segment declares — the only possible
+    /// indirect targets — or `None` when that set is not known.
+    table: Option<HashSet<FuncId>>,
     /// Local functions reachable from outside the module.
     exported: HashSet<FuncId>,
 }
@@ -124,10 +132,19 @@ impl CallIndex {
             .map(FuncId::from_index)
             .collect();
 
+        let table = ir.facts.table_functions.as_ref().map(|funcs| {
+            funcs
+                .iter()
+                .filter_map(|i| i.checked_sub(imported))
+                .map(FuncId::from_index)
+                .collect()
+        });
+
         Self {
             imported,
             callers,
             has_indirect,
+            table,
             exported,
         }
     }
@@ -147,10 +164,16 @@ impl CallIndex {
             .map_or(&[], Vec::as_slice)
     }
 
-    /// Whether the module contains any indirect call — if so, no caller set
-    /// is complete and no signature may be changed.
+    /// Whether `func`'s direct call sites are all of its callers, so its
+    /// signature may change: no indirect call in the module, or one that
+    /// cannot reach `func` because no element segment declares it.
+    /// Whether the module contains any indirect call at all.
     pub(crate) fn has_indirect_calls(&self) -> bool {
         self.has_indirect
+    }
+
+    pub(crate) fn caller_set_complete(&self, func: FuncId) -> bool {
+        !self.has_indirect || self.table.as_ref().is_some_and(|t| !t.contains(&func))
     }
 
     /// Whether `func` is reachable from outside the module, making its
@@ -211,6 +234,7 @@ mod tests {
                 function_type_indices: vec![],
                 function_bodies: vec![],
                 function_fingerprints: vec![],
+                table_functions: None,
                 custom_sections: vec![],
             },
             soroban_facts: None,
@@ -269,9 +293,8 @@ mod tests {
         assert!(!index.is_exported(FuncId::from_index(0)));
     }
 
-    #[test]
-    fn an_indirect_call_anywhere_poisons_the_index() {
-        let f = func_with(
+    fn indirect_caller() -> LiftedFunction {
+        func_with(
             vec![op(
                 waffle::Operator::CallIndirect {
                     sig_index: waffle::Signature::from(0),
@@ -280,8 +303,35 @@ mod tests {
                 vec![],
             )],
             vec![block(0, vec![], vec![v(0)], LiftedTerminator::Return { values: vec![] })],
-        );
-        let ir = module(vec![f], 0, vec![]);
-        assert!(CallIndex::build(&ir).has_indirect_calls());
+        )
+    }
+
+    /// With the element segments unknown, an indirect call anywhere
+    /// poisons every function's caller set.
+    #[test]
+    fn an_indirect_call_with_no_known_table_poisons_the_index() {
+        let mut leaf = leaf();
+        leaf.id = FuncId::from_index(1);
+        let ir = module(vec![indirect_caller(), leaf], 0, vec![]);
+        let index = CallIndex::build(&ir);
+        assert!(!index.caller_set_complete(FuncId::from_index(0)));
+        assert!(!index.caller_set_complete(FuncId::from_index(1)));
+    }
+
+    /// With them known, only a function they declare can be reached: WASM
+    /// index 3 with 2 imports is local function 1, so local 0 is not.
+    #[test]
+    fn only_a_function_in_a_table_is_an_indirect_target() {
+        let mut ir = module(vec![indirect_caller(), leaf()], 2, vec![]);
+        ir.facts.table_functions = Some(vec![3]);
+        let index = CallIndex::build(&ir);
+        assert!(index.caller_set_complete(FuncId::from_index(0)));
+        assert!(!index.caller_set_complete(FuncId::from_index(1)));
+    }
+
+    #[test]
+    fn without_an_indirect_call_every_caller_set_is_complete() {
+        let ir = module(vec![caller_of_one(), leaf()], 2, vec![]);
+        assert!(CallIndex::build(&ir).caller_set_complete(FuncId::from_index(1)));
     }
 }

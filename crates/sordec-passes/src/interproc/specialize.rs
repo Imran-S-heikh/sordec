@@ -935,6 +935,7 @@ mod tests {
                 function_type_indices: vec![],
                 function_bodies: bodies,
                 function_fingerprints: vec![],
+                table_functions: None,
                 custom_sections: vec![],
             },
             soroban_facts: Some(SorobanFacts::default()),

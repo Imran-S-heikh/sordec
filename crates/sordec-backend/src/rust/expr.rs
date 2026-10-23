@@ -211,6 +211,12 @@ pub(crate) fn sign_cast(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -
 /// when it is not arithmetic or nothing typed the operand.
 fn arithmetic_type(ctx: &FnCtx, v: sordec_common::ValueId, depth: u32) -> Option<KnownType> {
     let b = ctx.func.bindings.get(ctx.fold_target(v))?;
+    // A component of a helper's returned tuple is printed `t.N`, so Rust
+    // gives it the type the helper is declared returning there.
+    if let Expr::Project { value, index } = &b.expr {
+        return projected_type(ctx, *value, *index)
+            .filter(|k| matches!(k, KnownType::I32 | KnownType::U32 | KnownType::I64 | KnownType::U64));
+    }
     let Expr::Binary { op, lhs, rhs } = &b.expr else {
         return None;
     };
@@ -252,6 +258,26 @@ fn machine_word(t: &sordec_ir::TypeRef) -> Option<IrType> {
     Some(IrType::Known(k))
 }
 
+/// The type a helper is declared returning at component `index`, when
+/// `call` is a call to one: what `sig::helper_return` prints there.
+fn projected_type(ctx: &FnCtx, call: sordec_common::ValueId, index: u32) -> Option<KnownType> {
+    let Expr::Call { target, .. } = &ctx.func.bindings.get(ctx.fold_target(call))?.expr else {
+        return None;
+    };
+    let callee = ctx.high.function(*target)?;
+    if callee.signature.is_some() {
+        return None;
+    }
+    let site = sig::helper_return_site(callee)?;
+    if site.len() < 2 {
+        return None;
+    }
+    match &callee.bindings.get(*site.get(index as usize)?)?.ty {
+        IrType::Known(k) | IrType::Inferred(k) => Some(k.clone()),
+        IrType::Unknown(_) => None,
+    }
+}
+
 /// A `bool` assigned where an integer goes: it is `0` or `1` in the wasm,
 /// which is what the cast yields.
 pub(crate) fn bool_to_int(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<syn::Expr> {
@@ -285,6 +311,8 @@ fn bool_like(ctx: &FnCtx, v: sordec_common::ValueId, depth: u32) -> bool {
             _ => false,
         },
         Some(Expr::Unary { op: sordec_ir::UnaryOp::Eqz, .. }) => true,
+        // A component a helper is declared returning as a `bool`.
+        Some(Expr::Project { value, index }) => projected_type(ctx, *value, *index) == Some(KnownType::Bool),
         // A tag check is a test, printed `: bool` even as a hole.
         Some(Expr::Semantic(SemanticOp::Known(sordec_ir::KnownOp::ValTagCheck { .. }))) => true,
         // A call to a helper the emitter declares returning `bool`.
