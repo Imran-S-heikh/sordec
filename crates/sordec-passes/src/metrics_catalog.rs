@@ -484,6 +484,8 @@ pub const MARSHALLING_MASKED_ENCODES: &str = "marshalling_masked_encodes";
 pub const MARSHALLING_WIDE_ENCODES_INLINE: &str = "marshalling_wide_encodes_inline";
 /// `Void` tests of an `Option` parameter, and `Void` returned as `None`.
 pub const MARSHALLING_OPTION_PARAMS: &str = "marshalling_option_params";
+/// Returned `bool`s whose widening to the tag was folded back.
+pub const MARSHALLING_BOOL_RETURNS: &str = "marshalling_bool_returns";
 /// Storage reads whose SDK `Option` branch folded into
 /// `.unwrap_or(default)`.
 pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defaults_recovered";
@@ -1003,6 +1005,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_MASKED_ENCODES,
         MARSHALLING_WIDE_ENCODES_INLINE,
         MARSHALLING_OPTION_PARAMS,
+        MARSHALLING_BOOL_RETURNS,
         MARSHALLING_OPTION_DEFAULTS_RECOVERED,
         MARSHALLING_OPTION_DEFAULT_DECLINED_READ_ON_FALL_THROUGH,
         MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS,
