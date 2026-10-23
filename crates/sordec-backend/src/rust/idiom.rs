@@ -40,11 +40,11 @@ use sordec_ir::{
 use crate::rust::body::FnCtx;
 use crate::rust::ty::ident;
 
-/// A value typed only as the `Val` it is at the ABI, or not at all.
-fn untyped(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
+/// A value typed as a `Vec`, which has its own `len()`.
+fn typed_vec(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
     matches!(
         ctx.func.bindings.get(v).map(|b| &b.ty),
-        None | Some(IrType::Unknown(_) | IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val))
+        Some(IrType::Known(KnownType::Vec(_)) | IrType::Inferred(KnownType::Vec(_)))
     )
 }
 
@@ -92,11 +92,17 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                 // still absent — their operands are encoded `Val`s with no
                 // such recognizer, and a chain that reads like the source
                 // while being wrong by 2^32 is worse than a hole.
-                // A receiver nothing typed as a `Vec` is the `Val` the host
-                // call was handed; `vec_len` traps unless it is a vec, and so
-                // does the conversion that makes it one here.
-                VecOpKind::Len if untyped(ctx, args[0]) => Some(parse_quote!(
-                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Vec<soroban_sdk::Val>>::into_val(&#v, #eb).len()
+                // A receiver not typed as a `Vec` is the `Val` the host call
+                // was handed — untyped, or a `#[contracttype]` enum, which
+                // encodes as a vec its decode reads the length of. `vec_len`
+                // traps unless it is a vec, and so does the conversion that
+                // makes it one here. Through `Val`, since only `Val`
+                // converts to a `Vec`.
+                VecOpKind::Len if !typed_vec(ctx, args[0]) => Some(parse_quote!(
+                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Vec<soroban_sdk::Val>>::into_val(
+                        &soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#v, #eb),
+                        #eb,
+                    ).len()
                 )),
                 VecOpKind::Len => Some(parse_quote!(#v.len())),
                 VecOpKind::FirstIndexOf => {
