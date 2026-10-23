@@ -463,9 +463,12 @@ impl<'a> FnCtx<'a> {
             let live = scheduled.contains(&id) || matches!(r.expr, Expr::Phi { .. });
             // Arithmetic in the wide sense: binary ops, a zero test
             // (`x == 0` is `eqz`), and the integer width moves.
+            // An unrecovered operation reading it is a hole: it prints as a
+            // `todo!()` and consumes no type, so it says nothing either way.
             let arith = matches!(
                 r.expr,
                 Expr::Binary { .. }
+                    | Expr::Unknown { .. }
                     | Expr::Unary {
                         op: sordec_ir::UnaryOp::Eqz
                             | sordec_ir::UnaryOp::BitNot
@@ -483,7 +486,23 @@ impl<'a> FnCtx<'a> {
         }
         let mut region_reads = 0;
         self.func.region.for_each_value_use(|u| region_reads += usize::from(u == vid));
-        (readers > 0 && only_arith && region_reads == 0).then_some(ty)
+        // A 4-byte word tested by a branch is tested as one: `cond_ref`
+        // writes `!= 0` for it, so the read is integer arithmetic too.
+        let region_ok = region_reads == 0 || self.is_word_load(vid);
+        ((readers > 0 || region_reads > 0) && only_arith && region_ok).then_some(ty)
+    }
+
+    /// An untyped full 4-byte memory read: a 32-bit word, which no `Val`
+    /// (always 8 bytes) can be.
+    fn is_word_load(&self, vid: ValueId) -> bool {
+        matches!(
+            self.func.bindings.get(vid),
+            Some(Binding {
+                ty: IrType::Unknown(_),
+                expr: Expr::Load { width: sordec_ir::MemWidth::W4, signed: None, .. },
+                ..
+            })
+        )
     }
 
     fn has_machine_type(&self, vid: ValueId) -> bool {
@@ -524,7 +543,7 @@ impl<'a> FnCtx<'a> {
     /// recovered, so it is left alone to fail visibly.
     fn cond_ref(&self, vid: ValueId) -> syn::Expr {
         let expr = self.value_ref(vid);
-        if self.is_machine_integer(vid) || self.is_untyped_arithmetic(vid) {
+        if self.is_machine_integer(vid) || self.is_untyped_arithmetic(vid) || self.is_word_load(vid) {
             parse_quote!(#expr != 0)
         } else {
             expr
