@@ -239,6 +239,19 @@ fn arithmetic_type(ctx: &FnCtx, v: sordec_common::ValueId, depth: u32) -> Option
     typed(*lhs).or_else(|| typed(*rhs))
 }
 
+/// A declared field or parameter type that is a 32- or 64-bit word.
+fn machine_word(t: &sordec_ir::TypeRef) -> Option<IrType> {
+    use sordec_ir::{PrimitiveType as P, TypeRef};
+    let k = match t {
+        TypeRef::Primitive(P::U32) => KnownType::U32,
+        TypeRef::Primitive(P::I32) => KnownType::I32,
+        TypeRef::Primitive(P::U64) => KnownType::U64,
+        TypeRef::Primitive(P::I64) => KnownType::I64,
+        _ => return None,
+    };
+    Some(IrType::Known(k))
+}
+
 /// A `bool` assigned where an integer goes: it is `0` or `1` in the wasm,
 /// which is what the cast yields.
 pub(crate) fn bool_to_int(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<syn::Expr> {
@@ -727,20 +740,27 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             parse_quote!(if #c { #t } else { #f })
         }
         Expr::Struct { fields } => {
-            let name = match &binding.ty {
-                IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => {
-                    ctx.reg.name_of(*id)
-                }
+            let id = match &binding.ty {
+                IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => Some(*id),
                 _ => None,
             };
+            let name = id.and_then(|id| ctx.reg.name_of(id));
+            let declared = id.and_then(|id| ctx.reg.structs.iter().find(|d| d.id == id));
             match name {
                 Some(name) => {
                     let path = ty::ident(name);
                     let items: Vec<syn::FieldValue> = fields
                         .iter()
                         .map(|(field, value)| {
+                            // A same-width word of the other sign is cast to
+                            // the field's declared type, as for an argument.
+                            let want = declared
+                                .and_then(|d| d.fields.iter().find(|f| f.name == *field))
+                                .and_then(|f| machine_word(&f.ty));
                             let field = ty::ident(field);
-                            let value = ctx.value_ref(*value);
+                            let value = want
+                                .and_then(|w| sign_cast(ctx, *value, &w))
+                                .unwrap_or_else(|| ctx.value_ref(*value));
                             parse_quote!(#field: #value)
                         })
                         .collect();

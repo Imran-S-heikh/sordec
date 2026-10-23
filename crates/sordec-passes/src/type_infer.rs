@@ -678,8 +678,13 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
                 .all(|v| base_of(types.get(v)) == Some(first.clone()))
                 .then(|| IrType::Inferred(KnownType::Vec(Box::new(IrType::Inferred(first)))))
         }
+        // A 32-bit load is the word its opcode produced, and no `Val` (always
+        // 64 bits) fits in it — the same fact a 32-bit parameter carries.
+        // `Inferred`, so `u32` evidence settles its sign as for any word.
+        Expr::Load { ty: IrType::Known(KnownType::I32), .. } => Some(IrType::Inferred(KnownType::I32)),
         // Semantic ops are typed by the recognizers (host ABI); leave them.
-        // Load/Store/GlobalGet/IndirectCall/Unknown stay for later waves.
+        // Store/GlobalGet/IndirectCall/Unknown, and 64-bit loads (which may
+        // hold a `Val`), stay for later waves.
         _ => None,
     }
 }
