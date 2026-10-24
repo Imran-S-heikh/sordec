@@ -81,8 +81,15 @@ fn union_item(def: &UnionDef, reg: &TypeRegistry, policy: &dyn HolePolicy) -> sy
     } else {
         parse_quote!(#[derive(Clone)])
     };
+    // Unexported, the SDK still derives the conversions but leaves the
+    // type out of `contractspecv0`, as the original did.
+    let attr: syn::Attribute = if def.exported {
+        parse_quote!(#[contracttype])
+    } else {
+        parse_quote!(#[contracttype(export = false)])
+    };
     parse_quote! {
-        #[contracttype]
+        #attr
         #derives
         pub enum #name {
             #(#variants,)*
@@ -258,6 +265,7 @@ mod tests {
             unions: vec![UnionDef {
                 id: TypeId::new(1),
                 name: "DataKey".to_string(),
+                exported: true,
                 cases: vec![
                     UnionCase {
                         name: "Balance".to_string(),
@@ -273,6 +281,24 @@ mod tests {
         assert!(out.contains("pub enum DataKey"), "{out}");
         assert!(out.contains("Balance (soroban_sdk :: Address)"), "{out}");
         assert!(out.contains("Admin ,") || out.ends_with("Admin }"), "{out}");
+    }
+
+    #[test]
+    fn an_unexported_union_stays_out_of_the_spec() {
+        // A key enum synthesized in a module whose spec never declared it.
+        let union = |exported| TypeRegistry {
+            unions: vec![UnionDef {
+                id: TypeId::new(1),
+                name: "StorageKey".to_string(),
+                exported,
+                cases: vec![UnionCase { name: "Admin".to_string(), fields: vec![] }],
+            }],
+            ..Default::default()
+        };
+        let private = render(&contract_types(&union(false), &StrictNoGuess)[0]);
+        assert!(private.contains("# [contracttype (export = false)]"), "{private}");
+        let public = render(&contract_types(&union(true), &StrictNoGuess)[0]);
+        assert!(public.contains("# [contracttype]"), "{public}");
     }
 
     #[test]

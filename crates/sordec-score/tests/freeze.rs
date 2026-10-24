@@ -99,7 +99,7 @@ fn assert_close(actual: f64, expected: f64, label: &str) {
 #[test]
 fn scorer_version_is_frozen() {
     assert_eq!(
-        SCORER_VERSION, "score-2.1.0",
+        SCORER_VERSION, "score-2.2.0",
         "SCORER_VERSION changed — update the golden vector below to match"
     );
 }
@@ -113,7 +113,7 @@ fn golden_calibration_vector_is_stable() {
     };
     let report = score_str(GOLDEN_RECONSTRUCTED, GOLDEN_ORIGINAL, &opts).expect("score");
 
-    assert_eq!(report.scorer_version, "score-2.1.0");
+    assert_eq!(report.scorer_version, "score-2.2.0");
     assert_eq!(report.weights_profile, "rfp-default");
     // Re-frozen 2026-07-27 for score-2.0.0, when T11 split the ABI F1 into
     // entrypoints and types. Hand-checkable: interface drops `admin`, so

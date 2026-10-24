@@ -85,7 +85,7 @@
       ],
       "overall": 1.0,
       "passed": true,
-      "scorer_version": "score-2.1.0",
+      "scorer_version": "score-2.2.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     },
@@ -172,7 +172,7 @@
       ],
       "overall": 0.939985902255639,
       "passed": true,
-      "scorer_version": "score-2.1.0",
+      "scorer_version": "score-2.2.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     },
@@ -255,7 +255,7 @@
       ],
       "overall": 1.0,
       "passed": true,
-      "scorer_version": "score-2.1.0",
+      "scorer_version": "score-2.2.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     },
@@ -307,7 +307,7 @@
       ],
       "overall": 1.0,
       "passed": true,
-      "scorer_version": "score-2.1.0",
+      "scorer_version": "score-2.2.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     },
@@ -395,7 +395,7 @@
       ],
       "overall": 0.9502506265664161,
       "passed": true,
-      "scorer_version": "score-2.1.0",
+      "scorer_version": "score-2.2.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     },
@@ -483,7 +483,7 @@
       ],
       "overall": 0.8966791979949875,
       "passed": false,
-      "scorer_version": "score-2.1.0",
+      "scorer_version": "score-2.2.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     },
@@ -573,10 +573,10 @@
       ],
       "overall": 0.7902295006351019,
       "passed": false,
-      "scorer_version": "score-2.1.0",
+      "scorer_version": "score-2.2.0",
       "threshold": 0.9,
       "weights_profile": "rfp-default"
     }
   },
-  "scorer_version": "score-2.1.0"
+  "scorer_version": "score-2.2.0"
 }

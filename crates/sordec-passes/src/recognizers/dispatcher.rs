@@ -301,6 +301,7 @@ mod tests {
         UnionDef {
             id: TypeId::from_index(0),
             name: name.to_string(),
+            exported: true,
             cases: cases
                 .iter()
                 .map(|c| UnionCase {

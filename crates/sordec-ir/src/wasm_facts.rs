@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use sordec_common::{TypeId, UnknownReason};
+use sordec_common::{IrId, TypeId, UnknownReason};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -422,6 +422,20 @@ impl TypeRegistry {
             .or_else(|| self.events.iter().find(|d| d.id == id).map(|d| d.name.as_str()))
     }
 
+    /// The first [`TypeId`] no registered type carries, for a pass that
+    /// synthesizes one. Ids are module-global, so sizing by one category
+    /// alone hands out an id another category already owns, and every
+    /// `UserDefined` reference to that type then resolves to the new one.
+    #[must_use]
+    pub fn next_id(&self) -> u32 {
+        let ids = (self.structs.iter().map(|d| d.id))
+            .chain(self.unions.iter().map(|d| d.id))
+            .chain(self.enums.iter().map(|d| d.id))
+            .chain(self.errors.iter().map(|d| d.id))
+            .chain(self.events.iter().map(|d| d.id));
+        ids.map(|id| id.index() + 1).max().unwrap_or(0)
+    }
+
     /// The name of the single declared `#[contracterror]` enum, or `None`
     /// when there are zero or several.
     ///
@@ -500,6 +514,12 @@ pub struct UnionDef {
     pub name: String,
     /// Variants in declaration order.
     pub cases: Vec<UnionCase>,
+    /// Whether the type belongs in the contract's spec. True for every
+    /// type `contractspecv0` declares; false for one a recognizer
+    /// synthesized in a module that declares an ABI without it — a
+    /// private key enum, which the original's spec never recorded and
+    /// the reconstruction's must not either.
+    pub exported: bool,
 }
 
 /// One variant of a [`UnionDef`].
@@ -593,6 +613,19 @@ mod tests {
                 .map(|(n, v)| EnumCase { name: (*n).to_string(), value: *v })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn next_id_is_past_every_category() {
+        // `account`: one error enum and no union. Sized by unions alone, a
+        // synthesized key enum took id 0 and `Result<(), AccError>` emitted
+        // as `Result<(), StorageKey>`.
+        let mut reg = TypeRegistry::default();
+        assert_eq!(reg.next_id(), 0);
+        reg.errors.push(error_enum(0, "AccError", &[("NotEnoughSigners", 1)]));
+        assert_eq!(reg.next_id(), 1);
+        reg.enums.push(error_enum(4, "Kind", &[]));
+        assert_eq!(reg.next_id(), 5);
     }
 
     #[test]

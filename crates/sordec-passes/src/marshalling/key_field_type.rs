@@ -255,6 +255,7 @@ mod tests {
         UnionDef {
             id: TypeId::from_index(0),
             name: "StorageKey".to_string(),
+            exported: true,
             cases: vec![UnionCase {
                 name: "Balance".to_string(),
                 fields: vec![TypeRef::Unknown(UnknownReason::InsufficientEvidence)],

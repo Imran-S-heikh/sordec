@@ -31,7 +31,7 @@
 //! genuine fidelity win for the backend. It is simply not this category's
 //! measurement.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
 use stellar_xdr::curr::{
@@ -62,6 +62,24 @@ pub(crate) fn abi(spec: &SpecMap, names: bool) -> BTreeMap<String, String> {
         map.insert(key, value);
     }
     map
+}
+
+/// The names of the user-defined types a spec declares.
+///
+/// What the module itself records a type by: a type absent from here is
+/// one whose name exists only in the source, and a reconstruction has to
+/// invent it (see `SemanticFact::key_in`).
+pub(crate) fn declared_types(spec: &SpecMap) -> BTreeSet<String> {
+    spec.values()
+        .filter_map(|bytes| decode(bytes))
+        .filter_map(|entry| match entry {
+            ScSpecEntry::UdtStructV0(s) => Some(s.name.to_utf8_string_lossy()),
+            ScSpecEntry::UdtUnionV0(u) => Some(u.name.to_utf8_string_lossy()),
+            ScSpecEntry::UdtEnumV0(e) => Some(e.name.to_utf8_string_lossy()),
+            ScSpecEntry::UdtErrorEnumV0(e) => Some(e.name.to_utf8_string_lossy()),
+            ScSpecEntry::FunctionV0(_) | ScSpecEntry::EventV0(_) => None,
+        })
+        .collect()
 }
 
 /// The key a user-defined type is compared under.

@@ -1,6 +1,6 @@
 # Reconstruction accuracy report
 
-Scorer `score-2.1.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored directory-vs-directory against each fixture's vendored source. Compilation is a gate and is not evaluated here. Regenerate with `SORDEC_BENCH_WRITE=1 cargo test -p sordec --test benchmark -- --ignored`.
+Scorer `score-2.2.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored directory-vs-directory against each fixture's vendored source. Compilation is a gate and is not evaluated here. Regenerate with `SORDEC_BENCH_WRITE=1 cargo test -p sordec --test benchmark -- --ignored`.
 
 **Two aggregates, and they answer different questions.** The AST-only mean covers interface, structure and semantic; it is the figure comparable with the committed accuracy bands and with every earlier measurement, so it stays the headline. The second adds `behavior` — differential execution of the recompiled reconstruction against the original wasm — which is measured on 6 of 7 fixtures; each fixture's detail below says what was driven, and for any `n/a`, why not. An unmeasurable category is reported `n/a` and renormalises out of that fixture's mean; it is never a zero, since "could not be run" and "does the wrong thing" are different findings.
 

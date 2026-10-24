@@ -587,9 +587,7 @@ fn synthesize_structs(ir: &mut HighIr) -> i64 {
         return 0;
     }
     let facts = ir.soroban_facts.get_or_insert_with(SorobanFacts::default);
-    let base = facts.types.structs.len() as u32
-        + facts.types.unions.len() as u32
-        + facts.types.enums.len() as u32;
+    let base = facts.types.next_id();
     for (i, keys) in tables.iter().enumerate() {
         let name = if i == 0 {
             SYNTHESIZED_STRUCT.to_owned()

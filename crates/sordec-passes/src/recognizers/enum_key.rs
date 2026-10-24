@@ -149,97 +149,119 @@ enum Naming {
     NotACandidate,
 }
 
+/// [`EnumKeyPass`] as it runs after the inliner, which may also recover a
+/// union whose converter builds its last variant after the scope around
+/// its switch ([`union_from_ctor`]'s fallback). Only here: on the first
+/// run that reading would preempt the strict recovery the inlined module
+/// allows later, and the strict one's field counts are the measured ones.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EnumKeyAfterInlinePass;
+
+impl Pass<HighIr> for EnumKeyAfterInlinePass {
+    fn name(&self) -> &'static str {
+        PASS_NAME
+    }
+
+    fn run(&self, ir: &mut HighIr) -> PassResult {
+        run_enum_key(ir, true)
+    }
+}
+
 impl Pass<HighIr> for EnumKeyPass {
     fn name(&self) -> &'static str {
         PASS_NAME
     }
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
-        let mut result = PassResult::default();
-
-        // Gate 2 precondition: a union registry to match against. With
-        // no spec section there is none — but most of one is still in
-        // the code, because `#[contracttype]` compiles the variant names
-        // into the converter. Recover it, or stay silent as before.
-        let has_unions = ir
-            .soroban_facts
-            .as_ref()
-            .is_some_and(|f| !f.types.unions.is_empty());
-        if !has_unions {
-            let recovered = synthesize_unions(ir);
-            if recovered == 0 {
-                return result;
-            }
-            result.metrics.increment(M_SYNTHESIZED, recovered);
-            result.changed = true;
-        }
-
-        // Phase A — read-only scan.
-        let calls = CallIndex::build(ir);
-        let mut resolver = Resolver::new(ir, &calls);
-        let mut summaries: HashMap<FuncId, Option<CtorSummary>> = HashMap::new();
-        let mut planned: HashMap<FuncId, Vec<Rewrite>> = HashMap::new();
-
-        for func in &ir.functions {
-            for (id, binding) in func.bindings.iter() {
-                let Expr::Semantic(SemanticOp::Known(op)) = &binding.expr else {
-                    continue;
-                };
-                let Some(key) = unresolved_key_of(op) else {
-                    continue;
-                };
-                match try_name_key(ir, &calls, &mut resolver, &mut summaries, func, key) {
-                    Naming::Named(enum_key, note) => {
-                        planned.entry(func.id).or_default().push(Rewrite {
-                            id,
-                            expr: Expr::Semantic(SemanticOp::Known(with_resolved_key(
-                                op, enum_key,
-                            ))),
-                            // The op's ABI result type was set at
-                            // recognition; the key naming proves no type.
-                            ty: None,
-                            source: ProvenanceSource::SdkPattern,
-                            note,
-                            metric: M_KEY_NAMED,
-                        });
-                    }
-                    Naming::Unresolved => {
-                        result.metrics.increment(M_UNRESOLVED, 1);
-                        result.diagnostics.push(
-                            Diagnostic::warning(
-                                LiftDiagnosticCode::UnrecognisedStoragePattern,
-                                "",
-                            )
-                            .at(Location::Value {
-                                func: func.id,
-                                value: id.index(),
-                            }),
-                        );
-                    }
-                    Naming::NotACandidate => {}
-                }
-            }
-        }
-        let matched = summaries.values().filter(|s| s.is_some()).count();
-        if matched > 0 {
-            result
-                .metrics
-                .increment(M_CTOR_MATCHED, i64::try_from(matched).unwrap_or(i64::MAX));
-        }
-        drop(resolver);
-
-        // Phase B — apply per function.
-        for (func_id, rewrites) in planned {
-            for rw in &rewrites {
-                result.metrics.increment(rw.metric, 1);
-            }
-            result.changed = true;
-            if let Some(func) = ir.function_mut(func_id) {
-                apply_rewrites(func, PASS_NAME, rewrites);
-            }
-        }
-        result
+        run_enum_key(ir, false)
     }
+}
+
+fn run_enum_key(ir: &mut HighIr, after_scope: bool) -> PassResult {
+    let mut result = PassResult::default();
+
+    // Gate 2 precondition: a union registry to match against. With
+    // no spec section there is none — but most of one is still in
+    // the code, because `#[contracttype]` compiles the variant names
+    // into the converter. Recover it, or stay silent as before.
+    let has_unions = ir
+        .soroban_facts
+        .as_ref()
+        .is_some_and(|f| !f.types.unions.is_empty());
+    if !has_unions {
+        let recovered = synthesize_unions(ir, after_scope);
+        if recovered == 0 {
+            return result;
+        }
+        result.metrics.increment(M_SYNTHESIZED, recovered);
+        result.changed = true;
+    }
+
+    // Phase A — read-only scan.
+    let calls = CallIndex::build(ir);
+    let mut resolver = Resolver::new(ir, &calls);
+    let mut summaries: HashMap<FuncId, Option<CtorSummary>> = HashMap::new();
+    let mut planned: HashMap<FuncId, Vec<Rewrite>> = HashMap::new();
+
+    for func in &ir.functions {
+        for (id, binding) in func.bindings.iter() {
+            let Expr::Semantic(SemanticOp::Known(op)) = &binding.expr else {
+                continue;
+            };
+            let Some(key) = unresolved_key_of(op) else {
+                continue;
+            };
+            match try_name_key(ir, &calls, &mut resolver, &mut summaries, func, key) {
+                Naming::Named(enum_key, note) => {
+                    planned.entry(func.id).or_default().push(Rewrite {
+                        id,
+                        expr: Expr::Semantic(SemanticOp::Known(with_resolved_key(
+                            op, enum_key,
+                        ))),
+                        // The op's ABI result type was set at
+                        // recognition; the key naming proves no type.
+                        ty: None,
+                        source: ProvenanceSource::SdkPattern,
+                        note,
+                        metric: M_KEY_NAMED,
+                    });
+                }
+                Naming::Unresolved => {
+                    result.metrics.increment(M_UNRESOLVED, 1);
+                    result.diagnostics.push(
+                        Diagnostic::warning(
+                            LiftDiagnosticCode::UnrecognisedStoragePattern,
+                            "",
+                        )
+                        .at(Location::Value {
+                            func: func.id,
+                            value: id.index(),
+                        }),
+                    );
+                }
+                Naming::NotACandidate => {}
+            }
+        }
+    }
+    let matched = summaries.values().filter(|s| s.is_some()).count();
+    if matched > 0 {
+        result
+            .metrics
+            .increment(M_CTOR_MATCHED, i64::try_from(matched).unwrap_or(i64::MAX));
+    }
+    drop(resolver);
+
+    // Phase B — apply per function.
+    for (func_id, rewrites) in planned {
+        for rw in &rewrites {
+            result.metrics.increment(rw.metric, 1);
+        }
+        result.changed = true;
+        if let Some(func) = ir.function_mut(func_id) {
+            apply_rewrites(func, PASS_NAME, rewrites);
+        }
+    }
+    result
 }
 
 /// The `key` operand of a storage op still awaiting naming.
@@ -881,17 +903,34 @@ const SYNTHESIZED_UNION: &str = "StorageKey";
 /// readable is the type's own name, which is synthesized.
 ///
 /// Returns how many unions were recovered.
-fn synthesize_unions(ir: &mut HighIr) -> i64 {
-    let recovered: Vec<Vec<(String, usize)>> = ir
+fn synthesize_unions(ir: &mut HighIr, after_scope: bool) -> i64 {
+    // Strictly first, then the scope fallback only for a variant set no
+    // strict recovery already has: two converters of one enum (a key's
+    // and a value's) must not both be recovered, and the strict one is the
+    // one whose field counts were measured.
+    let mut recovered: Vec<Vec<(String, usize)>> = ir
         .functions
         .iter()
-        .filter_map(|f| union_from_ctor(ir, f))
+        .filter_map(|f| union_from_ctor(ir, f, false))
         .collect();
+    let names = |cases: &[(String, usize)]| cases.iter().map(|(n, _)| n.clone()).collect::<BTreeSet<_>>();
+    for f in ir.functions.iter().filter(|_| after_scope) {
+        if let Some(cases) = union_from_ctor(ir, f, true)
+            && !recovered.iter().any(|r| names(r) == names(&cases))
+        {
+            recovered.push(cases);
+        }
+    }
     if recovered.is_empty() {
         return 0;
     }
     let facts = ir.soroban_facts.get_or_insert_with(SorobanFacts::default);
-    let base = facts.types.unions.len() as u32;
+    // A module with an ABI that still needed a key enum synthesized kept
+    // that enum out of its spec (`account`'s private `DataKey`); a stripped
+    // one kept every type out, so there the spec is all the reconstruction
+    // has to say what it recovered.
+    let exported = facts.functions.is_empty();
+    let base = facts.types.next_id();
     for (i, cases) in recovered.iter().enumerate() {
         let next = base + i as u32;
         let name = if i == 0 {
@@ -902,6 +941,7 @@ fn synthesize_unions(ir: &mut HighIr) -> i64 {
         facts.types.unions.push(UnionDef {
             id: TypeId::from_index(next),
             name,
+            exported,
             cases: cases
                 .iter()
                 .map(|(case, fields)| UnionCase {
@@ -923,8 +963,16 @@ fn synthesize_unions(ir: &mut HighIr) -> i64 {
 /// rustc gives the last variant the `default` arm and lets it fall
 /// through the switch, so that arm's construction sits *after* it in the
 /// enclosing sequence rather than inside it.
-fn union_from_ctor(ir: &HighIr, func: &HighFunction) -> Option<Vec<(String, usize)>> {
+fn union_from_ctor(ir: &HighIr, func: &HighFunction, after_scope: bool) -> Option<Vec<(String, usize)>> {
     if func.signature.is_some() {
+        return None;
+    }
+    // The fallback counts fields from the converter's inputs, which is
+    // exact for a by-value converter — its payload is its parameters — and
+    // not for one reading a slab through a pointer, whose payload may sit
+    // behind nested helpers: `token-v23-stripped`'s would recover a
+    // fieldless `Allowance`. So by-value converters only.
+    if after_scope && reads_through_a_parameter(func) {
         return None;
     }
     let (arms, default, tail) = dispatch_of(&func.region)?;
@@ -934,7 +982,10 @@ fn union_from_ctor(ir: &HighIr, func: &HighFunction) -> Option<Vec<(String, usiz
         let [case] = arm.cases.as_slice() else {
             return None;
         };
-        let built = built_by(ir, func, &[&arm.body])?;
+        let mut built = built_by(ir, func, &[&arm.body])?;
+        if after_scope {
+            built.1 = fields_read(func, &[&arm.body]);
+        }
         if by_disc.insert(*case, built).is_some() {
             return None;
         }
@@ -943,7 +994,18 @@ fn union_from_ctor(ir: &HighIr, func: &HighFunction) -> Option<Vec<(String, usiz
     // switch falls through into.
     let mut fallthrough: Vec<&Region> = vec![default];
     fallthrough.extend(tail);
-    let built = built_by(ir, func, &fallthrough)?;
+    // When the default only `break`s out of a scope around the switch, its
+    // variant is built after that scope instead (`account`'s converter).
+    let built = match built_by(ir, func, &fallthrough) {
+        Some((text, _)) if after_scope => (text, fields_read(func, &fallthrough)),
+        Some(built) => built,
+        None if after_scope => {
+            let after = after_enclosing_scope(&func.region)?;
+            let (text, upto) = built_first(ir, func, &after)?;
+            (text, fields_read(func, &after[..upto]))
+        }
+        None => return None,
+    };
     let missing = (0..=u32::try_from(arms.len()).ok()?).find(|d| !by_disc.contains_key(d))?;
     by_disc.insert(missing, built);
 
@@ -972,6 +1034,109 @@ fn dispatch_of(region: &Region) -> Option<(&[SwitchArm], &Region, Vec<&Region>)>
         Region::Switch { arms, default, .. } => Some((arms, default, Vec::new())),
         _ => None,
     }
+}
+
+/// The regions following the labeled scope that most closely encloses the
+/// converter's switch, in its parent sequence.
+fn after_enclosing_scope(region: &Region) -> Option<Vec<&Region>> {
+    let Region::Sequence(items) = region else {
+        return match region {
+            Region::Scope { body, .. } | Region::Loop { body, .. } => after_enclosing_scope(body),
+            _ => None,
+        };
+    };
+    for (i, item) in items.iter().enumerate() {
+        if let Region::Scope { body, .. } = item
+            && dispatch_of(body).is_some()
+        {
+            // The switch's own scope, or one further in.
+            return after_enclosing_scope(body).or_else(|| Some(items[i + 1..].iter().collect()));
+        }
+        if dispatch_of(item).is_some() {
+            return after_enclosing_scope(item);
+        }
+    }
+    None
+}
+
+/// Like [`built_by`], over regions after the converter's switch, where the
+/// rest of the function follows the variant's construction: the name and
+/// how many of the regions, up to and including the one that builds it,
+/// are this variant's — what comes after reads the merged result.
+fn built_first(ir: &HighIr, func: &HighFunction, regions: &[&Region]) -> Option<(String, usize)> {
+    for (i, region) in regions.iter().enumerate() {
+        if let Some(text) = built_by_parts(ir, func, region) {
+            return text.map(|t| (t, i + 1));
+        }
+    }
+    None
+}
+
+/// The variant text one region builds — `Some(None)` when it builds two,
+/// which is no single variant.
+fn built_by_parts(ir: &HighIr, func: &HighFunction, region: &Region) -> Option<Option<String>> {
+    let mut texts: Vec<String> = Vec::new();
+    region.for_each_node(|node| {
+        let Region::Basic(b) = node else { return };
+        let Some(block) = func.blocks.get(*b) else { return };
+        for id in &block.bindings {
+            if let Some(found) = func.bindings.get(*id).and_then(|b| symbol_text_of(ir, func, &b.expr)) {
+                texts.push(found);
+            }
+        }
+    });
+    match texts.len() {
+        0 => None,
+        1 => Some(texts.pop()),
+        _ => Some(None),
+    }
+}
+
+/// Whether `func` loads anything through one of its parameters.
+fn reads_through_a_parameter(func: &HighFunction) -> bool {
+    func.bindings.iter().any(|(_, b)| {
+        matches!(&b.expr, Expr::Load { addr, .. } if func.params.contains(&canon_addr(func, *addr).0))
+    })
+}
+
+/// How many fields a variant's construction reads from the converter's
+/// inputs: distinct offsets loaded through a pointer parameter (the key's
+/// slab), and parameters other than the one it dispatches on that it uses
+/// directly (a by-value converter, `account`'s `func_3(disc, payload)`).
+///
+/// Counting every load in the arm, as [`built_by`] does, also counts
+/// reloads of the converter's own frame after a host call, and nothing for
+/// a by-value payload — which is what made the scope fallback recover
+/// `Admin(Val, Val)` and a fieldless `Signer`.
+fn fields_read(func: &HighFunction, regions: &[&Region]) -> usize {
+    let dispatch = dispatch_param(func).and_then(|i| func.params.get(i).copied());
+    let mut offsets: BTreeSet<(ValueId, u32)> = BTreeSet::new();
+    let mut direct: BTreeSet<ValueId> = BTreeSet::new();
+    let mut pointers: BTreeSet<ValueId> = BTreeSet::new();
+    for region in regions {
+        region.for_each_node(|node| {
+            let Region::Basic(b) = node else { return };
+            let Some(block) = func.blocks.get(*b) else { return };
+            for id in &block.bindings {
+                let Some(binding) = func.bindings.get(*id) else { continue };
+                if let Expr::Load { addr, offset, .. } = &binding.expr {
+                    let (base, k) = canon_addr(func, *addr);
+                    if func.params.contains(&base) {
+                        pointers.insert(base);
+                        offsets.insert((base, k.saturating_add(*offset)));
+                    }
+                    continue;
+                }
+                binding.expr.for_each_value_use(|u| {
+                    let u = crate::dataflow::resolve_use(func, u);
+                    if func.params.contains(&u) && Some(u) != dispatch {
+                        direct.insert(u);
+                    }
+                });
+            }
+        });
+    }
+    offsets.len() + direct.iter().filter(|p| !pointers.contains(p)).count()
 }
 
 /// The one variant name a set of regions builds, and how many payload
@@ -1191,6 +1356,7 @@ mod tests {
         UnionDef {
             id: sordec_common::TypeId::from_index(0),
             name: "DataKey".to_string(),
+            exported: true,
             cases: vec![
                 UnionCase {
                     name: "State".to_string(),
@@ -1422,6 +1588,7 @@ mod tests {
         UnionDef {
             id: sordec_common::TypeId::from_index(0),
             name: "DataKey".to_string(),
+            exported: true,
             cases: vec![
                 UnionCase {
                     name: "State".to_string(),

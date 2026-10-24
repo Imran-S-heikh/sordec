@@ -9,7 +9,7 @@
 //! tier is swapped, or an `events().publish` goes missing.
 
 use crate::extract;
-use crate::facts::SemanticFact;
+use crate::facts::{Names, SemanticFact};
 use crate::report::CategoryScore;
 use crate::simil::{self, Multiset};
 
@@ -17,10 +17,10 @@ use crate::simil::{self, Multiset};
 pub(crate) fn evaluate(
     reconstructed: &syn::File,
     original: &syn::File,
-    type_names: bool,
+    names: Names<'_>,
 ) -> CategoryScore {
-    let recon = bag(&extract::extract(reconstructed), type_names);
-    let orig = bag(&extract::extract(original), type_names);
+    let recon = bag(&extract::extract(reconstructed), names);
+    let orig = bag(&extract::extract(original), names);
 
     trace_facts(&recon, &orig);
 
@@ -97,13 +97,13 @@ fn presence(facts: &Multiset) -> Multiset {
 }
 
 /// Build a multiset of fact keys.
-fn bag(facts: &[SemanticFact], type_names: bool) -> Multiset {
+fn bag(facts: &[SemanticFact], names: Names<'_>) -> Multiset {
     // Facts whose only evidence the compiler deletes are dropped from
     // both sides — see [`SemanticFact::is_recoverable`].
     let keys: Vec<String> = facts
         .iter()
         .filter(|f| f.is_recoverable())
-        .map(|f| f.key_with(type_names))
+        .map(|f| f.key_in(names))
         .collect();
     simil::multiset(&keys)
 }
@@ -153,6 +153,7 @@ fn extra_note(orig: &Multiset, recon: &Multiset) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     fn file(src: &str) -> syn::File {
         syn::parse_str(src).expect("source parses")
@@ -169,9 +170,23 @@ mod tests {
     "#;
 
     #[test]
+    fn a_key_type_the_spec_does_not_declare_compares_by_variant() {
+        // `account`: a private `DataKey`, absent from `contractspecv0`, so
+        // the reconstruction can only name it something else.
+        let renamed = file(&CONTRACT.replace("DataKey", "StorageKey"));
+        let orig = file(CONTRACT);
+        let none = BTreeSet::new();
+        assert!((evaluate(&renamed, &orig, Names::Declared(&none)).score - 1.0).abs() < 1e-9);
+        // Declared, the name is in the module, and getting it wrong is a miss.
+        let declared = BTreeSet::from(["DataKey".to_owned()]);
+        assert!(evaluate(&renamed, &orig, Names::Declared(&declared)).score < 1.0);
+        assert!((evaluate(&orig, &orig, Names::Declared(&declared)).score - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn identical_semantics_score_one() {
         let f = file(CONTRACT);
-        assert!((evaluate(&f, &f, true).score - 1.0).abs() < 1e-9);
+        assert!((evaluate(&f, &f, Names::All).score - 1.0).abs() < 1e-9);
     }
 
     #[test]
@@ -187,7 +202,7 @@ mod tests {
             }
             "#,
         );
-        assert!(evaluate(&recon, &orig, true).score < 1.0);
+        assert!(evaluate(&recon, &orig, Names::All).score < 1.0);
     }
 
     #[test]
@@ -204,7 +219,7 @@ mod tests {
             }
             "#,
         );
-        assert!(evaluate(&recon, &orig, true).score < 1.0);
+        assert!(evaluate(&recon, &orig, Names::All).score < 1.0);
     }
 
     #[test]
@@ -220,7 +235,7 @@ mod tests {
             }
             "#,
         );
-        assert!(evaluate(&recon, &orig, true).score < 1.0);
+        assert!(evaluate(&recon, &orig, Names::All).score < 1.0);
     }
 
     #[test]
@@ -229,7 +244,7 @@ mod tests {
         // recovered because there was nothing to recover — unmeasurable,
         // not perfect. This is the hello-add fixture's shape.
         let f = file("fn helper(a: u32) -> u32 { a + 1 }");
-        let score = evaluate(&f, &f, true);
+        let score = evaluate(&f, &f, Names::All);
         assert!(!score.checked, "a 0-fact comparison must not be checked");
         assert_ne!(score.score, 1.0);
     }
@@ -241,7 +256,7 @@ mod tests {
         // stays checked — inventing facts is a measurable failure.
         let orig = file("fn helper(a: u32) -> u32 { a + 1 }");
         let recon = file(CONTRACT);
-        let score = evaluate(&recon, &orig, true);
+        let score = evaluate(&recon, &orig, Names::All);
         assert!(score.checked, "invented facts are measurable");
         assert_eq!(score.score, 0.0);
         let note = score.notes.first().expect("a summary note");

@@ -105,7 +105,7 @@ pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
     AbiSweepPass, AuthFlowPass, AuthPass, CallResultPass, ClientCallPass, CollectionsPass, ConstPropPass,
-    ContextPass, CrossContractPass, DispatcherPass, EnumKeyPass, ErrorConstPass, LinearMemoryPass,
+    ContextPass, CrossContractPass, DispatcherPass, EnumKeyAfterInlinePass, EnumKeyPass, ErrorConstPass, LinearMemoryPass,
     StoragePass, TtlPass, UnrecognizedScanPass, ValEncodingPass, ValPackedComparePass,
 };
 pub use refine::{
@@ -505,7 +505,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
                 recognizers::ttl::RESOLUTION_COUNTERS,
             )),
             Box::new(pass::Rerun::new(
-                EnumKeyPass,
+                EnumKeyAfterInlinePass,
                 ENUM_KEY_AFTER_INLINE,
                 recognizers::enum_key::RESOLUTION_COUNTERS,
             )),

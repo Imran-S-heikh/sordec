@@ -130,7 +130,7 @@ fn mean(values: impl Iterator<Item = f64>) -> Option<f64> {
 /// `overall_band`'s `_ => (0.00, 1.00)` wildcard.
 fn heldout_floor(name: &str) -> f64 {
     match name {
-        "account" => 0.54,
+        "account" => 0.77, // 0.7950: its private `DataKey` recovered, unexported
         "alloc" => 0.54,
         "atomic_swap" => 0.98,
         "auth" => 0.98,
@@ -159,7 +159,7 @@ fn heldout_floor(name: &str) -> f64 {
         "increment_with_fuzz" => 0.68,
         "increment_with_pause" => 0.84, // 0.8655: `paused()` through a declared client
         "logging" => 0.86,
-        "merkle_distribution" => 0.50,
+        "merkle_distribution" => 0.81, // 0.8321: no synthesized type takes a declared one's id
         "mint-lock" => 0.56, // 0.5882: `mint` through a declared client
         "modular_account" => 0.40,
         "other_custom_types" => 0.70,
@@ -175,7 +175,7 @@ fn heldout_floor(name: &str) -> f64 {
 ///
 /// The upper bound is not pedantry: it is the detector for a run that measured
 /// something other than what it says it measured. See the module docs.
-const HELDOUT_AGGREGATE: (f64, f64) = (0.73, 0.78);
+const HELDOUT_AGGREGATE: (f64, f64) = (0.75, 0.80);
 
 #[test]
 #[ignore = "needs SORDEC_HELDOUT_DIR pointing at a built held-out corpus; run explicitly"]

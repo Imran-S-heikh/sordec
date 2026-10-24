@@ -175,6 +175,7 @@ mod tests {
         vec![UnionDef {
             id: TypeId::new(4),
             name: "TimeBoundKind".to_string(),
+            exported: true,
             cases: vec![
                 UnionCase { name: "Before".to_string(), fields: vec![] },
                 UnionCase { name: "After".to_string(), fields: vec![] },

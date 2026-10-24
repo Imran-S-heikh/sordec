@@ -432,7 +432,7 @@ fn decode_spec(
                         }
                     })
                     .collect::<FrontendResult<Vec<_>>>()?;
-                types.unions.push(UnionDef { id, name, cases });
+                types.unions.push(UnionDef { id, name, cases, exported: true });
             }
 
             ScSpecEntry::UdtEnumV0(e) => {

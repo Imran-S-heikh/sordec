@@ -303,6 +303,9 @@ impl Sources {
 /// host, and this crate does not touch wasm. When it could not be measured, or was
 /// measured against something other than our own reconstruction, the category is an
 /// honest hole rather than a zero and stays out of the weighted mean entirely.
+/// No declared types: every storage-key qualifier is dropped.
+static EMPTY: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
 fn assemble(sources: &Sources, gate: CompilationGate, opts: &ScoreOptions) -> ScoreReport {
     let basis = &opts.basis;
     let (recon, orig) = sources.pair(basis.interface);
@@ -311,7 +314,16 @@ fn assemble(sources: &Sources, gate: CompilationGate, opts: &ScoreOptions) -> Sc
     let (recon, orig) = sources.pair(basis.structure);
     let structure = structure::evaluate(recon, orig, sources.spec_for(basis.structure));
     let (recon, orig) = sources.pair(basis.semantic);
-    let semantic = semantic::evaluate(recon, orig, opts.abi_declared);
+    // A storage key's type name is compared only where the original's spec
+    // declares the type: otherwise the module never recorded it (see
+    // `SemanticFact::key_in`). Without a spec to read, as written.
+    let declared = sources.spec.as_ref().map(|(_, orig)| spec::declared_types(orig));
+    let names = match (&declared, opts.abi_declared) {
+        (_, false) => facts::Names::Declared(&EMPTY),
+        (Some(types), true) => facts::Names::Declared(types),
+        (None, true) => facts::Names::All,
+    };
+    let semantic = semantic::evaluate(recon, orig, names);
 
     // Injected, not computed: behavior needs a Soroban host, and this crate does not
     // touch wasm. `category()` is also where the self-scoring guard lives — a

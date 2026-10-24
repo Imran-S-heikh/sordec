@@ -4,10 +4,12 @@
 //! Soroban operation, deliberately mirroring the pipeline's `KnownOp`
 //! categories (`sordec-ir`'s `high::semantic`) so a source-side fact
 //! multiset is comparable with what the recognizers recover. Facts are
-//! compared by their [`SemanticFact::key_with`] — a canonical string — so two
+//! compared by their [`SemanticFact::key_in`] — a canonical string — so two
 //! facts are "the same" exactly when their keys are equal. Storage facts
 //! carry their tier and (when resolvable) their key path, so a swapped tier
 //! or an unrecovered storage key is a real semantic miss.
+
+use std::collections::BTreeSet;
 
 /// A recovered Soroban operation, extracted from source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,23 +184,28 @@ pub(crate) enum LedgerKind {
 impl SemanticFact {
     /// The canonical comparison key for this fact. Equal keys mean equal
     /// facts for precision/recall.
-    /// The comparison key, optionally without the *type* half of a
-    /// storage key's name.
+    /// The comparison key, keeping a storage key's type name only where
+    /// the module records it.
     ///
     /// A storage key reads `DataKey::Admin`: an enum's name and one of
     /// its variants. The variant is compiled into the contract — it is
     /// the rodata symbol the derived converter builds — but the enum's
-    /// own name lives only in `contractspecv0`. Strip that section and
-    /// the name is nowhere in the module, so a reconstruction has to
-    /// synthesize one, and every storage fact it recovers perfectly
-    /// then reads as both a miss and a false positive against the
-    /// original's.
+    /// own name lives only in `contractspecv0`. Where that section does
+    /// not declare the type, the name is nowhere in the module, so a
+    /// reconstruction has to synthesize one, and every storage fact it
+    /// recovers perfectly then reads as both a miss and a false positive
+    /// against the original's.
     ///
-    /// `type_names: false` drops the qualifier from **both** sides, so
-    /// the comparison is on what the module actually records: which
-    /// variant, at which tier, under which operation. Callers pass it
-    /// when the module declared no ABI; see `ScoreOptions::abi_declared`.
-    pub(crate) fn key_with(&self, type_names: bool) -> String {
+    /// That happens two ways. A stripped module declares nothing
+    /// (`ScoreOptions::abi_declared`). And a module can declare an ABI
+    /// and still leave its key type out of it: `account`'s `enum DataKey`
+    /// is private, used only as a key, and absent from its
+    /// `contractspecv0`. [`Names::Declared`] with the **original's**
+    /// declared types covers both: the qualifier is dropped from both
+    /// sides exactly when the module never recorded it, and kept, and
+    /// compared, when it did — so the comparison is on what the module
+    /// records: which variant, at which tier, under which operation.
+    pub(crate) fn key_in(&self, names: Names<'_>) -> String {
         match self {
             SemanticFact::Storage { op, tier, key } => format!(
                 "storage:{}:{}:{}",
@@ -206,7 +213,7 @@ impl SemanticFact {
                 tier.token(),
                 match key.as_deref() {
                     None => "?",
-                    Some(k) if type_names => k,
+                    Some(k) if names.keeps(k) => k,
                     // `DataKey::Allowance` -> `Allowance`.
                     Some(k) => k.rsplit("::").next().unwrap_or(k),
                 }
@@ -218,6 +225,26 @@ impl SemanticFact {
             SemanticFact::Ledger(kind) => format!("ledger:{}", kind.token()),
             SemanticFact::Crypto { op } => format!("crypto:{op}"),
             SemanticFact::Prng { op } => format!("prng:{op}"),
+        }
+    }
+}
+
+/// Which storage-key type names a comparison keeps.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Names<'a> {
+    /// Every qualifier, as written.
+    All,
+    /// Only those of a type in this set — the types the original's spec
+    /// declares; every other qualifier is dropped.
+    Declared(&'a BTreeSet<String>),
+}
+
+impl Names<'_> {
+    /// Whether the key `Type::Variant` keeps its `Type::`.
+    fn keeps(self, key: &str) -> bool {
+        match self {
+            Names::All => true,
+            Names::Declared(types) => key.split_once("::").is_some_and(|(ty, _)| types.contains(ty)),
         }
     }
 }

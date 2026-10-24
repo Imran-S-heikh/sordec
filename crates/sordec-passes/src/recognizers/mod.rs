@@ -70,7 +70,7 @@ pub use const_prop::ConstPropPass;
 pub use context::ContextPass;
 pub use cross_contract::CrossContractPass;
 pub use dispatcher::DispatcherPass;
-pub use enum_key::EnumKeyPass;
+pub use enum_key::{EnumKeyAfterInlinePass, EnumKeyPass};
 pub use error_const::ErrorConstPass;
 pub use linear_memory::LinearMemoryPass;
 pub use storage::StoragePass;

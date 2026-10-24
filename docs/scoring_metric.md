@@ -1,7 +1,7 @@
 # Scoring Metric Definition
 
 **Instrument:** `sordec-score` crate + `sordec score` CLI
-**Version:** `score-2.1.0` (2.0.0 built M1–M7, 2026-07-28; 2.1.0 changes listed in §7.1; see §6 for limits and §7 for freeze policy)
+**Version:** `score-2.2.0` (2.0.0 built M1–M7, 2026-07-28; 2.1.0 changes listed in §7.1, 2.2.0 in §7.2; see §6 for limits and §7 for freeze policy)
 **Status:** the definition of record. Not awaiting anyone's approval — the accepted SCF
 submission specifies no weighting and no per-category threshold, so these are our
 choices, disclosed here and stamped into every report (see
@@ -383,7 +383,7 @@ would also pass.
 ## 7. Versioning and freeze policy
 
 Every report carries the scorer version and its weights profile. The
-algorithm and default weights are **frozen** at `score-2.1.0` (§7.1 lists what
+algorithm and default weights are **frozen** at `score-2.2.0` (§7.1 and §7.2 list what
 changed from `score-2.0.0`): a golden
 calibration vector pins the exact per-category scores for a fixed input
 pair, so any change that could move a score fails the freeze test until the
@@ -419,6 +419,26 @@ Three of the six fire only on a stripped build (`token-v23-stripped`). Measured
 together they account for **about +0.08** of the corpus aggregate's rise from 0.61
 (alpha) to 0.94; the rest is reconstruction. Every change carries its before/after
 numbers in its commit, and the golden vector was re-frozen with each.
+
+### 7.2 `score-2.2.0`: a key's enum name, where the spec does not declare it
+
+One rule, the same principle as §7.1's fourth row, widened. 2.1.0 dropped a
+storage key's enum name (`DataKey::Admin` -> `Admin`) only on a stripped
+build. But a module can declare an ABI and still leave its key type out of it:
+the SDK exports a `#[contracttype]` only when it is `pub`, and `account`'s
+`enum DataKey` is private. Its name is then nowhere in the module, exactly as on
+a stripped build. The qualifier is now kept only for a type the **original's**
+`contractspecv0` declares, and dropped from both sides otherwise; a stripped
+build still declares none, so it drops every one, as before.
+
+The golden vector does not move (it has no spec, so every name is kept).
+Measured on the held-out corpus, metric alone: mean 0.7630 -> 0.7719, all of
+it `merkle_distribution`, whose key enum is private too (semantic 0.3158 ->
+0.9474). `account` did not move, because its keys were not recovered at all yet. The decompiler changes that landed with it
+(a key enum recovered after inlining, emitted `export = false` where the module
+has an ABI, and a synthesized type no longer reusing another type's id) take
+the mean to 0.7833, `account` from 0.5693 to 0.7950 and `merkle_distribution`
+to 0.8321 (its interface 0.8333 -> 1.0000, from the id fix).
 
 ## 8. Baseline
 
