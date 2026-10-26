@@ -55,7 +55,7 @@ use sordec_ir::{Expr, HighIr, IrType, SemanticOp, TypeRef};
 
 use crate::pass::{Pass, PassResult};
 use crate::recognizers::enum_key::case_footprint;
-use crate::type_infer::primitive_of_known;
+use crate::type_infer::{primitive_of_known, primitive_to_known};
 
 /// Pass name.
 pub const PASS_NAME: &str = "marshalling-key-field-type";
@@ -64,6 +64,8 @@ pub const PASS_NAME: &str = "marshalling-key-field-type";
 const M_TYPED: &str = "marshalling_key_fields_typed";
 /// Fields left alone because the sites disagreed about the type.
 const M_DISAGREED: &str = "marshalling_key_fields_disagreed";
+/// Frame loads typed from the key field they fill.
+const M_LOADS_TYPED: &str = "marshalling_key_payload_loads_typed";
 /// Frame-read keys cut back to their variant's now-known footprint.
 const M_TRIMMED: &str = "marshalling_key_payloads_trimmed";
 
@@ -74,8 +76,44 @@ pub struct KeyFieldTypePass;
 /// What the construction sites witnessed for one `(variant, position)`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Witness {
-    One(sordec_ir::PrimitiveType),
+    One(Field),
     Disagreed,
+}
+
+/// A field type a site can witness: a primitive, or `BytesN<N>`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    Primitive(sordec_ir::PrimitiveType),
+    BytesN(u32),
+}
+
+impl Field {
+    const VAL: Field = Field::Primitive(sordec_ir::PrimitiveType::Val);
+
+    fn type_ref(self) -> TypeRef {
+        match self {
+            Field::Primitive(p) => TypeRef::Primitive(p),
+            Field::BytesN(n) => TypeRef::Composite(sordec_ir::CompositeType::BytesN(n)),
+        }
+    }
+}
+
+impl Witness {
+    /// This witness joined with another site's `ty`.
+    ///
+    /// A `Val` gives way to a concrete type rather than disagreeing with
+    /// it. `Val` is what every type travels as, so a site holding one is a
+    /// site whose type was not recovered, not one that put a different type
+    /// in the field: `account` builds `Signer` from a `BytesN<32>` in its
+    /// constructor and from a frame word typed only `Val` in
+    /// `__check_auth`, and the source's field is `BytesN<32>`.
+    fn join(self, ty: Field) -> Self {
+        match self {
+            Witness::One(seen) if seen == ty || ty == Field::VAL => Witness::One(seen),
+            Witness::One(Field::VAL) => Witness::One(ty),
+            _ => Witness::Disagreed,
+        }
+    }
 }
 
 impl Pass<HighIr> for KeyFieldTypePass {
@@ -103,8 +141,8 @@ impl Pass<HighIr> for KeyFieldTypePass {
                         continue;
                     }
                     match witnessed.get(&(union.name.clone(), case.name.clone(), index)) {
-                        Some(Witness::One(p)) => {
-                            *field = TypeRef::Primitive(*p);
+                        Some(Witness::One(ty)) => {
+                            *field = ty.type_ref();
                             result.metrics.increment(M_TYPED, 1);
                             result.changed = true;
                         }
@@ -117,7 +155,73 @@ impl Pass<HighIr> for KeyFieldTypePass {
             }
         }
         trim_payloads(ir, &mut result);
+        type_payload_loads(ir, &mut result);
         result
+    }
+}
+
+/// Type each untyped frame load a key puts in a now-typed field.
+///
+/// The field's type is what the source put there, so it is the type of
+/// every value put there. Only a `Load` takes it: a load's type is whatever
+/// its reader says, and nothing has said anything here but `Val`, while any
+/// other value's `Val` was derived from its own definition and is not this
+/// pass's to overrule. `account`'s `__check_auth` reads the signer's public
+/// key out of the frame and so held it as a `Val`, which neither the key nor
+/// the `ed25519_verify` it feeds would take.
+fn type_payload_loads(ir: &mut HighIr, result: &mut PassResult) {
+    let Some(facts) = ir.soroban_facts.as_ref() else {
+        return;
+    };
+    let mut fields: BTreeMap<(String, String), Vec<sordec_ir::KnownType>> = BTreeMap::new();
+    for union in &facts.types.unions {
+        for case in &union.cases {
+            let known = case.fields.iter().map(|f| match f {
+                TypeRef::Composite(sordec_ir::CompositeType::BytesN(n)) => {
+                    Some(sordec_ir::KnownType::BytesN(*n))
+                }
+                TypeRef::Primitive(p) if *p != sordec_ir::PrimitiveType::Val => {
+                    Some(primitive_to_known(*p))
+                }
+                _ => None,
+            });
+            // A `None` stands for "leave it": kept positional.
+            let known: Vec<_> = known.map(|k| k.unwrap_or(sordec_ir::KnownType::Val)).collect();
+            fields.insert((union.name.clone(), case.name.clone()), known);
+        }
+    }
+    for func in &mut ir.functions {
+        let mut retype = Vec::new();
+        for (_, binding) in func.bindings.iter() {
+            let Expr::Semantic(SemanticOp::Known(op)) = &binding.expr else {
+                continue;
+            };
+            let Some(key) = resolved_key(op) else {
+                continue;
+            };
+            let Some(types) = fields.get(&(key.enum_name.clone(), key.variant.clone())) else {
+                continue;
+            };
+            for (value, ty) in key.payload.iter().zip(types) {
+                if *ty != sordec_ir::KnownType::Val {
+                    retype.push((*value, ty.clone()));
+                }
+            }
+        }
+        for (value, ty) in retype {
+            let Some(binding) = func.bindings.get_mut(value) else {
+                continue;
+            };
+            let untyped = match &binding.ty {
+                IrType::Known(k) | IrType::Inferred(k) => *k == sordec_ir::KnownType::Val,
+                IrType::Unknown(_) => true,
+            };
+            if untyped && matches!(binding.expr, Expr::Load { .. }) {
+                binding.ty = IrType::Inferred(ty);
+                result.metrics.increment(M_LOADS_TYPED, 1);
+                result.changed = true;
+            }
+        }
     }
 }
 
@@ -201,31 +305,38 @@ fn witnesses(ir: &HighIr) -> BTreeMap<(String, String, usize), Witness> {
                 continue;
             };
             for (index, value) in key.payload.iter().enumerate() {
-                // Only a *primitive* witness. A user-defined or composite
-                // payload type needs a `TypeId` that means the same thing
-                // in this registry, and nothing here establishes that.
-                let Some(p) = func
+                // Only a primitive or `BytesN<N>` witness. A user-defined
+                // or other composite payload type needs a `TypeId` (or an
+                // element type) that means the same thing in this
+                // registry, and nothing here establishes that.
+                let Some(ty) = func
                     .bindings
                     .get(*value)
                     .and_then(|b| match &b.ty {
-                        IrType::Known(k) | IrType::Inferred(k) => primitive_of_known(k),
+                        IrType::Known(k) | IrType::Inferred(k) => witness_type(k),
                         IrType::Unknown(_) => None,
                     })
                 else {
                     continue;
                 };
                 let slot = (key.enum_name.clone(), key.variant.clone(), index);
-                out.entry(slot)
-                    .and_modify(|w| {
-                        if *w != Witness::One(p) {
-                            *w = Witness::Disagreed;
-                        }
-                    })
-                    .or_insert(Witness::One(p));
+                let joined = match out.remove(&slot) {
+                    Some(w) => w.join(ty),
+                    None => Witness::One(ty),
+                };
+                out.insert(slot, joined);
             }
         }
     }
     out
+}
+
+/// The field type a value of type `k` witnesses.
+fn witness_type(k: &sordec_ir::KnownType) -> Option<Field> {
+    match k {
+        sordec_ir::KnownType::BytesN(n) => Some(Field::BytesN(*n)),
+        k => primitive_of_known(k).map(Field::Primitive),
+    }
 }
 
 /// The recovered key a storage op names, where it names one.
@@ -322,6 +433,40 @@ mod tests {
         let result = KeyFieldTypePass.run(&mut ir);
         assert!(!result.changed, "nothing agreed");
         assert_eq!(result.metrics.get(M_DISAGREED), Some(1), "and it says why");
+    }
+
+    /// `account`: one site puts a `BytesN<32>` in the field, another a frame
+    /// word only typed `Val`. The `Val` is an unrecovered type, not a
+    /// disagreement, and the frame load then takes the field's type.
+    #[test]
+    fn a_val_site_yields_and_its_load_takes_the_field_type() {
+        let val = IrType::Known(sordec_ir::KnownType::Val);
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Load { addr: v(0), offset: 24, width: sordec_ir::MemWidth::W8, signed: None, ty: val.clone() },
+                get_with(vec![v(0)]),
+                get_with(vec![v(1)]),
+            ],
+            vec![],
+            vec![1, 2, 3],
+        );
+        f.bindings.get_mut(v(0)).expect("a").ty = IrType::Known(sordec_ir::KnownType::BytesN(32));
+        f.bindings.get_mut(v(1)).expect("b").ty = val;
+        let mut ir = with_union(module(vec![f]));
+
+        let result = KeyFieldTypePass.run(&mut ir);
+        assert_eq!(result.metrics.get(M_LOADS_TYPED), Some(1));
+        let load = &ir.functions[0].bindings.get(v(1)).expect("the load").ty;
+        assert!(
+            matches!(load, IrType::Inferred(sordec_ir::KnownType::BytesN(32))),
+            "got {load:?}"
+        );
+        let field = &ir.soroban_facts.expect("facts").types.unions[0].cases[0].fields[0];
+        assert!(
+            matches!(field, TypeRef::Composite(sordec_ir::CompositeType::BytesN(32))),
+            "got {field:?}"
+        );
     }
 
     /// A frame-read key that ran past its variant is cut back once the

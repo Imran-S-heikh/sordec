@@ -73,7 +73,7 @@ use std::collections::{HashMap, HashSet};
 
 use sordec_common::{FuncId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
-    BinaryOp, CompositeType, Expr, FunctionSignature, HighFunction, HighIr, IrType, KnownOp,
+    BinaryOp, CompositeType, CryptoOpKind, Expr, FunctionSignature, HighFunction, HighIr, IrType, KnownOp,
     KnownType, Literal, PrimitiveType, SemanticOp, TypeRef, UnaryOp, ValObjectKind, WasmOpcodeKind,
 };
 
@@ -867,6 +867,16 @@ fn semantic_arg_types(op: &KnownOp) -> Vec<(ValueId, KnownType)> {
             .and_then(|ty| args.first().map(|a| (*a, ty)))
             .into_iter()
             .collect(),
+        // `ed25519_verify(&BytesN<32>, &Bytes, &BytesN<64>)`: the key and
+        // the signature are fixed-width in the SDK's own signature. The
+        // message is left alone — a `Bytes` there is as often a `BytesN`
+        // the source converted, and typing it would contradict that.
+        K::CryptoOp { kind: CryptoOpKind::VerifySigEd25519, args } => match args.as_slice() {
+            [key, _message, signature] => {
+                vec![(*key, KnownType::BytesN(32)), (*signature, KnownType::BytesN(64))]
+            }
+            _ => vec![],
+        },
         _ => vec![],
     }
 }
@@ -1675,7 +1685,7 @@ pub(crate) fn primitive_of_known(k: &KnownType) -> Option<PrimitiveType> {
     })
 }
 
-fn primitive_to_known(p: PrimitiveType) -> KnownType {
+pub(crate) fn primitive_to_known(p: PrimitiveType) -> KnownType {
     match p {
         PrimitiveType::Val => KnownType::Val,
         PrimitiveType::Bool => KnownType::Bool,
@@ -2080,6 +2090,12 @@ mod tests {
         // (no informative scalar).
         assert_eq!(obj_from_scalar_type(ValObjectKind::ObjFromU64), Some(KnownType::U64));
         assert_eq!(obj_from_scalar_type(ValObjectKind::ObjToU64), None);
+        // ed25519_verify pins its key and signature widths, not the message.
+        let verify = KnownOp::CryptoOp { kind: CryptoOpKind::VerifySigEd25519, args: vec![addr, sym, val] };
+        assert_eq!(
+            semantic_arg_types(&verify),
+            vec![(addr, KnownType::BytesN(32)), (val, KnownType::BytesN(64))]
+        );
     }
 
     // ---- contractspec mapping ----
