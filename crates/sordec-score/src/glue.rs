@@ -58,6 +58,10 @@ pub(crate) const SPEC_FN: &str = "spec_xdr";
 /// contract struct: `TokenClient`, `TokenArgs`.
 pub(crate) const GENERATED_TYPE_SUFFIXES: [&str; 2] = ["Client", "Args"];
 
+/// The doc line `#[contractclient]` writes on the client it generates:
+/// `MintClient is a client for calling the contract defined in "MintInterface".`
+const TRAIT_CLIENT_DOC: &str = " is a client for calling the contract defined in ";
+
 /// An expanded source with the macro glue removed and its ABI recovered.
 pub(crate) struct Canonicalized {
     /// Glue-stripped AST — what the categories actually score.
@@ -104,9 +108,9 @@ fn starts_uppercase(name: &str) -> bool {
 pub(crate) fn canonicalize(file: syn::File) -> Canonicalized {
     // The paired-name check needs the full set of declared structs before any
     // filtering: `TokenClient` is glue only because `Token` is also present.
-    let declared = declared_structs(&file.items);
+    let helpers = generated_helpers(&file.items);
     let mut spec = BTreeMap::new();
-    let items = retain_items(file.items, &declared, &mut spec);
+    let items = retain_items(file.items, &helpers, &mut spec);
 
     Canonicalized {
         file: syn::File { items, ..file },
@@ -114,22 +118,28 @@ pub(crate) fn canonicalize(file: syn::File) -> Canonicalized {
     }
 }
 
-/// Every struct name declared anywhere in the tree, including nested modules.
-fn declared_structs(items: &[Item]) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    collect_struct_names(items, &mut names);
-    names
+/// The generated helper struct names anywhere in the tree, including nested
+/// modules: those [`is_generated_helper`] pairs with their contract, and the
+/// clients `#[contractclient]` generates for a trait.
+fn generated_helpers(items: &[Item]) -> BTreeSet<String> {
+    let mut structs = Vec::new();
+    collect_structs(items, &mut structs);
+    let declared: BTreeSet<String> = structs.iter().map(|s| s.ident.to_string()).collect();
+    structs
+        .iter()
+        .map(|s| s.ident.to_string())
+        .filter(|name| is_generated_helper(name, &declared))
+        .chain(structs.iter().filter(|s| is_trait_client(s)).map(|s| s.ident.to_string()))
+        .collect()
 }
 
-fn collect_struct_names(items: &[Item], names: &mut BTreeSet<String>) {
+fn collect_structs<'a>(items: &'a [Item], structs: &mut Vec<&'a syn::ItemStruct>) {
     for item in items {
         match item {
-            Item::Struct(s) => {
-                names.insert(s.ident.to_string());
-            }
+            Item::Struct(s) => structs.push(s),
             Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
-                    collect_struct_names(inner, names);
+                    collect_structs(inner, structs);
                 }
             }
             _ => {}
@@ -137,24 +147,45 @@ fn collect_struct_names(items: &[Item], names: &mut BTreeSet<String>) {
     }
 }
 
+/// Whether this struct is the client `#[contractclient(name = "…")]`
+/// generates for a trait.
+///
+/// The pairing rule cannot see it: the client is named for the attribute,
+/// not for any struct (`MintClient` for `trait MintInterface`). What marks
+/// it is the doc line the macro writes on it, identical in every SDK from
+/// 21.7 to 28.0. Left in, its `mint` shares a bare name with the
+/// contract's own `mint` entrypoint, and an ambiguous entrypoint is one
+/// `structure` cannot find on either side: mint-lock scored 0.0 there
+/// against its own source.
+fn is_trait_client(s: &syn::ItemStruct) -> bool {
+    s.attrs.iter().any(|attr| match &attr.meta {
+        syn::Meta::NameValue(nv) if nv.path.is_ident("doc") => matches!(
+            &nv.value,
+            syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(doc), .. })
+                if doc.value().contains(TRAIT_CLIENT_DOC)
+        ),
+        _ => false,
+    })
+}
+
 /// Filter one item list, recursing into inline modules. Expansion preserves
 /// the source's module tree, so the original's glue sits under `mod contract`
 /// while our flat `lib.rs` keeps it at the top level — both must be reached.
 fn retain_items(
     items: Vec<Item>,
-    declared: &BTreeSet<String>,
+    helpers: &BTreeSet<String>,
     spec: &mut BTreeMap<String, Vec<u8>>,
 ) -> Vec<Item> {
     items
         .into_iter()
-        .filter_map(|item| retain_item(item, declared, spec))
+        .filter_map(|item| retain_item(item, helpers, spec))
         .collect()
 }
 
 /// Keep one item, or `None` if the macros generated it.
 fn retain_item(
     item: Item,
-    declared: &BTreeSet<String>,
+    helpers: &BTreeSet<String>,
     spec: &mut BTreeMap<String, Vec<u8>>,
 ) -> Option<Item> {
     match item {
@@ -162,7 +193,7 @@ fn retain_item(
         Item::Mod(m) if m.ident.to_string().starts_with(GENERATED_MOD_PREFIX) => None,
         Item::Mod(mut m) => {
             if let Some((brace, inner)) = m.content.take() {
-                m.content = Some((brace, retain_items(inner, declared, spec)));
+                m.content = Some((brace, retain_items(inner, helpers, spec)));
             }
             Some(Item::Mod(m))
         }
@@ -170,8 +201,8 @@ fn retain_item(
         // these merely call, so nothing is lost by dropping them.
         Item::Static(s) if s.ident.to_string().starts_with(SPEC_STATIC_PREFIX) => None,
         // `TokenClient` / `TokenArgs`, but only alongside their `Token`.
-        Item::Struct(s) if is_generated_helper(&s.ident.to_string(), declared) => None,
-        Item::Impl(item_impl) => retain_impl(item_impl, declared, spec),
+        Item::Struct(s) if helpers.contains(&s.ident.to_string()) => None,
+        Item::Impl(item_impl) => retain_impl(item_impl, helpers, spec),
         other => Some(other),
     }
 }
@@ -180,7 +211,7 @@ fn retain_item(
 /// carries. Returns `None` when the whole block is glue or is left empty.
 fn retain_impl(
     mut item_impl: syn::ItemImpl,
-    declared: &BTreeSet<String>,
+    helpers: &BTreeSet<String>,
     spec: &mut BTreeMap<String, Vec<u8>>,
 ) -> Option<Item> {
     let self_name = type_name(&item_impl.self_ty);
@@ -189,7 +220,7 @@ fn retain_impl(
     // generated `impl Event for X`.
     if self_name
         .as_deref()
-        .is_some_and(|name| is_generated_helper(name, declared))
+        .is_some_and(|name| helpers.contains(name))
     {
         return None;
     }
@@ -445,6 +476,24 @@ mod tests {
         );
         assert_eq!(type_names(&out.file), vec!["Token"]);
         assert!(fn_names(&out.file).is_empty(), "their impls go too");
+    }
+
+    #[test]
+    fn a_trait_client_is_dropped_by_its_generated_doc() {
+        // `#[contractclient(name = "MintClient")] trait MintInterface`: no
+        // `Mint` struct to pair with, but the macro's doc line marks it.
+        let out = canon(
+            r#"
+            pub trait MintInterface { fn mint(env: Env, to: Address, amount: i128); }
+            ///MintClient is a client for calling the contract defined in "MintInterface".
+            pub struct MintClient<'a> { pub env: Env }
+            impl<'a> MintClient<'a> { pub fn mint(&self, to: &Address, amount: &i128) {} }
+            pub struct Contract;
+            impl Contract { pub fn mint(env: Env) {} }
+            "#,
+        );
+        assert_eq!(type_names(&out.file), vec!["Contract"]);
+        assert_eq!(fn_names(&out.file), vec!["mint"]);
     }
 
     #[test]

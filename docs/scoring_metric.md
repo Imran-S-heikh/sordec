@@ -422,7 +422,7 @@ numbers in its commit, and the golden vector was re-frozen with each.
 
 ### 7.2 `score-2.2.0`: a key's enum name, where the spec does not declare it
 
-One rule, the same principle as §7.1's fourth row, widened. 2.1.0 dropped a
+Two changes. The first is the same principle as §7.1's fourth row, widened. 2.1.0 dropped a
 storage key's enum name (`DataKey::Admin` -> `Admin`) only on a stripped
 build. But a module can declare an ABI and still leave its key type out of it:
 the SDK exports a `#[contracttype]` only when it is `pub`, and `account`'s
@@ -439,6 +439,17 @@ it `merkle_distribution`, whose key enum is private too (semantic 0.3158 ->
 has an ABI, and a synthesized type no longer reusing another type's id) take
 the mean to 0.7833, `account` from 0.5693 to 0.7950 and `merkle_distribution`
 to 0.8321 (its interface 0.8333 -> 1.0000, from the id fix).
+
+The second is a glue fix. The client `#[contractclient(name = "MintClient")]`
+generates for a trait was kept as authored code, because the pairing rule
+recognises a `TokenClient` only beside a `Token` and this one is named for its
+attribute. Its `mint` then shared a bare name with the contract's own `mint`
+entrypoint, and `structure` cannot find an ambiguous entrypoint on either side:
+mint-lock scored **0.0** on structure against its own source, overall 0.7059.
+The client is now recognised by the doc line the macro writes on it (the same
+in every SDK from 21.7 to 28.0), and the self-score is 1.0000. On the held-out
+corpus only mint-lock moves, 0.5882 -> 0.6326, its structure measured for the
+first time (0.1509) rather than read as a miss; the mean goes 0.7833 -> 0.7850.
 
 ## 8. Baseline
 

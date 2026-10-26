@@ -160,7 +160,7 @@ fn heldout_floor(name: &str) -> f64 {
         "increment_with_pause" => 0.84, // 0.8655: `paused()` through a declared client
         "logging" => 0.86,
         "merkle_distribution" => 0.81, // 0.8321: no synthesized type takes a declared one's id
-        "mint-lock" => 0.56, // 0.5882: `mint` through a declared client
+        "mint-lock" => 0.61, // 0.6326: `mint` through a declared client, its generated client glue
         "modular_account" => 0.40,
         "other_custom_types" => 0.70,
         "pause" => 0.98,
