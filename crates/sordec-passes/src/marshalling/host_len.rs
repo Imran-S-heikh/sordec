@@ -32,10 +32,28 @@
 //!   `BytesN<N>` conversion is recognized by that same decode.
 //! - **Only the exact re-encode.** `and` with the high-word mask, then `or`
 //!   with the `U32Val` tag; any other constant is not this.
+//!
+//! # And a bound checked on the raw `Val`
+//!
+//! The SDK's `Vec::get(i)` checks `i` against the length without decoding
+//! it: `account`'s `args.get(2)` is `raw_len <= 0x2_FFFF_FFFF`, the raw form
+//! of `len < 3`. With the length named `len()` that read `v.len() <= 12884901887`,
+//! a `u32` against an `i64`. The raw value is `len · 2³² + 4`, so
+//!
+//! ```text
+//! raw <= C  ⟺  len <= ⌊(C − 4) / 2³²⌋        raw == C  ⟺  len == C >> 32
+//! ```
+//!
+//! (with `<` as `<= C − 1`, and `>`, `>=`, `!=` their negations), and the
+//! comparison is rewritten on the length. The lowering has erased the
+//! comparison's signedness, which is safe here: signed and unsigned order
+//! agree on every raw value with `len < 2³¹`, and no Soroban collection
+//! approaches that. A bound outside the `u32` range, or an equality with a
+//! constant that is no `U32Val`, is left alone.
 
-use sordec_common::{Provenance, ProvenanceSource, ValueId};
+use sordec_common::{IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
-    BinaryOp, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal,
+    BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal,
     MapOpKind, SemanticOp, VecOpKind,
 };
 
@@ -59,6 +77,23 @@ impl Pass<HighIr> for HostLenPass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
         for func in &mut ir.functions {
+            let bounds = bounds(func);
+            for &(cmp, op, len, bound) in &bounds {
+                let lit = push_literal(func, bound);
+                schedule_before(func, cmp, lit);
+                if let Some(b) = func.bindings.get_mut(cmp) {
+                    b.expr = Expr::Binary { op, lhs: len, rhs: lit };
+                    b.add_provenance(Provenance::new(
+                        PASS_NAME,
+                        ProvenanceSource::SdkPattern,
+                        "a bound on a raw host length is the bound on the length",
+                    ));
+                }
+            }
+            if !bounds.is_empty() {
+                result.metrics.increment(M_LEN, bounds.len() as i64);
+                result.changed = true;
+            }
             let folds = folds(func);
             for &(id, len, note) in &folds {
                 if let Some(b) = func.bindings.get_mut(id) {
@@ -98,6 +133,81 @@ fn folds(func: &HighFunction) -> Vec<(ValueId, ValueId, &'static str)> {
             _ => None,
         })
         .collect()
+}
+
+/// Each comparison of a raw host length with a constant, as the same
+/// comparison on the length: `(comparison, op, length, bound)`, length on
+/// the left.
+fn bounds(func: &HighFunction) -> Vec<(ValueId, BinaryOp, ValueId, u32)> {
+    func.bindings
+        .iter()
+        .filter_map(|(id, b)| {
+            let Expr::Binary { op, lhs, rhs } = &b.expr else {
+                return None;
+            };
+            let (lhs, rhs) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
+            // Length on the left; a constant on the left flips the order.
+            let (op, len, c) = if is_len(func, lhs) {
+                (*op, lhs, literal(func, rhs)?)
+            } else if is_len(func, rhs) {
+                (flipped(*op)?, rhs, literal(func, lhs)?)
+            } else {
+                return None;
+            };
+            let (op, bound) = on_length(op, i128::from(c))?;
+            Some((id, op, len, u32::try_from(bound).ok()?))
+        })
+        .collect()
+}
+
+/// `raw op c` as `len op' bound`, where `raw = len · 2³² + 4`.
+fn on_length(op: BinaryOp, c: i128) -> Option<(BinaryOp, i128)> {
+    const WORD: i128 = 1 << 32;
+    let tag = i128::from(TAG_U32_VAL);
+    // `raw <= c ⟺ len <= ⌊(c − 4) / 2³²⌋`, defined while `c ≥ 4`.
+    let le = |c: i128| (c >= tag).then(|| (c - tag).div_euclid(WORD));
+    Some(match op {
+        BinaryOp::Le => (BinaryOp::Le, le(c)?),
+        BinaryOp::Lt => (BinaryOp::Le, le(c - 1)?),
+        BinaryOp::Gt => (BinaryOp::Gt, le(c)?),
+        BinaryOp::Ge => (BinaryOp::Gt, le(c - 1)?),
+        BinaryOp::Eq | BinaryOp::Ne if c.rem_euclid(WORD) == tag => (op, c.div_euclid(WORD)),
+        _ => return None,
+    })
+}
+
+/// The comparison with its operands swapped.
+fn flipped(op: BinaryOp) -> Option<BinaryOp> {
+    Some(match op {
+        BinaryOp::Lt => BinaryOp::Gt,
+        BinaryOp::Le => BinaryOp::Ge,
+        BinaryOp::Gt => BinaryOp::Lt,
+        BinaryOp::Ge => BinaryOp::Le,
+        BinaryOp::Eq | BinaryOp::Ne => op,
+        _ => return None,
+    })
+}
+
+/// Append a `u32` literal binding; the caller schedules it.
+fn push_literal(func: &mut HighFunction, n: u32) -> ValueId {
+    let id = ValueId::from_index(func.bindings.len() as u32);
+    func.bindings.push(Binding::new(
+        id,
+        IrType::Known(KnownType::U32),
+        Expr::Literal(Literal::U32(n)),
+        Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, "a raw length bound, decoded"),
+    ));
+    id
+}
+
+/// Schedule `fresh` immediately before `anchor` in whichever block holds it.
+fn schedule_before(func: &mut HighFunction, anchor: ValueId, fresh: ValueId) {
+    for (_, block) in func.blocks.iter_mut() {
+        if let Some(pos) = block.bindings.iter().position(|v| *v == anchor) {
+            block.bindings.insert(pos, fresh);
+            return;
+        }
+    }
 }
 
 /// A collection length, which the host returns as a `U32Val`.
@@ -148,6 +258,63 @@ mod tests {
         for id in [v(2), v(6)] {
             assert!(matches!(f.bindings.get(id).unwrap().expr, Expr::Use(n) if n == v(1)));
             assert_eq!(f.bindings.get(id).unwrap().ty, IrType::Known(KnownType::U32));
+        }
+    }
+
+    /// `vec_len(v0) op c`, the constant on the right or the left.
+    fn bound(op: BinaryOp, c: i64, constant_first: bool) -> HighIr {
+        let (lhs, rhs) = if constant_first { (v(2), v(1)) } else { (v(1), v(2)) };
+        module(vec![func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                                      // v0
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::Len, args: vec![v(0)] })), // v1
+                Expr::Literal(Literal::I64(c)),                                                      // v2
+                Expr::Binary { op, lhs, rhs },                                                       // v3
+            ],
+            vec![v(0)],
+            vec![1, 2, 3],
+        )])
+    }
+
+    fn rewritten(ir: &HighIr) -> Option<(BinaryOp, u32)> {
+        let f = &ir.functions[0];
+        let Expr::Binary { op, lhs, rhs } = f.bindings.get(v(3))?.expr else {
+            return None;
+        };
+        assert_eq!(lhs, v(1), "the length on the left");
+        match f.bindings.get(rhs)?.expr {
+            Expr::Literal(Literal::U32(n)) => Some((op, n)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_raw_length_bound_is_a_bound_on_the_length() {
+        // `args.get(2)`: `raw <= 0x2_FFFF_FFFF` is `len <= 2`.
+        let mut ir = bound(BinaryOp::Le, 0x2_FFFF_FFFF, false);
+        assert!(HostLenPass.run(&mut ir).changed);
+        assert_eq!(rewritten(&ir), Some((BinaryOp::Le, 2)));
+        // `raw < (3 << 32) | 4` is `len < 3`, i.e. `len <= 2`.
+        let mut ir = bound(BinaryOp::Lt, (3 << 32) | 4, false);
+        HostLenPass.run(&mut ir);
+        assert_eq!(rewritten(&ir), Some((BinaryOp::Le, 2)));
+        // `0x2_FFFF_FFFF < raw`, constant first, is `len > 2`.
+        let mut ir = bound(BinaryOp::Lt, 0x2_FFFF_FFFF, true);
+        HostLenPass.run(&mut ir);
+        assert_eq!(rewritten(&ir), Some((BinaryOp::Gt, 2)));
+        // An equality with a `U32Val` is one on its payload.
+        let mut ir = bound(BinaryOp::Eq, (5 << 32) | 4, false);
+        HostLenPass.run(&mut ir);
+        assert_eq!(rewritten(&ir), Some((BinaryOp::Eq, 5)));
+    }
+
+    #[test]
+    fn a_constant_that_is_no_length_bound_is_left_alone() {
+        // No `U32Val` equals this, and below the tag nothing is `<=`.
+        for (op, c) in [(BinaryOp::Eq, 0x2_FFFF_FFFF), (BinaryOp::Le, 3)] {
+            let mut ir = bound(op, c, false);
+            HostLenPass.run(&mut ir);
+            assert_eq!(rewritten(&ir), None, "{op:?} {c}");
         }
     }
 

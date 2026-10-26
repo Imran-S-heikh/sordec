@@ -48,6 +48,59 @@ fn typed_vec(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
     )
 }
 
+/// `vec_get(v, i)` with `i` a literal `U32Val`, as `v.get_unchecked(n)`.
+///
+/// The general `Get` stays a hole (see [`known_op_expr`]): its index is an
+/// encoded `Val`, and decoding it wrong is off by 2³². A literal one decodes
+/// exactly — tag 4 in the low word, the `u32` above it — and the host's
+/// `vec_get` traps out of range just as `get_unchecked` does, so the chain
+/// is the call. `account`'s `args.get(2)` is `vec_get(args, 0x2_0000_0004)`.
+///
+/// A receiver the IR has not typed as a `Vec` goes through `Val`, as
+/// `len()` does, and its element is then a `Val`; where the binding is
+/// typed (`i128`, the amount the source converts the argument to), the
+/// element is converted to it.
+pub(crate) fn vec_get_at_literal(
+    ctx: &FnCtx,
+    args: &[sordec_common::ValueId],
+    result: sordec_common::ValueId,
+) -> Option<syn::Expr> {
+    let [recv, index] = args else {
+        return None;
+    };
+    let n = match ctx.func.bindings.get(*index).map(|b| &b.expr) {
+        Some(sordec_ir::Expr::Literal(sordec_ir::Literal::I64(raw))) => u32_val_payload(*raw)?,
+        _ => return None,
+    };
+    let eb = ctx.env_borrow();
+    let v = ctx.value_ref(*recv);
+    if typed_vec(ctx, *recv) {
+        return Some(parse_quote!(#v.get_unchecked(#n)));
+    }
+    let element: syn::Expr = parse_quote!(
+        soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Vec<soroban_sdk::Val>>::into_val(
+            &soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#v, #eb),
+            #eb,
+        ).get_unchecked(#n)
+    );
+    let typed = matches!(
+        ctx.func.bindings.get(result).map(|b| &b.ty),
+        Some(IrType::Known(k) | IrType::Inferred(k)) if *k != KnownType::Val
+    );
+    if !typed {
+        return Some(element);
+    }
+    let ty = ctx.value_type(result);
+    Some(parse_quote!(soroban_sdk::IntoVal::<soroban_sdk::Env, #ty>::into_val(&#element, #eb)))
+}
+
+/// The `u32` a raw `U32Val` word carries: tag 4 in the low word, the value
+/// above it. `None` for any other word.
+fn u32_val_payload(raw: i64) -> Option<u32> {
+    (raw & 0xFFFF_FFFF == 4).then_some(())?;
+    u32::try_from(raw >> 32).ok()
+}
+
 /// The method chain for a recovered op, or `None` when it cannot be
 /// rendered honestly (an unmapped op, or an `Unknown` storage tier).
 pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
@@ -746,6 +799,16 @@ mod tests {
             tier_method(&StorageTier::Known(KnownTier::Temporary)).unwrap().to_string(),
             "temporary"
         );
+    }
+
+    #[test]
+    fn a_literal_index_decodes_only_from_a_u32_val() {
+        // `account`'s `args.get(2)`.
+        assert_eq!(u32_val_payload(0x2_0000_0004), Some(2));
+        assert_eq!(u32_val_payload(4), Some(0));
+        assert_eq!(u32_val_payload(0xFFFF_FFFF_0000_0004_u64 as i64), None, "negative: not a u32");
+        assert_eq!(u32_val_payload(0x2_0000_0005), None, "another tag");
+        assert_eq!(u32_val_payload(2), None, "a bare integer is not the encoded index");
     }
 
     #[test]

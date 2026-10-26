@@ -175,7 +175,8 @@ fn infer_function(func: &mut HighFunction, sigs: &SigTable) -> (bool, u64) {
         // Forward: each binding's type from its own expression.
         for (id, binding) in func.bindings.iter() {
             let cand = match &binding.expr {
-                Expr::Phi { incoming } => phi_join_with_constants(func, incoming, &types),
+                Expr::Phi { incoming } => counter_bounded_by_u32(func, id, incoming, &types)
+                    .or_else(|| phi_join_with_constants(func, incoming, &types)),
                 Expr::Binary { op, lhs, rhs } => {
                     offset_of_known(func, *op, *lhs, *rhs, &types).or_else(|| infer_expr(&binding.expr, &types))
                 }
@@ -778,6 +779,63 @@ fn phi_join_with_constants(
     } else {
         phi_join(incoming, types)
     }
+}
+
+/// A loop counter whose bound is a `u32` is a `u32`.
+///
+/// `for i in 0..v.len()` keeps `i` in whatever word the wasm compares it
+/// in, and a length decoded by an `i64.shr_u` makes that an `i64`: the
+/// counter's start and step are `i64` literals and nothing else about it
+/// says `u32` but the bound. Read as votes, those literals conflict with
+/// the bound's comparison and the counter comes out untyped — `account`'s
+/// signature loop declared `i: Val`, stepped with `+ 1i64`.
+///
+/// The shape is the induction variable: a phi whose constant arms are
+/// non-negative, whose other arms are this phi plus a positive constant,
+/// and which is compared `==` / `!=` with a `u32`. It runs from its start
+/// up to that bound and stops there, so every value it takes is a `u32`.
+fn counter_bounded_by_u32(
+    func: &HighFunction,
+    phi: ValueId,
+    incoming: &[(sordec_common::BlockId, ValueId)],
+    types: &HashMap<ValueId, IrType>,
+) -> Option<IrType> {
+    let literal = |v: ValueId| match func.bindings.get(resolve_use(func, v)).map(|b| &b.expr) {
+        Some(Expr::Literal(Literal::I32(n))) => Some(i128::from(*n)),
+        Some(Expr::Literal(Literal::I64(n))) => Some(i128::from(*n)),
+        Some(Expr::Literal(Literal::U32(n))) => Some(i128::from(*n)),
+        Some(Expr::Literal(Literal::U64(n))) => Some(i128::from(*n)),
+        _ => None,
+    };
+    let step = |v: ValueId| match func.bindings.get(resolve_use(func, v)).map(|b| &b.expr) {
+        Some(Expr::Binary { op: BinaryOp::Add, lhs, rhs }) => {
+            let (lhs, rhs) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
+            (lhs == phi && literal(rhs).is_some_and(|n| n > 0))
+                || (rhs == phi && literal(lhs).is_some_and(|n| n > 0))
+        }
+        _ => false,
+    };
+    let mut started = false;
+    for &(_, v) in incoming {
+        match literal(v) {
+            Some(n) if n >= 0 => started = true,
+            Some(_) => return None,
+            None if step(v) => {}
+            None => return None,
+        }
+    }
+    if !started {
+        return None;
+    }
+    let is_u32 = |v: ValueId| base_of(types.get(&resolve_use(func, v))) == Some(KnownType::U32);
+    let bounded = func.bindings.iter().any(|(_, b)| match &b.expr {
+        Expr::Binary { op: BinaryOp::Eq | BinaryOp::Ne, lhs, rhs } => {
+            let (lhs, rhs) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
+            (lhs == phi && is_u32(rhs)) || (rhs == phi && is_u32(lhs))
+        }
+        _ => false,
+    });
+    bounded.then_some(IrType::Inferred(KnownType::U32))
 }
 
 fn unary_result(op: UnaryOp, operand: Option<&IrType>) -> Option<IrType> {
@@ -2354,6 +2412,53 @@ mod tests {
         let mut ir = crate::marshalling::test_support::module(vec![f]);
         TypeInferPass.run(&mut ir);
         assert_ne!(ty_of(&ir, 0, 2), IrType::Known(KnownType::U32));
+    }
+
+    #[test]
+    fn a_loop_counter_bounded_by_a_u32_is_a_u32() {
+        // `account`'s `for i in 0..signatures.len()`, with the length
+        // decoded by an `i64` shift: start and step are `i64` literals and
+        // only the exit test against the `u32` length says what `i` is.
+        let b = sordec_common::BlockId::from_index;
+        let id = ValueId::from_index;
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Literal(Literal::I64(0)),                                     // v0 start
+                Expr::Phi { incoming: vec![(b(0), id(0)), (b(1), id(3))] },         // v1 i
+                Expr::Literal(Literal::I64(1)),                                     // v2
+                Expr::Binary { op: BinaryOp::Add, lhs: id(1), rhs: id(2) },         // v3 i + 1
+                Expr::Phi { incoming: vec![] },                                     // v4 len
+                Expr::Binary { op: BinaryOp::Eq, lhs: id(4), rhs: id(1) },          // v5
+            ],
+            vec![],
+            vec![0, 1, 2, 3, 4, 5],
+            vec![],
+        );
+        f.bindings.get_mut(id(4)).unwrap().ty = IrType::Known(KnownType::U32);
+        let mut ir = crate::marshalling::test_support::module(vec![f]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Inferred(KnownType::U32));
+    }
+
+    #[test]
+    fn a_counter_with_a_negative_start_is_not_bounded_below() {
+        let b = sordec_common::BlockId::from_index;
+        let id = ValueId::from_index;
+        let f = func_at(
+            0,
+            vec![
+                Expr::Literal(Literal::I64(-1)),
+                Expr::Phi { incoming: vec![(b(0), id(0)), (b(1), id(3))] },
+                Expr::Literal(Literal::I64(1)),
+                Expr::Binary { op: BinaryOp::Add, lhs: id(1), rhs: id(2) },
+            ],
+            vec![],
+            vec![0, 1, 2, 3],
+            vec![],
+        );
+        let Expr::Phi { incoming } = &f.bindings.get(id(1)).unwrap().expr else { unreachable!() };
+        assert_eq!(counter_bounded_by_u32(&f, id(1), incoming, &HashMap::new()), None);
     }
 
     #[test]

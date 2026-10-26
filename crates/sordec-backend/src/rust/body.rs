@@ -26,7 +26,7 @@ use syn::parse_quote;
 
 use sordec_common::{BlockId, IrId, ValueId};
 use sordec_ir::{
-    Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Region, SemanticOp,
+    BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Region, SemanticOp,
     TypeRegistry,
 };
 
@@ -415,8 +415,20 @@ impl<'a> FnCtx<'a> {
                 )
             )
         );
+        // `==` against a value of the same handle type is the type's own
+        // `PartialEq`, not a machine reader: `account` compares the
+        // signer's `Address` with the current contract's.
+        let base = |v: ValueId| match self.func.bindings.get(v).map(|b| &b.ty) {
+            Some(IrType::Known(k) | IrType::Inferred(k)) => Some(k),
+            _ => None,
+        };
+        let same_handle = |a: ValueId, b: ValueId| base(a).is_some() && base(a) == base(b);
+        // A reader nothing reads is the residue of a recognized check
+        // (`v & 255` beside the tag test that replaced it), not a reader.
         handle
-            && !self.func.bindings.iter().any(|(_, b)| match &b.expr {
+            && !self.func.bindings.iter().any(|(id, b)| match &b.expr {
+                _ if self.liveness.is_unused(id) => false,
+                Expr::Binary { op: BinaryOp::Eq | BinaryOp::Ne, lhs, rhs } if same_handle(*lhs, *rhs) => false,
                 Expr::Binary { lhs, rhs, .. } => *lhs == vid || *rhs == vid,
                 Expr::Unary { value, .. } => *value == vid,
                 _ => false,
@@ -622,7 +634,7 @@ impl<'a> FnCtx<'a> {
     }
 
     /// The recovered type of a binding, degrading through the hole policy.
-    fn value_type(&self, vid: ValueId) -> syn::Type {
+    pub(crate) fn value_type(&self, vid: ValueId) -> syn::Type {
         match self.func.bindings.get(vid) {
             Some(b) => ir_type(&b.ty, self.reg, self.policy),
             None => self.policy.unknown_type(None),
