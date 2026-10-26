@@ -865,6 +865,13 @@ impl<'a> FnCtx<'a> {
                     | KnownType::String
                     | KnownType::Bytes
                     | KnownType::BytesN(_)
+                    | KnownType::Bool
+                    | KnownType::U32
+                    | KnownType::I32
+                    | KnownType::U64
+                    | KnownType::I64
+                    | KnownType::U128
+                    | KnownType::I128
             )
         };
         matches!(&binding.ty, IrType::Known(k) | IrType::Inferred(k) if named(k)) && matches!(

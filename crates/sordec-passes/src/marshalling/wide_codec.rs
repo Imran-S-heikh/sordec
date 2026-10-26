@@ -57,12 +57,21 @@
 //! pair, and the caller-side evidence above. A frame the caller writes to
 //! or hands to another call between the decode and its loads is dropped
 //! from tracking, the same discipline [`super::decode`] uses.
+//!
+//! And a load is collapsed only where its decode **dominates** it. The scan
+//! is linear over the emission order, so a decode on one arm of an `if`
+//! and a load after the join look adjacent; `account` decodes the spend
+//! limit into one slot on each arm (a map read on one, a storage read on
+//! the other) and reads it after the join, and the collapse bound that read
+//! to the `else` arm's value alone, dropping the stored limit. A load its
+//! decode does not dominate stays a load, and its decode's call is then
+//! kept too, since the load still reads what the call writes.
 
 use std::collections::{BTreeMap, HashMap};
 
 use sordec_common::{FuncId, IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
-    BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal,
+    BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region,
     SemanticOp, UnaryOp, ValObjectKind,
 };
 
@@ -530,6 +539,48 @@ struct Frame<'a> {
     evidence: IrType,
     dec: &'a WideDecoder,
     consumed: bool,
+    /// A load of this frame the decode does not dominate was left as a
+    /// load, so the call that writes it must stay.
+    kept_load: bool,
+}
+
+/// For every block, the conditional arms around it, outermost first: each
+/// `if` branch, switch arm, loop body and scope body (a `break` can leave
+/// one early) is one arm. Block `a` is reached on every path to a later
+/// block `b` when `a`'s arms are a prefix of `b`'s — the structured form
+/// of dominance, over a region tree with no other way to skip code.
+fn arm_paths(func: &HighFunction) -> HashMap<sordec_common::BlockId, Vec<u32>> {
+    fn walk(r: &Region, path: &mut Vec<u32>, next: &mut u32, out: &mut HashMap<sordec_common::BlockId, Vec<u32>>) {
+        let arm = |r: &Region, path: &mut Vec<u32>, next: &mut u32, out: &mut HashMap<_, _>| {
+            path.push(*next);
+            *next += 1;
+            walk(r, path, next, out);
+            path.pop();
+        };
+        match r {
+            Region::Basic(b) => {
+                out.insert(*b, path.clone());
+            }
+            Region::Sequence(items) => items.iter().for_each(|i| walk(i, path, next, out)),
+            Region::Scope { body, .. } | Region::Loop { body, .. } => arm(body, path, next, out),
+            Region::If { then_region, else_region, .. } => {
+                arm(then_region, path, next, out);
+                if let Some(e) = else_region {
+                    arm(e, path, next, out);
+                }
+            }
+            Region::Switch { arms, default, .. } => {
+                for a in arms {
+                    arm(&a.body, path, next, out);
+                }
+                arm(default, path, next, out);
+            }
+            _ => {}
+        }
+    }
+    let mut out = HashMap::new();
+    walk(&func.region, &mut Vec::new(), &mut 0, &mut out);
+    out
 }
 
 /// Every collapse in one caller, plus the values whose type the decode
@@ -543,6 +594,17 @@ fn plan_decodes(
     if decoders.is_empty() {
         return (elisions, typed);
     }
+    let paths = arm_paths(func);
+    let block_of: HashMap<ValueId, sordec_common::BlockId> = func
+        .blocks
+        .iter()
+        .flat_map(|(b, block)| block.bindings.iter().map(move |v| (*v, b)))
+        .collect();
+    let arms = |v: ValueId| block_of.get(&v).and_then(|b| paths.get(b));
+    let dominates = |call: ValueId, load: ValueId| match (arms(call), arms(load)) {
+        (Some(c), Some(l)) => l.starts_with(c),
+        _ => false,
+    };
     let mut active: Vec<Frame<'_>> = Vec::new();
     let mut finished: Vec<Frame<'_>> = Vec::new();
     let overlaps = |f: &Frame<'_>, base: ValueId, off: u32| {
@@ -575,7 +637,7 @@ fn plan_decodes(
                     continue;
                 };
                 let (base, start) = canon_addr(func, args[0]);
-                active.push(Frame { base, start, call: id, val, evidence, dec, consumed: false });
+                active.push(Frame { base, start, call: id, val, evidence, dec, consumed: false, kept_load: false });
             }
             Expr::Load { addr, offset, .. } => {
                 let (b, o) = canon_addr(func, *addr);
@@ -583,6 +645,10 @@ fn plan_decodes(
                 let Some(frame) = active.iter_mut().find(|f| overlaps(f, b, o)) else {
                     continue;
                 };
+                if !dominates(frame.call, id) {
+                    frame.kept_load = true;
+                    continue;
+                }
                 let rel = o - frame.start;
                 let (expr, ty, note) = if rel == frame.dec.disc {
                     (
@@ -628,7 +694,49 @@ fn plan_decodes(
     }
     finished.extend(active);
 
-    for frame in finished.into_iter().filter(|f| f.consumed) {
+    // A frame whose slot a later load may still read uncollapsed keeps its
+    // call: that load reads what the call writes. A load is past this
+    // frame's reach when another write of the slot — a decode call handed
+    // it, or a store into it — falls between the two and dominates the
+    // load, so that every path to the load rewrites the slot first. Slots
+    // are reused across decodes in a straight line, and that is the case
+    // this lets through; `account`'s two arms writing one slot before a
+    // join is the case it stops.
+    let order: HashMap<ValueId, usize> =
+        sret::emission_order(func).into_iter().enumerate().map(|(i, v)| (v, i)).collect();
+    let collapsed: std::collections::HashSet<ValueId> = elisions.iter().map(|e| e.id).collect();
+    let writes = |f: &Frame<'_>, id: ValueId, b: &Binding| match &b.expr {
+        Expr::Call { args, .. } => args.iter().any(|a| {
+            let (base, o) = canon_addr(func, *a);
+            overlaps(f, base, o)
+        }),
+        Expr::Store { addr, offset, .. } => {
+            let (base, o) = canon_addr(func, *addr);
+            id != f.call && overlaps(f, base, o.wrapping_add(*offset))
+        }
+        _ => false,
+    };
+    let read_later = |f: &Frame<'_>| {
+        let at = |v: ValueId| order.get(&v).copied();
+        func.bindings.iter().any(|(load, b)| {
+            let Expr::Load { addr, offset, .. } = &b.expr else {
+                return false;
+            };
+            let (base, o) = canon_addr(func, *addr);
+            if !overlaps(f, base, o.wrapping_add(*offset)) || collapsed.contains(&load) || at(load) <= at(f.call) {
+                return false;
+            }
+            let covered = func.bindings.iter().any(|(w, wb)| {
+                w != f.call
+                    && at(w) > at(f.call)
+                    && at(w) < at(load)
+                    && writes(f, w, wb)
+                    && dominates(w, load)
+            });
+            !covered
+        })
+    };
+    for frame in finished.into_iter().filter(|f| f.consumed && !f.kept_load && !read_later(f)) {
         elisions.push(Elision {
             id: frame.call,
             expr: Expr::Literal(Literal::Unit),
@@ -901,6 +1009,30 @@ mod tests {
         assert!(matches!(expr_at(&m, 1, 7), Expr::Unary { op: UnaryOp::WideHi, value } if *value == v(0)));
         assert!(matches!(expr_at(&m, 1, 4), Expr::Literal(Literal::Unit)));
         assert_eq!(r.metrics.get(metrics::WIDE_CODEC_CALLS_ELIDED), Some(1));
+    }
+
+    /// `account`: the decode runs on one arm of an `if`, and its slots are
+    /// read after the join, on paths where it never ran. Those loads are not
+    /// its value, so nothing collapses and the call stays.
+    #[test]
+    fn a_decode_on_one_arm_does_not_collapse_a_load_after_the_join() {
+        let mut f = caller(1, 0, PrimitiveType::I128);
+        f.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings = vec![v(2), v(3)];
+        f.blocks.push(sordec_ir::HighBlock { id: BlockId::from_index(1), bindings: vec![v(4)] });
+        f.blocks.push(sordec_ir::HighBlock { id: BlockId::from_index(2), bindings: vec![v(5), v(6), v(7)] });
+        f.region = Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::If {
+                cond: v(2),
+                then_region: Box::new(Region::Basic(BlockId::from_index(1))),
+                else_region: None,
+            },
+            Region::Basic(BlockId::from_index(2)),
+        ]);
+        let mut m = module(vec![i128_decoder(0), f]);
+        WideCodecPass.run(&mut m);
+        assert!(matches!(expr_at(&m, 1, 6), Expr::Load { .. }), "{:?}", expr_at(&m, 1, 6));
+        assert!(matches!(expr_at(&m, 1, 4), Expr::Call { .. }), "the call still writes the slot");
     }
 
     /// The declared type is the licence. A `u64` argument fed to an

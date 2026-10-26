@@ -50,6 +50,17 @@
 //! agree on every raw value with `len < 2³¹`, and no Soroban collection
 //! approaches that. A bound outside the `u32` range, or an equality with a
 //! constant that is no `U32Val`, is left alone.
+//!
+//! # And two lengths compared through their raw words
+//!
+//! `tot_signers == signatures.len()` compiles to the two raw `U32Val`s
+//! xored and tested `< 2³²` unsigned: the tags cancel, leaving
+//! `(a ^ b) << 32`, which is below 2³² exactly when the payloads are equal.
+//! Rewritten as the `==` it is (`>=` as `!=`) when both sides are raw
+//! `U32Val` words — a host length, or a storage read checked as one — and the
+//! comparison was lowered from an unsigned opcode. Under a signed one a
+//! payload xor with its top bit set also passes, so that is not equality and
+//! is left alone.
 
 use sordec_common::{IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
@@ -77,6 +88,21 @@ impl Pass<HighIr> for HostLenPass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
         for func in &mut ir.functions {
+            let equalities = equalities(func);
+            for &(cmp, op, a, b) in &equalities {
+                if let Some(binding) = func.bindings.get_mut(cmp) {
+                    binding.expr = Expr::Binary { op, lhs: a, rhs: b };
+                    binding.add_provenance(Provenance::new(
+                        PASS_NAME,
+                        ProvenanceSource::SdkPattern,
+                        "two raw `U32Val`s xored and tested below 2^32: their payloads compared",
+                    ));
+                }
+            }
+            if !equalities.is_empty() {
+                result.metrics.increment(M_LEN, equalities.len() as i64);
+                result.changed = true;
+            }
             let bounds = bounds(func);
             for &(cmp, op, len, bound) in &bounds {
                 let lit = push_literal(func, bound);
@@ -158,6 +184,58 @@ fn bounds(func: &HighFunction) -> Vec<(ValueId, BinaryOp, ValueId, u32)> {
             Some((id, op, len, u32::try_from(bound).ok()?))
         })
         .collect()
+}
+
+/// Each `(a ^ b) <u 2³²` over two raw `U32Val` words, as
+/// `(comparison, Eq or Ne, a, b)`.
+fn equalities(func: &HighFunction) -> Vec<(ValueId, BinaryOp, ValueId, ValueId)> {
+    func.bindings
+        .iter()
+        .filter_map(|(id, b)| {
+            let Expr::Binary { op, lhs, rhs } = &b.expr else {
+                return None;
+            };
+            let op = match op {
+                BinaryOp::Lt => BinaryOp::Eq,
+                BinaryOp::Ge => BinaryOp::Ne,
+                _ => return None,
+            };
+            if literal(func, *rhs) != Some(1 << 32) || !crate::lowering::lift_to_high::lowered_unsigned(b) {
+                return None;
+            }
+            let Some(Expr::Binary { op: BinaryOp::BitXor, lhs: x, rhs: y }) =
+                func.bindings.get(resolve_use(func, *lhs)).map(|b| &b.expr)
+            else {
+                return None;
+            };
+            let (x, y) = (resolve_use(func, *x), resolve_use(func, *y));
+            (u32_val_word(func, x) && u32_val_word(func, y)).then_some((id, op, x, y))
+        })
+        .collect()
+}
+
+/// A `u32` the IR holds as the raw `U32Val` the host handed over, so that
+/// what it renders as is the payload: a collection length, or a storage
+/// read the program checks is a `U32Val` (whose typed read is the payload,
+/// and traps where that check does).
+///
+/// Only the payload matters to the xor, whose low word the comparison
+/// ignores — the tags need not match for the rewrite to be exact.
+fn u32_val_word(func: &HighFunction, v: ValueId) -> bool {
+    let read = matches!(
+        func.bindings.get(v).map(|b| &b.expr),
+        Some(Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. })))
+    );
+    let checked_u32 = || {
+        func.bindings.iter().any(|(_, b)| {
+            matches!(
+                &b.expr,
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, tag, .. }))
+                    if *tag == TAG_U32_VAL && resolve_use(func, *value) == v
+            )
+        })
+    };
+    is_len(func, v) || (read && checked_u32())
 }
 
 /// `raw op c` as `len op' bound`, where `raw = len · 2³² + 4`.
@@ -316,6 +394,56 @@ mod tests {
             HostLenPass.run(&mut ir);
             assert_eq!(rewritten(&ir), None, "{op:?} {c}");
         }
+    }
+
+    /// `vec_len(v0) ^ vec_len(v1) < 2^32`, with the comparison lowered from
+    /// `i64.lt_u` when `unsigned`.
+    fn xored(unsigned: bool) -> HighIr {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                                      // v0
+                Expr::Phi { incoming: vec![] },                                                      // v1
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::Len, args: vec![v(0)] })), // v2
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::Len, args: vec![v(1)] })), // v3
+                Expr::Binary { op: BinaryOp::BitXor, lhs: v(2), rhs: v(3) },                        // v4
+                Expr::Literal(Literal::I64(1 << 32)),                                                // v5
+                Expr::Binary { op: BinaryOp::Lt, lhs: v(4), rhs: v(5) },                             // v6
+            ],
+            vec![v(0), v(1)],
+            vec![2, 3, 4, 5, 6],
+        );
+        let cmp = f.bindings.get_mut(v(6)).unwrap();
+        *cmp = Binding::new(
+            v(6),
+            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            cmp.expr.clone(),
+            crate::lowering::lift_to_high::compare_provenance(unsigned),
+        );
+        module(vec![f])
+    }
+
+    #[test]
+    fn two_raw_lengths_xored_below_2_32_are_equal() {
+        // `tot_signers == signatures.len()`, as `account` compiles it.
+        let mut ir = xored(true);
+        assert!(HostLenPass.run(&mut ir).changed);
+        let cmp = &ir.functions[0].bindings.get(v(6)).unwrap().expr;
+        assert!(
+            matches!(cmp, Expr::Binary { op: BinaryOp::Eq, lhs, rhs } if *lhs == v(2) && *rhs == v(3)),
+            "{cmp:?}"
+        );
+    }
+
+    #[test]
+    fn a_signed_xor_test_is_not_equality() {
+        // A payload xor with its top bit set is negative, and passes `< 2^32`
+        // signed: that comparison is not `==`.
+        let mut ir = xored(false);
+        HostLenPass.run(&mut ir);
+        assert!(matches!(
+            ir.functions[0].bindings.get(v(6)).unwrap().expr,
+            Expr::Binary { op: BinaryOp::Lt, .. }
+        ));
     }
 
     #[test]

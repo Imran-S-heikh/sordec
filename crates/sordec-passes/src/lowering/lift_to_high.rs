@@ -464,7 +464,12 @@ fn lower_value_def(def: &LiftedValueDef, ctx: &LowerCtx<'_>) -> (Expr, String) {
 
         LiftedValueDef::Operator { op, args } => {
             let expr = lower_operator(op, args, ctx);
-            (expr, format!("operator: {:?}", op.kind()))
+            let note = if is_unsigned_compare(&op.0) {
+                format!("operator: {:?}{UNSIGNED_NOTE}", op.kind())
+            } else {
+                format!("operator: {:?}", op.kind())
+            };
+            (expr, note)
         }
     }
 }
@@ -679,6 +684,41 @@ fn binary_op(w: &waffle::Operator) -> Option<BinaryOp> {
         W::I32GeS | W::I32GeU | W::I64GeS | W::I64GeU | W::F32Ge | W::F64Ge => B::Ge,
         _ => return None,
     })
+}
+
+/// Marks a comparison lowered from an unsigned opcode.
+///
+/// [`BinaryOp`] has one `Lt` for `i64.lt_s` and `i64.lt_u`: almost every
+/// reader wants the comparison, not its signedness, and the emitter takes the
+/// order from the operands' recovered types. The few rewrites that change a
+/// comparison's operands need it, and the opcode is gone by then, so the
+/// lowering records it once, in the note it already writes, and
+/// [`lowered_unsigned`] reads it back.
+const UNSIGNED_NOTE: &str = ", unsigned";
+
+/// Whether `binding` is a comparison lowered from an unsigned opcode
+/// (`i64.lt_u`, `i32.ge_u`, …). `false` for a signed one, and for any
+/// binding a later pass built, whose signedness nothing recorded.
+pub(crate) fn lowered_unsigned(binding: &sordec_ir::Binding) -> bool {
+    binding
+        .provenance()
+        .first()
+        .is_some_and(|p| p.pass == PASS_NAME && p.note.ends_with(UNSIGNED_NOTE))
+}
+
+/// The provenance lowering gives a comparison, for tests that build one.
+#[cfg(test)]
+pub(crate) fn compare_provenance(unsigned: bool) -> Provenance {
+    let note = if unsigned { format!("operator: Comparison{UNSIGNED_NOTE}") } else { "operator: Comparison".to_string() };
+    Provenance::new(PASS_NAME, ProvenanceSource::DataFlow, note)
+}
+
+fn is_unsigned_compare(w: &waffle::Operator) -> bool {
+    use waffle::Operator as W;
+    matches!(
+        w,
+        W::I32LtU | W::I64LtU | W::I32LeU | W::I64LeU | W::I32GtU | W::I64GtU | W::I32GeU | W::I64GeU
+    )
 }
 
 /// Map a unary WASM operator to a [`UnaryOp`]. `None` for non-unary ops.
