@@ -56,13 +56,13 @@ isolation — see [Workspace layout](#workspace-layout).
 A decompiler that overstates itself is worse than useless: you cannot audit a
 contract against a reconstruction you can't calibrate. So here are three
 measurements, scored by [our own published metric](docs/scoring_metric.md)
-(`score-2.1.0` — four independent categories, fixed weights, stamped into every
-report). Measured 2026-10-08.
+(`score-2.2.0` — four independent categories, fixed weights, stamped into every
+report). Measured 2026-10-28.
 
 | Set | Contracts | Recompile | Overall score |
 |---|---|---|---|
 | Reference corpus ([`samples/contracts/`](samples/contracts/)) | 7 | **7 of 7** | **0.94** |
-| Held-out: the Stellar `soroban-examples` contracts | 25 | **17 of 25** | **0.76** |
+| Held-out: the Stellar `soroban-examples` contracts | 25 | **22 of 25** | **0.785** |
 | Unseen: third-party contracts built on other libraries | 2 | **0 of 2** | **0.53** |
 
 **Read them in reverse order.** The reference corpus is what the decompiler was
@@ -76,9 +76,9 @@ By category:
 
 | Category | Reference corpus | Held-out 25 |
 |---|---|---|
-| Interface — entrypoints, types | 0.90 | 0.99 |
-| Structure — control-flow shape | 0.94 | 0.29 |
-| Semantic — storage, auth, events, panics | 0.96 | 0.77 |
+| Interface — entrypoints, types | 0.90 | 1.00 |
+| Structure — control-flow shape | 0.94 | 0.31 |
+| Semantic — storage, auth, events, panics | 0.96 | 0.84 |
 | Behaviour — differential execution | 0.93, measured on 6 of 7 | not yet run |
 
 And the things a bare score won't tell you:
@@ -87,15 +87,21 @@ And the things a bare score won't tell you:
   0.61 at the alpha release. About 0.08 of the rise to 0.94 came from the six
   rule changes in `score-2.1.0`. Each one stops scoring something the compiler
   leaves no trace of (authored panic messages, a stripped contract's type and
-  parameter names, how many times a helper was inlined). They are listed with
-  their measured effect in [`docs/scoring_metric.md`](docs/scoring_metric.md).
-  The rest of the rise is decompiler work.
+  parameter names, how many times a helper was inlined). The held-out score
+  rose from 0.757 to 0.785 since the last measurement, and about 0.011 of that
+  is the two rule changes in `score-2.2.0` (a private key enum's name, which
+  the module never records, and a generated client that was scored as authored
+  code). Another 0.009 is `account`'s storage keys, which the decompiler now
+  recovers but which only score because of the first of those rules. Every
+  rule change is listed with its measured effect in
+  [`docs/scoring_metric.md`](docs/scoring_metric.md) §7. The rest of each rise
+  is decompiler work.
 - **Held-out structure is low for a reason that is mostly not control flow.**
   Many of those contracts compile library code into the wasm (`alloc`,
   `ark-bn254`, `eth-abi`, OpenZeppelin helpers). We have to emit that code,
   because it is in the binary, but the scorer compares against the contract's
   own source, which never contained it.
-- **Unprovable values become `todo!()` holes, never guesses.** There are 3,897
+- **Unprovable values become `todo!()` holes, never guesses.** There are 3,898
   of them across the 25 held-out contracts. A gap you can see is the design. A
   plausible wrong value that compiles is treated as a bug class, because that
   is the failure mode that gets someone hurt.
@@ -134,10 +140,9 @@ pipeline. `--quiet` silences the pipeline's warnings without hiding errors, and
 What's coming next:
 
 - **Contracts it has never seen.** Neither third-party contract compiles yet
-  (15 and 59 errors), and that is the number that matters most.
-- **The remaining eight held-out contracts.** Their errors are concentrated:
-  `other_custom_types` 33, `import_ark_bn254` 18, `fuzzing` 13, `single_offer`
-  9, `account` 8, `alloc` 7, `deep_contract_auth` 1, `mint-lock` 1.
+  (9 and 45 errors), and that is the number that matters most.
+- **The remaining three held-out contracts.** `other_custom_types` 18 errors,
+  `fuzzing` 8, `account` 3.
 - **Values passed between helpers by pointer.** Unoptimised builds pass storage
   keys and decoded structs through memory, and the decompiler cannot always
   follow them across a call yet. This is most of what still separates

@@ -10,7 +10,7 @@ follow [Semantic Versioning][semver].
 
 ### Reconstruction quality
 
-Measured 2026-10-08 with `score-2.1.0`; the alpha's own numbers are kept in
+Measured 2026-10-28 with `score-2.2.0`; the alpha's own numbers are kept in
 its section below.
 
 | | alpha.1 | now |
@@ -19,11 +19,14 @@ its section below.
 | Reference corpus: overall score | 0.6108 | **0.9389** |
 | Reference corpus: structure | 0.14 | **0.94** |
 | Reference corpus: behaviour measured on | 2 of 7 | **6 of 7** (0.93) |
-| Held-out 25 (`soroban-examples`): recompiles | — | **17 of 25** |
-| Held-out 25: overall score | — | **0.7570** |
+| Held-out 25 (`soroban-examples`): recompiles | — | **22 of 25** |
+| Held-out 25: overall score | — | **0.7850** |
 | Third-party unseen (2): overall score | — | **0.53** (0 of 2 recompile) |
 
-About 0.08 of the corpus rise is the scorer change below; the rest is the
+About 0.08 of the corpus rise is the `score-2.1.0` change below; the rest is
+the decompiler. The held-out mean was 0.7570 when last measured (2026-10-08):
+about 0.011 of its rise is the `score-2.2.0` change below, 0.009 more is
+`account`'s storage keys, which only score under it, and the rest is the
 decompiler. The bulk of the work since the alpha:
 
 - **Marshalling elision.** The SDK glue rustc inlines into every function —
@@ -34,10 +37,23 @@ decompiler. The bulk of the work since the alpha:
   boundaries, wide (`i128`) values, `Option` helpers returned as `Option<T>`
   (through an out-pointer or a register pair), struct decoders and encoders
   collapsed at their call sites, keys promoted to constant data named.
+- **Cross-contract calls** to a contract with no known interface are spelled
+  through a `#[contractclient]` trait declared from the call sites; a tuple
+  return is a tuple; a key enum the module does not export is emitted
+  `#[contracttype(export = false)]`.
 - **Behaviour harness** drives `Address`, `String`, `Bytes`, struct and enum
   parameters and constructors, and found three real output bugs on its first
   full run (event topics, symbol literals, a constructor hole).
 - **Host catalog** re-vendored to `soroban-env-common` 27.0.1 (protocol 27).
+
+### Scorer: `score-2.2.0`
+
+Two rule changes. A storage key's enum name is kept only where the original's
+`contractspecv0` declares the enum: a private `DataKey` is never exported, so
+its name is nowhere in the module, as on a stripped build. And the client
+`#[contractclient]` generates for a trait is recognised as glue by the doc line
+the macro writes on it, rather than scored as authored code. Both are in
+[`docs/scoring_metric.md` §7.2](docs/scoring_metric.md).
 
 ### Scorer: `score-2.1.0`
 
