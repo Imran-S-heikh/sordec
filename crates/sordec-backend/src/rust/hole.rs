@@ -28,6 +28,7 @@
 
 use proc_macro2::Literal;
 use sordec_common::UnknownReason;
+use sordec_ir::KnownType;
 use syn::parse_quote;
 
 /// Strategy for emitting IR facts the decompiler could not recover.
@@ -42,6 +43,14 @@ pub(crate) trait HolePolicy {
     /// the site; policies may branch on it. The return must be a real,
     /// compilable type.
     fn unknown_type(&self, reason: Option<&UnknownReason>) -> syn::Type;
+
+    /// The integer type [`Self::unknown_type`] prints for `reason`, when it
+    /// prints one rather than a `Val`. What a same-width cast against the
+    /// value must aim for: a `u32` argument handed to a parameter printed
+    /// `i32` needs one, though nothing typed the parameter.
+    fn unknown_word(&self, _reason: &UnknownReason) -> Option<KnownType> {
+        None
+    }
 
     /// The `syn::Expr` to emit in place of a value the IR could not
     /// recover — an unrecognised operation, a raw memory access, a
@@ -65,12 +74,16 @@ pub(crate) struct StrictNoGuess;
 
 impl HolePolicy for StrictNoGuess {
     fn unknown_type(&self, reason: Option<&UnknownReason>) -> syn::Type {
-        match reason {
-            // Not a guess: the wasm word is the one thing known, and no
-            // `Val` fits in it.
-            Some(UnknownReason::MachineWord32) => parse_quote!(i32),
+        match reason.and_then(|r| self.unknown_word(r)) {
+            Some(KnownType::I32) => parse_quote!(i32),
             _ => parse_quote!(soroban_sdk::Val),
         }
+    }
+
+    fn unknown_word(&self, reason: &UnknownReason) -> Option<KnownType> {
+        // Not a guess: the wasm word is the one thing known, and no `Val`
+        // fits in it.
+        matches!(reason, UnknownReason::MachineWord32).then_some(KnownType::I32)
     }
 
     fn unknown_expr(&self, label: &str) -> syn::Expr {
@@ -146,5 +159,9 @@ mod tests {
         };
         assert_eq!(render(UnknownReason::MachineWord32), "i32");
         assert_eq!(render(UnknownReason::InsufficientEvidence), "soroban_sdk :: Val");
+        // And what a cast against it aims for is that same word: an argument
+        // of the other sign handed to such a parameter is cast to `i32`.
+        assert_eq!(StrictNoGuess.unknown_word(&UnknownReason::MachineWord32), Some(KnownType::I32));
+        assert_eq!(StrictNoGuess.unknown_word(&UnknownReason::InsufficientEvidence), None);
     }
 }

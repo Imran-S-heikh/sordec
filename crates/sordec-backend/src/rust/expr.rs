@@ -889,10 +889,19 @@ fn val_coerced(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<
     }
 }
 
+/// The type a callee's parameter is printed as: its recovered type, or for
+/// one nothing typed, the integer the hole policy prints it as (a 32-bit
+/// word is an `i32`), so an argument of the other sign is cast to match.
 fn callee_param_type(ctx: &FnCtx, target: FuncId, index: usize) -> Option<IrType> {
     let callee = ctx.high.function(target)?;
     let param = *callee.params.get(index)?;
-    Some(callee.bindings.get(param)?.ty.clone())
+    Some(match &callee.bindings.get(param)?.ty {
+        IrType::Unknown(reason) => match ctx.policy.unknown_word(reason) {
+            Some(word) => IrType::Known(word),
+            None => IrType::Unknown(reason.clone()),
+        },
+        known => known.clone(),
+    })
 }
 
 /// The call path for a target function: a `contractspecv0` function is a
