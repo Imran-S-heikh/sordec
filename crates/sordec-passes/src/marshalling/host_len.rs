@@ -49,7 +49,8 @@
 //! comparison's signedness, which is safe here: signed and unsigned order
 //! agree on every raw value with `len < 2³¹`, and no Soroban collection
 //! approaches that. A bound outside the `u32` range, or an equality with a
-//! constant that is no `U32Val`, is left alone.
+//! constant that is no `U32Val`, is left alone — and so is a comparison on
+//! the length a decode already produced, which is on the payload.
 //!
 //! # And two lengths compared through their raw words
 //!
@@ -143,8 +144,7 @@ fn folds(func: &HighFunction) -> Vec<(ValueId, ValueId, &'static str)> {
         .iter()
         .filter_map(|(id, b)| match &b.expr {
             Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })) => {
-                let len = resolve_use(func, *value);
-                is_len(func, len).then_some((id, len, "decoding a host length is the `u32` `len()` returned"))
+                raw_len(func, *value).map(|len| (id, len, "decoding a host length is the `u32` `len()` returned"))
             }
             Expr::Binary { op: BinaryOp::BitOr, lhs, rhs } if literal(func, *rhs) == Some(i64::from(TAG_U32_VAL)) => {
                 let Some(Expr::Binary { op: BinaryOp::BitAnd, lhs: n, rhs: mask }) =
@@ -152,8 +152,8 @@ fn folds(func: &HighFunction) -> Vec<(ValueId, ValueId, &'static str)> {
                 else {
                     return None;
                 };
-                let len = resolve_use(func, *n);
-                (literal(func, *mask) == Some(-0x1_0000_0000) && is_len(func, len))
+                let len = raw_len(func, *n)?;
+                (literal(func, *mask) == Some(-0x1_0000_0000))
                     .then_some((id, len, "re-encoding a host length is the length"))
             }
             _ => None,
@@ -171,14 +171,11 @@ fn bounds(func: &HighFunction) -> Vec<(ValueId, BinaryOp, ValueId, u32)> {
             let Expr::Binary { op, lhs, rhs } = &b.expr else {
                 return None;
             };
-            let (lhs, rhs) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
             // Length on the left; a constant on the left flips the order.
-            let (op, len, c) = if is_len(func, lhs) {
-                (*op, lhs, literal(func, rhs)?)
-            } else if is_len(func, rhs) {
-                (flipped(*op)?, rhs, literal(func, lhs)?)
+            let (op, len, c) = if let Some(len) = raw_len(func, *lhs) {
+                (*op, len, literal(func, *rhs)?)
             } else {
-                return None;
+                (flipped(*op)?, raw_len(func, *rhs)?, literal(func, *lhs)?)
             };
             let (op, bound) = on_length(op, i128::from(c))?;
             Some((id, op, len, u32::try_from(bound).ok()?))
@@ -208,8 +205,7 @@ fn equalities(func: &HighFunction) -> Vec<(ValueId, BinaryOp, ValueId, ValueId)>
             else {
                 return None;
             };
-            let (x, y) = (resolve_use(func, *x), resolve_use(func, *y));
-            (u32_val_word(func, x) && u32_val_word(func, y)).then_some((id, op, x, y))
+            Some((id, op, u32_val_word(func, *x)?, u32_val_word(func, *y)?))
         })
         .collect()
 }
@@ -221,7 +217,11 @@ fn equalities(func: &HighFunction) -> Vec<(ValueId, BinaryOp, ValueId, ValueId)>
 ///
 /// Only the payload matters to the xor, whose low word the comparison
 /// ignores — the tags need not match for the rewrite to be exact.
-fn u32_val_word(func: &HighFunction, v: ValueId) -> bool {
+fn u32_val_word(func: &HighFunction, v: ValueId) -> Option<ValueId> {
+    if let Some(len) = raw_len(func, v) {
+        return Some(len);
+    }
+    let v = resolve_use(func, v);
     let read = matches!(
         func.bindings.get(v).map(|b| &b.expr),
         Some(Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. })))
@@ -235,7 +235,7 @@ fn u32_val_word(func: &HighFunction, v: ValueId) -> bool {
             )
         })
     };
-    is_len(func, v) || (read && checked_u32())
+    (read && checked_u32()).then_some(v)
 }
 
 /// `raw op c` as `len op' bound`, where `raw = len · 2³² + 4`.
@@ -286,6 +286,23 @@ fn schedule_before(func: &mut HighFunction, anchor: ValueId, fresh: ValueId) {
             return;
         }
     }
+}
+
+/// The raw host length `v` is, through renames — but not through this
+/// pass's own folds. A decode folded to the length is the payload: a bound
+/// or a re-encode read through it would convert the length a second time
+/// (a decoded `len <= 5` rewritten as the raw `len <= 0`).
+fn raw_len(func: &HighFunction, v: ValueId) -> Option<ValueId> {
+    let mut current = v;
+    for _ in 0..16 {
+        let b = func.bindings.get(current)?;
+        match &b.expr {
+            Expr::Use(_) if b.provenance().iter().any(|p| p.pass == PASS_NAME) => return None,
+            Expr::Use(next) => current = *next,
+            _ => return is_len(func, current).then_some(current),
+        }
+    }
+    None
 }
 
 /// A collection length, which the host returns as a `U32Val`.
@@ -394,6 +411,31 @@ mod tests {
             HostLenPass.run(&mut ir);
             assert_eq!(rewritten(&ir), None, "{op:?} {c}");
         }
+    }
+
+    #[test]
+    fn a_decoded_length_s_bound_is_not_converted_again() {
+        // `c = val_decode(vec_len(v0)); c <= 5` is already on the length.
+        // The first run folds the decode to the length; the second must not
+        // read `5` as a raw bound through that fold (it is not `len <= 0`).
+        let mut ir = module(vec![func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                                      // v0
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::Len, args: vec![v(0)] })), // v1
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value: v(1) })),          // v2
+                Expr::Literal(Literal::I64(5)),                                                      // v3
+                Expr::Binary { op: BinaryOp::Le, lhs: v(2), rhs: v(3) },                             // v4
+            ],
+            vec![v(0)],
+            vec![1, 2, 3, 4],
+        )]);
+        assert!(HostLenPass.run(&mut ir).changed);
+        assert!(!HostLenPass.run(&mut ir).changed);
+        let cmp = &ir.functions[0].bindings.get(v(4)).unwrap().expr;
+        assert!(
+            matches!(cmp, Expr::Binary { op: BinaryOp::Le, lhs, rhs } if *lhs == v(2) && *rhs == v(3)),
+            "{cmp:?}"
+        );
     }
 
     /// `vec_len(v0) ^ vec_len(v1) < 2^32`, with the comparison lowered from
