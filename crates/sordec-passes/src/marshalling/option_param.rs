@@ -121,14 +121,15 @@ fn returned_values(func: &HighFunction) -> Vec<ValueId> {
 }
 
 /// How many bindings the body still executes read `v`. Pruning residue
-/// left unscheduled in the arena is not a reader.
+/// left unscheduled in the arena is not a reader; a phi is, scheduled or
+/// not — the `Void` flowing into one is a number there, not this `None`.
 fn readers(func: &HighFunction, v: ValueId) -> usize {
     let scheduled: std::collections::HashSet<ValueId> =
         func.blocks.iter().flat_map(|(_, b)| b.bindings.iter().copied()).collect();
     func.bindings
         .iter()
         .filter(|(id, b)| {
-            if !scheduled.contains(id) {
+            if !scheduled.contains(id) && !matches!(b.expr, Expr::Phi { .. }) {
                 return false;
             }
             let mut reads = false;
@@ -187,6 +188,7 @@ fn is_option_param(func: &HighFunction, v: ValueId) -> bool {
 mod tests {
     use super::*;
     use crate::marshalling::test_support::{func_with, module, v};
+    use sordec_common::{BlockId, IrId};
     use sordec_ir::{CompositeType, FunctionParam, FunctionSignature, PrimitiveType, TypeRef};
 
     /// `option == 2` over a parameter declared `Option<u32>`, then a
@@ -232,6 +234,25 @@ mod tests {
         let f = &ir.functions[0];
         assert!(matches!(f.bindings.get(v(2)).unwrap().expr, Expr::IsSome { value } if value == v(0)));
         assert!(matches!(f.bindings.get(v(1)).unwrap().expr, Expr::Literal(_)), "the literal is left alone");
+    }
+
+    #[test]
+    fn a_void_a_phi_also_reads_is_left_alone() {
+        // Both `2`s flow into a phi as well: there they are numbers.
+        let mut ir = shape(BinaryOp::Eq);
+        let f = &mut ir.functions[0];
+        let phi = ValueId::from_index(f.bindings.len() as u32);
+        f.bindings.push(sordec_ir::Binding::new(
+            phi,
+            IrType::Inferred(KnownType::I64),
+            Expr::Phi { incoming: vec![(BlockId::from_index(0), v(1)), (BlockId::from_index(1), v(3))] },
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        OptionParamPass.run(&mut ir);
+        let f = &ir.functions[0];
+        assert!(matches!(f.bindings.get(v(1)).unwrap().expr, Expr::Literal(_)));
+        assert!(matches!(f.bindings.get(v(2)).unwrap().expr, Expr::Binary { .. }));
+        assert!(matches!(f.bindings.get(v(3)).unwrap().expr, Expr::Literal(_)));
     }
 
     #[test]

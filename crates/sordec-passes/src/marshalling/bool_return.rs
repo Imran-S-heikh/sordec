@@ -27,7 +27,8 @@
 //!
 //! - **The spec returns `bool`.** No other return type is touched.
 //! - **Every arm is one of the two shapes.** A phi with any other arm is
-//!   left alone, and so is a literal something else in the body still reads.
+//!   left alone, and so is an arm something else still reads — another phi
+//!   included, which would be handed a `bool` where it holds a number.
 
 use std::collections::HashSet;
 
@@ -90,7 +91,7 @@ fn plan(func: &HighFunction) -> Option<Vec<(ValueId, Option<Expr>)>> {
         if !seen.insert(r) {
             continue;
         }
-        match arm(func, r) {
+        match arm(func, r, None) {
             Some(Some(fold)) => {
                 plan.push((r, Some(fold)));
                 continue;
@@ -106,7 +107,7 @@ fn plan(func: &HighFunction) -> Option<Vec<(ValueId, Option<Expr>)>> {
             .map(|(_, v)| resolve_use(func, *v))
             .collect::<HashSet<_>>()
             .into_iter()
-            .map(|v| arm(func, v).map(|fold| (v, fold)))
+            .map(|v| arm(func, v, Some(r)).map(|fold| (v, fold)))
             .collect();
         let Some(arms) = arms else { continue };
         if arms.iter().all(|(_, fold)| fold.is_none()) {
@@ -120,19 +121,22 @@ fn plan(func: &HighFunction) -> Option<Vec<(ValueId, Option<Expr>)>> {
 
 /// One returned value's fold: `Some(Some(e))` rewrites it to `e`,
 /// `Some(None)` means it is already a `bool`, `None` that it is neither.
-fn arm(func: &HighFunction, v: ValueId) -> Option<Option<Expr>> {
+/// `via` is the returned phi `v` is an arm of, if any.
+fn arm(func: &HighFunction, v: ValueId, via: Option<ValueId>) -> Option<Option<Expr>> {
     let b = func.bindings.get(v)?;
     if matches!(b.ty, IrType::Known(KnownType::Bool) | IrType::Inferred(KnownType::Bool)) {
         return Some(None);
     }
     match &b.expr {
-        Expr::Unary { op: UnaryOp::ExtendU32, value } if is_bool(func, resolve_use(func, *value)) => {
+        Expr::Unary { op: UnaryOp::ExtendU32, value }
+            if is_bool(func, resolve_use(func, *value)) && only_returned(func, v, via) =>
+        {
             Some(Some(Expr::Use(resolve_use(func, *value))))
         }
-        Expr::Literal(Literal::I64(n @ (0 | 1))) if only_returned(func, v) => {
+        Expr::Literal(Literal::I64(n @ (0 | 1))) if only_returned(func, v, via) => {
             Some(Some(Expr::Literal(Literal::Bool(*n == 1))))
         }
-        Expr::Literal(Literal::I32(n @ (0 | 1))) if only_returned(func, v) => {
+        Expr::Literal(Literal::I32(n @ (0 | 1))) if only_returned(func, v, via) => {
             Some(Some(Expr::Literal(Literal::Bool(*n == 1))))
         }
         _ => None,
@@ -168,13 +172,15 @@ fn bool_like(func: &HighFunction, v: ValueId, depth: u32) -> bool {
     }
 }
 
-/// Nothing the body still executes reads `v` except as a phi arm or a
-/// return: the literal is the returned `false`, not a number used elsewhere.
-fn only_returned(func: &HighFunction, v: ValueId) -> bool {
+/// Nothing reads `v` but a return or `via`, the returned phi being folded:
+/// the arm is the returned `bool`, not a number used elsewhere. Pruning
+/// residue left unscheduled is not a reader; a phi is, scheduled or not.
+fn only_returned(func: &HighFunction, v: ValueId, via: Option<ValueId>) -> bool {
     let scheduled: HashSet<ValueId> =
         func.blocks.iter().flat_map(|(_, b)| b.bindings.iter().copied()).collect();
     !func.bindings.iter().any(|(id, b)| {
-        if matches!(b.expr, Expr::Phi { .. }) || !scheduled.contains(&id) {
+        let live = scheduled.contains(&id) || matches!(b.expr, Expr::Phi { .. });
+        if !live || Some(id) == via {
             return false;
         }
         let mut reads = false;
@@ -238,6 +244,23 @@ mod tests {
     fn another_return_type_is_left_alone() {
         let mut ir = shape(PrimitiveType::U64);
         assert!(!BoolReturnPass.run(&mut ir).changed);
+    }
+
+    #[test]
+    fn a_literal_another_phi_also_reads_is_left_alone() {
+        // `0` is also a loop counter's start: as `false` that phi would
+        // hold a `bool`. The returned phi keeps the arm, so it is not folded.
+        let mut ir = shape(PrimitiveType::Bool);
+        let f = &mut ir.functions[0];
+        let counter = ValueId::from_index(f.bindings.len() as u32);
+        f.bindings.push(sordec_ir::Binding::new(
+            counter,
+            IrType::Inferred(KnownType::U32),
+            Expr::Phi { incoming: vec![(BlockId::from_index(0), v(1))] },
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        assert!(!BoolReturnPass.run(&mut ir).changed);
+        assert!(matches!(ir.functions[0].bindings.get(v(1)).unwrap().expr, Expr::Literal(Literal::I64(0))));
     }
 
     #[test]
