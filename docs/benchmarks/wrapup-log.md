@@ -138,4 +138,5 @@ udt 10 → 9. Holes unchanged. Twelve reconstructions changed: six only in the
 spelling of `auth::Context`, two SDK 26 and one third-party at the fixed
 sites, and token-v22 and token-v23 (four lines each) where a storage key is
 now named from the caller's own frame and its arguments are cloned; both
-still compile with no errors. Scores: see the next row.
+still compile with no errors. Scores unchanged: corpus bands pass, held-out
+mean 0.7850.
