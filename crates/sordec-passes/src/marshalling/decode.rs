@@ -66,11 +66,18 @@
 //!   the type `contractspecv0` declares for the argument being passed. A
 //!   helper that accepts `AddressObject` fed a parameter declared `u64`
 //!   means our picture is wrong somewhere, so nothing is elided.
-//! - **Entry parameters only.** The collapse rests on the ABI guarantee
-//!   that the host already validated this value against the spec. That
-//!   guarantee exists for an entrypoint parameter and for nothing else.
+//! - **Entry parameters, and helper parameters that only ever receive
+//!   one.** The collapse rests on the ABI guarantee that the host already
+//!   validated this value against the spec. That guarantee exists for an
+//!   entrypoint parameter, and it survives a helper every one of whose
+//!   callers hands it such a parameter untouched — the wrapper the compiler
+//!   outlines around an entrypoint's body keeps the host's validation.
+//!   [`guaranteed_params`] is that reading, module-wide; it needs the
+//!   helper's callers to all be visible (not exported, not held by the
+//!   function table when the module calls through one) and to agree.
+//!   Nothing else carries the guarantee.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sordec_common::{FuncId, ValueId};
 use sordec_ir::{
@@ -175,10 +182,14 @@ impl Pass<HighIr> for ValDecodeCollapsePass {
             .filter_map(|f| classify(f).map(|h| (f.id, h)))
             .collect();
 
+        // Helper parameters that carry an entrypoint's guarantee, read
+        // once over the whole module before any function changes.
+        let guaranteed = guaranteed_params(ir, &helpers);
+
         // No early return on an empty helper set: an inline decode (SDK 27)
         // needs no helper, and `plan` collapses those too.
         for func in &mut ir.functions {
-            let (elisions, metrics) = plan(func, &helpers);
+            let (elisions, metrics) = plan(func, &helpers, &guaranteed);
             if elisions.is_empty() {
                 continue;
             }
@@ -629,11 +640,13 @@ enum SlotKey {
 fn plan(
     func: &HighFunction,
     helpers: &HashMap<FuncId, DecodeHelper>,
+    guaranteed: &Guaranteed,
 ) -> (Vec<Elision>, PassMetrics) {
     let mut elisions = Vec::new();
     let mut metrics = PassMetrics::new();
-    // Only an entrypoint carries the ABI guarantee the collapse rests on.
-    if func.signature.is_none() {
+    // Only an entrypoint carries the ABI guarantee the collapse rests on —
+    // or a helper handed nothing but an entrypoint's parameters.
+    if func.signature.is_none() && !guaranteed.keys().any(|(f, _)| *f == func.id) {
         elisions.extend(host_decodes(func));
         for el in &elisions {
             metrics.increment(el.metric, 1);
@@ -668,7 +681,7 @@ fn plan(
         };
         match &binding.expr {
             Expr::Call { target, args } => {
-                let (invalidate, claimed) = on_call(func, helpers, &active, id, *target, args);
+                let (invalidate, claimed) = on_call(func, helpers, &active, id, *target, args, guaranteed);
                 for frame in invalidate {
                     finished.extend(active.remove(&frame));
                     restored.retain(|(f, _), _| *f != frame);
@@ -761,7 +774,7 @@ fn plan(
             metric: metrics::DECODE_CALLS_ELIDED,
         });
     }
-    elisions.extend(inline_decodes(func));
+    elisions.extend(inline_decodes(func, guaranteed));
     elisions.extend(host_decodes(func));
     for el in &elisions {
         metrics.increment(el.metric, 1);
@@ -784,6 +797,7 @@ fn on_call(
     id: ValueId,
     target: FuncId,
     args: &[ValueId],
+    guaranteed: &Guaranteed,
 ) -> (Vec<ValueId>, Claimed) {
     let mut invalidate: Vec<ValueId> = args
         .iter()
@@ -798,7 +812,7 @@ fn on_call(
         return (invalidate, Claimed::None);
     }
     let actual = resolve_use(func, args[helper.val_index]);
-    let Some(declared) = declared_param_type(func, actual) else {
+    let Some(declared) = abi_param_type(func, actual, guaranteed) else {
         return (invalidate, Claimed::None);
     };
     // Every tag the helper tests must be able to *carry* the declared
@@ -863,7 +877,7 @@ fn projected_half(
 /// shift *is* the conversion the regenerated wrapper performs — those two
 /// types have one encoding, whose payload is the high word — so the decode
 /// is the parameter.
-fn inline_decodes(func: &HighFunction) -> Vec<Elision> {
+fn inline_decodes(func: &HighFunction, guaranteed: &Guaranteed) -> Vec<Elision> {
     sret::emission_order(func)
         .into_iter()
         .filter_map(|id| {
@@ -875,7 +889,7 @@ fn inline_decodes(func: &HighFunction) -> Vec<Elision> {
                 return None;
             }
             let param = resolve_use(func, *value);
-            let declared = declared_param_type(func, param)?;
+            let declared = abi_param_type(func, param, guaranteed)?;
             matches!(declared, KnownType::U32 | KnownType::I32).then(|| Elision {
                 id,
                 expr: Expr::Use(param),
@@ -939,6 +953,107 @@ fn typed_host_u32(func: &HighFunction, value: ValueId) -> Option<KnownType> {
     matches!(ty, KnownType::U32 | KnownType::I32).then_some(ty)
 }
 
+/// Helper parameters that carry an entrypoint's ABI guarantee, with the
+/// declared type each one carries. See [`guaranteed_params`].
+type Guaranteed = HashMap<(FuncId, usize), KnownType>;
+
+/// The `contractspecv0` type a helper's parameter is guaranteed to hold:
+/// every call site hands it, untouched, an entrypoint's own declared
+/// parameter — or a parameter of another helper this map already covers —
+/// and all of them name one type. The host validated the entrypoint's value
+/// against the spec, and a helper that only passes the value along keeps
+/// that validation, so a decode it performs on the value collapses exactly
+/// as it would in the entrypoint.
+///
+/// Only a helper whose callers are all visible: one with an ABI signature
+/// is called by the host, and one the function table holds may be called
+/// through it, so neither has a caller set the scan can close. A helper
+/// that calls itself is skipped: its guarantee would rest on itself. A
+/// decode helper is skipped too: its parameter is the raw `Val` it decodes,
+/// which is what the collapse at its call sites retires. The map is a
+/// fixed point, so a wrapper of a wrapper is covered too.
+fn guaranteed_params(ir: &HighIr, helpers: &HashMap<FuncId, DecodeHelper>) -> Guaranteed {
+    let has_indirect = ir
+        .functions
+        .iter()
+        .any(|f| f.bindings.iter().any(|(_, b)| matches!(b.expr, Expr::IndirectCall { .. })));
+    let table: Option<HashSet<FuncId>> = ir
+        .facts
+        .table_functions
+        .as_ref()
+        .map(|t| t.iter().map(|i| FuncId::new(*i)).collect());
+    let complete = |f: &HighFunction| {
+        f.signature.is_none() && (!has_indirect || table.as_ref().is_some_and(|t| !t.contains(&f.id)))
+    };
+    let mut sites: HashMap<FuncId, Vec<(FuncId, Vec<ValueId>)>> = HashMap::new();
+    for caller in &ir.functions {
+        for (_, binding) in caller.bindings.iter() {
+            if let Expr::Call { target, args } = &binding.expr {
+                sites.entry(*target).or_default().push((caller.id, args.clone()));
+            }
+        }
+    }
+    let by_id: HashMap<FuncId, &HighFunction> = ir.functions.iter().map(|f| (f.id, f)).collect();
+    let mut out = Guaranteed::new();
+    for _ in 0..8 {
+        let mut changed = false;
+        for func in &ir.functions {
+            if !complete(func) || helpers.contains_key(&func.id) {
+                continue;
+            }
+            let Some(calls) = sites.get(&func.id) else {
+                continue;
+            };
+            if calls.iter().any(|(caller, _)| *caller == func.id) {
+                continue;
+            }
+            for index in 0..func.params.len() {
+                if out.contains_key(&(func.id, index)) {
+                    continue;
+                }
+                let mut agreed: Option<KnownType> = None;
+                let every_site = calls.iter().all(|(caller_id, args)| {
+                    let Some(caller) = by_id.get(caller_id) else {
+                        return false;
+                    };
+                    let Some(&arg) = args.get(index) else {
+                        return false;
+                    };
+                    let Some(ty) = abi_param_type(caller, resolve_use(caller, arg), &out) else {
+                        return false;
+                    };
+                    match &agreed {
+                        None => {
+                            agreed = Some(ty);
+                            true
+                        }
+                        Some(have) => *have == ty,
+                    }
+                });
+                if every_site && let Some(ty) = agreed {
+                    out.insert((func.id, index), ty);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    out
+}
+
+/// The `contractspecv0` type `value` carries as a parameter of `func`:
+/// declared, when `func` is an entrypoint, or guaranteed through its
+/// callers, when it is a helper.
+fn abi_param_type(func: &HighFunction, value: ValueId, guaranteed: &Guaranteed) -> Option<KnownType> {
+    if let Some(declared) = declared_param_type(func, value) {
+        return Some(declared);
+    }
+    let index = func.params.iter().position(|p| *p == value)?;
+    guaranteed.get(&(func.id, index)).cloned()
+}
+
 /// The `contractspecv0` type of `value`, when it is one of this
 /// entrypoint's parameters.
 fn declared_param_type(func: &HighFunction, value: ValueId) -> Option<KnownType> {
@@ -967,7 +1082,7 @@ fn tag_list(tags: &[u8]) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::marshalling::test_support::{func_with, load, store, v};
+    use crate::marshalling::test_support::{func_with, load, module, store, v};
     use sordec_common::{BlockId, IrId};
     use sordec_ir::{BinaryOp, FunctionParam, FunctionSignature, PrimitiveType, Region, TypeRef};
 
@@ -1219,7 +1334,7 @@ pub(crate) mod tests {
     #[test]
     fn each_load_binds_to_the_call_that_produced_it() {
         let func = caller(PrimitiveType::U64);
-        let (elisions, _) = plan(&func, &helpers());
+        let (elisions, _) = plan(&func, &helpers(), &HashMap::new());
         let by_id: HashMap<ValueId, &Expr> =
             elisions.iter().map(|e| (e.id, &e.expr)).collect();
 
@@ -1240,7 +1355,7 @@ pub(crate) mod tests {
         // The helper tests U64 tags; the spec says the argument is an
         // Address. Something is wrong with our picture, so elide nothing.
         let func = caller(PrimitiveType::Address);
-        let (elisions, _) = plan(&func, &helpers());
+        let (elisions, _) = plan(&func, &helpers(), &HashMap::new());
         assert!(elisions.is_empty(), "a tag/type disagreement must elide nothing");
     }
 
@@ -1250,18 +1365,136 @@ pub(crate) mod tests {
         // against the spec, which is only true for an ABI entrypoint.
         let mut func = caller(PrimitiveType::U64);
         func.signature = None;
-        let (elisions, _) = plan(&func, &helpers());
+        let (elisions, _) = plan(&func, &helpers(), &HashMap::new());
         assert!(elisions.is_empty(), "only entrypoint parameters carry the guarantee");
+    }
+
+    /// `add(a, b)` as the compiler outlines it: the entrypoint hands its
+    /// declared parameters, untouched, to a wrapper, and the wrapper calls
+    /// the decoder. The wrapper's parameters carry the entrypoint's
+    /// guarantee, so the decodes collapse there.
+    fn entry_calling(wrapper: FuncId, param_ty: PrimitiveType) -> HighFunction {
+        let mut func = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                          // v0 param `a`
+                Expr::Phi { incoming: vec![] },                          // v1 param `b`
+                Expr::Call { target: wrapper, args: vec![v(0), v(1)] }, // v2
+            ],
+            vec![v(0), v(1)],
+            vec![2],
+        );
+        func.id = FuncId::from_index(3);
+        func.signature = Some(FunctionSignature {
+            name: "add".to_string(),
+            inputs: vec![
+                FunctionParam { name: "a".to_string(), ty: TypeRef::Primitive(param_ty) },
+                FunctionParam { name: "b".to_string(), ty: TypeRef::Primitive(param_ty) },
+            ],
+            outputs: vec![],
+        });
+        func
+    }
+
+    /// The entrypoint's body, outlined: `caller` with no signature.
+    fn wrapper() -> HighFunction {
+        let mut func = caller(PrimitiveType::U64);
+        func.signature = None;
+        func.id = FuncId::from_index(2);
+        func
+    }
+
+    /// A function calling through the table, with `held` the functions the
+    /// table holds.
+    fn table_caller(held: Vec<u32>) -> (HighFunction, Option<Vec<u32>>) {
+        let mut func = func_with(
+            vec![
+                Expr::Literal(Literal::I32(0)), // v0
+                Expr::IndirectCall { table: 0, sig: 0, callee: v(0), args: vec![] }, // v1
+            ],
+            vec![],
+            vec![0, 1],
+        );
+        func.id = FuncId::from_index(4);
+        (func, Some(held))
+    }
+
+    #[test]
+    fn a_wrapper_handed_only_entrypoint_parameters_carries_the_guarantee() {
+        let ir = module(vec![
+            u64_decode_helper(),
+            caller(PrimitiveType::U64),
+            wrapper(),
+            entry_calling(FuncId::from_index(2), PrimitiveType::U64),
+        ]);
+        let guaranteed = guaranteed_params(&ir, &helpers());
+        assert_eq!(guaranteed.get(&(FuncId::from_index(2), 0)), Some(&KnownType::U64));
+        assert_eq!(guaranteed.get(&(FuncId::from_index(2), 1)), Some(&KnownType::U64));
+
+        let (elisions, _) = plan(&ir.functions[2], &helpers(), &guaranteed);
+        let by_id: HashMap<ValueId, &Expr> = elisions.iter().map(|e| (e.id, &e.expr)).collect();
+        assert!(matches!(by_id.get(&v(5)), Some(Expr::Use(p)) if *p == v(1)), "the wrapper's decode collapses");
+        assert!(matches!(by_id.get(&v(3)), Some(Expr::Literal(Literal::Unit))));
+    }
+
+    #[test]
+    fn a_wrapper_some_caller_hands_an_unknown_value_carries_no_guarantee() {
+        // A second caller passes the wrapper constants, which are not an
+        // entrypoint's parameters: the guarantee does not reach it.
+        let mut other = func_with(
+            vec![
+                Expr::Literal(Literal::I64(7)),                                        // v0
+                Expr::Literal(Literal::I64(8)),                                        // v1
+                Expr::Call { target: FuncId::from_index(2), args: vec![v(0), v(1)] }, // v2
+            ],
+            vec![],
+            vec![0, 1, 2],
+        );
+        other.id = FuncId::from_index(4);
+        let ir = module(vec![
+            u64_decode_helper(),
+            caller(PrimitiveType::U64),
+            wrapper(),
+            entry_calling(FuncId::from_index(2), PrimitiveType::U64),
+            other,
+        ]);
+        assert!(guaranteed_params(&ir, &helpers()).is_empty());
+    }
+
+    #[test]
+    fn a_wrapper_the_function_table_holds_carries_no_guarantee() {
+        for (held, expected) in [(vec![2], 0), (vec![4], 2)] {
+            let (through_table, table) = table_caller(held);
+            let mut ir = module(vec![
+                u64_decode_helper(),
+                caller(PrimitiveType::U64),
+                wrapper(),
+                entry_calling(FuncId::from_index(2), PrimitiveType::U64),
+                through_table,
+            ]);
+            ir.facts.table_functions = table;
+            assert_eq!(guaranteed_params(&ir, &helpers()).len(), expected, "table holds {:?}", ir.facts.table_functions);
+        }
+        // An unknown table beside an indirect call closes no caller set.
+        let (through_table, _) = table_caller(vec![]);
+        let mut ir = module(vec![
+            u64_decode_helper(),
+            caller(PrimitiveType::U64),
+            wrapper(),
+            entry_calling(FuncId::from_index(2), PrimitiveType::U64),
+            through_table,
+        ]);
+        ir.facts.table_functions = None;
+        assert!(guaranteed_params(&ir, &helpers()).is_empty());
     }
 
     #[test]
     fn second_run_reports_no_work() {
         let mut func = caller(PrimitiveType::U64);
         let helpers = helpers();
-        let (first, _) = plan(&func, &helpers);
+        let (first, _) = plan(&func, &helpers, &HashMap::new());
         assert!(!first.is_empty());
         apply_elisions(&mut func, PASS_NAME, first);
-        let (second, _) = plan(&func, &helpers);
+        let (second, _) = plan(&func, &helpers, &HashMap::new());
         assert!(second.is_empty(), "idempotent: the loads and calls are gone");
     }
 }

@@ -253,6 +253,8 @@ pub const DEAD_FRAME_STORE_AFTER_EVENTS: &str = "dead-frame-store-after-events";
 pub const FRAME_ELISION_AFTER_EVENTS: &str = "frame-elision-after-events";
 /// [`SymbolArgsPass`] re-run on the positions the recovered elements prove.
 pub const SYMBOL_ARGS_AFTER_VEC: &str = "symbol-args-after-vec";
+/// [`SymbolArgsPass`] re-run on the positions the settled parameter types prove.
+pub const SYMBOL_ARGS_AFTER_TYPES: &str = "symbol-args-after-types";
 /// Name of the declared-type recovery re-run inside the elision group,
 /// where a struct recovered from its key table first has fields to type.
 pub const SPEC_FROM_GUARDS_ON_FIELDS: &str = "spec-from-guards-on-fields";
@@ -822,6 +824,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
                 &[],
             )),
             Box::new(TypeInferPass),
+            // A packed symbol handed to a parameter the types above settled
+            // as a `Symbol` or a `Val`: the callee itself proves the
+            // position, and only now is that written down.
+            Box::new(pass::Rerun::new(SymbolArgsPass, SYMBOL_ARGS_AFTER_TYPES, &[])),
             // A returned `bool` widened to its tag, once the flags it
             // widens are typed.
             Box::new(BoolReturnPass),
