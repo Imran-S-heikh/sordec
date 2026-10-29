@@ -58,6 +58,15 @@
 //! or hands to another call between the decode and its loads is dropped
 //! from tracking, the same discipline [`super::decode`] uses.
 //!
+//! One limb is a constant rather than a decode operation: a `u128` in its
+//! small form is at most 56 bits, zero-extended, so the small arm stores a
+//! literal `0` as the high limb. That `0` is read as the high limb only in
+//! a slot another arm fills with `obj_to_u128_hi64`, and only when the same
+//! block stores the small decode as the low limb — one straight-line block
+//! is one path, so the zero is written exactly where the small form was
+//! decoded. Anywhere else a stored `0` is still a constant (the `Ok`
+//! discriminant looks the same).
+//!
 //! And a load is collapsed only where its decode **dominates** it. The scan
 //! is linear over the emission order, so a decode on one arm of an `if`
 //! and a load after the join look adjacent; `account` decodes the spend
@@ -67,9 +76,9 @@
 //! decode does not dominate stays a load, and its decode's call is then
 //! kept too, since the load still reads what the call writes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use sordec_common::{FuncId, IrId, Provenance, ProvenanceSource, ValueId};
+use sordec_common::{BlockId, FuncId, IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
     BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region,
     SemanticOp, UnaryOp, ValObjectKind,
@@ -189,7 +198,7 @@ impl Pass<HighIr> for WideCodecPass {
 /// What one value stored into an out-slot is, relative to the `Val`
 /// parameter being decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Limb {
+pub(super) enum Limb {
     /// The low 64 bits: `val_decode(v)` or `obj_to_*_lo64(v)`.
     Lo(Option<KnownType128>),
     /// The high 64 bits: `shr v, 63` (the small encoding's sign
@@ -202,19 +211,26 @@ enum Limb {
 
 /// The two wide types the codecs come in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KnownType128 {
+pub(super) enum KnownType128 {
     I128,
     U128,
 }
 
 impl KnownType128 {
-    fn known(self) -> KnownType {
+    pub(super) fn known(self) -> KnownType {
         match self {
             Self::I128 => KnownType::I128,
             Self::U128 => KnownType::U128,
         }
     }
-    fn of_tags(tags: &[u8]) -> Option<Self> {
+    /// The small and object tags of this type.
+    pub(super) fn tags(self) -> (u8, u8) {
+        match self {
+            Self::I128 => (val_abi::TAG_I128_SMALL, val_abi::TAG_I128_OBJECT),
+            Self::U128 => (val_abi::TAG_U128_SMALL, val_abi::TAG_U128_OBJECT),
+        }
+    }
+    pub(super) fn of_tags(tags: &[u8]) -> Option<Self> {
         if tags.iter().all(|t| *t == val_abi::TAG_I128_SMALL || *t == val_abi::TAG_I128_OBJECT) {
             Some(Self::I128)
         } else if tags.iter().all(|t| *t == val_abi::TAG_U128_SMALL || *t == val_abi::TAG_U128_OBJECT) {
@@ -235,14 +251,14 @@ fn classify_decoder(func: &HighFunction) -> Option<WideDecoder> {
     // Stores through the out-pointer, several per offset allowed: each Ok
     // path writes the limbs itself. Any other use of the pointer, or any
     // host state, disqualifies.
-    let mut slots: BTreeMap<u32, Vec<ValueId>> = BTreeMap::new();
+    let mut slots: BTreeMap<u32, Vec<(ValueId, ValueId)>> = BTreeMap::new();
     for id in sret::emission_order(func) {
         let Some(binding) = func.bindings.get(id) else {
             continue;
         };
         match &binding.expr {
             Expr::Store { addr, value, offset, .. } if resolve_use(func, *addr) == out => {
-                slots.entry(*offset).or_default().push(*value);
+                slots.entry(*offset).or_default().push((id, *value));
             }
             other => {
                 let mut escapes = false;
@@ -277,9 +293,23 @@ fn classify_decoder(func: &HighFunction) -> Option<WideDecoder> {
         return None;
     }
 
+    let block_of = block_index(func);
+    let small_lo = small_low_blocks(func, &slots, val, &block_of);
     let (mut disc, mut lo, mut hi) = (None, None, None);
-    for (offset, values) in &slots {
-        let roles: Vec<Limb> = values.iter().map(|v| limb_of(func, *v, val, 2)).collect();
+    for (offset, stores) in &slots {
+        let values: Vec<ValueId> = stores.iter().map(|(_, v)| *v).collect();
+        let mut roles: Vec<Limb> = values.iter().map(|v| limb_of(func, *v, val, 2)).collect();
+        // A `u128`'s small form has no high half to compute, so its arm
+        // stores a literal `0` there. Read as the high limb only in a slot
+        // another arm fills with the object's high piece, and only beside
+        // the small decode it belongs to.
+        if ty == KnownType128::U128 && roles.iter().any(|r| matches!(r, Limb::Hi(_))) {
+            for (role, store) in roles.iter_mut().zip(stores) {
+                if *role == Limb::Const && zero_high_limb(func, *store, &small_lo, &block_of) {
+                    *role = Limb::Hi(Some(KnownType128::U128));
+                }
+            }
+        }
         if roles.iter().all(|r| *r == Limb::Const)
             && values.iter().any(|v| has_zero_arm(func, *v))
             && values.iter().all(|v| all_arms_are_flags(func, *v))
@@ -316,6 +346,46 @@ fn classify_decoder(func: &HighFunction) -> Option<WideDecoder> {
     })
 }
 
+/// The blocks that store `val_decode(val)` — the low limb of the small
+/// form — through the out-pointer.
+fn small_low_blocks(
+    func: &HighFunction,
+    slots: &BTreeMap<u32, Vec<(ValueId, ValueId)>>,
+    val: ValueId,
+    block_of: &HashMap<ValueId, BlockId>,
+) -> HashSet<BlockId> {
+    slots
+        .values()
+        .flatten()
+        .filter(|(_, value)| limb_of(func, *value, val, 0) == Limb::Lo(None))
+        .filter_map(|(store, _)| block_of.get(store).copied())
+        .collect()
+}
+
+/// Whether `store` writes a literal `0` in a block that also stores the
+/// small decode — the high limb of a `u128` in its small form.
+///
+/// That form carries at most 56 bits, zero-extended, so on the path that
+/// decodes it the high limb is exactly `0`. The same block is the same
+/// path: a block is straight-line, so the two stores run together or not
+/// at all.
+fn zero_high_limb(
+    func: &HighFunction,
+    (store, value): (ValueId, ValueId),
+    small_lo: &HashSet<BlockId>,
+    block_of: &HashMap<ValueId, BlockId>,
+) -> bool {
+    trace_int(func, value) == Some(0) && block_of.get(&store).is_some_and(|b| small_lo.contains(b))
+}
+
+/// The block each scheduled binding sits in.
+fn block_index(func: &HighFunction) -> HashMap<ValueId, BlockId> {
+    func.blocks
+        .iter()
+        .flat_map(|(b, block)| block.bindings.iter().map(move |v| (*v, b)))
+        .collect()
+}
+
 fn limb_ty(limb: Limb) -> Option<KnownType128> {
     match limb {
         Limb::Lo(t) | Limb::Hi(t) => t,
@@ -325,7 +395,7 @@ fn limb_ty(limb: Limb) -> Option<KnownType128> {
 
 /// Classify one stored value. Recurses through a phi so a merged Ok path
 /// still reads as one limb.
-fn limb_of(func: &HighFunction, value: ValueId, val: ValueId, depth: u32) -> Limb {
+pub(super) fn limb_of(func: &HighFunction, value: ValueId, val: ValueId, depth: u32) -> Limb {
     let id = resolve_use(func, value);
     let Some(binding) = func.bindings.get(id) else {
         return Limb::Other;
@@ -386,7 +456,7 @@ fn arms_of(func: &HighFunction, value: ValueId) -> Option<Vec<ValueId>> {
 }
 
 /// Every tag tested against `param` in this function.
-fn tested_tags(func: &HighFunction, param: ValueId) -> Vec<u8> {
+pub(super) fn tested_tags(func: &HighFunction, param: ValueId) -> Vec<u8> {
     let mut tags = Vec::new();
     for (_, binding) in func.bindings.iter() {
         if let Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, tag, .. })) =
@@ -760,7 +830,7 @@ fn plan_decodes(
 /// host's validation; a host operation's result carries the decode
 /// itself as evidence of what was stored. Anything else has no boundary
 /// to relocate the check to.
-fn value_evidence(func: &HighFunction, val: ValueId, ty: &KnownType, tags: &[u8]) -> Option<IrType> {
+pub(super) fn value_evidence(func: &HighFunction, val: ValueId, ty: &KnownType, tags: &[u8]) -> Option<IrType> {
     if let Some(declared) = declared_param_type(func, val) {
         if declared == *ty && tags.iter().all(|t| val_abi::tag_carries(*t, &declared)) {
             return Some(IrType::Known(declared));
@@ -947,6 +1017,59 @@ mod tests {
         );
         f.id = FuncId::from_index(id);
         f
+    }
+
+    /// `u128::try_from_val`, each arm in its own block. The small arm has
+    /// no high half to compute and stores a literal `0` — beside its
+    /// decode, or (`zero_with_decode` false) somewhere else.
+    fn u128_decoder(zero_with_decode: bool) -> HighFunction {
+        let bb = |i: u32| BlockId::from_index(i);
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                   // v0 out
+                Expr::Phi { incoming: vec![] },                                   // v1 val
+                tag_check(v(1), val_abi::TAG_U128_OBJECT),                        // v2
+                obj(ValObjectKind::ObjToU128Hi64, vec![v(1)]),                    // v3
+                obj(ValObjectKind::ObjToU128Lo64, vec![v(1)]),                    // v4
+                store(v(0), v(3), 24),                                            // v5
+                store(v(0), v(4), 16),                                            // v6
+                tag_check(v(1), val_abi::TAG_U128_SMALL),                         // v7
+                lit(0),                                                           // v8
+                store(v(0), v(8), 24),                                            // v9
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value: v(1) })), // v10
+                store(v(0), v(10), 16),                                           // v11
+                lit(34_359_740_419),                                              // v12 error Val
+                store(v(0), v(12), 8),                                            // v13
+                lit(1),                                                           // v14
+                Expr::Phi { incoming: vec![(bb(1), v(8)), (bb(2), v(8)), (bb(3), v(14))] }, // v15
+                store(v(0), v(15), 0),                                            // v16
+            ],
+            vec![v(0), v(1)],
+            if zero_with_decode { vec![2, 7] } else { vec![2, 7, 8, 9] },
+        );
+        let small = if zero_with_decode { vec![v(8), v(9), v(10), v(11)] } else { vec![v(10), v(11)] };
+        for (i, bindings) in [vec![v(3), v(4), v(5), v(6)], small, vec![v(12), v(13), v(14)], vec![v(16)]]
+            .into_iter()
+            .enumerate()
+        {
+            f.blocks.push(sordec_ir::HighBlock { id: bb(i as u32 + 1), bindings });
+        }
+        f.region = Region::Sequence((0..5).map(|i| Region::Basic(bb(i))).collect());
+        f
+    }
+
+    #[test]
+    fn a_u128_decoder_storing_a_zero_high_limb_beside_its_decode_is_classified() {
+        let d = classify_decoder(&u128_decoder(true)).expect("decoder");
+        assert_eq!((d.disc, d.lo, d.hi), (0, 16, 24));
+        assert_eq!(d.ty, KnownType::U128);
+    }
+
+    /// A `0` written on some other path is a constant, not the high limb
+    /// of the small form, and the slot then holds two different things.
+    #[test]
+    fn a_zero_away_from_the_small_decode_is_not_a_limb() {
+        assert!(classify_decoder(&u128_decoder(false)).is_none());
     }
 
     /// An entrypoint `mint(amount: i128)` decoding through a 32-byte frame

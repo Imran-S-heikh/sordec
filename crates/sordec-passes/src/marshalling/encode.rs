@@ -427,7 +427,7 @@ fn is_error_value(func: &HighFunction, value: ValueId) -> bool {
 /// payload's own encoding — so a path returning an encoded `T` returns
 /// `Ok(t)`, and the emitter wraps a returned `T` in exactly that. The
 /// `Err` paths return an error value, which is no encode and is left be.
-fn declared_return_type(func: &HighFunction) -> Option<KnownType> {
+pub(super) fn declared_return_type(func: &HighFunction) -> Option<KnownType> {
     let sig = func.signature.as_ref()?;
     let [only] = sig.outputs.as_slice() else {
         return None;
@@ -550,6 +550,11 @@ pub(super) fn encoded_constant(func: &HighFunction, value: ValueId, declared: &K
 /// `declared`. `None` for anything else — including an encode to a
 /// *different* type, which would mean our reading of the boundary is
 /// wrong.
+///
+/// A 128-bit small encode is declined too. What it takes is the *low
+/// limb*, one 64-bit half of the value, so naming its operand as the
+/// returned `i128` would declare a half to be the whole. The value is the
+/// pair of limbs, and [`super::wide_encode`] is what folds that.
 fn encoded_payload(
     func: &HighFunction,
     encoded: ValueId,
@@ -557,6 +562,10 @@ fn encoded_payload(
 ) -> Option<ValueId> {
     let binding = func.bindings.get(resolve_use(func, encoded))?;
     let (payload, encoded_ty) = match &binding.expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall {
+            ty: KnownType::I128 | KnownType::U128,
+            ..
+        })) => return None,
         Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty, value })) => {
             (*value, ty.clone())
         }
