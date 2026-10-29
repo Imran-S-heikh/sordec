@@ -26,3 +26,17 @@ merkle-voting 9 · and 22 of the 39 SDK 26 contracts.
 
 Output byte-identical to d6e0f94 on all five sets (no measured contract lacks
 entrypoints); same table as the baseline. Baseline moved to this commit.
+
+## 2026-10-29 — commit 488ae8d (hole typing merged)
+
+| Set | Contracts | Compile | Errors | Holes | Lines |
+|---|---:|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 | 2,026 |
+| Stellar examples, single-crate | 25 | 22/25 | 28 | 3,898 | 17,682 |
+| Stellar examples, multi-contract | 13 | 9/13 | 42 | 4,243 | 14,785 |
+| third-party | 2 | 0/2 | 52 | 788 | 3,462 |
+| SDK 26 test contracts | 39 | 17/39 | 122 | 1,607 | 8,206 |
+
+Errors 257 → 244. Moved: account 3→2, atomic_multiswap 2→1, privacy_pools 30→25,
+phoenix-vesting 45→43, udt 12→10, spec_shaking_v1/v2 18→17 each. Holes unchanged;
+every changed line is a placeholder gaining a type. Scores not re-run (no body changed).
