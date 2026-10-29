@@ -39,6 +39,18 @@
 //! So the select chain is the value and every comparison of it against a
 //! constant outside `{0, 1}` folds to the answer it always gives.
 //!
+//! # A dispatch on a value that is already a `bool`
+//!
+//! The encoding folded above is often dispatched on rather than compared:
+//! `match e { 0 => …, 1 => …, 2 => panic!(), _ => … }`, the `2` arm the
+//! "not a bool" marker. Once `e` is the `bool` itself, only its two
+//! encodings reach the dispatch, so it is the `if` on that `bool`: case `1`
+//! the `then`, case `0` the `else`, every other arm and the default never
+//! taken. Gated on the selector being a `bool` the program proves — an
+//! entrypoint parameter its spec declares `bool`, whose word the host has
+//! checked is `0` or `1`, or a comparison, which yields nothing else — not
+//! one only inferred to be.
+//!
 //! # Why it is exact
 //!
 //! Both rewrites need `v` to be a `bool`, and both keep the trap. Decoding,
@@ -321,6 +333,18 @@ fn fold_decodes(func: &HighFunction, region: Region, decoded: &mut Vec<(ValueId,
                 decoded.push((value, chain));
                 return Region::Return { values: vec![value] };
             }
+            if let Some(cond) = proven_bool(func, index) {
+                let body_for = |case: u32| {
+                    arms.iter()
+                        .find(|a| a.cases.contains(&case))
+                        .map_or_else(|| (*default).clone(), |a| a.body.clone())
+                };
+                let (on_false, on_true) = (body_for(0), body_for(1));
+                let then_region = Box::new(recurse(on_true));
+                let else_region = Some(Box::new(recurse(on_false)));
+                decoded.push((cond, Vec::new()));
+                return Region::If { cond: index, then_region, else_region };
+            }
             if let Some((value, chain)) = branched_bool(func, index, &arms, &default) {
                 let mut arms = arms;
                 let on_true = arms.pop().map(|a| a.body);
@@ -356,6 +380,23 @@ fn fold_decodes(func: &HighFunction, region: Region, decoded: &mut Vec<(ValueId,
         },
         other => other,
     }
+}
+
+/// The `bool` a dispatch selects on, when the program proves it is one: an
+/// entrypoint parameter declared `bool`, or a comparison.
+fn proven_bool(func: &HighFunction, index: ValueId) -> Option<ValueId> {
+    let v = resolve_use(func, index);
+    let b = func.bindings.get(v)?;
+    let declared = func.signature.as_ref().is_some_and(|sig| {
+        func.params
+            .iter()
+            .position(|p| *p == v)
+            .and_then(|i| sig.inputs.get(i))
+            .is_some_and(|p| known_of_type_ref(&p.ty) == Some(KnownType::Bool))
+    });
+    let compared = matches!(&b.expr, Expr::Binary { op, .. } if op.is_comparison())
+        || matches!(b.expr, Expr::Unary { op: UnaryOp::Eqz, .. });
+    (declared || compared).then_some(v)
 }
 
 /// The value a decoding dispatch converts, if that is what this is.
@@ -811,5 +852,56 @@ mod tests {
             ir.functions[0].bindings.get(v(4)).map(|b| &b.expr),
             Some(Expr::Unary { op: UnaryOp::Not, value }) if *value == v(2)
         ));
+    }
+
+    /// `fn f(ok: bool) { match ok { 0 => A, 1 => B, 2 => panic, _ => C } }`:
+    /// the `if ok { B } else { A }` it is.
+    fn bool_param_switch(declared: sordec_ir::PrimitiveType) -> HighFunction {
+        use sordec_ir::{FunctionParam, FunctionSignature, TypeRef};
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0 ok
+                Expr::Literal(Literal::I64(10)), // v1 A
+                Expr::Literal(Literal::I64(11)), // v2 B
+                Expr::Literal(Literal::I64(12)), // v3 C
+            ],
+            vec![v(0)],
+            vec![1, 2, 3],
+        );
+        f.signature = Some(FunctionSignature {
+            name: "f".to_string(),
+            inputs: vec![FunctionParam { name: "ok".to_string(), ty: TypeRef::Primitive(declared) }],
+            outputs: vec![],
+        });
+        f.region = Region::Switch {
+            index: v(0),
+            arms: vec![
+                SwitchArm { cases: vec![0], body: Region::Return { values: vec![v(1)] } },
+                SwitchArm { cases: vec![1], body: Region::Return { values: vec![v(2)] } },
+                SwitchArm { cases: vec![2], body: Region::Unreachable },
+            ],
+            default: Box::new(Region::Return { values: vec![v(3)] }),
+            dispatch: None,
+        };
+        f
+    }
+
+    #[test]
+    fn a_dispatch_on_a_declared_bool_is_the_if_on_it() {
+        let mut ir = module(vec![bool_param_switch(sordec_ir::PrimitiveType::Bool)]);
+        assert!(BoolCodecPass.run(&mut ir).changed);
+        let Region::If { cond, then_region, else_region } = &ir.functions[0].region else {
+            panic!("{:?}", ir.functions[0].region)
+        };
+        assert_eq!(*cond, v(0));
+        assert!(matches!(**then_region, Region::Return { ref values } if values == &vec![v(2)]));
+        assert!(matches!(else_region.as_deref(), Some(Region::Return { values }) if values == &vec![v(1)]));
+    }
+
+    #[test]
+    fn a_dispatch_on_a_value_not_proven_bool_is_left_alone() {
+        let mut ir = module(vec![bool_param_switch(sordec_ir::PrimitiveType::U32)]);
+        BoolCodecPass.run(&mut ir);
+        assert!(matches!(ir.functions[0].region, Region::Switch { .. }));
     }
 }
