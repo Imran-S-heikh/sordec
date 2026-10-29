@@ -229,3 +229,19 @@ function declared `-> Result<T, E>` takes its variant from `E` when two enums
 declare the same code, or becomes `Error::from_contract_error(code)` when `E` is
 the SDK's own `Error`. Only add_u64 changed; the held-out set is untouched, so
 scores are unchanged.
+
+## 2026-10-29 — commit d44be01 (a curve point's result has its protocol length)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 22/25 | 22 | 3,898 |
+| Stellar examples, multi-contract | 13 | 10/13 | 34 | 4,241 |
+| third-party | 2 | 1/2 | 28 | 788 |
+| SDK 26 test contracts | 39 | 24/39 | 57 | 1,595 |
+
+Errors 145 → 141. A BLS12-381 or BN254 point operation's result is the
+`BytesN<N>` the protocol fixes (G1 96 bytes, G2 192, BN254 G1 64), as the SDK
+wraps it. SDK 26 bls 5 → 3, bn254 4 → 2; bls_signature (held-out) now builds its
+two-point vector with `vec![]` and scores the same (0.6873). Scores unchanged:
+corpus bands pass, held-out mean 0.7850.
