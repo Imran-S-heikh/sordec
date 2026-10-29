@@ -257,6 +257,8 @@ pub const SYMBOL_ARGS_AFTER_VEC: &str = "symbol-args-after-vec";
 pub const SYMBOL_ARGS_AFTER_TYPES: &str = "symbol-args-after-types";
 /// [`ValDecodeCollapsePass`] re-run once the `Option`-shaped decoders exist.
 pub const VAL_DECODE_AFTER_OPTIONAL: &str = "val-decode-after-optional";
+/// [`OptionReturnPass`] re-run once the type pass has typed the arms.
+pub const OPTION_RETURN_AFTER_TYPES: &str = "option-return-after-types";
 /// Name of the declared-type recovery re-run inside the elision group,
 /// where a struct recovered from its key table first has fields to type.
 pub const SPEC_FROM_GUARDS_ON_FIELDS: &str = "spec-from-guards-on-fields";
@@ -832,6 +834,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // A helper returning a `bool` in its word, ahead of the typing
             // that carries the `bool` through its calls and merges.
             Box::new(BoolHelperPass),
+            // A returned `Option`'s encoded arms — `Void`, an encode of a `T`
+            // — as the `None` and `Some` they encode. Ahead of the typing,
+            // so the `Option` the spec returns is not read back into the
+            // helpers that encode its payload.
+            Box::new(OptionReturnPass),
             Box::new(TypeInferPass),
             // A packed symbol handed to a parameter the types above settled
             // as a `Symbol` or a `Val`: the callee itself proves the
@@ -840,10 +847,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // A returned `bool` widened to its tag, once the flags it
             // widens are typed.
             Box::new(BoolReturnPass),
-            // A returned `Option` merge's encoded arms — `Void`, a `T`'s
-            // `Val` — as the `None` and `Some(t)` they encode, once the
-            // arms are typed.
-            Box::new(OptionReturnPass),
+            // Again, for the arms only the typing names a `T`.
+            Box::new(pass::Rerun::new(
+                OptionReturnPass,
+                OPTION_RETURN_AFTER_TYPES,
+                &[metrics_catalog::MARSHALLING_OPTION_RETURNS],
+            )),
             // After the types settle, and outside the group: a stripped
             // module's key union is synthesized with untyped fields, and
             // the values its construction sites put in them are the

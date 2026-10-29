@@ -130,6 +130,7 @@ pub mod bool_helper;
 pub use bool_helper::BoolHelperPass;
 pub mod option_return;
 pub use option_return::OptionReturnPass;
+pub(crate) mod encode_helper;
 pub use residual_probe::ResidualProbePass;
 pub use option_sret::OptionSretPass;
 pub use optional_out::OptionalOutParamPass;

@@ -17,6 +17,11 @@
 //! The merge is typed `Option<T>` by the spec, so left alone one arm puts
 //! a `T` in it and the other an `i64`.
 //!
+//! An arm may also be the encode itself — the SDK's `obj_from_u64` /
+//! `val_encode` pair inline, or a call to a helper that does nothing else
+//! ([`super::encode_helper`]) — and then it is `Some` of what it encodes.
+//! So is a value returned directly that is such an encode.
+//!
 //! # Why it is exact
 //!
 //! `Void` is the encoding of `None` and of nothing else an `Option<T>` can
@@ -27,10 +32,15 @@
 //! # Gates
 //!
 //! - **The spec's one output is `Option<T>`**, with `T` named.
-//! - **Every arm is one of three things**, through merges that are read by
+//! - **Every arm is one of four things**, through merges that are read by
 //!   nothing but the return and each other: the constant `2`, a value typed
-//!   exactly `T`, or a value already an `Option`. Anything else — a `Val`,
-//!   a number of another type — and the return is left alone.
+//!   exactly `T`, an encode of a `T`, or a value already an `Option`.
+//!   Anything else — a `Val`, a number of another type — and the return is
+//!   left alone.
+//! - **An encode read only on the way out** is rewritten in place to the
+//!   `Some`, and a helper call left with no reader is dropped (the helper
+//!   does nothing else). One something else also reads — a store of the
+//!   `Val` — keeps its `Val`, and its edge carries a fresh `Some`.
 //! - **A `2` read only by those merges**, rewritten in place to `None`.
 //! - **A `T` arm leaves from a block the body schedules.** Its `Some(t)` is
 //!   built at the end of that block and the edge carries it; an edge whose
@@ -41,6 +51,7 @@ use std::collections::{HashMap, HashSet};
 use sordec_common::{BlockId, IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{Binding, Expr, HighFunction, HighIr, IrType, KnownType, Literal, Region};
 
+use super::encode_helper::{elide_spent_calls, encoder_calls, inline_encode, EncoderTable};
 use crate::dataflow::resolve_use;
 use crate::metrics_catalog::MARSHALLING_OPTION_RETURNS as M_OPTION_RETURNS;
 use crate::pass::{Pass, PassResult};
@@ -61,13 +72,18 @@ impl Pass<HighIr> for OptionReturnPass {
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
+        let encoders = EncoderTable::build(ir);
         for func in &mut ir.functions {
             let Some(option) = declared_option(func) else { continue };
-            for plan in plans(func, &option) {
+            for plan in plans(func, &option, &encoders) {
                 apply(func, &option, plan);
                 result.metrics.increment(M_OPTION_RETURNS, 1);
                 result.changed = true;
             }
+            // A helper call whose component became the `Some` in place has
+            // nothing left reading it, and the helper does nothing else.
+            let calls = encoder_calls(func, &encoders);
+            elide_spent_calls(func, &encoders, &calls, PASS_NAME);
         }
         result
     }
@@ -80,8 +96,13 @@ struct Plan {
     merges: Vec<ValueId>,
     /// `2` constants becoming `None`.
     nones: Vec<ValueId>,
-    /// `(merge, predecessor block, value)` edges whose `T` becomes `Some`.
-    somes: Vec<(ValueId, BlockId, ValueId)>,
+    /// `(merge, predecessor block, value, payload)` edges whose value
+    /// becomes `Some(payload)`: a `T` is its own payload, an encode of a
+    /// `T` the value it encodes.
+    somes: Vec<(ValueId, BlockId, ValueId, ValueId)>,
+    /// Encodes of a `T` read only on the way out: each becomes
+    /// `Some(payload)` in place.
+    in_place: Vec<(ValueId, ValueId)>,
 }
 
 /// `Option<T>` when the spec's one output is that, with `T` named.
@@ -102,7 +123,7 @@ fn payload(option: &KnownType) -> Option<KnownType> {
     }
 }
 
-fn plans(func: &HighFunction, option: &KnownType) -> Vec<Plan> {
+fn plans(func: &HighFunction, option: &KnownType, encoders: &EncoderTable) -> Vec<Plan> {
     let Some(t) = payload(option) else { return Vec::new() };
     let mut returned = Vec::new();
     func.region.for_each_node(|node| {
@@ -118,18 +139,38 @@ fn plans(func: &HighFunction, option: &KnownType) -> Vec<Plan> {
     let scheduled: HashSet<BlockId> = scheduled_blocks(func);
     returned
         .into_iter()
-        .filter_map(|r| plan(func, r, &t, &scheduled))
-        .filter(|p| !p.nones.is_empty() || !p.somes.is_empty())
+        .filter_map(|r| plan(func, r, &t, &scheduled, encoders))
+        .filter(|p| !p.nones.is_empty() || !p.somes.is_empty() || !p.in_place.is_empty())
         .collect()
 }
 
-/// The rewrite for the merge `r` returns, or `None` when an arm is not
-/// one of the three shapes.
-fn plan(func: &HighFunction, r: ValueId, t: &KnownType, scheduled: &HashSet<BlockId>) -> Option<Plan> {
-    if !matches!(func.bindings.get(r)?.expr, Expr::Phi { .. }) {
-        return None;
-    }
+/// The payload `v` encodes as `t`: an inline encode, or the component of a
+/// helper that only encodes ([`EncoderTable`]).
+fn encode_of(func: &HighFunction, encoders: &EncoderTable, v: ValueId, t: &KnownType) -> Option<ValueId> {
+    let (payload, ty) = inline_encode(func, v).or_else(|| encoders.encoded_by_call(func, v))?;
+    (ty == *t).then_some(payload)
+}
+
+/// The rewrite for the value `r` returns, or `None` when an arm is not one
+/// of the shapes.
+fn plan(
+    func: &HighFunction,
+    r: ValueId,
+    t: &KnownType,
+    scheduled: &HashSet<BlockId>,
+    encoders: &EncoderTable,
+) -> Option<Plan> {
     let mut plan = Plan::default();
+    if !matches!(func.bindings.get(r)?.expr, Expr::Phi { .. }) {
+        // Returned directly: only an encode, read by the return alone.
+        let payload = encode_of(func, encoders, r, t)?;
+        if !read_only_by(func, r, &HashSet::new()) {
+            return None;
+        }
+        plan.in_place.push((r, payload));
+        return Some(plan);
+    }
+    let mut encodes: Vec<(ValueId, BlockId, ValueId, ValueId)> = Vec::new();
     let mut work = vec![r];
     let mut seen = HashSet::new();
     while let Some(m) = work.pop() {
@@ -141,6 +182,12 @@ fn plan(func: &HighFunction, r: ValueId, t: &KnownType, scheduled: &HashSet<Bloc
         for (pred, arm) in incoming {
             let a = resolve_use(func, *arm);
             let b = func.bindings.get(a)?;
+            // An encode first: its own type may already say `Option` or
+            // `T`, taken from the very return being repaired.
+            if let Some(payload) = encode_of(func, encoders, a, t) {
+                encodes.push((m, *pred, *arm, payload));
+                continue;
+            }
             match &b.expr {
                 Expr::Phi { incoming } if !incoming.is_empty() => work.push(a),
                 Expr::Literal(Literal::I64(n)) if *n == i64::from(TAG_VOID) => {
@@ -154,13 +201,29 @@ fn plan(func: &HighFunction, r: ValueId, t: &KnownType, scheduled: &HashSet<Bloc
                     if !scheduled.contains(pred) {
                         return None;
                     }
-                    plan.somes.push((m, *pred, *arm));
+                    plan.somes.push((m, *pred, *arm, *arm));
                 }
                 _ => return None,
             }
         }
     }
     let merges: HashSet<ValueId> = plan.merges.iter().copied().collect();
+    // An encode read only on the way out becomes the `Some` in place; one
+    // something else also reads (a store of the `Val`) keeps its `Val`, and
+    // the edge carries a fresh `Some` of the payload instead.
+    for (m, pred, arm, payload) in encodes {
+        let a = resolve_use(func, arm);
+        if read_only_by(func, a, &merges) {
+            if !plan.in_place.iter().any(|(x, _)| *x == a) {
+                plan.in_place.push((a, payload));
+            }
+        } else {
+            if !scheduled.contains(&pred) {
+                return None;
+            }
+            plan.somes.push((m, pred, arm, payload));
+        }
+    }
     // Each merge but the returned one, and each `2`, is read only on the
     // way to the return.
     for &m in &plan.merges[1..] {
@@ -178,7 +241,7 @@ fn plan(func: &HighFunction, r: ValueId, t: &KnownType, scheduled: &HashSet<Bloc
     }
     // Every `Some` edge must be found in the region, where it is carried.
     let expected: HashMap<(ValueId, BlockId), ValueId> =
-        plan.somes.iter().map(|(m, p, v)| ((*m, *p), *v)).collect();
+        plan.somes.iter().map(|(m, p, v, _)| ((*m, *p), *v)).collect();
     let mut found = 0;
     let mut probe = func.region.clone();
     retarget(&mut probe, &mut None, &expected, &HashMap::new(), &mut found);
@@ -238,14 +301,25 @@ fn apply(func: &mut HighFunction, option: &KnownType, plan: Plan) {
             ));
         }
     }
+    for (a, payload) in &plan.in_place {
+        if let Some(b) = func.bindings.get_mut(*a) {
+            b.expr = Expr::Optional { payload: Some(vec![*payload]) };
+            b.ty = ty.clone();
+            b.add_provenance(Provenance::new(
+                PASS_NAME,
+                ProvenanceSource::SdkPattern,
+                "the encode of a `T` returned as an `Option<T>` is its `Some`: the SDK encodes `Some(t)` as `t`'s `Val`",
+            ));
+        }
+    }
     // One `Some(t)` per edge, built at the end of the block the edge leaves.
     let mut built: HashMap<(ValueId, BlockId), ValueId> = HashMap::new();
-    for (m, pred, value) in &plan.somes {
+    for (m, pred, value, payload) in &plan.somes {
         let id = ValueId::from_index(func.bindings.len() as u32);
         func.bindings.push(Binding::new(
             id,
             ty.clone(),
-            Expr::Optional { payload: Some(vec![*value]) },
+            Expr::Optional { payload: Some(vec![*payload]) },
             Provenance::new(
                 PASS_NAME,
                 ProvenanceSource::SdkPattern,
@@ -265,7 +339,7 @@ fn apply(func: &mut HighFunction, option: &KnownType, plan: Plan) {
         }
     }
     let expected: HashMap<(ValueId, BlockId), ValueId> =
-        plan.somes.iter().map(|(m, p, v)| ((*m, *p), *v)).collect();
+        plan.somes.iter().map(|(m, p, v, _)| ((*m, *p), *v)).collect();
     let mut found = 0;
     retarget(&mut func.region, &mut None, &expected, &built, &mut found);
     for m in &plan.merges {
@@ -398,6 +472,55 @@ mod tests {
         });
         assert!(carried, "the edge carries the `Some`");
         assert!(!OptionReturnPass.run(&mut ir).changed, "idempotent");
+    }
+
+    /// The `Symbol` arm replaced by `val_encode<u64>(x)` from a function
+    /// declared `-> Option<u64>`.
+    fn encoded_arm() -> HighIr {
+        let mut ir = shape(option_of(PrimitiveType::U64));
+        let f = &mut ir.functions[0];
+        let x = ValueId::from_index(f.bindings.len() as u32);
+        f.bindings.push(Binding::new(
+            x,
+            IrType::Known(KnownType::U64),
+            Expr::Phi { incoming: vec![] },
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        f.params.push(x);
+        f.bindings.get_mut(v(1)).unwrap().expr =
+            Expr::Semantic(sordec_ir::SemanticOp::Known(sordec_ir::KnownOp::ValEncodeSmall { ty: KnownType::U64, value: x }));
+        f.bindings.get_mut(v(1)).unwrap().ty = IrType::Inferred(KnownType::Val);
+        f.params.retain(|p| *p != v(1));
+        f.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings.push(v(1));
+        ir
+    }
+
+    #[test]
+    fn an_encoded_arm_is_some_of_what_it_encodes() {
+        let mut ir = encoded_arm();
+        assert!(OptionReturnPass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        let x = *f.params.last().unwrap();
+        assert!(matches!(&f.bindings.get(v(1)).unwrap().expr, Expr::Optional { payload: Some(p) } if p == &vec![x]));
+    }
+
+    #[test]
+    fn an_encoded_arm_also_stored_keeps_its_val() {
+        let mut ir = encoded_arm();
+        let f = &mut ir.functions[0];
+        let store = ValueId::from_index(f.bindings.len() as u32);
+        f.bindings.push(Binding::new(
+            store,
+            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            crate::marshalling::test_support::store(v(0), v(1), 8),
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        f.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings.push(store);
+        assert!(OptionReturnPass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        assert!(matches!(f.bindings.get(v(1)).unwrap().expr, Expr::Semantic(_)), "the stored Val stays");
+        let Expr::Phi { incoming } = &f.bindings.get(v(3)).unwrap().expr else { unreachable!() };
+        assert!(matches!(&f.bindings.get(incoming[0].1).unwrap().expr, Expr::Optional { payload: Some(_) }));
     }
 
     #[test]

@@ -28,6 +28,20 @@
 //! `storage().set(..)` or pushed into a `Vec<Val>` really is a `Val`, and
 //! rewriting it to its payload would change what gets stored. So the
 //! transform is anchored on the return, never on the encode alone.
+//!
+//! ## An encode outlined into a helper
+//!
+//! rustc often outlines the `u64` dispatch above into a helper the
+//! entrypoints share, and the entrypoint returns `func1(a + b).1`. When that
+//! helper does nothing but encode its argument on every path
+//! ([`super::encode_helper`]), the component *is* the encode, and collapses
+//! as the inline one does — only when nothing but the return reads it, since
+//! it is rewritten in place. The call, left with no reader, is dropped: the
+//! helper has no effect to keep.
+//!
+//! A `Result<T, E>`'s `Err` path returns an error value — a constant tagged
+//! `Error`, or a value typed one — which is no encoding of `T`. It is left
+//! be, and the other paths still collapse.
 
 use sordec_common::ValueId;
 use sordec_ir::{
@@ -35,6 +49,7 @@ use sordec_ir::{
     ValObjectKind,
 };
 
+use super::encode_helper::{elide_spent_calls, encoder_calls, EncoderTable};
 use super::{apply_elisions, metrics, Elision};
 use crate::dataflow::resolve_use;
 use crate::pass::{Pass, PassResult};
@@ -54,14 +69,22 @@ impl Pass<HighIr> for ValEncodeCollapsePass {
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
+        let encoders = EncoderTable::build(ir);
         for func in &mut ir.functions {
-            let elisions = plan(func);
+            let elisions = plan(func, &encoders);
             if !elisions.is_empty() {
                 result.changed = true;
                 result
                     .metrics
                     .increment(metrics::ENCODE_COLLAPSED, elisions.len() as i64);
                 apply_elisions(func, PASS_NAME, elisions);
+            }
+            // A call to a helper that only encodes, once nothing reads what
+            // it returned — its result collapsed here, or its status checked
+            // only by a guard since removed — has no effect left to keep.
+            let calls = encoder_calls(func, &encoders);
+            if elide_spent_calls(func, &encoders, &calls, PASS_NAME) > 0 {
+                result.changed = true;
             }
             // Collapsing both arms of the width dispatch leaves a branch
             // that no longer decides anything. Fold it here, while the
@@ -276,11 +299,15 @@ fn side_effect_free(func: &HighFunction, regions: &[Region]) -> bool {
 }
 
 /// Plan every return-encode collapse in one function.
-fn plan(func: &HighFunction) -> Vec<Elision> {
+fn plan(func: &HighFunction, encoders: &EncoderTable) -> Vec<Elision> {
     let mut elisions = Vec::new();
     let Some(declared) = declared_return_type(func) else {
         return elisions;
     };
+    let result = matches!(
+        func.signature.as_ref().map(|s| s.outputs.as_slice()),
+        Some([only]) if matches!(known_of_type_ref(only), Some(KnownType::Result(..)))
+    );
 
     for returned in returned_values(func) {
         // Each site that produces the returned value on some path.
@@ -296,6 +323,11 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
         // stands for its payload, whatever the other paths encode.
         let mut constants: Vec<(ValueId, Literal)> = Vec::new();
         for (binding, encoded) in &sites {
+            // A `Result`'s `Err` path returns an error value, which is no
+            // encoding of the `Ok` type: left be, as the emitter wraps it.
+            if result && is_error_value(func, *encoded) {
+                continue;
+            }
             if let Some(lit) = encoded_constant(func, *encoded, &declared) {
                 // Rewritten in place, so only a constant nothing else reads.
                 if read_count(func, *binding) != 1 {
@@ -313,7 +345,14 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
             ) {
                 continue;
             }
-            match encoded_payload(func, *encoded, &declared) {
+            // The encode outlined into a helper the entrypoints share: the
+            // call's component *is* the encode, on every path. Rewritten in
+            // place, so only a component nothing but the return reads.
+            let outlined = || {
+                let (value, ty) = encoders.encoded_by_call(func, *encoded)?;
+                (ty == declared && read_count(func, *binding) == 1).then_some(value)
+            };
+            match encoded_payload(func, *encoded, &declared).or_else(outlined) {
                 Some(value) if payload.is_none_or(|p| p == value) => payload = Some(value),
                 _ => {
                     ok = false;
@@ -341,6 +380,9 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
             continue;
         };
         for (binding, encoded) in sites {
+            if result && is_error_value(func, encoded) {
+                continue;
+            }
             let typed = matches!(
                 func.bindings.get(encoded).map(|b| &b.ty),
                 Some(IrType::Known(k) | IrType::Inferred(k)) if *k == declared
@@ -358,6 +400,20 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
         }
     }
     elisions
+}
+
+/// An error value: one typed `Error`, or a constant whose tag is
+/// `Error`'s. No `Ok` type encodes to that tag.
+fn is_error_value(func: &HighFunction, value: ValueId) -> bool {
+    let Some(b) = func.bindings.get(resolve_use(func, value)) else { return false };
+    if matches!(b.ty, IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error)) {
+        return true;
+    }
+    match &b.expr {
+        Expr::Literal(Literal::I64(n)) => (*n as u64 & 0xFF) as u8 == crate::val_abi::TAG_ERROR,
+        Expr::Literal(Literal::U64(n)) => (*n & 0xFF) as u8 == crate::val_abi::TAG_ERROR,
+        _ => false,
+    }
 }
 
 /// The single type `contractspecv0` declares this entrypoint returns.
@@ -590,7 +646,7 @@ mod tests {
 
     #[test]
     fn both_arms_of_a_return_encode_collapse_to_the_value() {
-        let elisions = plan(&both_encodings(PrimitiveType::U64));
+        let elisions = plan(&both_encodings(PrimitiveType::U64), &EncoderTable::default());
         assert_eq!(elisions.len(), 2, "one per encoding arm");
         for el in &elisions {
             assert!(matches!(el.expr, Expr::Use(p) if p == v(0)));
@@ -609,7 +665,7 @@ mod tests {
                 Box::new(TypeRef::Primitive(PrimitiveType::Error)),
             ))];
         }
-        let elisions = plan(&f);
+        let elisions = plan(&f, &EncoderTable::default());
         assert_eq!(elisions.len(), 2, "one per encoding arm");
         assert!(elisions.iter().all(|el| el.ty == Some(IrType::Known(KnownType::U64))));
     }
@@ -619,14 +675,14 @@ mod tests {
     #[test]
     fn a_returned_encoded_constant_is_its_payload() {
         let f = returning(PrimitiveType::U32, vec![Expr::Literal(Literal::I64(4))], v(0));
-        let elisions = plan(&f);
+        let elisions = plan(&f, &EncoderTable::default());
         assert_eq!(elisions.len(), 1);
         assert!(matches!(elisions[0].expr, Expr::Literal(Literal::U32(0))));
     }
 
     #[test]
     fn the_phi_itself_is_left_untouched() {
-        let elisions = plan(&both_encodings(PrimitiveType::U64));
+        let elisions = plan(&both_encodings(PrimitiveType::U64), &EncoderTable::default());
         assert!(
             elisions.iter().all(|e| e.id != v(3)),
             "phis are `let mut` declarations materialised from transfers; \
@@ -638,7 +694,7 @@ mod tests {
     fn an_encode_to_a_type_the_spec_does_not_declare_is_left_alone() {
         // The spec says i64, the encodes produce u64 — our reading of the
         // boundary is wrong somewhere, so collapse nothing.
-        let elisions = plan(&both_encodings(PrimitiveType::I64));
+        let elisions = plan(&both_encodings(PrimitiveType::I64), &EncoderTable::default());
         assert!(elisions.is_empty());
     }
 
@@ -658,7 +714,7 @@ mod tests {
             ),
         ));
         func.bindings.get_mut(v(2)).unwrap().expr = encode_small(other, KnownType::U64);
-        assert!(plan(&func).is_empty(), "differing payloads must not collapse");
+        assert!(plan(&func, &EncoderTable::default()).is_empty(), "differing payloads must not collapse");
     }
 
     #[test]
@@ -666,7 +722,7 @@ mod tests {
         // No signature means no typed ABI boundary to lean on.
         let mut func = both_encodings(PrimitiveType::U64);
         func.signature = None;
-        assert!(plan(&func).is_empty());
+        assert!(plan(&func, &EncoderTable::default()).is_empty());
     }
 
     #[test]
@@ -679,17 +735,100 @@ mod tests {
             ],
             v(1),
         );
-        let elisions = plan(&func);
+        let elisions = plan(&func, &EncoderTable::default());
         assert_eq!(elisions.len(), 1);
         assert!(matches!(elisions[0].expr, Expr::Use(p) if p == v(0)));
+    }
+
+    /// `add`: `return func1(v0).1`, where func 1 only encodes its argument.
+    fn outlined(declared: TypeRef, extra_reader: bool) -> sordec_ir::HighIr {
+        use crate::marshalling::test_support::module;
+        let mut helper = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0: x
+                obj_from_u64(v(0)),             // v1
+                encode_small(v(0), KnownType::U64), // v2
+                Expr::Phi { incoming: vec![(BlockId::from_index(0), v(1)), (BlockId::from_index(1), v(2))] }, // v3
+                Expr::Literal(Literal::I64(0)), // v4
+            ],
+            vec![v(0)],
+            vec![1, 2, 4],
+        );
+        helper.id = sordec_common::FuncId::from_index(1);
+        helper.region = Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::Return { values: vec![v(4), v(3)] },
+        ]);
+        let mut entry = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0: the sum
+                Expr::Call { target: sordec_common::FuncId::from_index(1), args: vec![v(0)] }, // v1
+                Expr::Project { value: v(1), index: 1 }, // v2
+                store(v(0), v(2)),               // v3, only with `extra_reader`
+            ],
+            vec![v(0)],
+            if extra_reader { vec![1, 2, 3] } else { vec![1, 2] },
+        );
+        entry.signature = Some(FunctionSignature { name: "add".to_string(), inputs: vec![], outputs: vec![declared] });
+        entry.region = Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::Return { values: vec![v(2)] },
+        ]);
+        module(vec![entry, helper])
+    }
+
+    fn store(addr: ValueId, value: ValueId) -> Expr {
+        crate::marshalling::test_support::store(addr, value, 8)
+    }
+
+    #[test]
+    fn an_encode_outlined_into_a_helper_collapses_and_the_call_goes() {
+        let mut ir = outlined(TypeRef::Primitive(PrimitiveType::U64), false);
+        assert!(ValEncodeCollapsePass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        assert!(matches!(f.bindings.get(v(2)).unwrap().expr, Expr::Use(p) if p == v(0)));
+        assert!(matches!(f.bindings.get(v(1)).unwrap().expr, Expr::Literal(Literal::Unit)), "the spent call is dropped");
+    }
+
+    #[test]
+    fn an_outlined_encode_something_else_reads_stays() {
+        let mut ir = outlined(TypeRef::Primitive(PrimitiveType::U64), true);
+        ValEncodeCollapsePass.run(&mut ir);
+        let f = &ir.functions[0];
+        assert!(matches!(f.bindings.get(v(2)).unwrap().expr, Expr::Project { .. }));
+        assert!(matches!(f.bindings.get(v(1)).unwrap().expr, Expr::Call { .. }));
+    }
+
+    #[test]
+    fn an_err_arm_is_left_be_and_the_ok_arm_collapses() {
+        let mut f = both_encodings(PrimitiveType::U64);
+        if let Some(sig) = f.signature.as_mut() {
+            sig.outputs = vec![TypeRef::Composite(sordec_ir::CompositeType::Result(
+                Box::new(TypeRef::Primitive(PrimitiveType::U64)),
+                Box::new(TypeRef::Primitive(PrimitiveType::Error)),
+            ))];
+        }
+        // A third arm: the contract error 1, `(1 << 32) | 3`.
+        let err = f.bindings.push(sordec_ir::Binding::new(
+            v(4),
+            IrType::Known(KnownType::I64),
+            Expr::Literal(Literal::I64((1 << 32) | 3)),
+            sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+        ));
+        if let Some(Expr::Phi { incoming }) = f.bindings.get_mut(v(3)).map(|b| &mut b.expr) {
+            incoming.push((BlockId::from_index(2), err));
+        }
+        let elisions = plan(&f, &EncoderTable::default());
+        assert_eq!(elisions.len(), 2, "the two encodes; the error stands");
+        assert!(elisions.iter().all(|e| e.id != err));
     }
 
     #[test]
     fn second_run_reports_no_work() {
         let mut func = both_encodings(PrimitiveType::U64);
-        let first = plan(&func);
+        let first = plan(&func, &EncoderTable::default());
         assert!(!first.is_empty());
         apply_elisions(&mut func, PASS_NAME, first);
-        assert!(plan(&func).is_empty(), "idempotent: the encodes are gone");
+        assert!(plan(&func, &EncoderTable::default()).is_empty(), "idempotent: the encodes are gone");
     }
 }
