@@ -35,7 +35,12 @@
 //! - **The pair agrees on signedness.** `i128` small with the `i128`
 //!   constructor, `u128` with `u128`.
 //! - **Not the outlined encoder.** A function returning the encoded value
-//!   is the helper [`super::wide_codec`] recognizes by these arms.
+//!   is the helper [`super::wide_codec`] recognizes by these arms — unless
+//!   it is an entrypoint whose `contractspecv0` declares it returns this
+//!   type. There the return is the ABI boundary: the host decodes the
+//!   returned `Val` at the declared type, so the typed value in its place
+//!   is the same return (the argument [`super::encode`] makes for a
+//!   one-limb scalar).
 
 use std::collections::HashMap;
 
@@ -140,10 +145,21 @@ fn folds(func: &HighFunction) -> Vec<(ValueId, Expr, KnownType)> {
 /// Whether this function hands the encoded value back: the outlined
 /// encoder [`super::wide_codec`] recognizes by these very arms, and folds
 /// at its call sites.
+///
+/// An entrypoint whose `contractspecv0` declares it returns this very type
+/// is not that helper. Its return is the ABI boundary, where the host reads
+/// the `Val` back at the declared type — the case [`super::encode`] folds
+/// for a one-limb scalar, and declines here because the value is two limbs.
 fn outlined(func: &HighFunction, folds: &[(ValueId, Expr, KnownType)], merges: &[(ValueId, KnownType)]) -> bool {
+    let declared = super::encode::declared_return_type(func);
     func.returns.iter().flatten().any(|v| {
         let v = resolve_use(func, *v);
-        folds.iter().any(|(f, ..)| *f == v) || merges.iter().any(|(m, _)| *m == v)
+        let ty = folds
+            .iter()
+            .find(|(f, ..)| *f == v)
+            .map(|(.., t)| t)
+            .or_else(|| merges.iter().find(|(m, _)| *m == v).map(|(_, t)| t));
+        ty.is_some_and(|t| declared.as_ref() != Some(t))
     })
 }
 

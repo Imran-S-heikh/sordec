@@ -122,6 +122,8 @@ pub mod masked_encode;
 pub use masked_encode::MaskedEncodePass;
 pub mod wide_encode;
 pub use wide_encode::WideEncodePass;
+pub mod wide_inline;
+pub use wide_inline::WideInlineDecodePass;
 pub mod option_param;
 pub use option_param::OptionParamPass;
 pub mod bool_return;

@@ -485,6 +485,8 @@ pub const MARSHALLING_HOST_LEN_CODECS: &str = "marshalling_host_len_codecs";
 pub const MARSHALLING_MASKED_ENCODES: &str = "marshalling_masked_encodes";
 /// Arms of an inlined 128-bit encode folded into the value.
 pub const MARSHALLING_WIDE_ENCODES_INLINE: &str = "marshalling_wide_encodes_inline";
+/// Limb reads of an inlined 128-bit decode, named as the value's halves.
+pub const MARSHALLING_WIDE_DECODES_INLINE: &str = "marshalling_wide_decodes_inline";
 /// `Void` tests of an `Option` parameter, and `Void` returned as `None`.
 pub const MARSHALLING_OPTION_PARAMS: &str = "marshalling_option_params";
 /// Returned `bool`s whose widening to the tag was folded back.
@@ -1017,6 +1019,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_HOST_LEN_CODECS,
         MARSHALLING_MASKED_ENCODES,
         MARSHALLING_WIDE_ENCODES_INLINE,
+        MARSHALLING_WIDE_DECODES_INLINE,
         MARSHALLING_OPTION_PARAMS,
         MARSHALLING_BOOL_RETURNS,
         MARSHALLING_BOOL_HELPERS,

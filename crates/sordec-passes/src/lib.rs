@@ -99,7 +99,7 @@ pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
     BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, OptionUnwrapPass, ResidualProbePass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
-    WideCodecPass, WideReturnPass,
+    WideCodecPass, WideInlineDecodePass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
@@ -423,6 +423,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the guard elision so the constant discriminant it plants is
             // what that pass then folds.
             Box::new(WideCodecPass),
+            // The same decode inlined: its limbs computed on two arms of
+            // the caller and merged at the join. Named as the halves of the
+            // value, so the trivial-merge pass below retires the merges and
+            // the inlined encode can see the same limbs re-encoded.
+            Box::new(WideInlineDecodePass),
             // A load off a literal address is the module's own data
             // section; folding it feeds the branch fold below the same way
             // a forwarded frame store does. Inside the group because a
@@ -883,7 +888,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 33..84],
+        vec![1..7, 33..85],
     )
 }
 
@@ -934,6 +939,7 @@ mod tests {
                 marshalling::decode::PASS_NAME,
                 marshalling::encode::PASS_NAME,
                 marshalling::wide_codec::PASS_NAME,
+                marshalling::wide_inline::PASS_NAME,
                 refine::CONST_LOAD_PASS_NAME,
                 marshalling::forward::PASS_NAME,
                 refine::CONST_BRANCH_PASS_NAME,
