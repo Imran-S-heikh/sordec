@@ -121,7 +121,7 @@ Measured beyond the corpus (2026-10-29; counts in
 | 27 | 25 + 13 Stellar `soroban-examples` contracts | `tools/build_heldout.sh` (examples `1f5aeb5`, rustc 1.97, pinned) |
 | as pinned by each project | two third-party contracts | `tools/build_unseen.sh` |
 
-The SDK 26 set is the one with the most compile failures (19 of 39 recompile):
+The SDK 26 set is the one with the most compile failures (20 of 39 recompile):
 its codec for enums with payloads and for structs moved through a stack frame is
 a shape the marshalling passes do not yet recognise, and it is where that work is
 measured.

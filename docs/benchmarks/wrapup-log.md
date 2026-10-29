@@ -55,18 +55,28 @@ Errors 244 → 228; two more SDK 26 contracts compile (mutability, workspace_con
 Scores unchanged: corpus bands pass, held-out mean 0.7850. 42 reconstructions
 changed by casts, decoded constants and dropped literal suffixes, none by value.
 
-## 2026-10-29 — commit 94f3c3b (four type-inference facts merged)
+## 2026-10-29 — commit 94f3c3b (four type-inference facts merged), corrected
+
+Measured again at 5a598a6 (the same decompiler; `tools/measure.sh` now checks
+each crate under a package name unique to the run). The first measurement of
+this commit ran while another measurement shared the cargo-check cache, and
+five of its "compiles" verdicts were that run's cached result rather than this
+commit's: account, fuzzing, and the SDK 26 errors, events and import_contract
+contracts do not compile. The message of commit 94f3c3b carries the wrong list.
+The rows above this one were re-measured the same way and reproduce exactly.
 
 | Set | Contracts | Compile | Errors | Holes |
 |---|---:|---:|---:|---:|
 | reference corpus | 7 | 7/7 | 0 | 85 |
-| Stellar examples, single-crate | 25 | 24/25 | 18 | 3,898 |
+| Stellar examples, single-crate | 25 | 22/25 | 26 | 3,898 |
 | Stellar examples, multi-contract | 13 | 10/13 | 35 | 4,243 |
 | third-party | 2 | 0/2 | 39 | 788 |
-| SDK 26 test contracts | 39 | 23/39 | 103 | 1,607 |
+| SDK 26 test contracts | 39 | 20/39 | 109 | 1,607 |
 
-Errors 228 → 195. Now compiling: account, fuzzing (held-out), atomic_multiswap
-(extra), and alloc, errors, events, import_contract (SDK 26). Also merkle-voting
-9 → 3, phoenix-vesting 42 → 36, privacy_pools 23 → 19. The branch alone measured
-228 → 215; the rest is the combination with the cast work merged just before.
-Scores unchanged (corpus bands pass, held-out mean 0.7850).
+Errors 228 → 209. Now compiling: atomic_multiswap (extra) and alloc (SDK 26).
+Also merkle-voting 9 → 3, phoenix-vesting 42 → 36, privacy_pools 23 → 19,
+fuzzing 7 → 6. Scores unchanged (corpus bands pass, held-out mean 0.7850).
+
+Not compiling: account 2, fuzzing 6, other_custom_types 18 · privacy_pools 19,
+groth16_bn254 8, groth16_bls12_381 8 · phoenix-vesting 36, merkle-voting 3 ·
+and 19 of the 39 SDK 26 contracts.
