@@ -212,11 +212,13 @@ holes as recovered facts.
 fraction is a required argument of the constructor, so a score that does not know
 what it covered cannot be built, let alone printed.
 
-On the corpus today behavior reports *unchecked* and is excluded from the mean — an
-honest hole, not a zero. Two things are missing, and they are different: the emitter
-does not yet produce a crate that compiles, so there is nothing to recompile as the
-compared side; and driving an entrypoint requires constructing arguments for its
-signature, which is not built. The report says which of the two it hit.
+On the corpus today behavior is measured on 6 of 7 contracts (mean 0.93;
+[`benchmarks/report.md`](benchmarks/report.md)). `timelock` reports *unchecked*,
+because every call the harness made failed the same way on both sides, so nothing
+was compared — an honest hole, not a zero. When the comparison cannot run at all,
+the report says which of two preconditions it missed, and they are different: a
+reconstruction that does not compile, so there is nothing to recompile as the
+compared side; or an entrypoint whose arguments the harness cannot construct.
 
 Note this is a limit of *coverage*, not of the harness. It is validated without the
 emitter, against nine known-answer divergence vectors — one per class it must
@@ -516,7 +518,7 @@ for the reader, not requests.
    soroban-sdk 21/22/23 — a multi-version corpus, which has already earned its keep: T16
    found an event-recognition bug visible only on the v22 API. `token-v23-stripped` is a
    name-stripped build of `token-v23` and exists to test name-independence, not recovery;
-   it is also permanently excluded from behaviour, having no metadata sections for the
-   host to load.
+   its behaviour is measured against `token-v23`'s own wasm (the stripped binary has no
+   spec for the host to load) and scores 0.6055 today.
 
 Anyone reviewing a number from this instrument should read §6 first.

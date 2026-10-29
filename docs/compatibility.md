@@ -159,9 +159,11 @@ varies per *contract* rather than per version.
 
 `token-v23-stripped` is the corpus fixture for the degraded case: the same
 contract as `token-v23` with every custom section removed. It scores interface
-**0.0000 by construction** — there is no ABI left to compare against — while
-structure is unaffected, because structure is scored per entrypoint over call
-closures and never reads names. That pair is the regression test proving
+**0.6429**: with no ABI left to compare names against, the scorer compares
+declared types by shape and parameters by type only ([`scoring_metric.md`
+§7.1](scoring_metric.md)), so what remains is what the binary itself carries —
+while structure is unaffected, because structure is scored per entrypoint over
+call closures and never reads names. That pair is the regression test proving
 recovery is not name-keyed.
 
 The practical reading: sordec degrades by *category* rather than failing. A
