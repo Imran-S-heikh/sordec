@@ -255,6 +255,8 @@ pub const FRAME_ELISION_AFTER_EVENTS: &str = "frame-elision-after-events";
 pub const SYMBOL_ARGS_AFTER_VEC: &str = "symbol-args-after-vec";
 /// [`SymbolArgsPass`] re-run on the positions the settled parameter types prove.
 pub const SYMBOL_ARGS_AFTER_TYPES: &str = "symbol-args-after-types";
+/// [`ValDecodeCollapsePass`] re-run once the `Option`-shaped decoders exist.
+pub const VAL_DECODE_AFTER_OPTIONAL: &str = "val-decode-after-optional";
 /// Name of the declared-type recovery re-run inside the elision group,
 /// where a struct recovered from its key table first has fields to type.
 pub const SPEC_FROM_GUARDS_ON_FIELDS: &str = "spec-from-guards-on-fields";
@@ -696,6 +698,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // this would take helpers it is about to claim. The late folds
             // and frame clean-ups below run after it.
             Box::new(OptionalOutParamPass),
+            // A decoder that pass just turned into `T::try_from_val(..).ok()`
+            // is only now the shape the decode collapse recognises: its
+            // guaranteed call sites become `Some(arg)`, the rest are typed.
+            Box::new(pass::Rerun::new(ValDecodeCollapsePass, VAL_DECODE_AFTER_OPTIONAL, &[])),
             // The same sum type handed back in two registers, `(tag, value)`,
             // and the caller's choice between the value and a fallback made
             // on the tag. Before the return-encode re-run below, which takes
