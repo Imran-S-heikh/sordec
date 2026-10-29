@@ -868,6 +868,31 @@ pub(crate) fn val_constant(ctx: &FnCtx, value: sordec_common::ValueId, phi: sord
     })
 }
 
+/// A constant returned from an entrypoint the spec declares `-> Val`,
+/// spelled as the `Val` it is.
+///
+/// The SDK's wrapper returns the `Val` as its 64 bits, so the constant is
+/// already the encoding: `2` is `Val::VOID`, not the integer two. As an
+/// integer it is a type error against `-> Val`, and `into_val` would encode
+/// it a second time; `Val::from_payload` takes the bits as they are.
+pub(crate) fn val_returned_constant(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<syn::Expr> {
+    let sig = ctx.func.signature.as_ref()?;
+    if !matches!(sig.outputs.as_slice(), [sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::Val)]) {
+        return None;
+    }
+    let bits: u64 = match &ctx.func.bindings.get(ctx.fold_target(value))?.expr {
+        Expr::Literal(Literal::I64(n)) => *n as u64,
+        Expr::Literal(Literal::U64(n)) => *n,
+        _ => return None,
+    };
+    Some(if bits == 2 {
+        parse_quote!(soroban_sdk::Val::VOID.to_val())
+    } else {
+        let lit = proc_macro2::Literal::u64_suffixed(bits);
+        parse_quote!(soroban_sdk::Val::from_payload(#lit))
+    })
+}
+
 /// The right-hand side expression for one binding.
 pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
     match &binding.expr {

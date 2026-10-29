@@ -352,7 +352,8 @@ impl<'a> FnCtx<'a> {
             .collect()
     }
 
-    /// Whether `contractspecv0` declares this function as returning nothing.
+    /// Whether `contractspecv0` declares this function as returning nothing:
+    /// no output, or the one output `()` (`-> ()` written out).
     ///
     /// Only a spec'd function answers `true`: a helper's return arity is
     /// recovered from its body, so its returned value is all the evidence
@@ -361,7 +362,7 @@ impl<'a> FnCtx<'a> {
         self.func
             .signature
             .as_ref()
-            .is_some_and(|sig| sig.outputs.is_empty())
+            .is_some_and(|sig| matches!(sig.outputs.as_slice(), [] | [sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::Void)]))
     }
 
     /// Whether `vid`'s recovered type is one it is safe to annotate a hole
@@ -1184,6 +1185,7 @@ impl<'a> FnCtx<'a> {
                     .and_then(|ty| {
                         expr::unsuffixed_against(self, *one, &ty).or_else(|| expr::sign_cast(self, *one, &ty))
                     })
+                    .or_else(|| expr::val_returned_constant(self, *one))
                     .unwrap_or_else(|| self.return_expr(*one));
                 parse_quote!(return #v;)
             }
