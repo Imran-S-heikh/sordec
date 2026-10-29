@@ -21,3 +21,8 @@ contracts; the Stellar SDK's own test contracts built at soroban-sdk 26.0.1
 Not compiling: other_custom_types 18, fuzzing 8, account 3 · privacy_pools 30,
 groth16_bn254 8, groth16_bls12_381 8, atomic_multiswap 2 · phoenix-vesting 45,
 merkle-voting 9 · and 22 of the 39 SDK 26 contracts.
+
+## 2026-10-29 — commit 1a6a29e (empty-contract scaffold merged)
+
+Output byte-identical to d6e0f94 on all five sets (no measured contract lacks
+entrypoints); same table as the baseline. Baseline moved to this commit.
