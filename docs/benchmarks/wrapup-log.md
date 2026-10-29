@@ -245,3 +245,22 @@ Errors 145 → 141. A BLS12-381 or BN254 point operation's result is the
 wraps it. SDK 26 bls 5 → 3, bn254 4 → 2; bls_signature (held-out) now builds its
 two-point vector with `vec![]` and scores the same (0.6873). Scores unchanged:
 corpus bands pass, held-out mean 0.7850.
+
+## 2026-10-29 — commit c3105ba (a 128-bit value decoded inline is the value)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 22/25 | 21 | 3,894 |
+| Stellar examples, multi-contract | 13 | 10/13 | 34 | 4,241 |
+| third-party | 2 | 1/2 | 26 | 776 |
+| SDK 26 test contracts | 39 | 25/39 | 47 | 1,540 |
+
+Errors 141 → 128, holes 10,607 → 10,536. The SDK's `i128`/`u128` conversion
+inlined into a caller computes the two halves on each path and merges them;
+each half is now named as the value's, so the merges go and the re-encode
+folds back to the value. A returned 128-bit small encode is no longer
+collapsed to its low half, which had made functions declared `-> i128` return
+a `u64`. SDK 26 add_u128 compiles; phoenix-vesting 28 → 26; other_custom_types
+15 → 14; the three contracttrait builds lose three errors each. Scores
+unchanged: corpus bands pass, held-out mean 0.7850.
