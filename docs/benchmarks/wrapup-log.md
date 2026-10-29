@@ -264,3 +264,24 @@ collapsed to its low half, which had made functions declared `-> i128` return
 a `u64`. SDK 26 add_u128 compiles; phoenix-vesting 28 → 26; other_custom_types
 15 → 14; the three contracttrait builds lose three errors each. Scores
 unchanged: corpus bands pass, held-out mean 0.7850.
+
+## 2026-10-29 — commit ec10975 (contracttype values returned or nested as their raw encoding)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 22/25 | 19 | 3,894 |
+| Stellar examples, multi-contract | 13 | 10/13 | 34 | 4,241 |
+| third-party | 2 | 1/2 | 23 | 776 |
+| SDK 26 test contracts | 39 | 27/39 | 35 | 1,487 |
+
+Errors 128 → 111. A `#[contracttype]` value handed back as its `Map`, `Vec` or
+encoded word is now the declared type: a struct whose field names several
+structs share is named where it goes, a tuple component in its encoded form is
+what it encodes, an integer enum returned as its discriminant is the variant,
+and a returned vec naming a variant is that variant. SDK 26 spec_shaking_v1/v2
+compile; other_custom_types 14 → 12, phoenix-vesting 26 → 23. The corpus
+changed only by dropping redundant renames.
+
+**Day total (2026-10-29):** errors 257 → 111; compiling contracts 55 → 67 of 86;
+holes 10,618 → 10,483; scores unchanged (corpus 0.9389, held-out 0.7850).
