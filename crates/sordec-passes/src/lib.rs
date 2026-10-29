@@ -201,6 +201,9 @@ pub const CONST_PROP_AFTER_INLINE: &str = "const-prop-after-inline";
 pub const TTL_AFTER_INLINE: &str = "ttl-after-inline";
 /// [`EnumKeyPass`] re-run after the inliner; see [`default_high_pipeline`].
 pub const ENUM_KEY_AFTER_INLINE: &str = "enum-key-after-inline";
+/// [`ErrorConstPass`] re-run after the inliner: a pasted panic wrapper
+/// brings its caller's error constant next to the panic.
+pub const ERROR_CONST_AFTER_INLINE: &str = "error-const-after-inline";
 /// Name of the panic-recovery re-run inside the elision group.
 pub const PANIC_RECOVER_AFTER_RECOVERY: &str = "panic-recover-after-recovery";
 /// Name of the polarity re-run inside the elision group.
@@ -515,6 +518,9 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
                 ENUM_KEY_AFTER_INLINE,
                 recognizers::enum_key::RESOLUTION_COUNTERS,
             )),
+            // A panic wrapper pasted into its caller puts the caller's
+            // constant error beside the panic, where it is an `Error`.
+            Box::new(pass::Rerun::new(ErrorConstPass, ERROR_CONST_AFTER_INLINE, &[])),
             // `get(&k).unwrap()` of a value wider than a register: the SDK
             // writes the `Option` into the caller's frame from a branching
             // helper. Each call becomes the read and the stores its `Some`
@@ -877,7 +883,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 33..83],
+        vec![1..7, 33..84],
     )
 }
 
@@ -948,6 +954,7 @@ mod tests {
                 CONST_PROP_AFTER_INLINE,
                 TTL_AFTER_INLINE,
                 ENUM_KEY_AFTER_INLINE,
+                ERROR_CONST_AFTER_INLINE,
                 marshalling::bool_codec::PASS_NAME,
                 marshalling::typed_read::PASS_NAME,
                 marshalling::scalar_decode::PASS_NAME,

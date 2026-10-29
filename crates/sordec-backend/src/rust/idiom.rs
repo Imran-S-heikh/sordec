@@ -414,6 +414,12 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         // A resolved `#[contracterror]` variant renders as its path; an
         // unresolved code falls through to an honest hole (the pass only
         // ever produces resolved variants today).
+        // No single declared enum names the code: the SDK's own `Error`
+        // with that contract code, the same bits.
+        KnownOp::MakeError { code, resolved: None } => {
+            let code = proc_macro2::Literal::u32_unsuffixed(*code);
+            Some(parse_quote!(soroban_sdk::Error::from_contract_error(#code)))
+        }
         KnownOp::MakeError { resolved: Some(ev), .. } => {
             let enum_name = ident(&ev.enum_name);
             let variant = ident(&ev.variant);

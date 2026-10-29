@@ -25,6 +25,18 @@
 //!    literal is left as-is. This gate also makes a coincidental
 //!    low-byte-`3` integer a non-event.
 //!
+//! ## A panic's error whose code no single enum names
+//!
+//! The argument of `panic_with_error!` is an `Error` by the host ABI —
+//! `fail_with_error` takes nothing else — so a constant read only there is
+//! one even when gate 3 cannot name its variant: a code two enums declare,
+//! or one no enum declares. It becomes [`KnownOp::MakeError`] with no
+//! variant, which the emitter spells `Error::from_contract_error(code)`.
+//! Exact: that is the `Error` with this type and code, the same bits, and
+//! `panic_with_error!` hands it to the host unchanged whichever enum the
+//! source named. Gates 1 and 2 still hold; only gate 3 is replaced, by the
+//! position.
+//!
 //! Unlike [`enum_key`], the discriminant here is *witnessed* (it is the
 //! literal's own bits, not a declaration-order inference), so a match is
 //! `HostFunctionAbi`-grade. Idempotent: the rewritten binding is a
@@ -47,6 +59,9 @@ pub const PASS_NAME: &str = "error-const";
 
 /// Constant Error `Val`s named as a declared `#[contracterror]` variant.
 const M_ERROR_NAMED: &str = "error_const_named";
+
+/// Constant Error `Val`s a panic raises, whose code no single enum names.
+const M_ERROR_UNNAMED: &str = "error_const_panic_unnamed";
 
 /// The contract-error constant recognizer. Stateless between runs.
 #[derive(Debug, Default, Clone, Copy)]
@@ -87,6 +102,19 @@ impl Pass<HighIr> for ErrorConstPass {
                     continue;
                 };
                 let Some((enum_name, variant)) = types.variant_by_value(code) else {
+                    if only_panicked(func, id) {
+                        planned.entry(func.id).or_default().push(Rewrite {
+                            id,
+                            expr: Expr::Semantic(SemanticOp::Known(KnownOp::MakeError { code, resolved: None })),
+                            ty: Some(IrType::Known(KnownType::Error)),
+                            source: ProvenanceSource::HostFunctionAbi,
+                            note: format!(
+                                "error-const: contract error code {code}, the argument of a panic; \
+                                 no single declared enum names it"
+                            ),
+                            metric: M_ERROR_UNNAMED,
+                        });
+                    }
                     continue;
                 };
                 let note = format!("error-const {enum_name}::{variant} (contract error code {code})");
@@ -120,6 +148,30 @@ impl Pass<HighIr> for ErrorConstPass {
         }
         result
     }
+}
+
+/// Whether every live reader of `id` is a `panic_with_error` raising it.
+fn only_panicked(func: &sordec_ir::HighFunction, id: sordec_common::ValueId) -> bool {
+    let scheduled: std::collections::HashSet<sordec_common::ValueId> =
+        func.blocks.iter().flat_map(|(_, b)| b.bindings.iter().copied()).collect();
+    let mut panics = 0;
+    for (reader, b) in func.bindings.iter() {
+        let mut reads = false;
+        b.expr.for_each_value_use(|u| reads |= u == id);
+        if !reads {
+            continue;
+        }
+        if !scheduled.contains(&reader) && !matches!(b.expr, Expr::Phi { .. }) {
+            continue;
+        }
+        match &b.expr {
+            Expr::Semantic(SemanticOp::Known(KnownOp::PanicWithError { error })) if *error == id => panics += 1,
+            _ => return false,
+        }
+    }
+    let mut region_reads = false;
+    func.region.for_each_value_use(|u| region_reads |= u == id);
+    panics > 0 && !region_reads
 }
 
 /// The raw 64-bit `Val` pattern of a constant that could be an `Error`.
@@ -237,6 +289,41 @@ mod tests {
         // The binding's type is upgraded to Error.
         let ty = &ir.functions[0].bindings.get(ValueId::from_index(0)).unwrap().ty;
         assert!(matches!(ty, IrType::Known(KnownType::Error)), "{ty:?}");
+    }
+
+    fn panic_of(v: u32) -> Expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::PanicWithError { error: ValueId::from_index(v) }))
+    }
+
+    #[test]
+    fn a_panic_s_error_no_enum_names_is_the_sdk_error_with_its_code() {
+        // Code 9 is declared by no enum, but `panic_with_error` takes an
+        // `Error` and nothing else.
+        let mut ir = module(
+            vec![Expr::Literal(Literal::I64(contract_error_val(9))), panic_of(0)],
+            &[("EmptyMessage", 1)],
+        );
+        let result = ErrorConstPass.run(&mut ir);
+        assert_eq!(result.metrics.get(M_ERROR_UNNAMED), Some(1));
+        assert!(matches!(
+            op_at(&ir, 0),
+            Expr::Semantic(SemanticOp::Known(KnownOp::MakeError { code: 9, resolved: None }))
+        ));
+    }
+
+    #[test]
+    fn an_unnamed_code_read_anywhere_else_is_left_alone() {
+        // The constant is also returned: not only a panic's argument.
+        let mut ir = module(
+            vec![
+                Expr::Literal(Literal::I64(contract_error_val(9))),
+                panic_of(0),
+                Expr::Use(ValueId::from_index(0)),
+            ],
+            &[("EmptyMessage", 1)],
+        );
+        ErrorConstPass.run(&mut ir);
+        assert!(matches!(op_at(&ir, 0), Expr::Literal(Literal::I64(_))));
     }
 
     #[test]
