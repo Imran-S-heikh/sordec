@@ -809,10 +809,13 @@ impl<'a> FnCtx<'a> {
                     // them.
                     let ty = self.value_type(vid);
                     out.push(parse_quote!(let #name: #ty = #value;));
-                } else if Self::is_hole_expr(&value) && self.converted_to_val_only(vid) {
+                } else if Self::is_hole_expr(&value)
+                    && (self.converted_to_val_only(vid) || self.read_as_declared_struct(vid))
+                {
                     // Annotated for what reads it, not for being a hole:
-                    // a reader that cannot infer the type, and the type the
-                    // IR already holds. See the predicate.
+                    // a reader that cannot infer the type — a conversion
+                    // through `Val`, a field access — and the type the IR
+                    // already holds. See the two predicates.
                     let ty = self.value_type(vid);
                     out.push(parse_quote!(let #name: #ty = #value;));
                 } else if Self::reads_a_recovered_type(binding) {
@@ -910,6 +913,35 @@ impl<'a> FnCtx<'a> {
                 }
                 _ => false,
             })
+    }
+
+    /// A hole the IR has typed as one of the contract's declared structs,
+    /// and whose fields the body reads: `let v72 = todo!("vec::Get");` then
+    /// `v72.min_recv`.
+    ///
+    /// rustc must know a receiver's type at a field access, and a `todo!()`
+    /// gives it none, so the access is "type annotations needed" however
+    /// the rest of the body uses the value. The type is the one the IR
+    /// holds, not one chosen here: a struct decode recovered against the
+    /// contract's own key table, or a spec type, and declared by the same
+    /// reconstruction — so naming it cannot conflict with a field the
+    /// declaration lacks. A struct the registry cannot name would print as
+    /// `Val` and is left alone, as is one that arithmetic reads (the masked
+    /// tag word beside a decode): there the annotation would only move the
+    /// error.
+    fn read_as_declared_struct(&self, vid: ValueId) -> bool {
+        let Some(IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id))) =
+            self.func.bindings.get(vid).map(|b| &b.ty)
+        else {
+            return false;
+        };
+        if self.reg.name_of(*id).is_none() {
+            return false;
+        }
+        let (readers, _) = self.emitted_readers(vid);
+        let exprs = || readers.iter().filter_map(|r| self.func.bindings.get(*r).map(|b| &b.expr));
+        exprs().any(|e| matches!(e, Expr::Field { base, .. } if self.fold.reads(*base) == Some(vid)))
+            && !exprs().any(|e| matches!(e, Expr::Binary { .. } | Expr::Unary { .. }))
     }
 
     /// `Some(v) = …get::<K, T>(&k)`, the head of an `if let` — the pattern
@@ -1623,6 +1655,62 @@ mod tests {
             vec![(untyped(), wide_load()), (IrType::Known(KnownType::U32), vec_len(1))],
             Some(1),
             &TypeRegistry::default(),
+        );
+        assert!(body.contains("let v1 = todo !"), "{body}");
+    }
+
+    // ---- a hole read as a declared struct ----
+
+    fn registry_with_struct(id: u32, name: &str) -> TypeRegistry {
+        let mut reg = TypeRegistry::default();
+        reg.structs.push(sordec_ir::StructDef {
+            id: sordec_common::TypeId::new(id),
+            name: name.to_string(),
+            fields: vec![sordec_ir::StructField {
+                name: "min_recv".to_string(),
+                ty: sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::I128),
+            }],
+        });
+        reg
+    }
+
+    /// `let v1 = todo!("vec::Get"); … v1.min_recv`, with `v1` typed as the
+    /// struct id 7 and `extra` appended after the field read.
+    fn struct_read(extra: Vec<(IrType, Expr)>, reg: &TypeRegistry) -> String {
+        let get = Expr::Semantic(SemanticOp::Known(KnownOp::VecOp {
+            kind: sordec_ir::VecOpKind::Get,
+            args: vec![v(0), v(0)],
+        }));
+        let mut exprs = vec![
+            (IrType::Known(KnownType::UserDefined(sordec_common::TypeId::new(7))), get),
+            (IrType::Known(KnownType::I128), Expr::Field { base: v(1), field: "min_recv".to_string() }),
+            (untyped(), store(2)),
+        ];
+        exprs.extend(extra);
+        emitted(exprs, None, reg)
+    }
+
+    #[test]
+    fn a_hole_whose_fields_are_read_takes_its_declared_struct() {
+        let body = struct_read(vec![], &registry_with_struct(7, "SwapSpec"));
+        assert!(body.contains("let v1 : SwapSpec = todo !"), "{body}");
+        assert!(body.contains("v1 . min_recv"), "{body}");
+    }
+
+    #[test]
+    fn a_struct_the_registry_cannot_name_is_not_annotated() {
+        // It would print as `Val`, which has no field to read.
+        let body = struct_read(vec![], &registry_with_struct(8, "Other"));
+        assert!(body.contains("let v1 = todo !"), "{body}");
+    }
+
+    #[test]
+    fn a_struct_arithmetic_reads_is_not_annotated() {
+        // The tag word masked beside the decode: annotating would move the
+        // error onto `SwapSpec & 255`, not remove it.
+        let body = struct_read(
+            vec![i64_lit(255), (IrType::Inferred(KnownType::I64), mask(1, 4)), (untyped(), store(5))],
+            &registry_with_struct(7, "SwapSpec"),
         );
         assert!(body.contains("let v1 = todo !"), "{body}");
     }
