@@ -31,7 +31,11 @@
 //!
 //! # Gates
 //!
-//! - **The spec's one output is `Option<T>`**, with `T` named.
+//! - **The spec's one output is `Option<T>`**, with `T` named, and `T` not
+//!   a type that can itself encode to `Void`: not `Val`, `()`, or another
+//!   `Option`. For those a `T` arm may hold `Void`, which the host reads
+//!   back as `None`, so the `Some` the rewrite would write is not what the
+//!   word means.
 //! - **Every arm is one of four things**, through merges that are read by
 //!   nothing but the return and each other: the constant `2`, a value typed
 //!   exactly `T`, an encode of a `T`, or a value already an `Option`.
@@ -109,7 +113,11 @@ struct Plan {
 fn declared_option(func: &HighFunction) -> Option<KnownType> {
     let [out] = func.signature.as_ref()?.outputs.as_slice() else { return None };
     let option @ KnownType::Option(_) = known_of_type_ref(out)? else { return None };
-    payload(&option).map(|_| option)
+    // A payload that may itself be `Void` makes `Void` ambiguous.
+    match payload(&option)? {
+        KnownType::Val | KnownType::Unit | KnownType::Option(_) => None,
+        _ => Some(option),
+    }
 }
 
 /// `T` of an `Option<T>`, when it is named.
@@ -543,5 +551,32 @@ mod tests {
         let f = &mut ir.functions[0];
         f.bindings.get_mut(v(0)).unwrap().expr = Expr::Phi { incoming: vec![(BlockId::from_index(1), v(2))] };
         assert!(!OptionReturnPass.run(&mut ir).changed);
+    }
+
+    /// `Option<Val>`, `Option<()>` and `Option<Option<T>>` can each hold a
+    /// `Void` that the host reads back as `None`: no rewrite.
+    #[test]
+    fn a_payload_that_may_be_void_is_not_rewritten() {
+        use sordec_ir::{FunctionSignature, PrimitiveType, TypeRef};
+        for inner in [
+            TypeRef::Primitive(PrimitiveType::Val),
+            TypeRef::Primitive(PrimitiveType::Void),
+            TypeRef::Composite(sordec_ir::CompositeType::Option(Box::new(TypeRef::Primitive(PrimitiveType::U64)))),
+        ] {
+            let mut f = crate::marshalling::test_support::func_with(vec![], vec![], vec![]);
+            f.signature = Some(FunctionSignature {
+                name: "f".to_string(),
+                inputs: vec![],
+                outputs: vec![TypeRef::Composite(sordec_ir::CompositeType::Option(Box::new(inner.clone())))],
+            });
+            assert!(declared_option(&f).is_none(), "{inner:?}");
+        }
+        let mut f = crate::marshalling::test_support::func_with(vec![], vec![], vec![]);
+        f.signature = Some(FunctionSignature {
+            name: "f".to_string(),
+            inputs: vec![],
+            outputs: vec![TypeRef::Composite(sordec_ir::CompositeType::Option(Box::new(TypeRef::Primitive(PrimitiveType::U64))))],
+        });
+        assert!(declared_option(&f).is_some());
     }
 }
