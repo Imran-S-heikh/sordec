@@ -42,11 +42,21 @@
 //! A `Result<T, E>`'s `Err` path returns an error value — a constant tagged
 //! `Error`, or a value typed one — which is no encoding of `T`. It is left
 //! be, and the other paths still collapse.
+//!
+//! ## A unit enum with integer discriminants, returned as a constant
+//!
+//! `#[contracttype] enum EnumIntA { V1 = 1, V2 = 2, V3 = 3 }` crosses the
+//! ABI as the `U32Val` of its discriminant, so `EnumIntA::V3` returned is
+//! the constant word `3 << 32 | U32Val`. A path returning such a word from
+//! an entrypoint the spec declares to return the enum returns the variant
+//! whose discriminant is the word's payload — the derive writes exactly
+//! that word for that variant and no other, since the discriminants of one
+//! enum are distinct. A payload no variant carries is left as it is.
 
 use sordec_common::ValueId;
 use sordec_ir::{
-    Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region, SemanticOp, UnaryOp,
-    ValObjectKind,
+    EnumDef, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region, SemanticOp,
+    UnaryOp, ValObjectKind,
 };
 
 use super::encode_helper::{elide_spent_calls, encoder_calls, EncoderTable};
@@ -70,8 +80,9 @@ impl Pass<HighIr> for ValEncodeCollapsePass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
         let encoders = EncoderTable::build(ir);
+        let enums: Vec<EnumDef> = ir.soroban_facts.as_ref().map(|f| f.types.enums.clone()).unwrap_or_default();
         for func in &mut ir.functions {
-            let elisions = plan(func, &encoders);
+            let elisions = plan(func, &encoders, &enums);
             if !elisions.is_empty() {
                 result.changed = true;
                 result
@@ -299,7 +310,7 @@ fn side_effect_free(func: &HighFunction, regions: &[Region]) -> bool {
 }
 
 /// Plan every return-encode collapse in one function.
-fn plan(func: &HighFunction, encoders: &EncoderTable) -> Vec<Elision> {
+fn plan(func: &HighFunction, encoders: &EncoderTable, enums: &[EnumDef]) -> Vec<Elision> {
     let mut elisions = Vec::new();
     let Some(declared) = declared_return_type(func) else {
         return elisions;
@@ -308,6 +319,13 @@ fn plan(func: &HighFunction, encoders: &EncoderTable) -> Vec<Elision> {
         func.signature.as_ref().map(|s| s.outputs.as_slice()),
         Some([only]) if matches!(known_of_type_ref(only), Some(KnownType::Result(..)))
     );
+    // A constant already in its encoded form: a number, or the variant of
+    // an integer enum whose discriminant it carries.
+    let constant = |encoded: ValueId| {
+        encoded_constant(func, encoded, &declared)
+            .map(Expr::Literal)
+            .or_else(|| encoded_variant(func, encoded, &declared, enums).map(|name| Expr::Variant { name }))
+    };
 
     for returned in returned_values(func) {
         // Each site that produces the returned value on some path.
@@ -321,20 +339,20 @@ fn plan(func: &HighFunction, encoders: &EncoderTable) -> Vec<Elision> {
         let mut ok = true;
         // A constant the path returns already encoded — `4`, `U32Val(0)` —
         // stands for its payload, whatever the other paths encode.
-        let mut constants: Vec<(ValueId, Literal)> = Vec::new();
+        let mut constants: Vec<(ValueId, Expr)> = Vec::new();
         for (binding, encoded) in &sites {
             // A `Result`'s `Err` path returns an error value, which is no
             // encoding of the `Ok` type: left be, as the emitter wraps it.
             if result && is_error_value(func, *encoded) {
                 continue;
             }
-            if let Some(lit) = encoded_constant(func, *encoded, &declared) {
+            if let Some(expr) = constant(*encoded) {
                 // Rewritten in place, so only a constant nothing else reads.
                 if read_count(func, *binding) != 1 {
                     ok = false;
                     break;
                 }
-                constants.push((*binding, lit));
+                constants.push((*binding, expr));
                 continue;
             }
             // A path returning a value already of the declared type is the
@@ -367,10 +385,10 @@ fn plan(func: &HighFunction, encoders: &EncoderTable) -> Vec<Elision> {
             "return-value encode collapsed at the ABI boundary \
              (contractspecv0 declares this entrypoint returns {declared:?})"
         );
-        for (binding, lit) in constants {
+        for (binding, expr) in constants {
             elisions.push(Elision {
                 id: binding,
-                expr: Expr::Literal(lit),
+                expr,
                 ty: Some(IrType::Known(declared.clone())),
                 note: note.clone(),
                 metric: metrics::ENCODE_COLLAPSED,
@@ -387,7 +405,7 @@ fn plan(func: &HighFunction, encoders: &EncoderTable) -> Vec<Elision> {
                 func.bindings.get(encoded).map(|b| &b.ty),
                 Some(IrType::Known(k) | IrType::Inferred(k)) if *k == declared
             );
-            if typed || encoded_constant(func, encoded, &declared).is_some() {
+            if typed || constant(encoded).is_some() {
                 continue;
             }
             elisions.push(Elision {
@@ -546,6 +564,17 @@ pub(super) fn encoded_constant(func: &HighFunction, value: ValueId, declared: &K
     }
 }
 
+/// The variant a constant returned as an integer enum is: the one whose
+/// discriminant the `U32Val` word carries. `None` when `declared` is not
+/// such an enum, the word is not a `U32Val`, or no variant has that
+/// discriminant.
+fn encoded_variant(func: &HighFunction, value: ValueId, declared: &KnownType, enums: &[EnumDef]) -> Option<String> {
+    let KnownType::UserDefined(id) = declared else { return None };
+    let def = enums.iter().find(|e| e.id == *id)?;
+    let Literal::U32(n) = encoded_constant(func, value, &KnownType::U32)? else { return None };
+    def.cases.iter().find(|c| c.value == n).map(|c| c.name.clone())
+}
+
 /// The payload `encoded` wraps, when it is a `Val` encode producing
 /// `declared`. `None` for anything else — including an encode to a
 /// *different* type, which would mean our reading of the boundary is
@@ -655,7 +684,7 @@ mod tests {
 
     #[test]
     fn both_arms_of_a_return_encode_collapse_to_the_value() {
-        let elisions = plan(&both_encodings(PrimitiveType::U64), &EncoderTable::default());
+        let elisions = plan(&both_encodings(PrimitiveType::U64), &EncoderTable::default(), &[]);
         assert_eq!(elisions.len(), 2, "one per encoding arm");
         for el in &elisions {
             assert!(matches!(el.expr, Expr::Use(p) if p == v(0)));
@@ -674,7 +703,7 @@ mod tests {
                 Box::new(TypeRef::Primitive(PrimitiveType::Error)),
             ))];
         }
-        let elisions = plan(&f, &EncoderTable::default());
+        let elisions = plan(&f, &EncoderTable::default(), &[]);
         assert_eq!(elisions.len(), 2, "one per encoding arm");
         assert!(elisions.iter().all(|el| el.ty == Some(IrType::Known(KnownType::U64))));
     }
@@ -684,14 +713,52 @@ mod tests {
     #[test]
     fn a_returned_encoded_constant_is_its_payload() {
         let f = returning(PrimitiveType::U32, vec![Expr::Literal(Literal::I64(4))], v(0));
-        let elisions = plan(&f, &EncoderTable::default());
+        let elisions = plan(&f, &EncoderTable::default(), &[]);
         assert_eq!(elisions.len(), 1);
         assert!(matches!(elisions[0].expr, Expr::Literal(Literal::U32(0))));
     }
 
+    /// `EnumIntA { V1 = 1, V2 = 2, V3 = 3 }`, declared as the return.
+    fn returning_enum(word: i64) -> (HighFunction, Vec<EnumDef>) {
+        use sordec_common::TypeId;
+        let mut f = returning(PrimitiveType::U32, vec![Expr::Literal(Literal::I64(word))], v(0));
+        f.signature.as_mut().unwrap().outputs = vec![TypeRef::UserDefined(TypeId::new(12))];
+        let enums = vec![EnumDef {
+            id: TypeId::new(12),
+            name: "EnumIntA".to_string(),
+            cases: (1..=3)
+                .map(|n| sordec_ir::EnumCase { name: format!("V{n}"), value: n })
+                .collect(),
+        }];
+        (f, enums)
+    }
+
+    /// `3 << 32 | U32Val` returned as `EnumIntA` is `EnumIntA::V3`.
+    #[test]
+    fn a_returned_encoded_discriminant_is_its_variant() {
+        let (f, enums) = returning_enum((3 << 32) | 4);
+        let elisions = plan(&f, &EncoderTable::default(), &enums);
+        assert_eq!(elisions.len(), 1);
+        assert!(matches!(&elisions[0].expr, Expr::Variant { name } if name == "V3"), "{:?}", elisions[0].expr);
+        assert!(matches!(
+            elisions[0].ty,
+            Some(IrType::Known(KnownType::UserDefined(id))) if id == sordec_common::TypeId::new(12)
+        ));
+    }
+
+    /// A discriminant no variant carries, or a word with another tag, is
+    /// left as it is.
+    #[test]
+    fn a_word_naming_no_variant_is_left_alone() {
+        for word in [(7 << 32) | 4, (3 << 32) | 5] {
+            let (f, enums) = returning_enum(word);
+            assert!(plan(&f, &EncoderTable::default(), &enums).is_empty(), "{word:#x}");
+        }
+    }
+
     #[test]
     fn the_phi_itself_is_left_untouched() {
-        let elisions = plan(&both_encodings(PrimitiveType::U64), &EncoderTable::default());
+        let elisions = plan(&both_encodings(PrimitiveType::U64), &EncoderTable::default(), &[]);
         assert!(
             elisions.iter().all(|e| e.id != v(3)),
             "phis are `let mut` declarations materialised from transfers; \
@@ -703,7 +770,7 @@ mod tests {
     fn an_encode_to_a_type_the_spec_does_not_declare_is_left_alone() {
         // The spec says i64, the encodes produce u64 — our reading of the
         // boundary is wrong somewhere, so collapse nothing.
-        let elisions = plan(&both_encodings(PrimitiveType::I64), &EncoderTable::default());
+        let elisions = plan(&both_encodings(PrimitiveType::I64), &EncoderTable::default(), &[]);
         assert!(elisions.is_empty());
     }
 
@@ -723,7 +790,7 @@ mod tests {
             ),
         ));
         func.bindings.get_mut(v(2)).unwrap().expr = encode_small(other, KnownType::U64);
-        assert!(plan(&func, &EncoderTable::default()).is_empty(), "differing payloads must not collapse");
+        assert!(plan(&func, &EncoderTable::default(), &[]).is_empty(), "differing payloads must not collapse");
     }
 
     #[test]
@@ -731,7 +798,7 @@ mod tests {
         // No signature means no typed ABI boundary to lean on.
         let mut func = both_encodings(PrimitiveType::U64);
         func.signature = None;
-        assert!(plan(&func, &EncoderTable::default()).is_empty());
+        assert!(plan(&func, &EncoderTable::default(), &[]).is_empty());
     }
 
     #[test]
@@ -744,7 +811,7 @@ mod tests {
             ],
             v(1),
         );
-        let elisions = plan(&func, &EncoderTable::default());
+        let elisions = plan(&func, &EncoderTable::default(), &[]);
         assert_eq!(elisions.len(), 1);
         assert!(matches!(elisions[0].expr, Expr::Use(p) if p == v(0)));
     }
@@ -827,7 +894,7 @@ mod tests {
         if let Some(Expr::Phi { incoming }) = f.bindings.get_mut(v(3)).map(|b| &mut b.expr) {
             incoming.push((BlockId::from_index(2), err));
         }
-        let elisions = plan(&f, &EncoderTable::default());
+        let elisions = plan(&f, &EncoderTable::default(), &[]);
         assert_eq!(elisions.len(), 2, "the two encodes; the error stands");
         assert!(elisions.iter().all(|e| e.id != err));
     }
@@ -835,9 +902,9 @@ mod tests {
     #[test]
     fn second_run_reports_no_work() {
         let mut func = both_encodings(PrimitiveType::U64);
-        let first = plan(&func, &EncoderTable::default());
+        let first = plan(&func, &EncoderTable::default(), &[]);
         assert!(!first.is_empty());
         apply_elisions(&mut func, PASS_NAME, first);
-        assert!(plan(&func, &EncoderTable::default()).is_empty(), "idempotent: the encodes are gone");
+        assert!(plan(&func, &EncoderTable::default(), &[]).is_empty(), "idempotent: the encodes are gone");
     }
 }
