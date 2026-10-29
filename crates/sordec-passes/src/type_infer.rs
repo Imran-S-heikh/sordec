@@ -109,13 +109,23 @@
 //! still printed `Vec<Val>`, and the assignment moved the type error rather
 //! than removing it. Callers are the exception: separate callers pass
 //! separate vecs, so their `Vec<?>` and `Vec<T>` still conflict.
+//!
+//! ## A struct literal's fields
+//!
+//! A value placed in a `#[contracttype]` struct literal's field is the
+//! field's declared type (`Inferred`): the contract's own declaration says
+//! what the field holds. Only for a value nothing has named, or named only
+//! `Val` — a slot read back, a helper's `Val` result. A value with a type
+//! of its own keeps it: a `BytesN<32>` in a `Bytes` field is a widening the
+//! source wrote, not a mistyping.
 
 use std::collections::{HashMap, HashSet};
 
 use sordec_common::{FuncId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
     BinaryOp, CompositeType, CryptoOpKind, Expr, FunctionSignature, HighFunction, HighIr, IrType, KnownOp,
-    KnownType, Literal, PrimitiveType, SemanticOp, TypeRef, UnaryOp, ValObjectKind, WasmOpcodeKind,
+    KnownType, Literal, PrimitiveType, SemanticOp, StructDef, TypeRef, UnaryOp, ValObjectKind,
+    WasmOpcodeKind,
 };
 
 use crate::dataflow::{resolve_use, HighUseIndex};
@@ -155,6 +165,8 @@ impl Pass<HighIr> for TypeInferPass {
         let seed = seed_signatures(ir);
         let mut sigs = seed.clone();
         let mut disagreements: u64 = 0;
+        let structs: Vec<StructDef> =
+            ir.soroban_facts.as_ref().map(|f| f.types.structs.clone()).unwrap_or_default();
         // Settled twice: first on everything but the host catalog's object
         // kinds, then with them, so that weakest of named statements only
         // speaks where nothing else has (see "What the host catalog fixes").
@@ -166,7 +178,7 @@ impl Pass<HighIr> for TypeInferPass {
                 // settled one rather than a running total over rounds.
                 disagreements = 0;
                 for func in &mut ir.functions {
-                    let (func_changed, func_disagreements) = infer_function(func, &sigs, catalog);
+                    let (func_changed, func_disagreements) = infer_function(func, &sigs, catalog, &structs);
                     round |= func_changed;
                     disagreements += func_disagreements;
                 }
@@ -206,8 +218,14 @@ impl Pass<HighIr> for TypeInferPass {
 /// many times inter-procedural evidence disagreed with an equal-rank
 /// incumbent. Works on a `ValueId -> IrType` snapshot and writes the
 /// improvements back with `TypePropagation` provenance. `catalog` lets the
-/// host catalog's operand kinds speak ([`crypto_object_args`]).
-fn infer_function(func: &mut HighFunction, sigs: &SigTable, catalog: bool) -> (bool, u64) {
+/// host catalog's operand kinds speak ([`crypto_object_args`]); `structs`
+/// are the contract's declared structs, whose literals type their fields.
+fn infer_function(
+    func: &mut HighFunction,
+    sigs: &SigTable,
+    catalog: bool,
+    structs: &[StructDef],
+) -> (bool, u64) {
     let mut types: HashMap<ValueId, IrType> =
         func.bindings.iter().map(|(id, b)| (id, b.ty.clone())).collect();
     // Structure does not change during inference, so this is built once.
@@ -238,7 +256,7 @@ fn infer_function(func: &mut HighFunction, sigs: &SigTable, catalog: bool) -> (b
             }
         }
         // Backward: uses constrain their operands / returned values.
-        round_changed |= backward(func, &uses, &mut types, &mut ev, catalog);
+        round_changed |= backward(func, &uses, &mut types, &mut ev, catalog, structs);
         round_changed |= backward_calls(func, sigs, &mut types, &mut ev);
         round_changed |= backward_returns(func, sigs, &mut types, &mut ev);
         if !round_changed {
@@ -442,6 +460,7 @@ fn backward(
     types: &mut HashMap<ValueId, IrType>,
     ev: &mut Evidence,
     catalog: bool,
+    structs: &[StructDef],
 ) -> bool {
     let mut changed = false;
     for (id, binding) in func.bindings.iter() {
@@ -577,6 +596,36 @@ fn backward(
                             changed |= improve(types, ev, *arm, IrType::Inferred(merged.clone()));
                         }
                     }
+                }
+            }
+            // A struct literal's field holds the field's declared type: the
+            // contract's own declaration says so, and the literal puts the
+            // value there. Only a value nothing has named, or named only
+            // `Val` — a field read back from a frame slot or a helper's
+            // `Val` result. A value with a type of its own keeps it, and a
+            // disagreement stays visible rather than being overwritten.
+            Expr::Struct { fields } => {
+                let Some(KnownType::UserDefined(ty)) = base_of(types.get(&id)) else {
+                    continue;
+                };
+                let Some(def) = structs.iter().find(|s| s.id == ty) else {
+                    continue;
+                };
+                for (name, value) in fields {
+                    let Some(declared) = def
+                        .fields
+                        .iter()
+                        .find(|f| f.name == *name)
+                        .and_then(|f| known_of_type_ref(&f.ty))
+                    else {
+                        continue;
+                    };
+                    if declared == KnownType::Val
+                        || base_of(types.get(value)).is_some_and(|have| have != KnownType::Val)
+                    {
+                        continue;
+                    }
+                    changed |= improve(types, ev, *value, IrType::Inferred(declared));
                 }
             }
             // Each component is the tuple's declared slot.
@@ -1972,7 +2021,7 @@ mod tests {
     /// Run only the intra-procedural half: no inter-procedural evidence, so
     /// a single function can be tested without building a module around it.
     fn infer_isolated(func: &mut HighFunction) -> bool {
-        infer_function(func, &SigTable::new(), true).0
+        infer_function(func, &SigTable::new(), true, &[]).0
     }
 
     // ---- lattice ----
@@ -2869,6 +2918,80 @@ mod tests {
         let mut ir = vec_op_on(sordec_ir::VecOpKind::Del, IrType::Known(KnownType::Val));
         TypeInferPass.run(&mut ir);
         assert_eq!(ty_of(&ir, 0, 1), IrType::Known(vec_of(unknown())));
+    }
+
+    /// `v3 = State { count: v0, owner: v1, memo: v2 }`, the struct declared
+    /// `{ count: u32, owner: Address, memo: Bytes }`, with the field values
+    /// typed as given, and the literal used.
+    fn struct_literal(count: IrType, owner: IrType, memo: IrType) -> HighIr {
+        use sordec_common::TypeId;
+        use sordec_ir::{EnvCompatibility, SorobanFacts, StructField, TypeRegistry};
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Phi { incoming: vec![] },
+                Expr::Phi { incoming: vec![] },
+                Expr::Struct {
+                    fields: vec![
+                        ("count".into(), ValueId::from_index(0)),
+                        ("owner".into(), ValueId::from_index(1)),
+                        ("memo".into(), ValueId::from_index(2)),
+                    ],
+                },
+            ],
+            (0..3).map(ValueId::from_index).collect(),
+            vec![3],
+            vec![vec![ValueId::from_index(3)]],
+        );
+        for (i, ty) in [count, owner, memo].into_iter().enumerate() {
+            f.bindings.get_mut(ValueId::from_index(i as u32)).unwrap().ty = ty;
+        }
+        f.bindings.get_mut(ValueId::from_index(3)).unwrap().ty =
+            IrType::Known(KnownType::UserDefined(TypeId::new(7)));
+        let field = |name: &str, p| StructField { name: name.into(), ty: TypeRef::Primitive(p) };
+        let mut m = crate::marshalling::test_support::module(vec![f]);
+        m.soroban_facts = Some(SorobanFacts {
+            functions: std::collections::BTreeMap::new(),
+            types: TypeRegistry {
+                structs: vec![StructDef {
+                    id: TypeId::new(7),
+                    name: "State".into(),
+                    fields: vec![
+                        field("count", PrimitiveType::U32),
+                        field("owner", PrimitiveType::Address),
+                        field("memo", PrimitiveType::Bytes),
+                    ],
+                }],
+                ..Default::default()
+            },
+            contract_meta: std::collections::BTreeMap::new(),
+            env_meta: EnvCompatibility::default(),
+        });
+        m
+    }
+
+    #[test]
+    fn a_struct_literal_names_its_untyped_and_val_fields() {
+        let mut ir = struct_literal(unknown(), IrType::Known(KnownType::Val), unknown());
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Inferred(KnownType::U32));
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Inferred(KnownType::Address));
+        assert_eq!(ty_of(&ir, 0, 2), IrType::Inferred(KnownType::Bytes));
+    }
+
+    #[test]
+    fn a_struct_field_value_with_a_type_of_its_own_keeps_it() {
+        // A `BytesN<32>` stored in a `Bytes` field is the source's widening,
+        // and a disagreement is evidence, not something to overwrite.
+        let mut ir = struct_literal(
+            IrType::Inferred(KnownType::I64),
+            IrType::Known(KnownType::Address),
+            IrType::Inferred(KnownType::BytesN(32)),
+        );
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Inferred(KnownType::I64));
+        assert_eq!(ty_of(&ir, 0, 2), IrType::Inferred(KnownType::BytesN(32)));
     }
 
     #[test]
