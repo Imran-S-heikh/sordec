@@ -97,3 +97,28 @@ byte-identical to 5a598a6, so scores are unchanged (held-out mean 0.7850 on the
 branch). The larger shape this work was aimed at, a decoder helper reached only
 through a function table, is blocked by a module-wide rule and is recorded as
 the next task.
+
+## 2026-10-29 — commit 3c91cba (operators keep the opcode's signedness)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 22/25 | 26 | 3,898 |
+| Stellar examples, multi-contract | 13 | 10/13 | 35 | 4,243 |
+| third-party | 2 | 0/2 | 37 | 788 |
+| SDK 26 test contracts | 39 | 20/39 | 108 | 1,604 |
+
+A correctness fix rather than a number: an unsigned shift, division, remainder
+or ordering printed on a value typed signed (or the reverse) was silently the
+other operation, and compiled. The IR now keeps the opcode's reading and the
+emitter reinterprets an operand whose printed type disagrees, at its own width.
+40 reconstructions changed, 1,008 lines, every one a reinterpretation cast (21
+also rewrite a constant as its bits); 1,319 operator sites reread, 23 printed
+bare because no operand's type is known (17) or the operands disagree on
+width (6), both listed by `SORDEC_SIGN_TRACE=1`. Errors 209 → 207: three
+vanished (phoenix-vesting ×2, SDK 26 add_u128) because both sides of a
+comparison are now cast to one reading where rustc had been reporting a type
+disagreement the recovered types do not show; that disagreement is unchanged
+one line earlier (see the working notes). One error in fuzzing changed its
+message, not its site. Holes and compile counts unchanged; corpus bands pass;
+held-out mean 0.7850 unchanged.
