@@ -90,6 +90,10 @@ fi
 [ -x "$SORDEC_BIN" ] || { echo "no decompiler at $SORDEC_BIN" >&2; exit 1; }
 
 mkdir -p "$OUT/logs"
+# A shared CARGO_TARGET_DIR means another checkout's build can overwrite
+# `release/sordec` between our build and our run; measure the copy, so
+# every reconstruction in this run comes from one binary.
+cp "$SORDEC_BIN" "$OUT/sordec" && SORDEC_BIN=$OUT/sordec
 IFS=, read -r -a set_list <<< "$SETS"
 # A re-run of some sets replaces only their rows, so a set measured later
 # (one that did not exist yet) joins an earlier run's summary.
