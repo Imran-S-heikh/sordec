@@ -182,3 +182,18 @@ its pass. One soundness fix on the way: a storage read whose tag check was
 removed now takes the type the check named, so the check's trap moves into the
 typed read instead of being dropped. Eighteen reconstructions changed, the
 corpus none. Scores unchanged: corpus bands pass, held-out mean 0.7850.
+
+## 2026-10-29 — commit acad723 (a panic's contract error as the SDK Error)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 22/25 | 22 | 3,898 |
+| Stellar examples, multi-contract | 13 | 10/13 | 34 | 4,241 |
+| third-party | 2 | 1/2 | 28 | 788 |
+| SDK 26 test contracts | 39 | 23/39 | 77 | 1,595 |
+
+Errors 168 → 161. A constant raised by `panic_with_error!` whose contract code
+two error enums share, or none declares, is now `Error::from_contract_error(code)`,
+the same value; three SDK 26 reconstructions changed, at those sites only.
+Holes unchanged; held-out mean 0.7850.
