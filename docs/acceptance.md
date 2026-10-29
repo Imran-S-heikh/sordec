@@ -154,7 +154,7 @@ flattering:
 |---|---:|---|---:|
 | Third-party contracts, never seen during development | 2 | 0 of 2 | 0.53 |
 | Stellar's `soroban-examples`, single-contract folders | 25 | 22 of 25 | 0.7850 |
-| Stellar's `soroban-examples`, multi-contract folders | 13 | 9 of 13 | to be filled in <!-- TODO(M1) --> |
+| Stellar's `soroban-examples`, multi-contract folders | 13 | 9 of 13 | 0.6226 |
 | Reference set (the agreed vectors, §3) | 7 | 7 of 7 | 0.9389 |
 
 **Third-party contracts.** OpenZeppelin's `merkle-voting` scores 0.4034 and Phoenix's
@@ -172,7 +172,7 @@ structure is low mostly because of library code (§5). `account`, `fuzzing` and
 `other_custom_types` do not build. Behaviour cannot be measured here yet: these are
 built for Soroban protocol 27 and the execution harness hosts protocol 23. The 13
 multi-contract examples (contracts that import or deploy one another) are measured the
-same way; their score is to be filled in <!-- TODO(M1) -->. `atomic_multiswap`, the two
+same way and score 0.6226 (measured 2026-10-29). `atomic_multiswap`, the two
 `groth16` verifiers and `privacy_pools` do not build.
 
 **Part of the rise is the ruler, not the decompiler.** At the first alpha release the
@@ -230,8 +230,15 @@ SORDEC_HELDOUT_DIR=~/.cache/sordec-heldout \
   cargo test --release -p sordec --test heldout_bench -- --ignored --nocapture
 ```
 
-The 13 multi-contract examples are built by a script not yet in this repository.
-<!-- TODO(M1): add the script and its command. -->
+The 13 multi-contract examples are built by
+[`tools/build_examples_extra.sh`](../tools/build_examples_extra.sh) from the same
+checkout, into the same layout:
+
+```bash
+tools/build_examples_extra.sh
+SORDEC_HELDOUT_DIR=~/.cache/sordec-examples-extra \
+  cargo test --release -p sordec --test heldout_bench -- --ignored --nocapture
+```
 
 **Third-party contracts (§4).** [`tools/build_unseen.sh`](../tools/build_unseen.sh)
 clones both projects at pinned commits and builds them. The run prints the scores and
