@@ -235,8 +235,8 @@ fn relabel_overflow_check(func: &mut HighFunction, site: &Site) {
         };
         match op {
             BinaryOp::Eq if site.k == 1 => c == bound,
-            BinaryOp::Ge if l == site.x => c == bound,
-            BinaryOp::Gt if l == site.x => c == bound - 1,
+            BinaryOp::Ge | BinaryOp::GeU if l == site.x => c == bound,
+            BinaryOp::Gt | BinaryOp::GtU if l == site.x => c == bound - 1,
             _ => false,
         }
     };

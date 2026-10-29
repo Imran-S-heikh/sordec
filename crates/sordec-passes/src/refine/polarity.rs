@@ -15,15 +15,15 @@
 //! would corrupt any other reader, so it fires only when this `If` is
 //! the condition's sole live use — exactly the
 //! [`InlineClass::Inline`]`(`[`InlineSite::RegionUse`]`)` class the
-//! treeification analysis already computes. Only the six total integer
-//! comparators invert (`Eq↔Ne`, `Lt↔Ge`, `Le↔Gt`; sound for either
-//! signedness, which [`BinaryOp`] erases — floats, the one unsound
-//! case, cannot reach deployed Soroban code). Every flip appends a
+//! treeification analysis already computes. Only the ten total integer
+//! comparators invert (`Eq↔Ne`, `Lt↔Ge`, `Le↔Gt`, each ordering on its
+//! own reading — floats, the one unsound case, cannot reach deployed
+//! Soroban code). Every flip appends a
 //! provenance entry, so the audit trail records that the rendered
 //! polarity is refined, not raw.
 
 use sordec_common::{Arena, Provenance, ProvenanceSource, ValueId};
-use sordec_ir::{BinaryOp, Binding, Expr, HighIr, Region};
+use sordec_ir::{Binding, Expr, HighIr, Region};
 
 use super::{debug_validate, is_bare_exit};
 use crate::dataflow::{InlineClass, InlinePlan, InlineSite};
@@ -203,7 +203,7 @@ fn negates(op: sordec_ir::UnaryOp, operand: Option<&sordec_ir::IrType>) -> bool 
     }
 }
 
-/// Invert `cond`'s comparator in place when it is one of the six total
+/// Invert `cond`'s comparator in place when it is one of the ten total
 /// integer comparisons; records the flip in the binding's provenance.
 /// Returns whether the inversion happened.
 fn invert_comparator(bindings: &mut Arena<ValueId, Binding>, cond: ValueId) -> bool {
@@ -213,14 +213,8 @@ fn invert_comparator(bindings: &mut Arena<ValueId, Binding>, cond: ValueId) -> b
     let Expr::Binary { op, .. } = &mut binding.expr else {
         return false;
     };
-    let inverted = match op {
-        BinaryOp::Eq => BinaryOp::Ne,
-        BinaryOp::Ne => BinaryOp::Eq,
-        BinaryOp::Lt => BinaryOp::Ge,
-        BinaryOp::Ge => BinaryOp::Lt,
-        BinaryOp::Le => BinaryOp::Gt,
-        BinaryOp::Gt => BinaryOp::Le,
-        _ => return false,
+    let Some(inverted) = op.inverted() else {
+        return false;
     };
     *op = inverted;
     binding.add_provenance(Provenance::new(
@@ -234,6 +228,7 @@ fn invert_comparator(bindings: &mut Arena<ValueId, Binding>, cond: ValueId) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sordec_ir::BinaryOp;
     use crate::pipeline::Pipeline;
     use sordec_common::{BlockId, FuncId, UnknownReason};
     use sordec_ir::{HighBlock, HighFunction, IrType, Literal};

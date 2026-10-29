@@ -138,8 +138,11 @@ fn comparison(func: &HighFunction, expr: &Expr) -> Option<(BinaryOp, Side, Optio
     // in the same operand order. That order is what pairs each low limb
     // with its own high one, so both operands are named even when the
     // function itself never put either pair together.
+    // The low halves are magnitudes whatever the value's sign, so they are
+    // compared unsigned; the high halves carry the sign, so theirs is the
+    // comparison's.
     let (low_op, lo_l, lo_r) = compare_of(func, *on_equal)?;
-    if low_op != high_op {
+    if low_op != high_op.unsigned() {
         return None;
     }
     Some((
@@ -184,9 +187,9 @@ fn against_zero(func: &HighFunction, expr: &Expr) -> Option<(BinaryOp, Side, Opt
             (_, Some(v)) => (v, BinaryOp::Lt),
             _ => return None,
         },
-        BinaryOp::Gt => match (is_nonzero(func, on_equal), is_zero(func, on_equal)) {
-            (Some(v), _) => (v, BinaryOp::Gt),
-            (_, Some(v)) => (v, BinaryOp::Ge),
+        BinaryOp::Gt | BinaryOp::GtU => match (is_nonzero(func, on_equal), is_zero(func, on_equal)) {
+            (Some(v), _) => (v, op),
+            (_, Some(v)) => (v, if op == BinaryOp::Gt { BinaryOp::Ge } else { BinaryOp::GeU }),
             _ => return None,
         },
         _ => return None,
@@ -230,7 +233,7 @@ fn sided(func: &HighFunction, lhs: ValueId, rhs: ValueId) -> Option<ValueId> {
 
 /// Whether this operator orders — equality decides nothing lexicographic.
 fn ordering(op: BinaryOp) -> bool {
-    matches!(op, BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge)
+    op.is_ordered()
 }
 
 /// The comparison a value is.
@@ -251,10 +254,10 @@ mod tests {
     use crate::marshalling::test_support::{func_with, module, v};
     use sordec_common::UnknownReason;
 
-    /// `select(gt(lo a, lo b), gt(hi a, hi b), eq(hi a, hi b))`.
-    /// `matching` false makes the tie-break case use the wrong operator.
-    fn shape(matching: bool) -> HighIr {
-        let low = if matching { BinaryOp::Gt } else { BinaryOp::Lt };
+    /// `select(low(lo a, lo b), gt(hi a, hi b), eq(hi a, hi b))`: an
+    /// `i128` `>` as rustc spells it, whose low halves are compared
+    /// unsigned (`low` = `GtU`).
+    fn shape(low: BinaryOp) -> HighIr {
         module(vec![func_with(
             vec![
                 Expr::Phi { incoming: vec![] },                             // v0 a
@@ -279,7 +282,7 @@ mod tests {
 
     #[test]
     fn halves_compared_lexicographically_are_the_comparison() {
-        let mut m = shape(true);
+        let mut m = shape(BinaryOp::GtU);
         assert!(WideComparePass.run(&mut m).changed);
         assert!(matches!(
             m.functions[0].bindings.get(v(9)).unwrap().expr,
@@ -290,13 +293,21 @@ mod tests {
     /// Halves compared in different directions order nothing.
     #[test]
     fn a_select_whose_halves_disagree_is_left_alone() {
-        let mut m = shape(false);
+        let mut m = shape(BinaryOp::Lt);
+        assert!(!WideComparePass.run(&mut m).changed);
+    }
+
+    /// The low halves are magnitudes: compared signed, this is not the
+    /// lexicographic comparison of a 128-bit value.
+    #[test]
+    fn a_select_whose_low_halves_compare_signed_is_left_alone() {
+        let mut m = shape(BinaryOp::Gt);
         assert!(!WideComparePass.run(&mut m).changed);
     }
 
     #[test]
     fn the_pass_is_idempotent() {
-        let mut m = shape(true);
+        let mut m = shape(BinaryOp::GtU);
         assert!(WideComparePass.run(&mut m).changed);
         assert!(!WideComparePass.run(&mut m).changed);
     }

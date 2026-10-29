@@ -322,8 +322,8 @@ mod tests {
         assert!(matches!(items[..], [Region::Basic(_), Region::Panic { .. }]));
     }
 
-    /// Signedness is erased on `BinaryOp`, so an ordered comparison of
-    /// literals has no certain answer here.
+    /// An ordered comparison of literals is not folded: the fold reads
+    /// equality only.
     #[test]
     fn an_ordered_comparison_is_not_folded() {
         let mut m = module(vec![guarded(BinaryOp::Lt)]);

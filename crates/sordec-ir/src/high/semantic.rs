@@ -654,11 +654,11 @@ pub enum KnownOp {
     /// Guest-side small-value Val decode: `value >> shift`, extracting
     /// the body from a tagged Val.
     ///
-    /// Deliberately carries **no payload-type claim**: the lowering
-    /// erases shift signedness (`shr_s` vs `shr_u` both lower to
-    /// `BinaryOp::Shr`), so u64-vs-i64 is not determinable from the
-    /// pattern alone. The type-recovery pass refines the binding's
-    /// `IrType` later when flow context proves the payload type.
+    /// Deliberately carries **no payload-type claim**: the recognizer
+    /// accepts the shift on either reading (`shr_s` for a signed payload,
+    /// `shr_u` for an unsigned one) and does not carry the reading here,
+    /// so u64-vs-i64 is left to the type-recovery pass, which refines the
+    /// binding's `IrType` when flow context proves the payload type.
     ValDecodeSmall {
         /// The tagged Val being unpacked.
         value: ValueId,

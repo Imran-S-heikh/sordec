@@ -1096,7 +1096,7 @@ fn dump_hir_renders_dex_loops_with_labeled_continue() {
     // dex exercises every D3 outcome: the argument copy loop proves
     // `while` in the continue-in-then form (condition as-is), the
     // Newton bisection loop in the exit-in-then form (comparator
-    // inverted, `le` -> `gt`), and the per-iteration-call loops
+    // inverted, `le_u` -> `gt_u`), and the per-iteration-call loops
     // honestly keep the labeled `loop` + `continue` back edge.
     Command::cargo_bin("sordec")
         .expect("sordec binary builds")
@@ -1106,7 +1106,7 @@ fn dump_hir_renders_dex_loops_with_labeled_continue() {
         // The argument copy loop is unrolled before structuring now (it
         // was `'bb3: while (ne v14, 24i32)`), so the `while` witness is
         // the Newton bisection alone.
-        .stdout(predicate::str::contains("while (gt v79, v80) {"))
+        .stdout(predicate::str::contains("while (gt_u v79, v80) {"))
         .stdout(predicate::str::contains(": loop {"))
         .stdout(predicate::str::contains("continue 'bb"));
 }

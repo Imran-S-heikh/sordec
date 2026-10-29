@@ -45,12 +45,13 @@
 //! ```
 //!
 //! (with `<` as `<= C − 1`, and `>`, `>=`, `!=` their negations), and the
-//! comparison is rewritten on the length. The lowering has erased the
-//! comparison's signedness, which is safe here: signed and unsigned order
-//! agree on every raw value with `len < 2³¹`, and no Soroban collection
-//! approaches that. A bound outside the `u32` range, or an equality with a
-//! constant that is no `U32Val`, is left alone — and so is a comparison on
-//! the length a decode already produced, which is on the payload.
+//! comparison is rewritten on the length, as the unsigned comparison it is.
+//! Only an unsigned ordering qualifies: a raw `Val` is a `u64`, and that is
+//! how the SDK's bound check compares it; under a signed one a raw value
+//! with `len ≥ 2³¹` is negative and the identity above fails. A bound
+//! outside the `u32` range, or an equality with a constant that is no
+//! `U32Val`, is left alone — and so is a comparison on the length a decode
+//! already produced, which is on the payload.
 //!
 //! # And two lengths compared through their raw words
 //!
@@ -59,7 +60,7 @@
 //! `(a ^ b) << 32`, which is below 2³² exactly when the payloads are equal.
 //! Rewritten as the `==` it is (`>=` as `!=`) when both sides are raw
 //! `U32Val` words — a host length, or a storage read checked as one — and the
-//! comparison was lowered from an unsigned opcode. Under a signed one a
+//! comparison is the unsigned one. Under a signed one a
 //! payload xor with its top bit set also passes, so that is not equality and
 //! is left alone.
 
@@ -175,7 +176,7 @@ fn bounds(func: &HighFunction) -> Vec<(ValueId, BinaryOp, ValueId, u32)> {
             let (op, len, c) = if let Some(len) = raw_len(func, *lhs) {
                 (*op, len, literal(func, *rhs)?)
             } else {
-                (flipped(*op)?, raw_len(func, *rhs)?, literal(func, *lhs)?)
+                (op.flipped()?, raw_len(func, *rhs)?, literal(func, *lhs)?)
             };
             let (op, bound) = on_length(op, i128::from(c))?;
             Some((id, op, len, u32::try_from(bound).ok()?))
@@ -193,11 +194,11 @@ fn equalities(func: &HighFunction) -> Vec<(ValueId, BinaryOp, ValueId, ValueId)>
                 return None;
             };
             let op = match op {
-                BinaryOp::Lt => BinaryOp::Eq,
-                BinaryOp::Ge => BinaryOp::Ne,
+                BinaryOp::LtU => BinaryOp::Eq,
+                BinaryOp::GeU => BinaryOp::Ne,
                 _ => return None,
             };
-            if literal(func, *rhs) != Some(1 << 32) || !crate::lowering::lift_to_high::lowered_unsigned(b) {
+            if literal(func, *rhs) != Some(1 << 32) {
                 return None;
             }
             let Some(Expr::Binary { op: BinaryOp::BitXor, lhs: x, rhs: y }) =
@@ -245,23 +246,11 @@ fn on_length(op: BinaryOp, c: i128) -> Option<(BinaryOp, i128)> {
     // `raw <= c ⟺ len <= ⌊(c − 4) / 2³²⌋`, defined while `c ≥ 4`.
     let le = |c: i128| (c >= tag).then(|| (c - tag).div_euclid(WORD));
     Some(match op {
-        BinaryOp::Le => (BinaryOp::Le, le(c)?),
-        BinaryOp::Lt => (BinaryOp::Le, le(c - 1)?),
-        BinaryOp::Gt => (BinaryOp::Gt, le(c)?),
-        BinaryOp::Ge => (BinaryOp::Gt, le(c - 1)?),
+        BinaryOp::LeU => (BinaryOp::LeU, le(c)?),
+        BinaryOp::LtU => (BinaryOp::LeU, le(c - 1)?),
+        BinaryOp::GtU => (BinaryOp::GtU, le(c)?),
+        BinaryOp::GeU => (BinaryOp::GtU, le(c - 1)?),
         BinaryOp::Eq | BinaryOp::Ne if c.rem_euclid(WORD) == tag => (op, c.div_euclid(WORD)),
-        _ => return None,
-    })
-}
-
-/// The comparison with its operands swapped.
-fn flipped(op: BinaryOp) -> Option<BinaryOp> {
-    Some(match op {
-        BinaryOp::Lt => BinaryOp::Gt,
-        BinaryOp::Le => BinaryOp::Ge,
-        BinaryOp::Gt => BinaryOp::Lt,
-        BinaryOp::Ge => BinaryOp::Le,
-        BinaryOp::Eq | BinaryOp::Ne => op,
         _ => return None,
     })
 }
@@ -386,17 +375,17 @@ mod tests {
     #[test]
     fn a_raw_length_bound_is_a_bound_on_the_length() {
         // `args.get(2)`: `raw <= 0x2_FFFF_FFFF` is `len <= 2`.
-        let mut ir = bound(BinaryOp::Le, 0x2_FFFF_FFFF, false);
+        let mut ir = bound(BinaryOp::LeU, 0x2_FFFF_FFFF, false);
         assert!(HostLenPass.run(&mut ir).changed);
-        assert_eq!(rewritten(&ir), Some((BinaryOp::Le, 2)));
+        assert_eq!(rewritten(&ir), Some((BinaryOp::LeU, 2)));
         // `raw < (3 << 32) | 4` is `len < 3`, i.e. `len <= 2`.
-        let mut ir = bound(BinaryOp::Lt, (3 << 32) | 4, false);
+        let mut ir = bound(BinaryOp::LtU, (3 << 32) | 4, false);
         HostLenPass.run(&mut ir);
-        assert_eq!(rewritten(&ir), Some((BinaryOp::Le, 2)));
+        assert_eq!(rewritten(&ir), Some((BinaryOp::LeU, 2)));
         // `0x2_FFFF_FFFF < raw`, constant first, is `len > 2`.
-        let mut ir = bound(BinaryOp::Lt, 0x2_FFFF_FFFF, true);
+        let mut ir = bound(BinaryOp::LtU, 0x2_FFFF_FFFF, true);
         HostLenPass.run(&mut ir);
-        assert_eq!(rewritten(&ir), Some((BinaryOp::Gt, 2)));
+        assert_eq!(rewritten(&ir), Some((BinaryOp::GtU, 2)));
         // An equality with a `U32Val` is one on its payload.
         let mut ir = bound(BinaryOp::Eq, (5 << 32) | 4, false);
         HostLenPass.run(&mut ir);
@@ -406,11 +395,21 @@ mod tests {
     #[test]
     fn a_constant_that_is_no_length_bound_is_left_alone() {
         // No `U32Val` equals this, and below the tag nothing is `<=`.
-        for (op, c) in [(BinaryOp::Eq, 0x2_FFFF_FFFF), (BinaryOp::Le, 3)] {
+        for (op, c) in [(BinaryOp::Eq, 0x2_FFFF_FFFF), (BinaryOp::LeU, 3)] {
             let mut ir = bound(op, c, false);
             HostLenPass.run(&mut ir);
             assert_eq!(rewritten(&ir), None, "{op:?} {c}");
         }
+    }
+
+    #[test]
+    fn a_signed_bound_on_the_raw_word_is_not_a_length_bound() {
+        // Under a signed order a raw value with `len >= 2^31` is negative,
+        // and the identity with `len <= bound` fails; only the unsigned
+        // comparison, the one the SDK's bound check compiles to, qualifies.
+        let mut ir = bound(BinaryOp::Le, 0x2_FFFF_FFFF, false);
+        HostLenPass.run(&mut ir);
+        assert_eq!(rewritten(&ir), None);
     }
 
     #[test]
@@ -424,7 +423,7 @@ mod tests {
                 Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::Len, args: vec![v(0)] })), // v1
                 Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value: v(1) })),          // v2
                 Expr::Literal(Literal::I64(5)),                                                      // v3
-                Expr::Binary { op: BinaryOp::Le, lhs: v(2), rhs: v(3) },                             // v4
+                Expr::Binary { op: BinaryOp::LeU, lhs: v(2), rhs: v(3) },                            // v4
             ],
             vec![v(0)],
             vec![1, 2, 3, 4],
@@ -433,15 +432,14 @@ mod tests {
         assert!(!HostLenPass.run(&mut ir).changed);
         let cmp = &ir.functions[0].bindings.get(v(4)).unwrap().expr;
         assert!(
-            matches!(cmp, Expr::Binary { op: BinaryOp::Le, lhs, rhs } if *lhs == v(2) && *rhs == v(3)),
+            matches!(cmp, Expr::Binary { op: BinaryOp::LeU, lhs, rhs } if *lhs == v(2) && *rhs == v(3)),
             "{cmp:?}"
         );
     }
 
-    /// `vec_len(v0) ^ vec_len(v1) < 2^32`, with the comparison lowered from
-    /// `i64.lt_u` when `unsigned`.
-    fn xored(unsigned: bool) -> HighIr {
-        let mut f = func_with(
+    /// `vec_len(v0) ^ vec_len(v1) < 2^32`, the comparison `op`.
+    fn xored(op: BinaryOp) -> HighIr {
+        let f = func_with(
             vec![
                 Expr::Phi { incoming: vec![] },                                                      // v0
                 Expr::Phi { incoming: vec![] },                                                      // v1
@@ -449,17 +447,10 @@ mod tests {
                 Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::Len, args: vec![v(1)] })), // v3
                 Expr::Binary { op: BinaryOp::BitXor, lhs: v(2), rhs: v(3) },                        // v4
                 Expr::Literal(Literal::I64(1 << 32)),                                                // v5
-                Expr::Binary { op: BinaryOp::Lt, lhs: v(4), rhs: v(5) },                             // v6
+                Expr::Binary { op, lhs: v(4), rhs: v(5) },                                           // v6
             ],
             vec![v(0), v(1)],
             vec![2, 3, 4, 5, 6],
-        );
-        let cmp = f.bindings.get_mut(v(6)).unwrap();
-        *cmp = Binding::new(
-            v(6),
-            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
-            cmp.expr.clone(),
-            crate::lowering::lift_to_high::compare_provenance(unsigned),
         );
         module(vec![f])
     }
@@ -467,7 +458,7 @@ mod tests {
     #[test]
     fn two_raw_lengths_xored_below_2_32_are_equal() {
         // `tot_signers == signatures.len()`, as `account` compiles it.
-        let mut ir = xored(true);
+        let mut ir = xored(BinaryOp::LtU);
         assert!(HostLenPass.run(&mut ir).changed);
         let cmp = &ir.functions[0].bindings.get(v(6)).unwrap().expr;
         assert!(
@@ -480,7 +471,7 @@ mod tests {
     fn a_signed_xor_test_is_not_equality() {
         // A payload xor with its top bit set is negative, and passes `< 2^32`
         // signed: that comparison is not `==`.
-        let mut ir = xored(false);
+        let mut ir = xored(BinaryOp::Lt);
         HostLenPass.run(&mut ir);
         assert!(matches!(
             ir.functions[0].bindings.get(v(6)).unwrap().expr,

@@ -37,12 +37,15 @@ fn is_raw_arithmetic(op: BinaryOp) -> bool {
             | B::Sub
             | B::Mul
             | B::Div
+            | B::DivU
             | B::Rem
+            | B::RemU
             | B::BitAnd
             | B::BitOr
             | B::BitXor
             | B::Shl
             | B::Shr
+            | B::ShrU
             | B::Rotl
             | B::Rotr
     )

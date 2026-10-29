@@ -177,7 +177,7 @@ fn limbs(func: &HighFunction, hi: ValueId, expr: &Expr) -> Option<Found> {
     }
     let (hi_a, hi_b) = (resolve_use(func, *hi_a), resolve_use(func, *hi_b));
     // The carry: the low limbs' unsigned comparison.
-    let Expr::Binary { op: BinaryOp::Lt, lhs: c_l, rhs: c_r } =
+    let Expr::Binary { op: BinaryOp::LtU, lhs: c_l, rhs: c_r } =
         &func.bindings.get(resolve_use(func, carry))?.expr
     else {
         return None;
@@ -247,7 +247,7 @@ mod tests {
                 Expr::Phi { incoming: vec![] },                              // v2 lo b
                 Expr::Phi { incoming: vec![] },                              // v3 hi b
                 Expr::Binary { op, lhs: v(0), rhs: v(2) },                   // v4 low
-                Expr::Binary { op: BinaryOp::Lt, lhs: v(carry_lhs), rhs: v(2) }, // v5 carry
+                Expr::Binary { op: BinaryOp::LtU, lhs: v(carry_lhs), rhs: v(2) }, // v5 carry
                 Expr::Binary { op, lhs: v(1), rhs: v(3) },                   // v6
                 Expr::Unary { op: UnaryOp::ExtendU32, value: v(5) },         // v7
                 Expr::Binary { op, lhs: v(6), rhs: v(7) },                   // v8 high

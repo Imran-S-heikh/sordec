@@ -159,7 +159,7 @@ fn bool_like(func: &HighFunction, v: ValueId, depth: u32) -> bool {
     }
     match &b.expr {
         Expr::Binary { op, lhs, rhs } => match op {
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => true,
+            op if op.is_comparison() => true,
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
                 bool_like(func, resolve_use(func, *lhs), depth + 1)
                     && bool_like(func, resolve_use(func, *rhs), depth + 1)

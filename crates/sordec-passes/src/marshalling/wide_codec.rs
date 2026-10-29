@@ -347,7 +347,7 @@ fn limb_of(func: &HighFunction, value: ValueId, val: ValueId, depth: u32) -> Lim
                 _ => Limb::Other,
             }
         }
-        Expr::Binary { op: BinaryOp::Shr, lhs, rhs }
+        Expr::Binary { op: BinaryOp::Shr | BinaryOp::ShrU, lhs, rhs }
             if from_val(*lhs) && trace_int(func, *rhs) == Some(63) =>
         {
             Limb::Hi(None)

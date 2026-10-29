@@ -336,7 +336,7 @@ fn is_division_guard(func: &HighFunction, cond: ValueId) -> bool {
     let mut numerators = Vec::new();
     let mut divisors = Vec::new();
     for (_, b) in func.bindings.iter() {
-        if let Expr::Binary { op: BinaryOp::Div | BinaryOp::Rem, lhs, rhs } = &b.expr {
+        if let Expr::Binary { op: BinaryOp::Div | BinaryOp::DivU | BinaryOp::Rem | BinaryOp::RemU, lhs, rhs } = &b.expr {
             numerators.push(resolve_use(func, *lhs));
             divisors.push(resolve_use(func, *rhs));
         }
@@ -454,7 +454,7 @@ fn classify_other(cond: ValueId, func: &HighFunction) -> PanicKind {
             rhs,
         } if is_tag_mask(func, *lhs) || is_tag_mask(func, *rhs) => PanicKind::Unwrap,
         Expr::Binary {
-            op: BinaryOp::Lt | BinaryOp::Gt,
+            op: BinaryOp::Lt | BinaryOp::LtU | BinaryOp::Gt | BinaryOp::GtU,
             lhs,
             rhs,
         } if is_overflow_test(func, *lhs, *rhs) => PanicKind::ArithOverflow,
@@ -480,7 +480,7 @@ fn inverted_guard_kind(prev: &Region, func: &HighFunction) -> Option<PanicKind> 
         return None;
     }
     match &func.bindings.get(resolve_use(func, *cond))?.expr {
-        Expr::Binary { op: BinaryOp::Ge | BinaryOp::Le, lhs, rhs }
+        Expr::Binary { op: BinaryOp::Ge | BinaryOp::GeU | BinaryOp::Le | BinaryOp::LeU, lhs, rhs }
             if is_overflow_test(func, *lhs, *rhs) =>
         {
             Some(PanicKind::ArithOverflow)

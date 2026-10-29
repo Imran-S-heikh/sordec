@@ -29,7 +29,7 @@ pub use high::{
     AddressOpKind, BinaryOp, Binding, BufOpKind, ClientInterface, CryptoOpKind, DeployOpKind,
     DispatchTable, EnumKey, ErrorVariant, Expr, HighBlock, HighFunction, HighIr, IrType, KnownOp,
     KnownTier, KnownType, Literal, LoopKind, MapOpKind, MemWidth, Missing, PanicKind, PhiTransfer,
-    PrngOpKind, Region, SemanticOp, StorageTier, SwitchArm, TestOpKind, UnaryOp, ValObjectKind,
+    PrngOpKind, Region, SemanticOp, Sign, StorageTier, SwitchArm, TestOpKind, UnaryOp, ValObjectKind,
     VecOpKind,
 };
 pub use lifted::{
