@@ -57,24 +57,24 @@ fn typed_vec(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
 /// is the call. `account`'s `args.get(2)` is `vec_get(args, 0x2_0000_0004)`.
 ///
 /// A receiver the IR has not typed as a `Vec` goes through `Val`, as
-/// `len()` does, and its element is then a `Val`; where the binding is
-/// typed (`i128`, the amount the source converts the argument to), the
-/// element is converted to it.
+/// `len()` does ([`converted_to_val`]), and its element is then a `Val`;
+/// where the binding is typed (`i128`, the amount the source converts the
+/// argument to), the element is converted to it.
 pub(crate) fn vec_get_at_literal(
     ctx: &FnCtx,
-    args: &[sordec_common::ValueId],
+    op: &KnownOp,
     result: sordec_common::ValueId,
 ) -> Option<syn::Expr> {
-    let [recv, index] = args else {
+    let KnownOp::VecOp { kind: VecOpKind::Get, args } = op else {
         return None;
     };
-    let n = match ctx.func.bindings.get(*index).map(|b| &b.expr) {
-        Some(sordec_ir::Expr::Literal(sordec_ir::Literal::I64(raw))) => u32_val_payload(*raw)?,
-        _ => return None,
+    let [recv, index] = args.as_slice() else {
+        return None;
     };
+    let n = literal_index(ctx, *index)?;
     let eb = ctx.env_borrow();
     let v = ctx.value_ref(*recv);
-    if typed_vec(ctx, *recv) {
+    if converted_to_val(ctx, op).is_none() {
         return Some(parse_quote!(#v.get_unchecked(#n)));
     }
     let element: syn::Expr = parse_quote!(
@@ -99,6 +99,55 @@ pub(crate) fn vec_get_at_literal(
 fn u32_val_payload(raw: i64) -> Option<u32> {
     (raw & 0xFFFF_FFFF == 4).then_some(())?;
     u32::try_from(raw >> 32).ok()
+}
+
+/// The `u32` an index operand carries when it is a literal `U32Val`.
+fn literal_index(ctx: &FnCtx, index: sordec_common::ValueId) -> Option<u32> {
+    match ctx.func.bindings.get(index).map(|b| &b.expr) {
+        Some(sordec_ir::Expr::Literal(sordec_ir::Literal::I64(raw))) => u32_val_payload(*raw),
+        _ => None,
+    }
+}
+
+/// The operand whose chain converts it into a `Val` before using it —
+/// `IntoVal::<Env, Val>::into_val(&x, e)` — or `None` when the op's chain
+/// converts none.
+///
+/// Three chains do: `len()` and a literal-index `get` on a receiver the IR
+/// has not typed as a `Vec` ([`known_op_expr`], [`vec_get_at_literal`]),
+/// and `authorize_as_current_contract` on entries typed neither a `Vec`
+/// nor a `Val`. Each treats the operand as the `Val` the host call was
+/// handed, which is what lets the body annotate an untyped hole read only
+/// this way as one (`FnCtx::converted_to_val_only`): without it, the
+/// hole's `!` falls back to `()`, and `()` is not the value the host read.
+///
+/// The three renderers decide whether to convert by calling this, so what
+/// the body annotates and what the chain prints cannot drift apart.
+pub(crate) fn converted_to_val(ctx: &FnCtx, op: &KnownOp) -> Option<sordec_common::ValueId> {
+    match op {
+        KnownOp::VecOp { kind: VecOpKind::Len, args } => {
+            let recv = *args.first()?;
+            (!typed_vec(ctx, recv)).then_some(recv)
+        }
+        KnownOp::VecOp { kind: VecOpKind::Get, args } => {
+            let [recv, index] = args.as_slice() else {
+                return None;
+            };
+            literal_index(ctx, *index)?;
+            (!typed_vec(ctx, *recv)).then_some(*recv)
+        }
+        KnownOp::AuthorizeAsCurrContract { auth_entries } => {
+            let typed = matches!(
+                ctx.func.bindings.get(*auth_entries).map(|b| &b.ty),
+                Some(
+                    IrType::Known(KnownType::Vec(_) | KnownType::Val)
+                        | IrType::Inferred(KnownType::Vec(_) | KnownType::Val)
+                )
+            );
+            (!typed).then_some(*auth_entries)
+        }
+        _ => None,
+    }
 }
 
 /// The method chain for a recovered op, or `None` when it cannot be
@@ -151,7 +200,7 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                 // traps unless it is a vec, and so does the conversion that
                 // makes it one here. Through `Val`, since only `Val`
                 // converts to a `Vec`.
-                VecOpKind::Len if !typed_vec(ctx, args[0]) => Some(parse_quote!(
+                VecOpKind::Len if converted_to_val(ctx, op).is_some() => Some(parse_quote!(
                     soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Vec<soroban_sdk::Val>>::into_val(
                         &soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#v, #eb),
                         #eb,
@@ -254,12 +303,13 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         // same `Val` either way.
         KnownOp::AuthorizeAsCurrContract { auth_entries } => {
             let entries = ctx.value_ref(*auth_entries);
-            let val: syn::Expr = match ctx.func.bindings.get(*auth_entries).map(|b| &b.ty) {
-                Some(IrType::Known(KnownType::Vec(_)) | IrType::Inferred(KnownType::Vec(_))) => {
-                    parse_quote!(#entries.to_val())
-                }
-                Some(IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val)) => entries,
-                _ => parse_quote!(soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#entries, #eb)),
+            let val: syn::Expr = if converted_to_val(ctx, op).is_some() {
+                parse_quote!(soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#entries, #eb))
+            } else if typed_vec(ctx, *auth_entries) {
+                parse_quote!(#entries.to_val())
+            } else {
+                // Typed `Val` already.
+                entries
             };
             Some(parse_quote!(#e.authorize_as_current_contract(soroban_sdk::FromVal::from_val(#eb, &#val))))
         }
