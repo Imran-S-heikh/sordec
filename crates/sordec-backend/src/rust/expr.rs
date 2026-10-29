@@ -631,6 +631,14 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 | BinaryOp::Ge | BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
                     (unsuffixed(ctx, *lhs, *rhs), unsuffixed(ctx, *rhs, *lhs))
                 }
+                // A mask or flag word keeps its bits: a negative constant
+                // against an unsigned value is the unsigned number with the
+                // same bits (`-2i32` on a `u32` is `4294967294`), so no bit
+                // of the result changes.
+                BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => (
+                    same_bits(ctx, *lhs, *rhs),
+                    same_bits(ctx, *rhs, *lhs),
+                ),
                 _ => (None, None),
             };
             binary_expr(

@@ -1684,6 +1684,29 @@ mod tests {
         assert!(out.contains("Temp (v1)"), "{out}");
     }
 
+    /// `v1 & -2i32` with `v1: u32` is the same 32 bits as `v1 & 4294967294`.
+    fn masked(operand: KnownType) -> String {
+        let phi = (IrType::Known(operand), Expr::Phi { incoming: vec![] });
+        let lit = (IrType::Known(KnownType::I32), Expr::Literal(sordec_ir::Literal::I32(-2)));
+        emitted(
+            vec![phi, lit, (IrType::Known(KnownType::U32), mask(1, 2)), (untyped(), store(3))],
+            vec![],
+            &TypeRegistry::default(),
+        )
+    }
+
+    #[test]
+    fn a_negative_mask_on_an_unsigned_word_is_the_same_bits_unsigned() {
+        let out = masked(KnownType::U32);
+        assert!(out.contains("4294967294") && !out.contains("- 2"), "{out}");
+    }
+
+    #[test]
+    fn a_negative_mask_on_a_signed_word_keeps_its_suffix() {
+        let out = masked(KnownType::I32);
+        assert!(out.contains("2i32") && !out.contains("4294967294"), "{out}");
+    }
+
     // ---- a hole only a conversion through `Val` reads ----
 
     #[test]
