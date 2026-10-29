@@ -306,7 +306,7 @@ fn try_encode(func: &HighFunction, id: ValueId, expr: &Expr) -> Option<Rewrite> 
 /// having a recognized tag check.
 fn try_decode(id: ValueId, expr: &Expr, func: &HighFunction) -> Option<Rewrite> {
     let Expr::Binary {
-        op: BinaryOp::Shr,
+        op: BinaryOp::Shr | BinaryOp::ShrU,
         lhs,
         rhs,
     } = expr

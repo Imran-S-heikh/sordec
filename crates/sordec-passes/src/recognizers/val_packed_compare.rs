@@ -56,16 +56,13 @@
 //! **B-eq** is exact for the same reason, one step shorter: two
 //! well-formed `U32Val`s are bit-equal exactly when their payloads are.
 //!
-//! **B-lt carries a premise, and it is recorded rather than hidden.**
-//! `payload << 32 | 4 <ᵘ k << 32` iff `payload < k`, but
-//! [`crate::lowering::lift_to_high`] folds `i64.lt_s` and `i64.lt_u` onto
-//! the same [`BinaryOp::Lt`] — sign is deliberately erased there, on the
-//! grounds that the operand types carry it, which for a raw Val they do
-//! not. Signed and unsigned agree here iff the payload is below 2³¹. Every
-//! witnessed producer is a host-side length or index, and the wasm this
-//! was derived from is `i64.lt_u`, so the reading is the right one; it is
-//! an inference from the SDK's compiled shape, not a proof, and the
-//! binding's provenance says so. `sordec-diffexec` is what settles it.
+//! **B-lt is exact because the comparison's reading is known.**
+//! `payload << 32 | 4 <ᵘ k << 32` iff `payload < k` on an unsigned
+//! reading, for every payload; on a signed one the two agree only below
+//! 2³¹. The lowering keeps the opcode's reading on the operator
+//! ([`BinaryOp::LtU`] against [`BinaryOp::Lt`]), so only the unsigned
+//! orderings are admitted here, and every witnessed producer — a host-side
+//! length or index — is compared `i64.lt_u` by the SDK.
 //!
 //! **C is the degenerate case, and it is exact by the encoding's own
 //! definition.** A `Bool` Val carries no body: `Tag::False` is `0` and
@@ -326,10 +323,10 @@ fn try_oriented(
         // same unsigned reading: `p >= k << 32` iff `payload >= k`. It
         // reached here once an entrypoint's own `u32` parameter counted as
         // a producer — `if decimal > 18` compiles to `ge param, 19 << 32`.
-        BinaryOp::Lt | BinaryOp::Ge if side == ConstSide::Rhs => {
+        BinaryOp::LtU | BinaryOp::GeU if side == ConstSide::Rhs => {
             try_ordered(func, cmp, value, const_id, bits)
         }
-        BinaryOp::Gt if side == ConstSide::Rhs => try_ordered_gt(func, value, const_id, bits),
+        BinaryOp::GtU if side == ConstSide::Rhs => try_ordered_gt(func, value, const_id, bits),
         BinaryOp::BitAnd => try_masked_value(func, cmp, value, const_id, bits),
         _ => None,
     }
@@ -460,7 +457,8 @@ fn try_ordered_gt(
             ty: Some(IrType::Known(KnownType::U32)),
             source: ProvenanceSource::SdkPattern,
             note: format!(
-                "val-packed-compare: `> ({k} << {shift}) - 1` on a packed U32Val is `> {}` on                  its payload (reads the wasm comparison as unsigned, which holds for every                  payload below 2^31)",
+                "val-packed-compare: `>u ({k} << {shift}) - 1` on a packed U32Val is `> {}` on \
+                 its payload (the comparison is unsigned, so this holds for every payload)",
                 k - 1,
                 shift = val_abi::MAJOR_SHIFT
             ),
@@ -562,11 +560,10 @@ fn try_packed_eq(
     })
 }
 
-/// Shape B-lt — `p < k << 32`, i.e. `payload < k`.
+/// Shape B-lt — `p <ᵘ k << 32`, i.e. `payload < k`.
 ///
-/// The one shape with a premise: `BinaryOp::Lt` has lost whether the wasm
-/// said `lt_s` or `lt_u`, and the two agree only for a payload below 2³¹.
-/// See the module docs.
+/// Exact on the unsigned reading, which is the only one the caller admits
+/// ([`BinaryOp::LtU`] and [`BinaryOp::GeU`]). See the module docs.
 fn try_ordered(
     func: &HighFunction,
     cmp: ValueId,
@@ -586,9 +583,8 @@ fn try_ordered(
     if k == 0 {
         return None;
     }
-    // Reject a constant whose bit pattern is negative as an i64: there the
-    // signed and unsigned readings differ for *every* payload, not just
-    // large ones, and the premise below would not hold at all.
+    // A constant with its top bit set would bound the payload at 2³¹ or
+    // more, which no length or index reaches: not this shape.
     if (bits as i64) < 0 {
         return None;
     }
@@ -600,9 +596,8 @@ fn try_ordered(
         ty: Some(IrType::Known(KnownType::U32)),
         source: ProvenanceSource::SdkPattern,
         note: format!(
-            "val-packed-compare: `< {k} << {shift}` on a packed U32Val is `< {k}` on its \
-             payload (reads the wasm comparison as unsigned, which holds for every payload \
-             below 2^31)",
+            "val-packed-compare: `<u {k} << {shift}` on a packed U32Val is `< {k}` on its \
+             payload (the comparison is unsigned, so this holds for every payload)",
             shift = val_abi::MAJOR_SHIFT
         ),
         metric: M_ORDERED,
@@ -881,7 +876,7 @@ mod tests {
         let mut func = func_with(vec![
             Expr::Phi { incoming: vec![] },
             Expr::Phi { incoming: vec![] },
-            Expr::Binary { op: BinaryOp::Lt, lhs: v(0), rhs: v(1) },
+            Expr::Binary { op: BinaryOp::LtU, lhs: v(0), rhs: v(1) },
             Expr::Literal(Literal::I64(1)),
             Expr::Binary { op: BinaryOp::Eq, lhs: v(2), rhs: v(3) },
         ]);
@@ -962,7 +957,7 @@ mod tests {
             Expr::Phi { incoming: vec![] },
             bytes_len(v(0)),
             Expr::Literal(Literal::I64(1 << val_abi::MAJOR_SHIFT)),
-            Expr::Binary { op: BinaryOp::Lt, lhs: v(1), rhs: v(2) },
+            Expr::Binary { op: BinaryOp::LtU, lhs: v(1), rhs: v(2) },
         ]);
         assert_eq!(run(&mut func).get(M_ORDERED), Some(1));
         assert!(matches!(
@@ -982,7 +977,7 @@ mod tests {
             Expr::Phi { incoming: vec![] },
             bytes_len(v(0)),
             Expr::Literal(Literal::I64(4 << val_abi::MAJOR_SHIFT)),
-            Expr::Binary { op: BinaryOp::Lt, lhs: v(1), rhs: v(2) },
+            Expr::Binary { op: BinaryOp::LtU, lhs: v(1), rhs: v(2) },
         ]);
         assert_eq!(run(&mut func).get(M_ORDERED), Some(1));
         assert!(matches!(
@@ -991,7 +986,7 @@ mod tests {
         ));
         assert!(matches!(
             func.bindings.get(v(3)).unwrap().expr,
-            Expr::Binary { op: BinaryOp::Lt, .. }
+            Expr::Binary { op: BinaryOp::LtU, .. }
         ));
     }
 
@@ -1039,7 +1034,7 @@ mod tests {
             Expr::Phi { incoming: vec![] },
             bytes_len(v(0)),
             Expr::Literal(Literal::I64(1 << val_abi::MAJOR_SHIFT)),
-            Expr::Binary { op: BinaryOp::Lt, lhs: v(1), rhs: v(2) },
+            Expr::Binary { op: BinaryOp::LtU, lhs: v(1), rhs: v(2) },
             // a second reader of the same literal
             Expr::Binary { op: BinaryOp::Add, lhs: v(2), rhs: v(2) },
         ]);
@@ -1084,7 +1079,22 @@ mod tests {
     /// test.
     #[test]
     fn the_unwitnessed_ordered_operators_are_declined() {
-        for op in [BinaryOp::Le, BinaryOp::Gt] {
+        for op in [BinaryOp::LeU, BinaryOp::GtU] {
+            let mut func = func_with(vec![
+                Expr::Phi { incoming: vec![] },
+                bytes_len(v(0)),
+                Expr::Literal(Literal::I64(1 << val_abi::MAJOR_SHIFT)),
+                Expr::Binary { op, lhs: v(1), rhs: v(2) },
+            ]);
+            assert_eq!(run(&mut func).get(M_ORDERED), None, "{op:?} must not match");
+        }
+    }
+
+    /// A signed ordering is a different operation on the same bits, and
+    /// agrees with the payload's order only below 2³¹: not this shape.
+    #[test]
+    fn a_signed_ordering_is_declined() {
+        for op in [BinaryOp::Lt, BinaryOp::Ge, BinaryOp::Gt] {
             let mut func = func_with(vec![
                 Expr::Phi { incoming: vec![] },
                 bytes_len(v(0)),
@@ -1170,7 +1180,7 @@ mod tests {
                     negated: true,
                 })), // v1
                 Expr::Literal(Literal::I64(19 << val_abi::MAJOR_SHIFT)), // v2
-                Expr::Binary { op: BinaryOp::Ge, lhs: v(0), rhs: v(2) }, // v3
+                Expr::Binary { op: BinaryOp::GeU, lhs: v(0), rhs: v(2) }, // v3
             ],
             vec![v(0)],
             vec![1, 2, 3],
@@ -1186,7 +1196,7 @@ mod tests {
             vec![
                 Expr::Phi { incoming: vec![] },
                 Expr::Literal(Literal::I64(19 << val_abi::MAJOR_SHIFT)),
-                Expr::Binary { op: BinaryOp::Ge, lhs: v(0), rhs: v(1) },
+                Expr::Binary { op: BinaryOp::GeU, lhs: v(0), rhs: v(1) },
             ],
             vec![v(0)],
             vec![1, 2],
@@ -1202,7 +1212,7 @@ mod tests {
             Expr::Phi { incoming: vec![] },
             bytes_len(v(0)),
             Expr::Literal(Literal::I64(19 << val_abi::MAJOR_SHIFT)),
-            Expr::Binary { op: BinaryOp::Ge, lhs: v(1), rhs: v(2) },
+            Expr::Binary { op: BinaryOp::GeU, lhs: v(1), rhs: v(2) },
         ]);
         assert_eq!(run(&mut func).get(M_ORDERED), Some(1), "Ge is witnessed");
         assert!(
@@ -1223,7 +1233,7 @@ mod tests {
             Expr::Phi { incoming: vec![] },
             bytes_len(v(0)),
             Expr::Literal(Literal::I64(bits as i64)),
-            Expr::Binary { op: BinaryOp::Lt, lhs: v(1), rhs: v(2) },
+            Expr::Binary { op: BinaryOp::LtU, lhs: v(1), rhs: v(2) },
         ]);
         assert_eq!(run(&mut func).get(M_ORDERED), None);
     }
@@ -1234,7 +1244,7 @@ mod tests {
             Expr::Phi { incoming: vec![] },
             bytes_len(v(0)),
             Expr::Literal(Literal::I64(1 << val_abi::MAJOR_SHIFT)),
-            Expr::Binary { op: BinaryOp::Lt, lhs: v(1), rhs: v(2) },
+            Expr::Binary { op: BinaryOp::LtU, lhs: v(1), rhs: v(2) },
         ]);
         let (first, _) = recognize_function(&mut func);
         assert!(first);

@@ -607,15 +607,7 @@ fn inverted_condition(func: &HighFunction, cond: ValueId, ctx: &FoldCtx<'_>) -> 
     let Expr::Binary { op, lhs, rhs } = &func.bindings.get(cond)?.expr else {
         return None;
     };
-    let inverted = match op {
-        BinaryOp::Eq => BinaryOp::Ne,
-        BinaryOp::Ne => BinaryOp::Eq,
-        BinaryOp::Lt => BinaryOp::Ge,
-        BinaryOp::Ge => BinaryOp::Lt,
-        BinaryOp::Le => BinaryOp::Gt,
-        BinaryOp::Gt => BinaryOp::Le,
-        _ => return None,
-    };
+    let inverted = op.inverted()?;
     Some(format!(
         "({} {}, {})",
         binary_str(inverted),
@@ -1493,20 +1485,27 @@ fn binary_str(op: BinaryOp) -> &'static str {
         BinaryOp::Sub => "sub",
         BinaryOp::Mul => "mul",
         BinaryOp::Div => "div",
+        BinaryOp::DivU => "div_u",
         BinaryOp::Rem => "rem",
+        BinaryOp::RemU => "rem_u",
         BinaryOp::BitAnd => "and",
         BinaryOp::BitOr => "or",
         BinaryOp::BitXor => "xor",
         BinaryOp::Shl => "shl",
         BinaryOp::Shr => "shr",
+        BinaryOp::ShrU => "shr_u",
         BinaryOp::Rotl => "rotl",
         BinaryOp::Rotr => "rotr",
         BinaryOp::Eq => "eq",
         BinaryOp::Ne => "ne",
         BinaryOp::Lt => "lt",
+        BinaryOp::LtU => "lt_u",
         BinaryOp::Le => "le",
+        BinaryOp::LeU => "le_u",
         BinaryOp::Gt => "gt",
+        BinaryOp::GtU => "gt_u",
         BinaryOp::Ge => "ge",
+        BinaryOp::GeU => "ge_u",
         BinaryOp::MulOverflows => "mul_overflows",
     }
 }

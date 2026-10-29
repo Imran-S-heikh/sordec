@@ -899,7 +899,7 @@ fn host_decodes(func: &HighFunction) -> Vec<Elision> {
         .filter_map(|id| {
             let value = match &func.bindings.get(id)?.expr {
                 Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })) => *value,
-                Expr::Binary { op: sordec_ir::BinaryOp::Shr, lhs, rhs }
+                Expr::Binary { op: sordec_ir::BinaryOp::ShrU, lhs, rhs }
                     if crate::dataflow::trace_int(func, *rhs) == Some(32) =>
                 {
                     *lhs
@@ -1371,7 +1371,7 @@ mod census {
             vec![
                 Expr::Semantic(SemanticOp::Known(KnownOp::GetLedgerSequence)), // v0
                 Expr::Literal(Literal::I64(32)),                               // v1
-                Expr::Binary { op: sordec_ir::BinaryOp::Shr, lhs: crate::marshalling::test_support::v(0), rhs: crate::marshalling::test_support::v(1) }, // v2
+                Expr::Binary { op: sordec_ir::BinaryOp::ShrU, lhs: crate::marshalling::test_support::v(0), rhs: crate::marshalling::test_support::v(1) }, // v2
             ],
             vec![],
             vec![0, 1, 2],

@@ -205,7 +205,7 @@ fn is_effectful(expr: &Expr) -> bool {
         | Expr::GlobalGet { .. }
         | Expr::Unknown { .. } => true,
         // Division/remainder can trap (divide-by-zero); keep the trap.
-        Expr::Binary { op: BinaryOp::Div | BinaryOp::Rem, .. } => true,
+        Expr::Binary { op: BinaryOp::Div | BinaryOp::DivU | BinaryOp::Rem | BinaryOp::RemU, .. } => true,
         // Pure value production — safe to elide when unused. A projection
         // only names a component of an already-produced value; dropping an
         // unread one cannot drop the producer, which is bound separately.
@@ -266,6 +266,8 @@ mod tests {
         // Trapping arithmetic stays: the emitted statement really does trap.
         assert!(rendered(&Expr::Binary { op: BinaryOp::Div, lhs: v(0), rhs: v(1) }));
         assert!(rendered(&Expr::Binary { op: BinaryOp::Rem, lhs: v(0), rhs: v(1) }));
+        assert!(rendered(&Expr::Binary { op: BinaryOp::DivU, lhs: v(0), rhs: v(1) }));
+        assert!(rendered(&Expr::Binary { op: BinaryOp::RemU, lhs: v(0), rhs: v(1) }));
     }
 
     #[test]

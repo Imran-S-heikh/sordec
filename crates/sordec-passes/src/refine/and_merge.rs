@@ -252,19 +252,10 @@ fn try_merge_diamond(
 /// Is `value` a boolean-producing binding — an integer comparison or a
 /// `Val` tag check?
 fn is_boolean(func: &HighFunction, value: ValueId) -> bool {
-    func.bindings.get(value).is_some_and(|b| {
-        matches!(
-            &b.expr,
-            Expr::Binary {
-                op: BinaryOp::Eq
-                    | BinaryOp::Ne
-                    | BinaryOp::Lt
-                    | BinaryOp::Le
-                    | BinaryOp::Gt
-                    | BinaryOp::Ge,
-                ..
-            } | Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { .. }))
-        )
+    func.bindings.get(value).is_some_and(|b| match &b.expr {
+        Expr::Binary { op, .. } => op.is_comparison(),
+        Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { .. })) => true,
+        _ => false,
     })
 }
 

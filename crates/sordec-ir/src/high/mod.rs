@@ -21,7 +21,7 @@ pub mod semantic;
 pub mod storage;
 pub mod ty;
 
-pub use expr::{BinaryOp, Expr, Literal, MemWidth, UnaryOp};
+pub use expr::{BinaryOp, Expr, Literal, MemWidth, Sign, UnaryOp};
 pub use region::{LoopKind, PanicKind, PhiTransfer, Region, SwitchArm};
 pub use semantic::{
     AddressOpKind, BufOpKind, ClientInterface, CryptoOpKind, DeployOpKind, DispatchTable, EnumKey,

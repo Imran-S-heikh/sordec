@@ -143,15 +143,7 @@ fn plan(func: &HighFunction, order: &[ValueId], read: ValueId) -> Option<Plan> {
             // payload: its other side is a decoded `u32`, so once the read is
             // typed the two agree.
             Expr::Binary { op, lhs, rhs }
-                if matches!(
-                    op,
-                    sordec_ir::BinaryOp::Lt
-                        | sordec_ir::BinaryOp::Le
-                        | sordec_ir::BinaryOp::Gt
-                        | sordec_ir::BinaryOp::Ge
-                        | sordec_ir::BinaryOp::Eq
-                        | sordec_ir::BinaryOp::Ne
-                ) && [*lhs, *rhs].iter().any(|v| {
+                if op.is_comparison() && [*lhs, *rhs].iter().any(|v| {
                     matches!(
                         func.bindings.get(resolve_use(func, *v)).map(|b| &b.expr),
                         Some(Expr::Literal(Literal::U32(_)))

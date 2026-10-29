@@ -1156,20 +1156,22 @@ fn is_arithmetic(op: BinaryOp) -> bool {
             | B::Sub
             | B::Mul
             | B::Div
+            | B::DivU
             | B::Rem
+            | B::RemU
             | B::BitAnd
             | B::BitOr
             | B::BitXor
             | B::Shl
             | B::Shr
+            | B::ShrU
             | B::Rotl
             | B::Rotr
     )
 }
 
 fn is_comparison(op: BinaryOp) -> bool {
-    use BinaryOp as B;
-    matches!(op, B::Eq | B::Ne | B::Lt | B::Le | B::Gt | B::Ge | B::MulOverflows)
+    op.is_comparison() || op == BinaryOp::MulOverflows
 }
 
 /// The concrete Soroban type of an integer/bool/unit literal, or `None` for

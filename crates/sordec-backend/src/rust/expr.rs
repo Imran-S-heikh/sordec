@@ -9,7 +9,7 @@
 //! replaces these with method chains).
 
 use sordec_common::{FuncId, IrId};
-use sordec_ir::{BinaryOp, Binding, Expr, HighIr, IrType, KnownType, Literal, SemanticOp, UnaryOp};
+use sordec_ir::{BinaryOp, Binding, Expr, HighIr, IrType, KnownType, Literal, SemanticOp, Sign, UnaryOp};
 use syn::parse_quote;
 
 use crate::rust::body::FnCtx;
@@ -185,17 +185,8 @@ pub(crate) fn sign_cast(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -
         _ => None,
     };
     let (IrType::Known(to) | IrType::Inferred(to)) = want else { return None };
-    let b = ctx.func.bindings.get(ctx.fold_target(v))?;
-    // What Rust will infer for it, which is what the cast is against: an
-    // unannotated arithmetic `let` takes its operands' type, whatever the
-    // binding was typed. An untyped narrowing is still an `i32`: it is
-    // printed `as i32`.
-    let from = match (arithmetic_type(ctx, v, 0), &b.ty, &b.expr) {
-        (Some(k), ..) => k,
-        (None, IrType::Known(k) | IrType::Inferred(k), _) => k.clone(),
-        (None, IrType::Unknown(_), Expr::Unary { op: sordec_ir::UnaryOp::Wrap32, .. }) => KnownType::I32,
-        _ => return None,
-    };
+    // What Rust will infer for it, which is what the cast is against.
+    let from = printed_int_type(ctx, v)?;
     let from = &from;
     if from == to || width(from)? != width(to)? {
         return None;
@@ -243,6 +234,232 @@ fn arithmetic_type(ctx: &FnCtx, v: sordec_common::ValueId, depth: u32) -> Option
         })
     };
     typed(*lhs).or_else(|| typed(*rhs))
+}
+
+/// The integer type Rust sees for `v` as printed: what an unannotated
+/// arithmetic `let` takes from its operands, else the binding's own type,
+/// else the `i32` an untyped narrowing is printed as. `None` when nothing
+/// says — a value typed as something other than a machine integer, or not
+/// typed at all.
+pub(crate) fn printed_int_type(ctx: &FnCtx, v: sordec_common::ValueId) -> Option<KnownType> {
+    let b = ctx.func.bindings.get(ctx.fold_target(v))?;
+    let machine = |k: &KnownType| {
+        matches!(
+            k,
+            KnownType::I32 | KnownType::U32 | KnownType::I64 | KnownType::U64 | KnownType::I128 | KnownType::U128
+        )
+    };
+    match (arithmetic_type(ctx, v, 0), &b.ty, &b.expr) {
+        (Some(k), ..) => Some(k),
+        (None, IrType::Known(k) | IrType::Inferred(k), _) if machine(k) => Some(k.clone()),
+        (None, IrType::Unknown(_), Expr::Unary { op: UnaryOp::Wrap32, .. }) => Some(KnownType::I32),
+        _ => None,
+    }
+}
+
+/// `k` read with `sign`, at its own width.
+fn with_sign(k: &KnownType, sign: Sign) -> KnownType {
+    match (k, sign) {
+        (KnownType::I32 | KnownType::U32, Sign::Signed) => KnownType::I32,
+        (KnownType::I32 | KnownType::U32, Sign::Unsigned) => KnownType::U32,
+        (KnownType::I64 | KnownType::U64, Sign::Signed) => KnownType::I64,
+        (KnownType::I64 | KnownType::U64, Sign::Unsigned) => KnownType::U64,
+        (KnownType::I128 | KnownType::U128, Sign::Signed) => KnownType::I128,
+        (KnownType::I128 | KnownType::U128, Sign::Unsigned) => KnownType::U128,
+        (other, _) => other.clone(),
+    }
+}
+
+/// The reading a machine integer type has; `None` for any other type.
+fn sign_of(k: &KnownType) -> Option<Sign> {
+    match k {
+        KnownType::I32 | KnownType::I64 | KnownType::I128 => Some(Sign::Signed),
+        KnownType::U32 | KnownType::U64 | KnownType::U128 => Some(Sign::Unsigned),
+        _ => None,
+    }
+}
+
+/// A shift, division, remainder or ordering whose opcode reads its
+/// operands with one signedness, printed on operands Rust reads with the
+/// other.
+///
+/// The operator is the opcode's fact, not the operands': `i64.shr_u` on a
+/// value that is an `i64` everywhere else is still a logical shift, and
+/// `x >> 8` on an `i64` is not one. So the operands are reinterpreted to
+/// the opcode's reading at their own width — `(x as u64) >> 8`, every bit
+/// kept — and a shift, division or remainder is cast back to the type its
+/// left operand is printed with, so the binding keeps the type the rest of
+/// the body was printed against. A comparison yields a `bool` and needs no
+/// cast back; its right operand is reread too, since Rust compares like
+/// with like. A shift count may be any integer and is left alone.
+///
+/// Printed bare, as before, when the readings agree, when the operator has
+/// no sign, and in three cases where a reread would assert something the
+/// recovered types do not support: no operand's printed type is known
+/// (nothing to disagree with); the two operands, or an operand and a
+/// constant, disagree on *width* (one wasm operator has one width, so a
+/// recovered type is wrong, and a cast would hide that instead of letting
+/// rustc report it); or an operand is an unannotated placeholder, whose
+/// `todo!()` takes whatever type the other side has. `SORDEC_SIGN_TRACE=1`
+/// lists every site of every kind on stderr.
+fn sign_honoured(
+    ctx: &FnCtx,
+    op: BinaryOp,
+    lhs: sordec_common::ValueId,
+    rhs: sordec_common::ValueId,
+    l: &syn::Expr,
+    r: &syn::Expr,
+) -> Option<syn::Expr> {
+    let sign = op.sign()?;
+    let shift = matches!(op, BinaryOp::Shr | BinaryOp::ShrU);
+    let bare = |why: &str| {
+        sign_trace(ctx, lhs, op, &format!("{why}, printed bare"));
+        None
+    };
+    let lt = printed_int_type(ctx, lhs);
+    let rt = if shift { None } else { printed_int_type(ctx, rhs) };
+    let wrong = |t: &Option<KnownType>| t.as_ref().is_some_and(|k| sign_of(k) != Some(sign));
+    // A shift, division or remainder keeps its left operand's type; with
+    // that unknown there is nothing to cast back to.
+    let word = if op.is_comparison() { lt.clone().or_else(|| rt.clone()) } else { lt.clone() };
+    let Some(word) = word else {
+        return bare("with no typed operand");
+    };
+    if !wrong(&lt) && !wrong(&rt) {
+        return None;
+    }
+    // One operator, one width: a disagreement is a wrong recovered type.
+    let width = |k: &KnownType| match k {
+        KnownType::I32 | KnownType::U32 => Some(32),
+        KnownType::I64 | KnownType::U64 => Some(64),
+        KnownType::I128 | KnownType::U128 => Some(128),
+        _ => None,
+    };
+    let operands = if shift { vec![lhs] } else { vec![lhs, rhs] };
+    for v in &operands {
+        let own = printed_int_type(ctx, *v).as_ref().and_then(width).or_else(|| literal_width(ctx, *v));
+        if own.is_some_and(|w| Some(w) != width(&word)) {
+            return bare("with operands of two widths");
+        }
+    }
+    let is_literal = |v: sordec_common::ValueId| literal_width(ctx, v).is_some();
+    let both_literals = !shift && is_literal(lhs) && is_literal(rhs);
+    let want = IrType::Inferred(with_sign(&word, sign));
+    let ty = crate::rust::ty::ir_type(&want, ctx.reg, ctx.policy);
+    let reread = |v: sordec_common::ValueId, printed: &syn::Expr| -> syn::Expr {
+        // A constant is its bits read the opcode's way: `-97` against a
+        // `u32` is `4294967199`. It is printed without a suffix where the
+        // other side pins the type, and with one where nothing does — a
+        // shift count pins nothing, and neither does another constant.
+        if let Some(lit) = literal_bits_as(ctx, v, &want, shift || both_literals) {
+            return lit;
+        }
+        // An unannotated placeholder is a `todo!()`, which takes the type
+        // the other side has; a cast would pin it to nothing.
+        if printed_int_type(ctx, v).is_none() && renders_as_hole(ctx, v) {
+            return printed.clone();
+        }
+        let printed = as_operand(printed);
+        parse_quote!((#printed as #ty))
+    };
+    let out = if shift {
+        binary_expr(op, reread(lhs, l), r.clone())
+    } else {
+        binary_expr(op, reread(lhs, l), reread(rhs, r))
+    };
+    let out = if op.is_comparison() || !wrong(&lt) {
+        out
+    } else {
+        let back = crate::rust::ty::ir_type(&IrType::Inferred(word), ctx.reg, ctx.policy);
+        let whole = as_operand(&out);
+        parse_quote!((#whole as #back))
+    };
+    sign_trace(ctx, lhs, op, &format!("reread as {}", quote::ToTokens::to_token_stream(&out)));
+    Some(out)
+}
+
+/// Print one line about a sign-bearing operator when `SORDEC_SIGN_TRACE`
+/// is set, the way the marshalling passes' trace switches do.
+#[allow(clippy::print_stderr)]
+fn sign_trace(ctx: &FnCtx, lhs: sordec_common::ValueId, op: BinaryOp, what: &str) {
+    if std::env::var_os("SORDEC_SIGN_TRACE").is_some() {
+        eprintln!("sign-trace: {:?} {:?}: {:?} {what}", ctx.func.id, lhs, op);
+    }
+}
+
+/// The width of the integer constant `value` is, by the word its opcode
+/// loaded; `None` for anything else.
+fn literal_width(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<u32> {
+    match &ctx.func.bindings.get(ctx.fold_target(value))?.expr {
+        Expr::Literal(Literal::I32(_) | Literal::U32(_)) => Some(32),
+        Expr::Literal(Literal::I64(_) | Literal::U64(_)) => Some(64),
+        _ => None,
+    }
+}
+
+/// Whether `value` is printed as a placeholder: an operation the emitter
+/// has no rendering for, which becomes a `todo!()`.
+fn renders_as_hole(ctx: &FnCtx, value: sordec_common::ValueId) -> bool {
+    matches!(
+        ctx.func.bindings.get(ctx.fold_target(value)).map(|b| &b.expr),
+        Some(Expr::Load { .. } | Expr::Store { .. } | Expr::Unknown { .. } | Expr::Semantic(SemanticOp::Unknown { .. }))
+    )
+}
+
+/// An integer constant's bits read as `want`, printed without a suffix.
+/// `None` when `value` is not an integer constant or `want` not a machine
+/// integer. The width is `want`'s: a 32-bit constant against a 64-bit type
+/// is the same number, and a 64-bit one against a 32-bit type keeps its
+/// low word, which is what the wasm operator sees.
+fn literal_bits_as(
+    ctx: &FnCtx,
+    value: sordec_common::ValueId,
+    want: &IrType,
+    suffixed: bool,
+) -> Option<syn::Expr> {
+    use proc_macro2::Literal as L;
+    let (IrType::Known(k) | IrType::Inferred(k)) = want else { return None };
+    let bits: u64 = match &ctx.func.bindings.get(ctx.fold_target(value))?.expr {
+        Expr::Literal(Literal::I32(n)) => *n as u32 as u64,
+        Expr::Literal(Literal::U32(n)) => u64::from(*n),
+        Expr::Literal(Literal::I64(n)) => *n as u64,
+        Expr::Literal(Literal::U64(n)) => *n,
+        _ => return None,
+    };
+    let lit = match (k, suffixed) {
+        (KnownType::U32, false) => L::u32_unsuffixed(bits as u32),
+        (KnownType::U32, true) => L::u32_suffixed(bits as u32),
+        (KnownType::I32, false) => L::i32_unsuffixed(bits as u32 as i32),
+        (KnownType::I32, true) => L::i32_suffixed(bits as u32 as i32),
+        (KnownType::U64, false) => L::u64_unsuffixed(bits),
+        (KnownType::U64, true) => L::u64_suffixed(bits),
+        (KnownType::I64, false) => L::i64_unsuffixed(bits as i64),
+        (KnownType::I64, true) => L::i64_suffixed(bits as i64),
+        (KnownType::U128, false) => L::u128_unsuffixed(u128::from(bits)),
+        (KnownType::U128, true) => L::u128_suffixed(u128::from(bits)),
+        (KnownType::I128, false) => L::i128_unsuffixed(i128::from(bits as i64)),
+        (KnownType::I128, true) => L::i128_suffixed(i128::from(bits as i64)),
+        _ => return None,
+    };
+    Some(parse_quote!(#lit))
+}
+
+/// `e` as the operand of a cast: parenthesised unless it is a single term,
+/// so that `as` binds to all of it. `a >> b as u64` is `a >> (b as u64)`.
+fn as_operand(e: &syn::Expr) -> syn::Expr {
+    match e {
+        syn::Expr::Path(_)
+        | syn::Expr::Lit(_)
+        | syn::Expr::Paren(_)
+        | syn::Expr::Call(_)
+        | syn::Expr::MethodCall(_)
+        | syn::Expr::Field(_)
+        | syn::Expr::Index(_)
+        | syn::Expr::Macro(_)
+        | syn::Expr::Tuple(_)
+        | syn::Expr::Array(_) => e.clone(),
+        other => parse_quote!((#other)),
+    }
 }
 
 /// A declared field or parameter type that is a 32- or 64-bit word.
@@ -304,7 +521,7 @@ fn bool_like(ctx: &FnCtx, v: sordec_common::ValueId, depth: u32) -> bool {
     }
     match ctx.func.bindings.get(v).map(|b| &b.expr) {
         Some(Expr::Binary { op, lhs, rhs }) => match op {
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => true,
+            o if o.is_comparison() => true,
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
                 bool_like(ctx, ctx.fold_target(*lhs), depth + 1) && bool_like(ctx, ctx.fold_target(*rhs), depth + 1)
             }
@@ -636,8 +853,7 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                                 .and_then(|b| sign_cast(ctx, *rhs, &b.ty))
                         }),
                 ),
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt
-                | BinaryOp::Ge | BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
+                o if o.is_ordered() || matches!(o, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) => {
                     (unsuffixed(ctx, *lhs, *rhs), unsuffixed(ctx, *rhs, *lhs))
                 }
                 // A negative constant of the operand's own width against an
@@ -654,11 +870,12 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 ),
                 _ => (None, None),
             };
-            binary_expr(
-                *op,
-                l.unwrap_or_else(|| ctx.value_ref(*lhs)),
-                r.unwrap_or_else(|| ctx.value_ref(*rhs)),
-            )
+            let l = l.unwrap_or_else(|| ctx.value_ref(*lhs));
+            let r = r.unwrap_or_else(|| ctx.value_ref(*rhs));
+            if let Some(reread) = sign_honoured(ctx, *op, *lhs, *rhs, &l, &r) {
+                return reread;
+            }
+            binary_expr(*op, l, r)
         }
         Expr::Call { target, args } => {
             let path = callee_path(ctx.high, *target);
@@ -1190,21 +1407,21 @@ fn binary_expr(op: BinaryOp, l: syn::Expr, r: syn::Expr) -> syn::Expr {
         BinaryOp::Add => parse_quote!(#l + #r),
         BinaryOp::Sub => parse_quote!(#l - #r),
         BinaryOp::Mul => parse_quote!(#l * #r),
-        BinaryOp::Div => parse_quote!(#l / #r),
-        BinaryOp::Rem => parse_quote!(#l % #r),
+        BinaryOp::Div | BinaryOp::DivU => parse_quote!(#l / #r),
+        BinaryOp::Rem | BinaryOp::RemU => parse_quote!(#l % #r),
         BinaryOp::BitAnd => parse_quote!(#l & #r),
         BinaryOp::BitOr => parse_quote!(#l | #r),
         BinaryOp::BitXor => parse_quote!(#l ^ #r),
         BinaryOp::Shl => parse_quote!(#l << #r),
-        BinaryOp::Shr => parse_quote!(#l >> #r),
+        BinaryOp::Shr | BinaryOp::ShrU => parse_quote!(#l >> #r),
         BinaryOp::Rotl => parse_quote!(#l.rotate_left(#r)),
         BinaryOp::Rotr => parse_quote!(#l.rotate_right(#r)),
         BinaryOp::Eq => parse_quote!(#l == #r),
         BinaryOp::Ne => parse_quote!(#l != #r),
-        BinaryOp::Lt => parse_quote!(#l < #r),
-        BinaryOp::Le => parse_quote!(#l <= #r),
-        BinaryOp::Gt => parse_quote!(#l > #r),
-        BinaryOp::Ge => parse_quote!(#l >= #r),
+        BinaryOp::Lt | BinaryOp::LtU => parse_quote!(#l < #r),
+        BinaryOp::Le | BinaryOp::LeU => parse_quote!(#l <= #r),
+        BinaryOp::Gt | BinaryOp::GtU => parse_quote!(#l > #r),
+        BinaryOp::Ge | BinaryOp::GeU => parse_quote!(#l >= #r),
         BinaryOp::MulOverflows => parse_quote!(#l.checked_mul(#r).is_none()),
     }
 }

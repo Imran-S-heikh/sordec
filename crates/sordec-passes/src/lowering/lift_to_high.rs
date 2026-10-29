@@ -463,13 +463,7 @@ fn lower_value_def(def: &LiftedValueDef, ctx: &LowerCtx<'_>) -> (Expr, String) {
         }
 
         LiftedValueDef::Operator { op, args } => {
-            let expr = lower_operator(op, args, ctx);
-            let note = if is_unsigned_compare(&op.0) {
-                format!("operator: {:?}{UNSIGNED_NOTE}", op.kind())
-            } else {
-                format!("operator: {:?}", op.kind())
-            };
-            (expr, note)
+            (lower_operator(op, args, ctx), format!("operator: {:?}", op.kind()))
         }
     }
 }
@@ -653,8 +647,10 @@ fn store_width(w: &waffle::Operator) -> Option<MemWidth> {
     })
 }
 
-/// Map a binary WASM operator to a [`BinaryOp`] (sign/width erased — the
-/// surrounding binding type carries that). `None` for non-binary ops.
+/// Map a binary WASM operator to a [`BinaryOp`]. Width is erased — the
+/// binding's type carries it — but the opcode's signedness is kept, on the
+/// operators whose result depends on it: see [`BinaryOp`]. `None` for
+/// non-binary ops.
 ///
 /// Mirrors the exhaustive structure of
 /// [`WasmOp::kind`](sordec_ir::WasmOp::kind); a waffle bump that adds
@@ -667,58 +663,30 @@ fn binary_op(w: &waffle::Operator) -> Option<BinaryOp> {
         W::I32Add | W::I64Add | W::F32Add | W::F64Add => B::Add,
         W::I32Sub | W::I64Sub | W::F32Sub | W::F64Sub => B::Sub,
         W::I32Mul | W::I64Mul | W::F32Mul | W::F64Mul => B::Mul,
-        W::I32DivS | W::I32DivU | W::I64DivS | W::I64DivU | W::F32Div | W::F64Div => B::Div,
-        W::I32RemS | W::I32RemU | W::I64RemS | W::I64RemU => B::Rem,
+        W::I32DivS | W::I64DivS | W::F32Div | W::F64Div => B::Div,
+        W::I32DivU | W::I64DivU => B::DivU,
+        W::I32RemS | W::I64RemS => B::Rem,
+        W::I32RemU | W::I64RemU => B::RemU,
         W::I32And | W::I64And => B::BitAnd,
         W::I32Or | W::I64Or => B::BitOr,
         W::I32Xor | W::I64Xor => B::BitXor,
         W::I32Shl | W::I64Shl => B::Shl,
-        W::I32ShrS | W::I32ShrU | W::I64ShrS | W::I64ShrU => B::Shr,
+        W::I32ShrS | W::I64ShrS => B::Shr,
+        W::I32ShrU | W::I64ShrU => B::ShrU,
         W::I32Rotl | W::I64Rotl => B::Rotl,
         W::I32Rotr | W::I64Rotr => B::Rotr,
         W::I32Eq | W::I64Eq | W::F32Eq | W::F64Eq => B::Eq,
         W::I32Ne | W::I64Ne | W::F32Ne | W::F64Ne => B::Ne,
-        W::I32LtS | W::I32LtU | W::I64LtS | W::I64LtU | W::F32Lt | W::F64Lt => B::Lt,
-        W::I32LeS | W::I32LeU | W::I64LeS | W::I64LeU | W::F32Le | W::F64Le => B::Le,
-        W::I32GtS | W::I32GtU | W::I64GtS | W::I64GtU | W::F32Gt | W::F64Gt => B::Gt,
-        W::I32GeS | W::I32GeU | W::I64GeS | W::I64GeU | W::F32Ge | W::F64Ge => B::Ge,
+        W::I32LtS | W::I64LtS | W::F32Lt | W::F64Lt => B::Lt,
+        W::I32LtU | W::I64LtU => B::LtU,
+        W::I32LeS | W::I64LeS | W::F32Le | W::F64Le => B::Le,
+        W::I32LeU | W::I64LeU => B::LeU,
+        W::I32GtS | W::I64GtS | W::F32Gt | W::F64Gt => B::Gt,
+        W::I32GtU | W::I64GtU => B::GtU,
+        W::I32GeS | W::I64GeS | W::F32Ge | W::F64Ge => B::Ge,
+        W::I32GeU | W::I64GeU => B::GeU,
         _ => return None,
     })
-}
-
-/// Marks a comparison lowered from an unsigned opcode.
-///
-/// [`BinaryOp`] has one `Lt` for `i64.lt_s` and `i64.lt_u`: almost every
-/// reader wants the comparison, not its signedness, and the emitter takes the
-/// order from the operands' recovered types. The few rewrites that change a
-/// comparison's operands need it, and the opcode is gone by then, so the
-/// lowering records it once, in the note it already writes, and
-/// [`lowered_unsigned`] reads it back.
-const UNSIGNED_NOTE: &str = ", unsigned";
-
-/// Whether `binding` is a comparison lowered from an unsigned opcode
-/// (`i64.lt_u`, `i32.ge_u`, …). `false` for a signed one, and for any
-/// binding a later pass built, whose signedness nothing recorded.
-pub(crate) fn lowered_unsigned(binding: &sordec_ir::Binding) -> bool {
-    binding
-        .provenance()
-        .first()
-        .is_some_and(|p| p.pass == PASS_NAME && p.note.ends_with(UNSIGNED_NOTE))
-}
-
-/// The provenance lowering gives a comparison, for tests that build one.
-#[cfg(test)]
-pub(crate) fn compare_provenance(unsigned: bool) -> Provenance {
-    let note = if unsigned { format!("operator: Comparison{UNSIGNED_NOTE}") } else { "operator: Comparison".to_string() };
-    Provenance::new(PASS_NAME, ProvenanceSource::DataFlow, note)
-}
-
-fn is_unsigned_compare(w: &waffle::Operator) -> bool {
-    use waffle::Operator as W;
-    matches!(
-        w,
-        W::I32LtU | W::I64LtU | W::I32LeU | W::I64LeU | W::I32GtU | W::I64GtU | W::I32GeU | W::I64GeU
-    )
 }
 
 /// Map a unary WASM operator to a [`UnaryOp`]. `None` for non-unary ops.
@@ -943,7 +911,7 @@ mod tests {
         let b = lower_and_bindings(ir);
         assert!(matches!(
             b.get(v(2)).unwrap().expr,
-            Expr::Binary { op: BinaryOp::Lt, .. }
+            Expr::Binary { op: BinaryOp::LtU, .. }
         ));
     }
 

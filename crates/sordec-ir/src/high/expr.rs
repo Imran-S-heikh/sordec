@@ -624,9 +624,17 @@ pub enum UnaryOp {
 
 /// Binary operations after recovery.
 ///
-/// Sign and bit-width are erased from these names; the result and
-/// operand types on the surrounding [`crate::Binding`] preserve that
-/// information. This avoids `AddU32`/`AddI32`/`AddU64`/... duplication.
+/// Bit-width is erased from these names; the types on the surrounding
+/// [`crate::Binding`] carry it, which avoids `AddU32`/`AddI32`/`AddU64`/...
+/// duplication. Signedness is not erased, because it is not a property of
+/// the operands: `i64.shr_u` and `i64.shr_s` are two different operations
+/// on the same bits, and a value's recovered type cannot stand in for the
+/// opcode — a `Val` word is an `i64` to the lowering and a `u64` to the
+/// shift that extracts its payload. The operators whose result depends on
+/// the reading (division, remainder, right shift, the four orderings) come
+/// in two: the signed one keeps the short name, the unsigned one ends in
+/// `U`. Float operators, which have no sign, use the short name.
+/// [`BinaryOp::sign`] says which reading an operator takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum BinaryOp {
@@ -636,20 +644,26 @@ pub enum BinaryOp {
     Sub,
     /// Multiplication.
     Mul,
-    /// Division.
+    /// Signed division (`div_s`), or a float one.
     Div,
-    /// Remainder.
+    /// Unsigned division (`div_u`).
+    DivU,
+    /// Signed remainder (`rem_s`).
     Rem,
+    /// Unsigned remainder (`rem_u`).
+    RemU,
     /// Bitwise AND.
     BitAnd,
     /// Bitwise OR.
     BitOr,
     /// Bitwise XOR.
     BitXor,
-    /// Logical shift left.
+    /// Shift left.
     Shl,
-    /// Arithmetic / logical shift right (sign captured by surrounding type).
+    /// Arithmetic shift right (`shr_s`): the sign bit fills in from the left.
     Shr,
+    /// Logical shift right (`shr_u`): zeros fill in from the left.
+    ShrU,
     /// Rotate left.
     Rotl,
     /// Rotate right.
@@ -658,14 +672,22 @@ pub enum BinaryOp {
     Eq,
     /// Inequality.
     Ne,
-    /// Less-than.
+    /// Signed less-than (`lt_s`), or a float one.
     Lt,
-    /// Less-than-or-equal.
+    /// Unsigned less-than (`lt_u`).
+    LtU,
+    /// Signed less-than-or-equal (`le_s`), or a float one.
     Le,
-    /// Greater-than.
+    /// Unsigned less-than-or-equal (`le_u`).
+    LeU,
+    /// Signed greater-than (`gt_s`), or a float one.
     Gt,
-    /// Greater-than-or-equal.
+    /// Unsigned greater-than (`gt_u`).
+    GtU,
+    /// Signed greater-than-or-equal (`ge_s`), or a float one.
     Ge,
+    /// Unsigned greater-than-or-equal (`ge_u`).
+    GeU,
     /// Whether `lhs * rhs` overflows the operands' type — the boolean
     /// rustc tests under `overflow-checks = true` before it lets a
     /// product through.
@@ -680,4 +702,121 @@ pub enum BinaryOp {
     /// uses for the 64-bit carry test, because the re-emitted `*`
     /// regenerates the check.
     MulOverflows,
+}
+
+/// How an operator reads its operands' bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum Sign {
+    /// As two's-complement numbers.
+    Signed,
+    /// As natural numbers.
+    Unsigned,
+}
+
+impl BinaryOp {
+    /// The reading this operator gives its operands, for the operators
+    /// whose result depends on it. `None` for the rest: addition, the
+    /// bitwise operators, equality and the others come out the same on
+    /// either reading.
+    pub fn sign(self) -> Option<Sign> {
+        use BinaryOp as B;
+        match self {
+            B::Div | B::Rem | B::Shr | B::Lt | B::Le | B::Gt | B::Ge => Some(Sign::Signed),
+            B::DivU | B::RemU | B::ShrU | B::LtU | B::LeU | B::GtU | B::GeU => Some(Sign::Unsigned),
+            B::Add
+            | B::Sub
+            | B::Mul
+            | B::BitAnd
+            | B::BitOr
+            | B::BitXor
+            | B::Shl
+            | B::Rotl
+            | B::Rotr
+            | B::Eq
+            | B::Ne
+            | B::MulOverflows => None,
+        }
+    }
+
+    /// The same operator read unsigned; itself when it has no sign.
+    pub fn unsigned(self) -> Self {
+        use BinaryOp as B;
+        match self {
+            B::Div => B::DivU,
+            B::Rem => B::RemU,
+            B::Shr => B::ShrU,
+            B::Lt => B::LtU,
+            B::Le => B::LeU,
+            B::Gt => B::GtU,
+            B::Ge => B::GeU,
+            other => other,
+        }
+    }
+
+    /// The same operator read signed; itself when it has no sign.
+    pub fn signed(self) -> Self {
+        use BinaryOp as B;
+        match self {
+            B::DivU => B::Div,
+            B::RemU => B::Rem,
+            B::ShrU => B::Shr,
+            B::LtU => B::Lt,
+            B::LeU => B::Le,
+            B::GtU => B::Gt,
+            B::GeU => B::Ge,
+            other => other,
+        }
+    }
+
+    /// Whether this is one of the ten comparisons, which yield a `bool`.
+    /// [`MulOverflows`](Self::MulOverflows) yields one too but compares
+    /// nothing.
+    pub fn is_comparison(self) -> bool {
+        matches!(self, BinaryOp::Eq | BinaryOp::Ne) || self.is_ordered()
+    }
+
+    /// Whether this orders its operands: `<`, `<=`, `>` or `>=`, on either
+    /// reading.
+    pub fn is_ordered(self) -> bool {
+        use BinaryOp as B;
+        matches!(self, B::Lt | B::LtU | B::Le | B::LeU | B::Gt | B::GtU | B::Ge | B::GeU)
+    }
+
+    /// The comparison that holds exactly when this one does not, on the
+    /// same reading; `None` for a non-comparison.
+    pub fn inverted(self) -> Option<Self> {
+        use BinaryOp as B;
+        Some(match self {
+            B::Eq => B::Ne,
+            B::Ne => B::Eq,
+            B::Lt => B::Ge,
+            B::Ge => B::Lt,
+            B::Le => B::Gt,
+            B::Gt => B::Le,
+            B::LtU => B::GeU,
+            B::GeU => B::LtU,
+            B::LeU => B::GtU,
+            B::GtU => B::LeU,
+            _ => return None,
+        })
+    }
+
+    /// This comparison with its operands swapped, on the same reading;
+    /// `None` for a non-comparison.
+    pub fn flipped(self) -> Option<Self> {
+        use BinaryOp as B;
+        Some(match self {
+            B::Eq | B::Ne => self,
+            B::Lt => B::Gt,
+            B::Gt => B::Lt,
+            B::Le => B::Ge,
+            B::Ge => B::Le,
+            B::LtU => B::GtU,
+            B::GtU => B::LtU,
+            B::LeU => B::GeU,
+            B::GeU => B::LeU,
+            _ => return None,
+        })
+    }
 }

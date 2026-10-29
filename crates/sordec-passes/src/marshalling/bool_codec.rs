@@ -539,10 +539,7 @@ fn is_comparison_at(func: &HighFunction, value: ValueId, depth: u32) -> bool {
             });
             all && computed
         }
-        Some(Expr::Binary { op, .. }) => matches!(
-            op,
-            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-        ),
+        Some(Expr::Binary { op, .. }) => op.is_comparison(),
         Some(Expr::Unary { op: UnaryOp::Eqz, .. }) => true,
         Some(Expr::Unary { op: UnaryOp::Not, value: inner }) => {
             let inner = resolve_use(func, *inner);

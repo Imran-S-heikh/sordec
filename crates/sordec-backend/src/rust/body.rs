@@ -587,7 +587,8 @@ impl<'a> FnCtx<'a> {
                         | sordec_ir::BinaryOp::Sub
                         | sordec_ir::BinaryOp::Mul
                         | sordec_ir::BinaryOp::Shl
-                        | sordec_ir::BinaryOp::Shr,
+                        | sordec_ir::BinaryOp::Shr
+                        | sordec_ir::BinaryOp::ShrU,
                     ..
                 }
             );
@@ -613,7 +614,8 @@ impl<'a> FnCtx<'a> {
                         | sordec_ir::BinaryOp::BitOr
                         | sordec_ir::BinaryOp::BitXor
                         | sordec_ir::BinaryOp::Shl
-                        | sordec_ir::BinaryOp::Shr,
+                        | sordec_ir::BinaryOp::Shr
+                        | sordec_ir::BinaryOp::ShrU,
                     ..
                 }
             )
@@ -1710,6 +1712,129 @@ mod tests {
     fn a_variant_payload_of_the_declared_sign_is_left_alone() {
         let out = key_with_payload(sordec_ir::PrimitiveType::I32);
         assert!(out.contains("Temp (v1)"), "{out}");
+    }
+
+    /// The text with its spaces removed, so a check does not depend on
+    /// token spacing.
+    fn packed(s: &str) -> String {
+        s.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    fn lit_i32(n: i32) -> (IrType, Expr) {
+        (IrType::Known(KnownType::I32), Expr::Literal(sordec_ir::Literal::I32(n)))
+    }
+
+    /// `arg0 op 8` with `arg0: i32`, returned.
+    fn on_the_param(op: BinaryOp) -> String {
+        emitted(
+            vec![lit_i32(8), (untyped(), Expr::Binary { op, lhs: v(0), rhs: v(1) })],
+            vec![ret(2)],
+            &TypeRegistry::default(),
+        )
+    }
+
+    /// `i32.shr_u` on a value printed as an `i32`: the operand is reread as
+    /// the `u32` the opcode sees, and the result comes back as the `i32`
+    /// the rest of the body was printed against.
+    #[test]
+    fn a_logical_shift_on_a_signed_operand_is_reread_unsigned() {
+        let out = packed(&on_the_param(BinaryOp::ShrU));
+        assert!(out.contains("((arg0asu32)>>8") && out.contains(")asi32"), "{out}");
+    }
+
+    /// `i32.shr_s` on an `i32` is the arithmetic shift Rust's `>>` already
+    /// is: printed bare.
+    #[test]
+    fn an_arithmetic_shift_on_a_signed_operand_is_printed_bare() {
+        let out = packed(&on_the_param(BinaryOp::Shr));
+        assert!(out.contains("arg0>>8"), "{out}");
+        assert!(!out.contains("asu32"), "{out}");
+    }
+
+    /// An unsigned ordering compares both sides reread, and yields the
+    /// `bool` as it is: nothing to cast back.
+    #[test]
+    fn an_unsigned_ordering_on_signed_operands_rereads_both_sides() {
+        let out = packed(&emitted(
+            vec![
+                lit_i32(8),
+                (untyped(), Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(1) }),
+                (untyped(), Expr::Binary { op: BinaryOp::LtU, lhs: v(0), rhs: v(2) }),
+            ],
+            vec![ret(3)],
+            &TypeRegistry::default(),
+        ));
+        assert!(out.contains("(arg0asu32)<(v2asu32)"), "{out}");
+        assert!(!out.contains(")asi32"), "{out}");
+    }
+
+    /// A signed division on a value printed unsigned is the mirror case.
+    #[test]
+    fn a_signed_division_on_an_unsigned_operand_is_reread_signed() {
+        let seq = (IrType::Known(KnownType::U32), known(KnownOp::GetLedgerSequence));
+        let signed = packed(&emitted(
+            vec![seq.clone(), lit_i32(2), (untyped(), Expr::Binary { op: BinaryOp::Div, lhs: v(1), rhs: v(2) })],
+            vec![ret(3)],
+            &TypeRegistry::default(),
+        ));
+        assert!(signed.contains("((sequenceasi32)/2)asu32"), "{signed}");
+        let unsigned = packed(&emitted(
+            vec![seq, lit_i32(2), (untyped(), Expr::Binary { op: BinaryOp::DivU, lhs: v(1), rhs: v(2) })],
+            vec![ret(3)],
+            &TypeRegistry::default(),
+        ));
+        assert!(unsigned.contains("/2"), "{unsigned}");
+        assert!(!unsigned.contains("asi32"), "{unsigned}");
+    }
+
+    /// With no operand's printed type known there is nothing to disagree
+    /// with, and the operator is printed bare as before.
+    #[test]
+    fn a_sign_bearing_operator_on_untyped_operands_is_printed_bare() {
+        let out = packed(&emitted(
+            vec![(untyped(), wide_load()), lit_i32(8), (untyped(), Expr::Binary { op: BinaryOp::ShrU, lhs: v(1), rhs: v(2) })],
+            vec![ret(3)],
+            &TypeRegistry::default(),
+        ));
+        assert!(out.contains("v1>>8"), "{out}");
+        assert!(!out.contains("asu"), "{out}");
+    }
+
+    /// A 32-bit operand against a 64-bit constant: one operator has one
+    /// width, so a recovered type is wrong, and a cast would hide that
+    /// from rustc. Printed bare.
+    #[test]
+    fn a_sign_bearing_operator_whose_operands_disagree_on_width_is_printed_bare() {
+        let out = packed(&emitted(
+            vec![i64_lit(5), (untyped(), Expr::Binary { op: BinaryOp::LtU, lhs: v(0), rhs: v(1) })],
+            vec![ret(2)],
+            &TypeRegistry::default(),
+        ));
+        assert!(out.contains("arg0<5"), "{out}");
+        assert!(!out.contains("asu"), "{out}");
+    }
+
+    /// An unannotated placeholder takes the other side's type by itself:
+    /// the typed operand is reread, the placeholder is left as it is.
+    #[test]
+    fn a_placeholder_operand_is_not_cast() {
+        let out = packed(&emitted(
+            vec![(untyped(), wide_load()), (untyped(), Expr::Binary { op: BinaryOp::LtU, lhs: v(0), rhs: v(1) })],
+            vec![ret(2)],
+            &TypeRegistry::default(),
+        ));
+        assert!(out.contains("(arg0asu32)<v1"), "{out}");
+    }
+
+    /// Two constants pin no type between them, so both carry the suffix.
+    #[test]
+    fn two_constants_under_an_unsigned_ordering_keep_their_suffixes() {
+        let out = packed(&emitted(
+            vec![lit_i32(2), lit_i32(-1), (untyped(), Expr::Binary { op: BinaryOp::LtU, lhs: v(1), rhs: v(2) })],
+            vec![ret(3)],
+            &TypeRegistry::default(),
+        ));
+        assert!(out.contains("2u32<4294967295u32"), "{out}");
     }
 
     /// `v1 & -2i32` with `v1: u32` is the same 32 bits as `v1 & 4294967294`.

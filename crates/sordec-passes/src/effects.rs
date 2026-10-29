@@ -794,12 +794,15 @@ pub fn expr_effects(expr: &Expr) -> Effects {
         // truncations never lower to `Unary`; they stay
         // `Unknown{Conversion}`) — pinned by test.
         Expr::Unary { .. } => Effects::PURE,
-        // Integer div/rem trap (div-by-zero, MIN/-1). `BinaryOp` erases
-        // signedness/width, so every Div/Rem is may_trap; the float-div
-        // over-approximation costs nothing (the Soroban VM rejects float
-        // opcodes in deployed contracts).
+        // Integer div/rem trap (div-by-zero, and MIN/-1 for the signed
+        // ones). `BinaryOp` erases width, so every Div/Rem is may_trap; the
+        // float-div over-approximation costs nothing (the Soroban VM
+        // rejects float opcodes in deployed contracts).
         Expr::Binary { op, .. } => match op {
-            sordec_ir::BinaryOp::Div | sordec_ir::BinaryOp::Rem => TRAP,
+            sordec_ir::BinaryOp::Div
+            | sordec_ir::BinaryOp::DivU
+            | sordec_ir::BinaryOp::Rem
+            | sordec_ir::BinaryOp::RemU => TRAP,
             sordec_ir::BinaryOp::Add
             | sordec_ir::BinaryOp::Sub
             | sordec_ir::BinaryOp::Mul
@@ -808,14 +811,19 @@ pub fn expr_effects(expr: &Expr) -> Effects {
             | sordec_ir::BinaryOp::BitXor
             | sordec_ir::BinaryOp::Shl
             | sordec_ir::BinaryOp::Shr
+            | sordec_ir::BinaryOp::ShrU
             | sordec_ir::BinaryOp::Rotl
             | sordec_ir::BinaryOp::Rotr
             | sordec_ir::BinaryOp::Eq
             | sordec_ir::BinaryOp::Ne
             | sordec_ir::BinaryOp::Lt
+            | sordec_ir::BinaryOp::LtU
             | sordec_ir::BinaryOp::Le
+            | sordec_ir::BinaryOp::LeU
             | sordec_ir::BinaryOp::Gt
+            | sordec_ir::BinaryOp::GtU
             | sordec_ir::BinaryOp::Ge
+            | sordec_ir::BinaryOp::GeU
             | sordec_ir::BinaryOp::MulOverflows => Effects::PURE,
         },
         // Intra-module callee summaries are future work — fail closed.
@@ -1517,24 +1525,31 @@ mod tests {
             BinaryOp::Sub,
             BinaryOp::Mul,
             BinaryOp::Div,
+            BinaryOp::DivU,
             BinaryOp::Rem,
+            BinaryOp::RemU,
             BinaryOp::BitAnd,
             BinaryOp::BitOr,
             BinaryOp::BitXor,
             BinaryOp::Shl,
             BinaryOp::Shr,
+            BinaryOp::ShrU,
             BinaryOp::Rotl,
             BinaryOp::Rotr,
             BinaryOp::Eq,
             BinaryOp::Ne,
             BinaryOp::Lt,
+            BinaryOp::LtU,
             BinaryOp::Le,
+            BinaryOp::LeU,
             BinaryOp::Gt,
+            BinaryOp::GtU,
             BinaryOp::Ge,
+            BinaryOp::GeU,
         ];
         for op in all {
             let expr = Expr::Binary { op, lhs: v(0), rhs: v(1) };
-            let expected = matches!(op, BinaryOp::Div | BinaryOp::Rem);
+            let expected = matches!(op, BinaryOp::Div | BinaryOp::DivU | BinaryOp::Rem | BinaryOp::RemU);
             assert_eq!(
                 expr_effects(&expr).may_trap,
                 expected,

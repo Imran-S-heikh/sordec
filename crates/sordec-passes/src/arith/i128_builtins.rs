@@ -235,7 +235,7 @@ fn shape_of(func: &HighFunction) -> Shape {
             Expr::Unary { op: UnaryOp::Clz, .. } => s.clz += 1,
             Expr::Binary { op: BinaryOp::Mul, .. } => s.muls += 1,
             Expr::Binary { op: BinaryOp::BitXor, .. } => s.xors += 1,
-            Expr::Binary { op: BinaryOp::Shl | BinaryOp::Shr, .. } => s.shifts += 1,
+            Expr::Binary { op: BinaryOp::Shl | BinaryOp::Shr | BinaryOp::ShrU, .. } => s.shifts += 1,
             Expr::Binary { op: BinaryOp::Sub, lhs, .. }
                 if matches!(
                     func.bindings.get(resolve_use(func, *lhs)).map(|b| &b.expr),
@@ -355,12 +355,12 @@ fn rewrite_site(func: &mut HighFunction, call: ValueId, kind: Builtin) -> bool {
     let (op, wide, flag_ptr) = match kind {
         Builtin::Multi3 if args.len() >= 4 => (BinaryOp::Mul, KnownType::I128, None),
         Builtin::Muloti4 if args.len() >= 5 => (BinaryOp::Mul, KnownType::I128, Some(args[4])),
-        Builtin::Signed(op) if args.len() >= 4 => (op, KnownType::I128, None),
-        Builtin::Unsigned(op) if args.len() >= 4 => (op, KnownType::U128, None),
+        Builtin::Signed(op) if args.len() >= 4 => (op.signed(), KnownType::I128, None),
+        Builtin::Unsigned(op) if args.len() >= 4 => (op.unsigned(), KnownType::U128, None),
         // The divmod itself, called directly: a `u128` `/` or `%` whose
         // wrapper rustc inlined. Quotient components only; a remainder
         // reader would need both results, which is not seen yet.
-        Builtin::Udivmodti4 if args.len() >= 4 => (BinaryOp::Div, KnownType::U128, None),
+        Builtin::Udivmodti4 if args.len() >= 4 => (BinaryOp::DivU, KnownType::U128, None),
         _ => return false,
     };
     let (a_lo, a_hi, b_lo, b_hi) = (args[0], args[1], args[2], args[3]);

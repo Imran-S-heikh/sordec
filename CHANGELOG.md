@@ -121,6 +121,20 @@ evidence in [`docs/scoring_metric.md` §7.1](docs/scoring_metric.md).
 
 ### Fixed
 
+- **An unsigned shift, division, remainder or ordering printed on a signed
+  operand, or the reverse, was silently the other operation.** The IR had
+  one `>>`, one `/`, one `%` and one of each ordering, the wasm opcode's
+  signedness was dropped at lowering, and the emitter printed the bare
+  operator on whatever type the operand had recovered: `i64.shr_u` on a
+  value typed `i64` came out `x >> 8`, an arithmetic shift, wrong for every
+  value with its top bit set. It compiled, and no score saw it. The IR now
+  carries the opcode's reading (`ShrU`, `DivU`, `RemU`, `LtU`, ...), the
+  lowering sets it, and the emitter reinterprets the operands when the
+  printed type disagrees — `((x as u64) >> 8) as i64` — and prints the
+  bare operator only where the readings agree. The passes that depend on
+  the reading (length bounds on raw host words, packed `u32` orderings,
+  128-bit comparisons and their carries) now accept only the reading they
+  are exact under; the rest accept both, as before.
 - **A non-WASM input printed ten lines of bytes.** `wasmparser` reports a
   magic-number mismatch by pretty-printing both byte arrays, and the frontend
   passed it straight through. It now checks the magic number itself and says
