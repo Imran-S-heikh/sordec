@@ -31,7 +31,9 @@
 # when unset or when --no-build is absent), CARGO_TARGET_DIR (respected for
 # that build), SORDEC_CHECK_TARGET (the shared target dir for the cargo checks,
 # default ~/.cache/sordec-check-target; sharing it keeps each run to seconds
-# per crate once soroban-sdk is built), CARGO_BUILD_JOBS (default 4).
+# per crate once soroban-sdk is built; each crate is checked under a package
+# name unique to this run so two runs never share a fingerprint),
+# CARGO_BUILD_JOBS (default 4).
 #
 # Run the whole script inside the capped scope on this machine:
 #   systemd-run --user --scope --quiet -p MemoryHigh=8G -p MemoryMax=12G \
@@ -67,6 +69,8 @@ export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4}
 COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)
 OUT=${OUT:-$HOME/.cache/sordec-measure/$COMMIT}
 CHECK_TARGET=${SORDEC_CHECK_TARGET:-$HOME/.cache/sordec-check-target}
+# This run's package-name prefix; see the cargo check below.
+PKG_TAG=m$(date +%s)$$
 
 root_of() {
   case $1 in
@@ -123,7 +127,14 @@ for set in "${set_list[@]}"; do
     lines=$(wc -l < "$crate/src/lib.rs")
     if [ $CHECK -eq 1 ]; then
       clog=$OUT/logs/$set/$n.check.log
-      touch "$crate/src/lib.rs"
+      # Every reconstruction is the package `reconstructed-contract`, and
+      # cargo tells crates apart by name, version and dependencies, not by
+      # directory. Two runs checking the same contract at the same time
+      # race on one fingerprint, and the later one can be handed the
+      # earlier one's cached verdict (five "compiles" rows were replayed
+      # that way on 2026-10-29). A name no other run uses makes each
+      # check its own.
+      sed -i "s/^name = \"reconstructed-contract\"/name = \"$PKG_TAG-$set-${n//_/-}\"/" "$crate/Cargo.toml"
       (cd "$crate" && CARGO_TARGET_DIR=$CHECK_TARGET cargo check -q) >"$clog" 2>&1
       if [ $? -eq 0 ]; then ok=yes; else ok=no; fi
       errs=$(count_errors "$clog")
