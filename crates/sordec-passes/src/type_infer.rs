@@ -246,7 +246,8 @@ fn infer_function(
         for (id, binding) in func.bindings.iter() {
             let cand = match &binding.expr {
                 Expr::Phi { incoming } => counter_bounded_by_u32(func, id, incoming, &types)
-                    .or_else(|| phi_join_with_constants(func, incoming, &types, awaiting_callers)),
+                    .or_else(|| phi_join_with_constants(func, incoming, &types, awaiting_callers))
+                    .filter(|c| !ok_arms_of(types.get(&id), c)),
                 Expr::Binary { op, lhs, rhs } => {
                     offset_of_known(func, *op, *lhs, *rhs, &types).or_else(|| infer_expr(&binding.expr, &types))
                 }
@@ -982,6 +983,22 @@ fn phi_join_with_constants(
         Some(decided)
     } else {
         phi_join(incoming, types)
+    }
+}
+
+/// Whether a merge's arms, joined as `cand`, are the `Ok` payloads of the
+/// `Result<T, E>` the merge already is.
+///
+/// A returned merge is typed by the spec's `Result<T, E>`, and the arms that
+/// carry a `T` are its `Ok` values — the host reads a returned `T`'s
+/// encoding as `Ok(t)`, and the emitter wraps such an arm as `Ok(..)`. So
+/// the arms agreeing on `T` say less of the merge, not something else; read
+/// as a conflict they took the merge's type away, and it was declared `Val`
+/// while every arm assigned it a `T` or an error.
+fn ok_arms_of(merge: Option<&IrType>, cand: &IrType) -> bool {
+    match (base_of(merge), base_of(Some(cand))) {
+        (Some(KnownType::Result(ok, _)), Some(arms)) => base_of(Some(ok.as_ref())) == Some(arms),
+        _ => false,
     }
 }
 
@@ -2413,6 +2430,52 @@ mod tests {
         // Once the callers say `Symbol`, the merge holds neither type.
         types.insert(v(0), IrType::Inferred(KnownType::Symbol));
         assert_eq!(phi_join_with_constants(&f, incoming, &types, false), None);
+    }
+
+    /// `r = phi [err, x]; return r` from a function declared `-> out`, `x`
+    /// a `u64` parameter and `err` the constant contract error 1.
+    fn result_merge(out: TypeRef) -> HighFunction {
+        use crate::marshalling::test_support::{func_with, v};
+        let (b0, b1) = (BlockId::from_index(0), BlockId::from_index(1));
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                         // v0 x
+                Expr::Literal(Literal::I64((1 << 32) | 3)),             // v1 err
+                Expr::Phi { incoming: vec![(b0, v(1)), (b1, v(0))] },   // v2 r
+            ],
+            vec![v(0)],
+            vec![1],
+        );
+        f.signature = Some(FunctionSignature {
+            name: "safe_add".into(),
+            inputs: vec![FunctionParam { name: "x".into(), ty: TypeRef::Primitive(PrimitiveType::U64) }],
+            outputs: vec![out],
+        });
+        f.region = Region::Sequence(vec![Region::Basic(b0), Region::Return { values: vec![v(2)] }]);
+        f.returns = vec![vec![v(2)]];
+        f
+    }
+
+    #[test]
+    fn a_result_merge_whose_arms_are_ok_payloads_stays_the_result() {
+        use crate::marshalling::test_support::v;
+        let mut f = result_merge(TypeRef::Composite(CompositeType::Result(
+            Box::new(TypeRef::Primitive(PrimitiveType::U64)),
+            Box::new(TypeRef::Primitive(PrimitiveType::Error)),
+        )));
+        infer_isolated(&mut f);
+        assert!(matches!(f.bindings.get(v(2)).unwrap().ty, IrType::Inferred(KnownType::Result(..))));
+    }
+
+    #[test]
+    fn a_merge_of_another_type_still_conflicts() {
+        use crate::marshalling::test_support::v;
+        let mut f = result_merge(TypeRef::Composite(CompositeType::Result(
+            Box::new(TypeRef::Primitive(PrimitiveType::Symbol)),
+            Box::new(TypeRef::Primitive(PrimitiveType::Error)),
+        )));
+        infer_isolated(&mut f);
+        assert!(matches!(f.bindings.get(v(2)).unwrap().ty, IrType::Unknown(_)));
     }
 
     #[test]
