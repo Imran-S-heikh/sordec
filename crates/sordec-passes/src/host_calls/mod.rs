@@ -74,6 +74,9 @@ pub struct HostCall {
     /// The ABI return type as `env.json` names it (`"VecObject"`,
     /// `"U32Val"`, `"Void"`, …).
     pub return_type: &'static str,
+    /// The ABI type of each argument, in order, as `env.json` names it
+    /// (`"BytesObject"`, `"U32Val"`, …).
+    pub arg_types: &'static [&'static str],
 }
 
 /// Identifier of the upstream `soroban-env-common` release whose
@@ -156,6 +159,16 @@ struct EnvFunction {
     /// ABI return type, e.g. `"VecObject"`.
     #[serde(rename = "return", default)]
     return_type: String,
+    /// The arguments, in order.
+    #[serde(default)]
+    args: Vec<EnvArg>,
+}
+
+#[derive(Deserialize)]
+struct EnvArg {
+    /// ABI type, e.g. `"BytesObject"`.
+    #[serde(rename = "type")]
+    ty: String,
 }
 
 const ENV_JSON: &str = include_str!("env.json");
@@ -178,6 +191,9 @@ static CATALOG: LazyLock<Vec<HostCall>> = LazyLock::new(|| {
             let name: &'static str = Box::leak(func.export.clone().into_boxed_str());
             let friendly: &'static str = Box::leak(func.name.clone().into_boxed_str());
             let return_type: &'static str = Box::leak(func.return_type.clone().into_boxed_str());
+            let arg_types: Vec<&'static str> =
+                func.args.iter().map(|a| &*Box::leak(a.ty.clone().into_boxed_str())).collect();
+            let arg_types: &'static [&'static str] = Box::leak(arg_types.into_boxed_slice());
 
             let entry = HostCall {
                 module: module_export,
@@ -186,6 +202,7 @@ static CATALOG: LazyLock<Vec<HostCall>> = LazyLock::new(|| {
                 module_name,
                 min_protocol: func.min_supported_protocol,
                 return_type,
+                arg_types,
             };
 
             // Reject duplicate (module, name) pairs — would indicate
@@ -229,6 +246,14 @@ mod tests {
         assert_eq!(hc.module, "l");
         assert_eq!(hc.name, "_");
         assert_eq!(hc.friendly_name, "put_contract_data");
+    }
+
+    #[test]
+    fn an_entry_carries_its_argument_types() {
+        let hc = resolve("c", "_").expect("c._ is compute_hash_sha256");
+        assert_eq!(hc.arg_types, &["BytesObject"]);
+        let hc = resolve("c", "2").expect("c.2 is recover_key_ecdsa_secp256k1");
+        assert_eq!(hc.arg_types, &["BytesObject", "BytesObject", "U32Val"]);
     }
 
     #[test]

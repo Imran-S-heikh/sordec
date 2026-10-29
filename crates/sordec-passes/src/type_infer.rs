@@ -68,6 +68,27 @@
 //! **60.4% to 80.9%** (`Unknown` 5,425 → 2,618) and `cargo check` errors
 //! from 653 to 345. `Known` did not move: every type this adds is
 //! `Inferred`, and nothing proven is overwritten.
+//!
+//! ## What the host catalog fixes
+//!
+//! A crypto call's object operand is the object the catalog names: a
+//! `BytesObject` operand is a `Bytes`, a `VecObject` one a `Vec` (`Known`,
+//! by the ABI). Exact because an object crosses into the host as its
+//! handle, so the operand is that object whatever computed it — the same
+//! reasoning that types an unnamed host call's object *result*. Two limits
+//! keep it from saying more than the catalog does. It names only an
+//! operand nothing has named, or named only `Val`: a `BytesObject` may be a
+//! `BytesN` the source converted on the way in, and the catalog says
+//! nothing of length, so a `BytesN<32>` is never widened by it. And a small
+//! scalar operand (`U32Val`) is left alone: what the host receives there is
+//! the encoding, not the number.
+//!
+//! "Nothing has named" must mean nothing *will*, so the catalog speaks
+//! last: the module fixpoint settles once without it and then again with
+//! it. Within one fixpoint a `Known(Bytes)` planted in the first round
+//! would outrank a `BytesN<32>` the next round derives — an `unwrap` of an
+//! `Option<BytesN<32>>` typed only once its producer is — and the message
+//! handed to `ed25519_verify` would lose the width it carries.
 
 use std::collections::{HashMap, HashSet};
 
@@ -114,25 +135,30 @@ impl Pass<HighIr> for TypeInferPass {
         let seed = seed_signatures(ir);
         let mut sigs = seed.clone();
         let mut disagreements: u64 = 0;
-        for _ in 0..MAX_MODULE_ROUNDS {
-            let mut round = false;
-            // Counted fresh each round, not accumulated: the loop exits on a
-            // round that changed nothing, so that round's count is the
-            // settled one rather than a running total over rounds.
-            disagreements = 0;
-            for func in &mut ir.functions {
-                let (func_changed, func_disagreements) = infer_function(func, &sigs);
-                round |= func_changed;
-                disagreements += func_disagreements;
-            }
-            let next = recompute_signatures(ir, &seed);
-            if next != sigs {
-                sigs = next;
-                round = true;
-            }
-            changed |= round;
-            if !round {
-                break;
+        // Settled twice: first on everything but the host catalog's object
+        // kinds, then with them, so that weakest of named statements only
+        // speaks where nothing else has (see "What the host catalog fixes").
+        for catalog in [false, true] {
+            for _ in 0..MAX_MODULE_ROUNDS {
+                let mut round = false;
+                // Counted fresh each round, not accumulated: the loop exits on
+                // a round that changed nothing, so that round's count is the
+                // settled one rather than a running total over rounds.
+                disagreements = 0;
+                for func in &mut ir.functions {
+                    let (func_changed, func_disagreements) = infer_function(func, &sigs, catalog);
+                    round |= func_changed;
+                    disagreements += func_disagreements;
+                }
+                let next = recompute_signatures(ir, &seed);
+                if next != sigs {
+                    sigs = next;
+                    round = true;
+                }
+                changed |= round;
+                if !round {
+                    break;
+                }
             }
         }
         if disagreements > 0 {
@@ -159,8 +185,9 @@ impl Pass<HighIr> for TypeInferPass {
 /// signature table. Returns whether any binding's type improved, and how
 /// many times inter-procedural evidence disagreed with an equal-rank
 /// incumbent. Works on a `ValueId -> IrType` snapshot and writes the
-/// improvements back with `TypePropagation` provenance.
-fn infer_function(func: &mut HighFunction, sigs: &SigTable) -> (bool, u64) {
+/// improvements back with `TypePropagation` provenance. `catalog` lets the
+/// host catalog's operand kinds speak ([`crypto_object_args`]).
+fn infer_function(func: &mut HighFunction, sigs: &SigTable, catalog: bool) -> (bool, u64) {
     let mut types: HashMap<ValueId, IrType> =
         func.bindings.iter().map(|(id, b)| (id, b.ty.clone())).collect();
     // Structure does not change during inference, so this is built once.
@@ -191,7 +218,7 @@ fn infer_function(func: &mut HighFunction, sigs: &SigTable) -> (bool, u64) {
             }
         }
         // Backward: uses constrain their operands / returned values.
-        round_changed |= backward(func, &uses, &mut types, &mut ev);
+        round_changed |= backward(func, &uses, &mut types, &mut ev, catalog);
         round_changed |= backward_calls(func, sigs, &mut types, &mut ev);
         round_changed |= backward_returns(func, sigs, &mut types, &mut ev);
         if !round_changed {
@@ -394,6 +421,7 @@ fn backward(
     uses: &HighUseIndex,
     types: &mut HashMap<ValueId, IrType>,
     ev: &mut Evidence,
+    catalog: bool,
 ) -> bool {
     let mut changed = false;
     for (id, binding) in func.bindings.iter() {
@@ -458,12 +486,24 @@ fn backward(
             // operand-share guess (a `u32` that is also bit-shifted to build a
             // `Val` stays a `u32`, it does not become a conflict → `Unknown`).
             Expr::Semantic(SemanticOp::Known(op)) => {
-                for (arg, ty) in semantic_arg_types(op) {
+                let pinned = semantic_arg_types(op);
+                for (arg, ty) in pinned.iter().cloned() {
                     // A shadow-stack address handed to the host as a
                     // `U32Val` (the SDK's buffer pointers) is `ptr as u32`
                     // there; the address itself stays the wasm word every
                     // other use of it computes in.
                     if matches!(op, KnownOp::ValEncodeSmall { .. }) && is_frame_address(func, arg) {
+                        continue;
+                    }
+                    changed |= improve(types, ev, arg, IrType::Known(ty));
+                }
+                // The object kind the host's catalog fixes for the rest —
+                // only where nothing better is said ([`crypto_object_args`]).
+                for (arg, ty) in crypto_object_args(op) {
+                    if !catalog
+                        || pinned.iter().any(|(p, _)| *p == arg)
+                        || base_of(types.get(&arg)).is_some_and(|have| have != KnownType::Val)
+                    {
                         continue;
                     }
                     changed |= improve(types, ev, arg, IrType::Known(ty));
@@ -937,6 +977,42 @@ fn semantic_arg_types(op: &KnownOp) -> Vec<(ValueId, KnownType)> {
         },
         _ => vec![],
     }
+}
+
+/// The object type the host catalog declares for each operand of a crypto
+/// call: a `BytesObject` operand is a `Bytes`, a `VecObject` one a `Vec`.
+///
+/// Objects only. An object's handle *is* the `Val` the host receives, so
+/// the operand is that object whatever produced it — the same reason
+/// [`infer_expr`] types an unnamed host call's object result. A small
+/// scalar (`U32Val`, `U256Val`) arrives encoded, and the operand is the
+/// encoding, not the number. The caller applies these only to an operand
+/// nothing has named, or named only `Val`: the catalog says the object's
+/// kind, not its length, so a `BytesN<32>` handed to `sha256` stays one.
+fn crypto_object_args(op: &KnownOp) -> Vec<(ValueId, KnownType)> {
+    let KnownOp::CryptoOp { kind, args } = op else {
+        return vec![];
+    };
+    let name = crate::val_abi::crypto_kind_name(*kind);
+    let Some(call) = crate::host_calls::all().iter().find(|c| c.module == "c" && c.friendly_name == name) else {
+        return vec![];
+    };
+    if call.arg_types.len() != args.len() {
+        return vec![];
+    }
+    args.iter()
+        .zip(call.arg_types)
+        .filter_map(|(arg, ty)| {
+            let ty = match *ty {
+                "BytesObject" => KnownType::Bytes,
+                "VecObject" => KnownType::Vec(Box::new(IrType::Unknown(
+                    sordec_common::UnknownReason::InsufficientEvidence,
+                ))),
+                _ => return None,
+            };
+            Some((*arg, ty))
+        })
+        .collect()
 }
 
 /// The scalar operand type of a single-argument `obj_from_*` conversion, or
@@ -1811,7 +1887,7 @@ mod tests {
     /// Run only the intra-procedural half: no inter-procedural evidence, so
     /// a single function can be tested without building a module around it.
     fn infer_isolated(func: &mut HighFunction) -> bool {
-        infer_function(func, &SigTable::new()).0
+        infer_function(func, &SigTable::new(), true).0
     }
 
     // ---- lattice ----
@@ -2459,6 +2535,94 @@ mod tests {
         );
         let Expr::Phi { incoming } = &f.bindings.get(id(1)).unwrap().expr else { unreachable!() };
         assert_eq!(counter_bounded_by_u32(&f, id(1), incoming, &HashMap::new()), None);
+    }
+
+    /// One function whose `v0..v(n-1)` are untyped parameters handed to
+    /// the crypto op `kind`, which is `v(n)`; `ty` seeds `v0`.
+    fn crypto_on_params(kind: CryptoOpKind, n: u32, ty: Option<IrType>) -> HighIr {
+        let mut exprs: Vec<Expr> = (0..n).map(|_| Expr::Phi { incoming: vec![] }).collect();
+        exprs.push(Expr::Semantic(SemanticOp::Known(KnownOp::CryptoOp {
+            kind,
+            args: (0..n).map(ValueId::from_index).collect(),
+        })));
+        let mut f = func_at(0, exprs, (0..n).map(ValueId::from_index).collect(), vec![n], vec![]);
+        if let Some(ty) = ty {
+            f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = ty;
+        }
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn a_hash_input_nothing_typed_is_the_bytes_the_host_takes() {
+        let mut ir = crypto_on_params(CryptoOpKind::ComputeHashSha256, 1, None);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::Bytes));
+        // A `Val` says less than the catalog and is refined by it.
+        let mut ir = crypto_on_params(CryptoOpKind::ComputeHashKeccak256, 1, Some(IrType::Known(KnownType::Val)));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::Bytes));
+    }
+
+    #[test]
+    fn a_hash_input_already_named_keeps_its_name() {
+        // The catalog says "a bytes object", not its length: a `BytesN<32>`
+        // handed to `sha256` is not widened.
+        let mut ir =
+            crypto_on_params(CryptoOpKind::ComputeHashSha256, 1, Some(IrType::Inferred(KnownType::BytesN(32))));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Inferred(KnownType::BytesN(32)));
+    }
+
+    #[test]
+    fn the_catalog_waits_for_a_width_that_arrives_late() {
+        // fn1(x) { sha256(x) }, called by fn0 with a `BytesN<32>`. `x` is
+        // typed from that call site only once the table is rebuilt, a round
+        // after the catalog could first have said `Bytes`.
+        let callee = func_at(
+            1,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Semantic(SemanticOp::Known(KnownOp::CryptoOp {
+                    kind: CryptoOpKind::ComputeHashSha256,
+                    args: vec![ValueId::from_index(0)],
+                })),
+            ],
+            vec![ValueId::from_index(0)],
+            vec![1],
+            vec![],
+        );
+        let mut caller = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Call { target: FuncId::from_index(1), args: vec![ValueId::from_index(0)] },
+            ],
+            vec![],
+            vec![1],
+            vec![],
+        );
+        caller.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = IrType::Known(KnownType::BytesN(32));
+        let mut ir = crate::marshalling::test_support::module(vec![caller, callee]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 1, 0), IrType::Inferred(KnownType::BytesN(32)));
+    }
+
+    #[test]
+    fn the_catalog_types_objects_only_and_yields_to_a_pinned_width() {
+        // `recover_key_ecdsa_secp256k1(digest, signature, recovery_id)`: the
+        // two objects are bytes, the `U32Val` is the encoding, left alone.
+        let mut ir = crypto_on_params(CryptoOpKind::RecoverKeyEcdsaSecp256k1, 3, None);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::Bytes));
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Known(KnownType::Bytes));
+        assert!(matches!(ty_of(&ir, 0, 2), IrType::Unknown(_)));
+        // `ed25519_verify`'s key and signature keep the widths the SDK's own
+        // signature pins; only the message takes the catalog's `Bytes`.
+        let mut ir = crypto_on_params(CryptoOpKind::VerifySigEd25519, 3, None);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::BytesN(32)));
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Known(KnownType::Bytes));
+        assert_eq!(ty_of(&ir, 0, 2), IrType::Known(KnownType::BytesN(64)));
     }
 
     #[test]
