@@ -684,6 +684,7 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                     want.as_ref()
                         .and_then(|ty| unsuffixed_against(ctx, *v, ty))
                         .or_else(|| want.as_ref().and_then(|ty| val_coerced(ctx, *v, ty)))
+                        .or_else(|| want.as_ref().and_then(|ty| bytes_widened(ctx, *v, ty)))
                         .or_else(|| want.as_ref().and_then(|ty| sign_cast(ctx, *v, ty)))
                         .unwrap_or_else(|| ctx.arg_ref(*v))
                 })
@@ -907,6 +908,28 @@ fn val_coerced(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<
                 soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#x, #e)
             ))
         }
+    }
+}
+
+/// A fixed-width `BytesN<N>` handed to a `Bytes` parameter, widened on the
+/// way in.
+///
+/// The two are one host object, and the SDK's `From<BytesN<N>> for Bytes`
+/// is the conversion the source wrote (`.into()`, or a `&Bytes` taken from
+/// `as_ref`). The callee is typed `Bytes` by its own body — it appends to
+/// the value, or hashes it — while every caller holds the `BytesN` it
+/// decoded. Only those two exact types: anything else is not this
+/// conversion.
+fn bytes_widened(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<syn::Expr> {
+    if !matches!(want, IrType::Known(KnownType::Bytes) | IrType::Inferred(KnownType::Bytes)) {
+        return None;
+    }
+    match &ctx.func.bindings.get(v)?.ty {
+        IrType::Known(KnownType::BytesN(_)) | IrType::Inferred(KnownType::BytesN(_)) => {
+            let x = ctx.arg_ref(v);
+            Some(parse_quote!(soroban_sdk::Bytes::from(#x)))
+        }
+        _ => None,
     }
 }
 

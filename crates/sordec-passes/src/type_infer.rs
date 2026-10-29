@@ -386,6 +386,13 @@ fn backward_calls(
         };
         for (arg, slot) in args.iter().zip(&sig.params) {
             if let Some(ty) = slot.to_ir(Certainty::Inferred) {
+                // A fixed-width value handed to a `Bytes` parameter keeps
+                // its width: the call is where it widens.
+                if base_of(Some(&ty)) == Some(KnownType::Bytes)
+                    && matches!(base_of(types.get(arg)), Some(KnownType::BytesN(_)))
+                {
+                    continue;
+                }
                 changed |= improve_tracked(types, ev, *arg, ty);
             }
         }
@@ -1207,19 +1214,33 @@ impl Slot {
     /// Least upper bound. `Bottom` is the identity, `Conflict` absorbing,
     /// and two different agreed types conflict.
     fn join(self, other: Slot) -> Slot {
-        self.join_with(other, true)
+        self.join_with(other, false)
     }
 
-    /// [`join`](Self::join), with `vecs` saying whether `Vec<?>` and
-    /// `Vec<T>` are one type ([`merge_partial_with`]). They are when the
-    /// witnesses are values of one variable: a function's return sites, a
-    /// merge's arms. Not across callers: each caller builds its own vec,
-    /// and a `Vec<?>` there is often the `Vec<Val>` a client call's
-    /// arguments are, which merging into another caller's `Vec<Address>`
-    /// would declare the parameter as, and leave that caller passing a
+    /// [`join`](Self::join), for witnesses that are values of one variable
+    /// — a function's return sites, a merge's arms — or, with `callers`,
+    /// the arguments separate callers pass one parameter. Two things differ
+    /// between them.
+    ///
+    /// `Vec<?>` and `Vec<T>` are one type only for one variable
+    /// ([`merge_partial_with`]). Each caller builds its own vec, and a
+    /// `Vec<?>` there is often the `Vec<Val>` a client call's arguments
+    /// are, which merging into another caller's `Vec<Address>` would
+    /// declare the parameter as, and leave that caller passing a
     /// `Vec<Val>` to it.
-    fn join_with(self, other: Slot, vecs: bool) -> Slot {
+    ///
+    /// And a `BytesN<N>` beside a `Bytes` is a `Bytes` parameter only
+    /// across callers: a call is where the SDK's `From<BytesN<N>> for
+    /// Bytes` widens one, and the emitter writes that conversion there.
+    /// Nothing widens a merge's arm or a returned value.
+    fn join_with(self, other: Slot, callers: bool) -> Slot {
         match (self, other) {
+            (Slot::Agreed(KnownType::Bytes), Slot::Agreed(KnownType::BytesN(_)))
+            | (Slot::Agreed(KnownType::BytesN(_)), Slot::Agreed(KnownType::Bytes))
+                if callers =>
+            {
+                Slot::Agreed(KnownType::Bytes)
+            }
             (Slot::Conflict, _) | (_, Slot::Conflict) => Slot::Conflict,
             (Slot::Bottom, s) | (s, Slot::Bottom) => s,
             // `Val` is the lattice's top, not a leaf. Every host object and
@@ -1231,7 +1252,7 @@ impl Slot {
             // other.
             (Slot::Agreed(KnownType::Val), s @ Slot::Agreed(_))
             | (s @ Slot::Agreed(_), Slot::Agreed(KnownType::Val)) => s,
-            (Slot::Agreed(a), Slot::Agreed(b)) => match merge_partial_with(&a, &b, vecs) {
+            (Slot::Agreed(a), Slot::Agreed(b)) => match merge_partial_with(&a, &b, !callers) {
                 Some(merged) => Slot::Agreed(merged),
                 None => Slot::Conflict,
             },
@@ -1456,7 +1477,7 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
                     continue;
                 }
                 let witness = Slot::witness(ty);
-                *slot = std::mem::replace(slot, Slot::Bottom).join_with(witness, false);
+                *slot = std::mem::replace(slot, Slot::Bottom).join_with(witness, true);
             }
         }
     }
@@ -2868,6 +2889,59 @@ mod tests {
             "got {:?}",
             ty_of(&ir, 1, 0)
         );
+    }
+
+    /// fn`id`(v0) { fn`target`(v0) }, with `v0` typed `ty` (a parameter
+    /// when `param`).
+    fn forwards(id: u32, target: u32, ty: Option<KnownType>, param: bool) -> HighFunction {
+        let mut f = func_at(
+            id,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Call { target: FuncId::from_index(target), args: vec![ValueId::from_index(0)] },
+            ],
+            if param { vec![ValueId::from_index(0)] } else { vec![] },
+            vec![1],
+            vec![],
+        );
+        if let Some(ty) = ty {
+            f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = IrType::Known(ty);
+        }
+        f
+    }
+
+    #[test]
+    fn a_fixed_width_value_handed_on_to_a_bytes_helper_keeps_its_width() {
+        // fn0 holds a `BytesN<32>` and calls fn1(p), which hands `p` on to
+        // fn2, whose parameter its body proved `Bytes`.
+        let bytes_param = func_at(2, vec![Expr::Phi { incoming: vec![] }], vec![ValueId::from_index(0)], vec![], vec![]);
+        let mut ir = crate::marshalling::test_support::module(vec![
+            forwards(0, 1, Some(KnownType::BytesN(32)), false),
+            forwards(1, 2, None, true),
+            bytes_param,
+        ]);
+        ir.functions[2].bindings.get_mut(ValueId::from_index(0)).unwrap().ty = IrType::Known(KnownType::Bytes);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 1, 0), IrType::Inferred(KnownType::BytesN(32)), "p is what every caller passes");
+        assert_eq!(ty_of(&ir, 2, 0), IrType::Known(KnownType::Bytes));
+    }
+
+    #[test]
+    fn callers_passing_bytes_and_a_fixed_width_make_a_bytes_parameter() {
+        let callee = func_at(2, vec![Expr::Phi { incoming: vec![] }], vec![ValueId::from_index(0)], vec![], vec![]);
+        let mut ir = crate::marshalling::test_support::module(vec![
+            forwards(0, 2, Some(KnownType::BytesN(32)), false),
+            forwards(1, 2, Some(KnownType::Bytes), false),
+            callee,
+        ]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 2, 0), IrType::Inferred(KnownType::Bytes));
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::BytesN(32)), "the call widens it");
+    }
+
+    #[test]
+    fn a_merge_of_bytes_and_a_fixed_width_still_conflicts() {
+        assert_eq!(Slot::Agreed(KnownType::Bytes).join(Slot::Agreed(KnownType::BytesN(32))), Slot::Conflict);
     }
 
     #[test]
