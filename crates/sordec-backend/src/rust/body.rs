@@ -1188,14 +1188,35 @@ impl<'a> FnCtx<'a> {
             // Each element is declared by its binding's type (`sig::
             // helper_return`), and a flag typed as the wasm word it travels
             // in is still printed as the comparison it is: cast it back.
+            //
+            // The declaration is one site's; another site's element may be
+            // the same word in the other sign (`u64` from an object decode
+            // beside an `i64` shift), so it is cast to the declared type —
+            // all of its bits kept.
             many => {
+                let declared: Option<Vec<IrType>> = if self.func.signature.is_some() {
+                    None
+                } else {
+                    sig::helper_return_site(self.func).filter(|s| s.len() == many.len()).map(|s| {
+                        s.iter()
+                            .filter_map(|v| self.func.bindings.get(*v).map(|b| b.ty.clone()))
+                            .collect()
+                    })
+                };
                 let vs: Vec<syn::Expr> = many
                     .iter()
-                    .map(|v| {
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let want = declared.as_ref().and_then(|d| d.get(i));
                         self.func
                             .bindings
                             .get(*v)
                             .and_then(|b| expr::bool_to_int(self, *v, &b.ty))
+                            .or_else(|| {
+                                let b = self.func.bindings.get(*v)?;
+                                let ty = want.filter(|t| **t != b.ty)?;
+                                expr::unsuffixed_against(self, *v, ty).or_else(|| expr::sign_cast(self, *v, ty))
+                            })
                             .unwrap_or_else(|| self.value_ref(*v))
                     })
                     .collect();
@@ -1556,6 +1577,15 @@ mod tests {
     /// whose bindings are `exprs` from `v1` on, all scheduled in order;
     /// `tail` follows the block.
     fn emitted(exprs: Vec<(IrType, Expr)>, tail: Vec<Region>, reg: &TypeRegistry) -> String {
+        emitted_returning(exprs, tail, reg, vec![])
+    }
+
+    fn emitted_returning(
+        exprs: Vec<(IrType, Expr)>,
+        tail: Vec<Region>,
+        reg: &TypeRegistry,
+        returns: Vec<Vec<ValueId>>,
+    ) -> String {
         use quote::ToTokens;
         use sordec_common::{Arena, FuncId, Provenance, ProvenanceSource};
         use sordec_ir::{HighBlock, MemoryImage, WasmFacts};
@@ -1583,7 +1613,7 @@ mod tests {
             bindings,
             region,
             params: vec![v(0)],
-            returns: vec![],
+            returns,
         };
         let high = HighIr {
             facts: WasmFacts {
@@ -1705,6 +1735,34 @@ mod tests {
     fn a_negative_mask_on_a_signed_word_keeps_its_suffix() {
         let out = masked(KnownType::I32);
         assert!(out.contains("2i32") && !out.contains("4294967294"), "{out}");
+    }
+
+    /// A helper whose declared pair is `(i64, i64)` (the first return site)
+    /// returning `(0, <u64>)` at another site: the `u64` is cast to the
+    /// declared `i64`, keeping its bits.
+    fn pair_return(second: KnownType) -> String {
+        let exprs = vec![
+            (IrType::Known(KnownType::I64), Expr::Phi { incoming: vec![] }), // v1 declared
+            (IrType::Known(second), Expr::Phi { incoming: vec![] }),         // v2 returned
+        ];
+        emitted_returning(
+            exprs,
+            vec![Region::Return { values: vec![v(1), v(2)] }],
+            &TypeRegistry::default(),
+            vec![vec![v(1), v(1)]],
+        )
+    }
+
+    #[test]
+    fn a_pair_element_of_the_other_sign_is_cast_to_the_declared_type() {
+        let out = pair_return(KnownType::U64);
+        assert!(out.contains("(v2 as i64)"), "{out}");
+    }
+
+    #[test]
+    fn a_pair_element_of_the_declared_type_is_left_alone() {
+        let out = pair_return(KnownType::I64);
+        assert!(!out.contains(" as "), "{out}");
     }
 
     // ---- a hole only a conversion through `Val` reads ----
