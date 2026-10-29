@@ -43,6 +43,16 @@
 //! name this way from every caller, so no sibling exists to witness it, and
 //! the literal reached the vector as an `i64` and published as a number.
 //!
+//! **The callee's own parameter type.** The same two facts, read off the
+//! parameter instead of its uses: a parameter the pipeline has typed
+//! `Symbol` is a symbol position, and one typed `Val` holds tagged bits,
+//! so a tag-14 literal handed to either is that symbol. The parameter is
+//! typed by what the callee does with it — hands it to a host function as
+//! a symbol, stores it, or by the type its callers settled — which is the
+//! witness the first two rules look for one step further away. On the
+//! group's re-run the types are there; an untyped parameter proves
+//! nothing and the literal stays raw.
+//!
 //! ## What it does not do
 //!
 //! It does not touch the parameter's own type. Once the literals read as
@@ -81,6 +91,7 @@ impl Pass<HighIr> for SymbolArgsPass {
         let mut result = PassResult::default();
         let witnessed = witnessed_positions(ir);
         let stored_as_val = val_positions(ir);
+        let typed = typed_positions(ir);
         // Collected over an immutable view: the rewrite is per function,
         // but the evidence spans the module.
         let mut planned: HashMap<FuncId, Vec<(ValueId, String, &'static str)>> = HashMap::new();
@@ -99,6 +110,11 @@ impl Pass<HighIr> for SymbolArgsPass {
                     } else if stored_as_val.contains(&(*target, index)) {
                         "the callee stores this parameter unconverted into a host vector, so \
                          its bits are a `Val`, and this one is tagged `SymbolSmall`"
+                    } else if typed.get(&(*target, index)) == Some(&KnownType::Symbol) {
+                        "the callee's parameter is typed `Symbol`, so the position is a symbol"
+                    } else if typed.get(&(*target, index)) == Some(&KnownType::Val) {
+                        "the callee's parameter is typed `Val`, so its bits are tagged, and this \
+                         one is tagged `SymbolSmall`"
                     } else {
                         result.metrics.increment(M_UNWITNESSED, 1);
                         continue;
@@ -174,6 +190,25 @@ fn val_positions(ir: &HighIr) -> HashSet<(FuncId, usize)> {
                 if let Some(&index) = params.get(&resolve_use(func, *element)) {
                     out.insert((func.id, index));
                 }
+            }
+        }
+    }
+    out
+}
+
+/// `(callee, parameter index)` pairs whose parameter the pipeline has typed
+/// `Symbol` or `Val`, with that type.
+fn typed_positions(ir: &HighIr) -> HashMap<(FuncId, usize), KnownType> {
+    let mut out = HashMap::new();
+    for func in &ir.functions {
+        for (index, param) in func.params.iter().enumerate() {
+            match func.bindings.get(*param).map(|b| &b.ty) {
+                Some(IrType::Known(k) | IrType::Inferred(k))
+                    if matches!(k, KnownType::Symbol | KnownType::Val) =>
+                {
+                    out.insert((func.id, index), k.clone());
+                }
+                _ => {}
             }
         }
     }
@@ -284,6 +319,55 @@ mod tests {
         let result = SymbolArgsPass.run(&mut ir);
         assert!(!result.changed, "nothing proves this is a symbol");
         assert_eq!(result.metrics.get(M_UNWITNESSED), Some(1), "and it says so");
+    }
+
+    /// Every caller passes the literal, but the pipeline has typed the
+    /// callee's parameter: as a `Symbol` the position is a symbol position,
+    /// as a `Val` its bits are tagged. Either way the literal reads back.
+    #[test]
+    fn a_parameter_the_callee_typed_proves_the_position() {
+        for ty in [KnownType::Symbol, KnownType::Val] {
+            let caller = func_with(
+                vec![
+                    Expr::Literal(Literal::I64(TRANSFER)), // v0
+                    call(1, vec![v(0)]),                   // v1
+                ],
+                vec![],
+                (0..2).collect(),
+            );
+            let mut callee = at(1, func_with(vec![Expr::Phi { incoming: vec![] }], vec![v(0)], vec![0]));
+            callee.bindings.get_mut(v(0)).expect("the parameter").ty = IrType::Inferred(ty.clone());
+            let mut ir = module(vec![caller, callee]);
+
+            assert!(SymbolArgsPass.run(&mut ir).changed, "{ty:?} proves the position");
+            let f = ir.functions.first().expect("the caller");
+            assert!(
+                matches!(
+                    &f.bindings.get(v(0)).expect("the constant").expr,
+                    Expr::Literal(Literal::Symbol(s)) if s == "transfer"
+                ),
+                "{ty:?}: read back as its symbol, got {:?}",
+                f.bindings.get(v(0)).map(|b| &b.expr)
+            );
+        }
+    }
+
+    /// A parameter typed as something else — an integer the callee adds
+    /// to — is not a symbol position, however symbol-shaped the literal.
+    #[test]
+    fn a_parameter_typed_as_an_integer_does_not_prove_the_position() {
+        let caller = func_with(
+            vec![
+                Expr::Literal(Literal::I64(TRANSFER)), // v0
+                call(1, vec![v(0)]),                   // v1
+            ],
+            vec![],
+            (0..2).collect(),
+        );
+        let mut callee = at(1, func_with(vec![Expr::Phi { incoming: vec![] }], vec![v(0)], vec![0]));
+        callee.bindings.get_mut(v(0)).expect("the parameter").ty = IrType::Inferred(KnownType::I64);
+        let mut ir = module(vec![caller, callee]);
+        assert!(!SymbolArgsPass.run(&mut ir).changed);
     }
 
     /// No sibling at all — every caller passes the literal — but the callee
