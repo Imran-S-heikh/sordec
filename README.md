@@ -72,6 +72,10 @@ no longer strictly unseen. The two third-party contracts (OpenZeppelin's
 `merkle-voting`, Phoenix's `vesting`) are the closest thing to "a contract you
 hand it today", and **0.53 is the honest figure for that**.
 
+The criterion the project was funded against, how it is measured, and the result
+measured against it, with every caveat above spelled out, are in
+[`docs/acceptance.md`](docs/acceptance.md).
+
 By category:
 
 | Category | Reference corpus | Held-out 25 |
