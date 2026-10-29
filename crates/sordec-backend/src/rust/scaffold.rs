@@ -25,9 +25,9 @@ const CONTRACT_TYPE: &str = "Contract";
 /// `use soroban_sdk::{…}`; unlike type paths they are emitted bare
 /// (`#[contract]`), so they must always be imported.
 pub(crate) fn macro_imports(types: Option<&TypeRegistry>, has_impl: bool) -> Vec<syn::Ident> {
-    let mut names: Vec<syn::Ident> = Vec::new();
+    // The struct is always emitted; the impl block only with entrypoints.
+    let mut names: Vec<syn::Ident> = vec![ident("contract")];
     if has_impl {
-        names.push(ident("contract"));
         names.push(ident("contractimpl"));
     }
     if let Some(t) = types {
@@ -245,8 +245,9 @@ mod tests {
     }
 
     #[test]
-    fn no_macro_imports_when_nothing_is_used() {
-        assert!(macro_imports(None, false).is_empty());
+    fn only_the_struct_macro_without_entrypoints() {
+        let names: Vec<String> = macro_imports(None, false).iter().map(|i| i.to_string()).collect();
+        assert_eq!(names, ["contract"]);
     }
 
     #[test]

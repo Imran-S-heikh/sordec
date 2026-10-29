@@ -102,7 +102,8 @@ fn locally_defined(items: &[syn::Item]) -> BTreeSet<String> {
 }
 
 /// The `use soroban_sdk::{…};` for the merged import set, or `None` when the
-/// module references nothing from the SDK (e.g. a stripped free-fn module).
+/// set is empty (the emitted module always imports at least `contract`, so
+/// `build_file` never sees `None`).
 pub(crate) fn use_item(names: &BTreeSet<String>) -> Option<syn::Item> {
     if names.is_empty() {
         return None;

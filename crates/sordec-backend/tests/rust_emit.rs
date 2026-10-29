@@ -604,3 +604,21 @@ fn token_v23_reconstructs_contract_types() {
     assert!(src.contains("Balance(Address)"), "payload variant:\n{src}");
     assert!(src.contains("Admin,"), "unit variant:\n{src}");
 }
+
+/// A module with no entrypoints is still a contract: the SDK's `#[contract]`
+/// attribute exports nothing by itself, so the bare struct is the smallest
+/// source that matches such a binary. (Any export becomes an entrypoint, with
+/// a signature synthesized when there is no spec, so the case is a module
+/// that exports nothing.)
+#[test]
+fn no_entrypoints_emits_the_bare_contract_struct() {
+    let wasm = wat::parse_str("(module (func))").expect("wat parses");
+    let src = emit_rust(&common::build_high(&wasm)).expect("emits");
+
+    assert!(src.starts_with("#![no_std]"), "no_std module attribute:\n{src}");
+    let use_line = src.lines().find(|l| l.starts_with("use soroban_sdk::")).expect("an SDK import");
+    assert!(use_line.contains("contract"), "the struct's macro import:\n{src}");
+    assert!(src.contains("#[contract]\npub struct Contract;"), "contract struct:\n{src}");
+    assert!(!src.contains("contractimpl"), "no impl block without entrypoints:\n{src}");
+    assert!(!src.contains("impl Contract"), "no impl block without entrypoints:\n{src}");
+}
