@@ -101,6 +101,47 @@ fn u32_val_payload(raw: i64) -> Option<u32> {
     u32::try_from(raw >> 32).ok()
 }
 
+/// The operand whose chain converts it into a `Val` before using it —
+/// `IntoVal::<Env, Val>::into_val(&x, e)` — or `None` when the op's chain
+/// converts none.
+///
+/// Three chains do: `len()` and a literal-index `get` on a receiver the IR
+/// has not typed as a `Vec` ([`known_op_expr`], [`vec_get_at_literal`]),
+/// and `authorize_as_current_contract` on entries typed neither a `Vec`
+/// nor a `Val`. Each treats the operand as the `Val` the host call was
+/// handed, which is what lets the body annotate an untyped hole read only
+/// this way as one (`FnCtx::converted_to_val_only`): without it, the
+/// hole's `!` falls back to `()`, and `()` is not the value the host read.
+pub(crate) fn converted_to_val(ctx: &FnCtx, op: &KnownOp) -> Option<sordec_common::ValueId> {
+    match op {
+        KnownOp::VecOp { kind: VecOpKind::Len, args } => {
+            let recv = *args.first()?;
+            (!typed_vec(ctx, recv)).then_some(recv)
+        }
+        KnownOp::VecOp { kind: VecOpKind::Get, args } => {
+            let [recv, index] = args.as_slice() else {
+                return None;
+            };
+            let literal = match ctx.func.bindings.get(*index).map(|b| &b.expr) {
+                Some(sordec_ir::Expr::Literal(sordec_ir::Literal::I64(raw))) => u32_val_payload(*raw),
+                _ => None,
+            };
+            (literal.is_some() && !typed_vec(ctx, *recv)).then_some(*recv)
+        }
+        KnownOp::AuthorizeAsCurrContract { auth_entries } => {
+            let typed = matches!(
+                ctx.func.bindings.get(*auth_entries).map(|b| &b.ty),
+                Some(
+                    IrType::Known(KnownType::Vec(_) | KnownType::Val)
+                        | IrType::Inferred(KnownType::Vec(_) | KnownType::Val)
+                )
+            );
+            (!typed).then_some(*auth_entries)
+        }
+        _ => None,
+    }
+}
+
 /// The method chain for a recovered op, or `None` when it cannot be
 /// rendered honestly (an unmapped op, or an `Unknown` storage tier).
 pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
@@ -151,7 +192,7 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                 // traps unless it is a vec, and so does the conversion that
                 // makes it one here. Through `Val`, since only `Val`
                 // converts to a `Vec`.
-                VecOpKind::Len if !typed_vec(ctx, args[0]) => Some(parse_quote!(
+                VecOpKind::Len if converted_to_val(ctx, op).is_some() => Some(parse_quote!(
                     soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Vec<soroban_sdk::Val>>::into_val(
                         &soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#v, #eb),
                         #eb,

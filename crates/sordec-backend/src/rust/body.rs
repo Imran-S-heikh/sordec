@@ -33,6 +33,7 @@ use sordec_ir::{
 use crate::rust::expr;
 use crate::rust::fold::Fold;
 use crate::rust::hole::HolePolicy;
+use crate::rust::idiom;
 use crate::rust::liveness::{self, Liveness};
 use crate::rust::naming::ValueNames;
 use crate::rust::sig;
@@ -808,6 +809,12 @@ impl<'a> FnCtx<'a> {
                     // them.
                     let ty = self.value_type(vid);
                     out.push(parse_quote!(let #name: #ty = #value;));
+                } else if Self::is_hole_expr(&value) && self.converted_to_val_only(vid) {
+                    // Annotated for what reads it, not for being a hole:
+                    // a reader that cannot infer the type, and the type the
+                    // IR already holds. See the predicate.
+                    let ty = self.value_type(vid);
+                    out.push(parse_quote!(let #name: #ty = #value;));
                 } else if Self::reads_a_recovered_type(binding) {
                     // `Storage::get` is generic in its payload, so nothing
                     // at the use site pins it when the value only flows
@@ -823,6 +830,86 @@ impl<'a> FnCtx<'a> {
                 }
             }
         }
+    }
+
+    /// The bindings the emitted body reads `vid` in — through renames, as
+    /// [`Liveness`] counts reads — and whether anything else reads it.
+    ///
+    /// A reader dropped as dead is not one, and neither is a reader that
+    /// renders as a hole: `todo!("…")` names its operands inside a string
+    /// and reads none of them. "Anything else" is a read the region makes
+    /// itself (a condition, a return, a merge's input), a merge, or an
+    /// `if let` — each pins a type of its own, which the callers here do
+    /// not look at.
+    fn emitted_readers(&self, vid: ValueId) -> (Vec<ValueId>, bool) {
+        let mut readers = Vec::new();
+        let mut other = false;
+        self.func.region.for_each_value_use(|u| other |= self.fold.reads(u) == Some(vid));
+        self.func.region.for_each_node(|node| {
+            let Region::Basic(b) = node else { return };
+            let Some(block) = self.func.blocks.get(*b) else {
+                return;
+            };
+            for &id in &block.bindings {
+                let Some(r) = self.func.bindings.get(id) else {
+                    continue;
+                };
+                let mut reads = false;
+                liveness::rendered_reads(self.func, r, |u| reads |= self.fold.reads(u) == Some(vid));
+                if !reads {
+                    continue;
+                }
+                if matches!(r.expr, Expr::Phi { .. })
+                    || self.if_lets.contains_key(&id)
+                    || self.if_lets.values().any(|read| *read == id)
+                {
+                    other = true;
+                    continue;
+                }
+                let hole = Self::is_hole_expr(&expr::binding_expr(self, r));
+                if hole || self.liveness.is_unused(id) && !liveness::survives_unused(&r.expr, hole) {
+                    continue;
+                }
+                readers.push(id);
+            }
+        });
+        (readers, other)
+    }
+
+    /// An untyped hole whose every emitted reader converts it into a `Val`
+    /// first ([`idiom::converted_to_val`]): `len()` on a receiver the IR
+    /// has not typed as a `Vec`, spelled
+    /// `IntoVal::<Env, Vec<Val>>::into_val(&IntoVal::<Env, Val>::into_val(&v, e), e).len()`.
+    ///
+    /// `into_val` is generic in what it converts, so nothing at that reader
+    /// pins the hole's type; the `!` of `todo!()` falls back to `()`, which
+    /// rustc rejects ("depends on never type fallback"). Annotating it `Val`
+    /// is exact: an untyped value is printed `Val` everywhere else, the
+    /// reader already treats it as the `Val` the host call was handed, and
+    /// `into_val` of a `Val` into a `Val` is the identity.
+    ///
+    /// Keyed on the reader, not on the hole — annotating holes as such was
+    /// measured to cost errors (see the comment above the machine-type
+    /// branch). Any other reader that prints it, or a read by the region,
+    /// leaves the hole alone: that reader may pin a type of its own.
+    fn converted_to_val_only(&self, vid: ValueId) -> bool {
+        let renders_as_val = match self.func.bindings.get(vid).map(|b| &b.ty) {
+            Some(IrType::Unknown(reason)) => self.policy.unknown_word(reason).is_none(),
+            Some(IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val)) => true,
+            _ => false,
+        };
+        if !renders_as_val {
+            return false;
+        }
+        let (readers, other) = self.emitted_readers(vid);
+        !other
+            && !readers.is_empty()
+            && readers.iter().all(|r| match self.func.bindings.get(*r).map(|b| &b.expr) {
+                Some(Expr::Semantic(SemanticOp::Known(op))) => {
+                    idiom::converted_to_val(self, op).and_then(|x| self.fold.reads(x)) == Some(vid)
+                }
+                _ => false,
+            })
     }
 
     /// `Some(v) = …get::<K, T>(&k)`, the head of an `if let` — the pattern
@@ -1416,6 +1503,128 @@ mod tests {
 
     fn v(i: u32) -> ValueId {
         ValueId::new(i)
+    }
+
+    /// The emitted body of a one-block helper whose parameter is `v0` and
+    /// whose bindings are `exprs` from `v1` on, all scheduled in order;
+    /// `ret` adds a `return` of that value after the block.
+    fn emitted(exprs: Vec<(IrType, Expr)>, ret: Option<u32>, reg: &TypeRegistry) -> String {
+        use quote::ToTokens;
+        use sordec_common::{Arena, FuncId, Provenance, ProvenanceSource};
+        use sordec_ir::{HighBlock, MemoryImage, WasmFacts};
+
+        let mut bindings: Arena<ValueId, Binding> = Arena::new();
+        let param = (IrType::Known(KnownType::I32), Expr::Phi { incoming: vec![] });
+        for (ty, expr) in std::iter::once(param).chain(exprs) {
+            let id = v(bindings.len() as u32);
+            bindings.push(Binding::new(id, ty, expr, Provenance::new("test", ProvenanceSource::DataFlow, "test")));
+        }
+        let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
+        let b0 = BlockId::from_index(0);
+        blocks.push(HighBlock { id: b0, bindings: (1..bindings.len() as u32).map(v).collect() });
+        let region = match ret {
+            Some(r) => Region::Sequence(vec![Region::Basic(b0), Region::Return { values: vec![v(r)] }]),
+            None => Region::Basic(b0),
+        };
+        let func = HighFunction {
+            id: FuncId::from_index(0),
+            name: None,
+            signature: None,
+            aliases: Vec::new(),
+            blocks,
+            bindings,
+            region,
+            params: vec![v(0)],
+            returns: vec![],
+        };
+        let high = HighIr {
+            facts: WasmFacts {
+                imports: vec![],
+                exports: vec![],
+                function_type_indices: vec![],
+                function_bodies: vec![],
+                function_fingerprints: vec![],
+                table_functions: None,
+                custom_sections: vec![],
+            },
+            soroban_facts: None,
+            functions: vec![func],
+            memory: MemoryImage::empty(),
+        };
+        let policy = crate::rust::hole::StrictNoGuess;
+        emit_body(&high, &high.functions[0], reg, &policy).to_token_stream().to_string()
+    }
+
+    fn untyped() -> IrType {
+        IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)
+    }
+
+    /// `load arg0 width 8`, which the emitter cannot render: a hole.
+    fn wide_load() -> Expr {
+        Expr::Load { addr: v(0), offset: 0, width: sordec_ir::MemWidth::W8, signed: None, ty: untyped() }
+    }
+
+    /// A memory write of `value`: a hole too, kept because it writes.
+    fn store(value: u32) -> Expr {
+        Expr::Store { addr: v(0), value: v(value), offset: 0, width: sordec_ir::MemWidth::W8 }
+    }
+
+    fn vec_len(recv: u32) -> Expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::Len, args: vec![v(recv)] }))
+    }
+
+    fn mask(value: u32, literal: u32) -> Expr {
+        Expr::Binary { op: BinaryOp::BitAnd, lhs: v(value), rhs: v(literal) }
+    }
+
+    fn i64_lit(n: i64) -> (IrType, Expr) {
+        (IrType::Known(KnownType::I64), Expr::Literal(sordec_ir::Literal::I64(n)))
+    }
+
+    // ---- a hole only a conversion through `Val` reads ----
+
+    #[test]
+    fn a_hole_read_only_through_val_is_annotated_val() {
+        // The element's tag check and its spill are holes, and the one
+        // reader that prints it is `len()` through `Val`. Left bare, the
+        // `!` falls back to `()`.
+        let body = emitted(
+            vec![(untyped(), wide_load()), (untyped(), store(1)), (IrType::Known(KnownType::U32), vec_len(1))],
+            None,
+            &TypeRegistry::default(),
+        );
+        assert!(body.contains("let v1 : soroban_sdk :: Val = todo !"), "{body}");
+        assert!(body.contains("into_val (& v1"), "the reader converts it:\n{body}");
+    }
+
+    #[test]
+    fn a_hole_another_reader_prints_is_left_to_inference() {
+        // `v1 & 255` reads it too, and pins what the conversion does not.
+        // (The length is stored, so it is read: an unread one would leave
+        // the mask the only reader, which `raw_load_word` types.)
+        let body = emitted(
+            vec![
+                (untyped(), wide_load()),
+                (IrType::Known(KnownType::U32), vec_len(1)),
+                (untyped(), store(2)),
+                i64_lit(255),
+                (IrType::Inferred(KnownType::I64), mask(1, 4)),
+                (untyped(), store(5)),
+            ],
+            None,
+            &TypeRegistry::default(),
+        );
+        assert!(body.contains("let v1 = todo !"), "{body}");
+    }
+
+    #[test]
+    fn a_hole_the_region_reads_is_left_to_inference() {
+        let body = emitted(
+            vec![(untyped(), wide_load()), (IrType::Known(KnownType::U32), vec_len(1))],
+            Some(1),
+            &TypeRegistry::default(),
+        );
+        assert!(body.contains("let v1 = todo !"), "{body}");
     }
 
     #[test]
