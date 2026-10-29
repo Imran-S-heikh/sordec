@@ -324,7 +324,7 @@ fn plan(func: &HighFunction, encoders: &EncoderTable, enums: &[EnumDef]) -> Vec<
     let constant = |encoded: ValueId| {
         encoded_constant(func, encoded, &declared)
             .map(Expr::Literal)
-            .or_else(|| encoded_variant(func, encoded, &declared, enums).map(|name| Expr::Variant { name }))
+            .or_else(|| encoded_variant(func, encoded, &declared, enums).map(|name| Expr::Variant { name, payload: Vec::new() }))
     };
 
     for returned in returned_values(func) {
@@ -739,7 +739,7 @@ mod tests {
         let (f, enums) = returning_enum((3 << 32) | 4);
         let elisions = plan(&f, &EncoderTable::default(), &enums);
         assert_eq!(elisions.len(), 1);
-        assert!(matches!(&elisions[0].expr, Expr::Variant { name } if name == "V3"), "{:?}", elisions[0].expr);
+        assert!(matches!(&elisions[0].expr, Expr::Variant { name, .. } if name == "V3"), "{:?}", elisions[0].expr);
         assert!(matches!(
             elisions[0].ty,
             Some(IrType::Known(KnownType::UserDefined(id))) if id == sordec_common::TypeId::new(12)

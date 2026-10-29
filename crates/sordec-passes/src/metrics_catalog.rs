@@ -479,6 +479,12 @@ pub const MARSHALLING_TUPLE_RETURNS_RECOVERED: &str = "marshalling_tuple_returns
 /// Returned vecs of a tuple-returning function left as vecs: read
 /// elsewhere, or a component of another type.
 pub const MARSHALLING_TUPLE_RETURNS_DECLINED: &str = "marshalling_tuple_returns_declined";
+/// Returned vecs rewritten to the enum variant the spec declares.
+pub const MARSHALLING_VARIANT_RETURNS_RECOVERED: &str = "marshalling_variant_returns_recovered";
+/// Returned vecs of an enum-returning function left as vecs: read
+/// elsewhere, no constant symbol naming a variant first, or a value of
+/// another type.
+pub const MARSHALLING_VARIANT_RETURNS_DECLINED: &str = "marshalling_variant_returns_declined";
 /// Decodes and re-encodes of a host length folded into the length.
 pub const MARSHALLING_HOST_LEN_CODECS: &str = "marshalling_host_len_codecs";
 /// 32-bit values whose single-mask re-encode was folded into the value.
@@ -1016,6 +1022,8 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_OPTIONAL_PAIR_REWRITTEN,
         MARSHALLING_TUPLE_RETURNS_RECOVERED,
         MARSHALLING_TUPLE_RETURNS_DECLINED,
+        MARSHALLING_VARIANT_RETURNS_RECOVERED,
+        MARSHALLING_VARIANT_RETURNS_DECLINED,
         MARSHALLING_HOST_LEN_CODECS,
         MARSHALLING_MASKED_ENCODES,
         MARSHALLING_WIDE_ENCODES_INLINE,

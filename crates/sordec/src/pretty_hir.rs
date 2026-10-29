@@ -759,7 +759,11 @@ fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Resu
             write!(out, "wide({}, {})", ctx.operand(*lo), ctx.operand(*hi))
         }
         Expr::Field { base, field } => write!(out, "{}.{field}", ctx.operand(*base)),
-        Expr::Variant { name } => write!(out, "::{name}"),
+        Expr::Variant { name, payload } if payload.is_empty() => write!(out, "::{name}"),
+        Expr::Variant { name, payload } => {
+            let items: Vec<String> = payload.iter().map(|v| ctx.operand(*v)).collect();
+            write!(out, "::{name}({})", items.join(", "))
+        }
         Expr::Select { cond, if_true, if_false } => write!(
             out,
             "if {} {{ {} }} else {{ {} }}",

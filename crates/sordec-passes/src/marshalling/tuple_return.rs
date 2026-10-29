@@ -1,4 +1,4 @@
-//! A returned tuple, recovered from the `Vec` it travels as.
+//! A returned tuple or enum variant, recovered from the `Vec` it travels as.
 //!
 //! # The shape
 //!
@@ -53,18 +53,41 @@
 //!   (`2 << 32 | U32Val`): by the encoding's definition it is that number,
 //!   the same reading a returned constant gets
 //!   ([`super::encode::encoded_constant`]). Only the raw word — a number
-//!   found behind an encode is the value itself.
+//!   found behind an encode is the value itself. And the raw word is
+//!   never its literal number: `4294967300` in an `i64` position is a
+//!   `U32Val`, not an `i64`, so a word that decodes to nothing declared
+//!   declines the vec.
 //!
 //! Both are exact for the reason the tuple is: the spec says the vec is the
 //! tuple's encoding, so its element at each position is the encoding of the
 //! declared component, and each of these readings is that encoding's
 //! inverse.
+//!
+//! # An enum variant, by the same route
+//!
+//! A `#[contracttype]` enum's variant travels as a vec too: the variant's
+//! name as a symbol, then each value it carries, encoded. `UsedReturnEnum::
+//! A(1)` returned is `vec![Symbol("A"), 1 << 32 | U32Val]`. Where the spec
+//! declares the entrypoint returns the enum, a returned vec whose first
+//! element is a constant symbol naming one of its variants, with exactly
+//! as many elements after it as that variant carries values, is that
+//! variant: [`Expr::Variant`] with the rest read as the tuple's components
+//! are, against the variant's declared types.
+//!
+//! Exact: the spec says the vec is the enum's encoding, the derive writes
+//! the variant's own name first and variant names are unique within an
+//! enum, so the symbol picks the variant and the length confirms it; the
+//! values after it are that variant's, in order, by the derive's layout.
+//! A first element that is not a constant symbol, a name the enum does
+//! not declare, a length that disagrees, or any value of another type
+//! declines the vec.
 
 use std::collections::HashSet;
 
 use sordec_common::{IrId, Provenance, ProvenanceSource, TypeId, ValueId};
 use sordec_ir::{
     CompositeType, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, SemanticOp, StructDef, TypeRef,
+    UnionDef,
 };
 
 use super::encode::encoded_constant;
@@ -73,14 +96,18 @@ use crate::dataflow::high_uses::{HighUseIndex, HighUseSite};
 use crate::dataflow::resolve_use;
 use crate::metrics_catalog::{
     MARSHALLING_TUPLE_RETURNS_DECLINED as M_DECLINED, MARSHALLING_TUPLE_RETURNS_RECOVERED as M_RECOVERED,
+    MARSHALLING_VARIANT_RETURNS_DECLINED as M_VARIANT_DECLINED,
+    MARSHALLING_VARIANT_RETURNS_RECOVERED as M_VARIANT_RECOVERED,
 };
 use crate::pass::{Pass, PassResult};
 use crate::type_infer::known_of_type_ref;
+use crate::val_abi::decode_small_symbol;
 
 /// Pass name — also the provenance `pass` field for every rewrite.
 pub const PASS_NAME: &str = "marshalling-tuple-return";
 
-/// Rewrites a returned `Vec` to the tuple the spec declares.
+/// Rewrites a returned `Vec` to the tuple or enum variant the spec
+/// declares.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TupleReturnPass;
 
@@ -91,39 +118,62 @@ impl Pass<HighIr> for TupleReturnPass {
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
-        let structs: Vec<StructDef> =
-            ir.soroban_facts.as_ref().map(|f| f.types.structs.clone()).unwrap_or_default();
+        let (structs, unions): (Vec<StructDef>, Vec<UnionDef>) = ir
+            .soroban_facts
+            .as_ref()
+            .map(|f| (f.types.structs.clone(), f.types.unions.clone()))
+            .unwrap_or_default();
         let memory = &ir.memory;
         for func in &mut ir.functions {
-            let Some(slots) = declared_tuple(func) else {
+            let Some(declared) = declared(func, &unions) else {
                 continue;
+            };
+            let (recovered, declined) = match declared {
+                Declared::Tuple(_) => (M_RECOVERED, M_DECLINED),
+                Declared::Variant(_) => (M_VARIANT_RECOVERED, M_VARIANT_DECLINED),
             };
             let uses = HighUseIndex::build(func);
             for leaf in returned_vecs(func) {
-                let Some(components) = plan(func, memory, &structs, &uses, &leaf, &slots) else {
-                    result.metrics.increment(M_DECLINED, 1);
+                let planned = match declared {
+                    Declared::Tuple(ref slots) => {
+                        plan(func, memory, &structs, &uses, &leaf, slots).map(|c| (None, c))
+                    }
+                    Declared::Variant(def) => {
+                        plan_variant(func, memory, &structs, &uses, &leaf, def).map(|(name, c)| (Some(name), c))
+                    }
+                };
+                let Some((variant, components)) = planned else {
+                    result.metrics.increment(declined, 1);
                     continue;
                 };
                 let Some(items) = settle(func, memory, &structs, leaf.vec, components) else {
-                    result.metrics.increment(M_DECLINED, 1);
+                    result.metrics.increment(declined, 1);
                     continue;
                 };
-                let ty = IrType::Known(KnownType::Tuple(slots.clone()));
-                if let Some(binding) = func.bindings.get_mut(leaf.vec) {
-                    binding.expr = Expr::Tuple { items };
-                    binding.ty = ty.clone();
-                    binding.add_provenance(Provenance::new(
-                        PASS_NAME,
-                        ProvenanceSource::SdkPattern,
+                let (expr, ty, note) = match (&declared, variant) {
+                    (Declared::Variant(def), Some(name)) => (
+                        Expr::Variant { name, payload: items },
+                        IrType::Known(KnownType::UserDefined(def.id)),
+                        "returned vec is the enum variant the spec declares",
+                    ),
+                    (Declared::Tuple(slots), _) => (
+                        Expr::Tuple { items },
+                        IrType::Known(KnownType::Tuple(slots.clone())),
                         "returned vec is the tuple the spec declares",
-                    ));
+                    ),
+                    (Declared::Variant(_), None) => continue,
+                };
+                if let Some(binding) = func.bindings.get_mut(leaf.vec) {
+                    binding.expr = expr;
+                    binding.ty = ty.clone();
+                    binding.add_provenance(Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note));
                 }
                 for &copy in &leaf.copies {
                     if let Some(binding) = func.bindings.get_mut(copy) {
                         binding.ty = ty.clone();
                     }
                 }
-                result.metrics.increment(M_RECOVERED, 1);
+                result.metrics.increment(recovered, 1);
                 result.changed = true;
             }
         }
@@ -131,16 +181,25 @@ impl Pass<HighIr> for TupleReturnPass {
     }
 }
 
-/// The components of the tuple the function's spec says it returns, bare or
-/// as a `Result`'s `Ok`.
-fn declared_tuple(func: &HighFunction) -> Option<Vec<IrType>> {
+/// What the spec says a returned vec is.
+enum Declared<'a> {
+    /// A tuple, by its components' types.
+    Tuple(Vec<IrType>),
+    /// One variant of this `#[contracttype]` enum.
+    Variant(&'a UnionDef),
+}
+
+/// What the function's spec says it returns, bare or as a `Result`'s `Ok`,
+/// when that travels as a vec: a tuple, or an enum with variants.
+fn declared<'a>(func: &HighFunction, unions: &'a [UnionDef]) -> Option<Declared<'a>> {
     let ty = match func.signature.as_ref()?.outputs.as_slice() {
         [TypeRef::Composite(CompositeType::Result(ok, _))] => ok.as_ref(),
         [one] => one,
         _ => return None,
     };
     match known_of_type_ref(ty)? {
-        KnownType::Tuple(slots) if !slots.is_empty() => Some(slots),
+        KnownType::Tuple(slots) if !slots.is_empty() => Some(Declared::Tuple(slots)),
+        KnownType::UserDefined(id) => unions.iter().find(|u| u.id == id).map(Declared::Variant),
         _ => None,
     }
 }
@@ -241,7 +300,7 @@ fn settle(
                     Provenance::new(
                         PASS_NAME,
                         ProvenanceSource::SdkPattern,
-                        "a tuple component stored as its encoded constant, decoded",
+                        "a component stored as its encoded constant, decoded",
                     ),
                 ));
                 let block = func.blocks.iter_mut().find(|(_, b)| b.bindings.contains(&vec))?;
@@ -264,14 +323,55 @@ fn plan(
     leaf: &Leaf,
     slots: &[IrType],
 ) -> Option<Vec<Component>> {
+    let elements = returned_elements(func, uses, leaf)?;
+    if elements.len() != slots.len() {
+        return None;
+    }
+    components(func, memory, structs, elements, slots)
+}
+
+/// The variant the vec is, and the values it carries, or `None` when a
+/// gate declines.
+fn plan_variant(
+    func: &HighFunction,
+    memory: &sordec_ir::MemoryImage,
+    structs: &[StructDef],
+    uses: &HighUseIndex,
+    leaf: &Leaf,
+    def: &UnionDef,
+) -> Option<(String, Vec<Component>)> {
+    let (first, rest) = returned_elements(func, uses, leaf)?.split_first()?;
+    let name = symbol_text(func, *first)?;
+    let case = def.cases.iter().find(|c| c.name == name)?;
+    if case.fields.len() != rest.len() {
+        return None;
+    }
+    let slots = case
+        .fields
+        .iter()
+        .map(|t| known_of_type_ref(t).map(IrType::Known))
+        .collect::<Option<Vec<_>>>()?;
+    Some((name, components(func, memory, structs, rest, &slots)?))
+}
+
+/// The text of a constant symbol: one the host builds from a string the
+/// pipeline resolved, or a `SymbolSmall` word.
+fn symbol_text(func: &HighFunction, value: ValueId) -> Option<String> {
+    match &func.bindings.get(resolve_use(func, value))?.expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { resolved: Some(text), .. })) => Some(text.clone()),
+        Expr::Literal(Literal::I64(bits)) => decode_small_symbol(*bits as u64),
+        Expr::Literal(Literal::U64(bits)) => decode_small_symbol(*bits),
+        _ => None,
+    }
+}
+
+/// The elements of a returned vec that nothing but the return reads.
+fn returned_elements<'f>(func: &'f HighFunction, uses: &HighUseIndex, leaf: &Leaf) -> Option<&'f [ValueId]> {
     let Some(Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { elements: Some(elements), .. }))) =
         func.bindings.get(leaf.vec).map(|b| &b.expr)
     else {
         return None;
     };
-    if elements.len() != slots.len() {
-        return None;
-    }
     // A binding no block schedules and no merge stands for — residue a
     // rewrite left behind — never runs, so it reads nothing.
     let scheduled: HashSet<ValueId> = func.blocks.iter().flat_map(|(_, b)| b.bindings.iter().copied()).collect();
@@ -284,15 +384,37 @@ fn plan(
             HighUseSite::Return | HighUseSite::Region => true,
         })
     });
-    if !read_only_on_the_way {
-        return None;
-    }
+    read_only_on_the_way.then_some(elements.as_slice())
+}
+
+/// Each element read as the component its slot declares, or `None` if
+/// any is not.
+fn components(
+    func: &HighFunction,
+    memory: &sordec_ir::MemoryImage,
+    structs: &[StructDef],
+    elements: &[ValueId],
+    slots: &[IrType],
+) -> Option<Vec<Component>> {
     elements
         .iter()
         .zip(slots)
         .map(|(&element, slot)| {
             let want = base(slot)?;
             let item = encoded_value(func, element);
+            // A 64-bit constant stored as the element itself, typed only as
+            // the word its literal is, is the `Val` — tag and all — so only
+            // its decode can make it a component. Behind an encode, a
+            // number is the value.
+            let raw_word = item == resolve_use(func, element)
+                && func.bindings.get(item).is_some_and(|b| {
+                    matches!(b.expr, Expr::Literal(Literal::I64(_) | Literal::U64(_)))
+                        && matches!(base(&b.ty), None | Some(KnownType::I64 | KnownType::U64))
+                });
+            if raw_word {
+                let lit = encoded_constant(func, element, &want)?;
+                return Some(Component::Word(lit, want));
+            }
             if component_type(func, element, item).as_ref() == Some(&want) {
                 return Some(Component::Value(item));
             }
@@ -300,11 +422,6 @@ fn plan(
                 && encodes(func, memory, structs, item, id)
             {
                 return Some(Component::Struct(item, id));
-            }
-            // Only the raw word: behind an encode, a number is the value.
-            if item == resolve_use(func, element) {
-                let lit = encoded_constant(func, element, &want)?;
-                return Some(Component::Word(lit, want));
             }
             None
         })
@@ -534,5 +651,99 @@ mod tests {
         ));
         let mut ir = struct_and_word(9, (2 << 32) | 4);
         assert!(!TupleReturnPass.run(&mut ir).changed);
+    }
+
+    // -----------------------------------------------------------------
+    // An enum variant
+    // -----------------------------------------------------------------
+
+    /// `enum UsedReturnEnum { A(u32), B(i64) }` (5), declared as the return;
+    /// the returned vec is `[symbol, words..]`, through a rename.
+    fn variant(symbol: Expr, words: &[i64]) -> HighIr {
+        use sordec_ir::{SorobanFacts, TypeRegistry, UnionCase};
+        let mut exprs = vec![symbol]; // v0
+        exprs.extend(words.iter().map(|w| Expr::Literal(Literal::I64(*w)))); // v1..
+        let n = exprs.len() as u32;
+        exprs.push(Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+            vals_pos: v(0),
+            len: v(0),
+            elements: Some((0..n).map(v).collect()),
+        }))); // vn
+        exprs.push(Expr::Use(v(n))); // vn+1
+        let mut func = func_with(exprs, vec![], (0..n + 2).collect());
+        for i in 1..n {
+            func.bindings.get_mut(v(i)).unwrap().ty = IrType::Known(KnownType::I64);
+        }
+        func.signature = Some(FunctionSignature {
+            name: "ret".to_string(),
+            inputs: vec![],
+            outputs: vec![TypeRef::UserDefined(TypeId::new(5))],
+        });
+        func.returns = vec![vec![v(n + 1)]];
+        let mut m = module(vec![func]);
+        m.soroban_facts = Some(SorobanFacts {
+            functions: std::collections::BTreeMap::new(),
+            types: TypeRegistry {
+                unions: vec![UnionDef {
+                    id: TypeId::new(5),
+                    name: "UsedReturnEnum".to_string(),
+                    cases: vec![
+                        UnionCase { name: "A".to_string(), fields: vec![TypeRef::Primitive(PrimitiveType::U32)] },
+                        UnionCase { name: "B".to_string(), fields: vec![TypeRef::Primitive(PrimitiveType::I64)] },
+                    ],
+                    exported: true,
+                }],
+                ..Default::default()
+            },
+            contract_meta: std::collections::BTreeMap::new(),
+            env_meta: sordec_ir::EnvCompatibility::default(),
+        });
+        m
+    }
+
+    fn symbol_new(text: &str) -> Expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew {
+            lm_pos: v(0),
+            len: v(0),
+            resolved: Some(text.to_string()),
+        }))
+    }
+
+    /// `"A"` as a `SymbolSmall` word: code 12, tag 14.
+    const SMALL_A: i64 = (12 << 8) | 14;
+
+    /// `vec![Symbol("A"), U32Val(1)]` returned as `UsedReturnEnum` is
+    /// `UsedReturnEnum::A(1)`, whichever form the symbol takes.
+    #[test]
+    fn a_returned_vec_is_the_variant_its_symbol_names() {
+        for symbol in [symbol_new("A"), Expr::Literal(Literal::I64(SMALL_A))] {
+            let mut ir = variant(symbol, &[(1 << 32) | 4]);
+            assert!(TupleReturnPass.run(&mut ir).changed);
+            let func = &ir.functions[0];
+            let vec = func.bindings.get(v(2)).unwrap();
+            let Expr::Variant { name, payload } = &vec.expr else {
+                panic!("the vec is the variant, got {:?}", vec.expr);
+            };
+            assert_eq!(name, "A");
+            assert_eq!(vec.ty, IrType::Known(KnownType::UserDefined(TypeId::new(5))));
+            assert!(matches!(func.bindings.get(payload[0]).unwrap().expr, Expr::Literal(Literal::U32(1))));
+            assert_eq!(func.bindings.get(v(3)).unwrap().ty, vec.ty, "the rename takes the enum's type");
+        }
+    }
+
+    /// A name the enum does not declare, a count of values the variant
+    /// does not carry, or a value of another type: the vec stays a vec.
+    #[test]
+    fn a_vec_that_is_no_declared_variant_stays_a_vec() {
+        for (symbol, words) in [
+            (symbol_new("C"), vec![(1 << 32) | 4]),
+            (symbol_new("A"), vec![(1 << 32) | 4, (2 << 32) | 4]),
+            (symbol_new("A"), vec![]),
+            (symbol_new("B"), vec![(1 << 32) | 4]),
+            (Expr::Phi { incoming: vec![] }, vec![(1 << 32) | 4]),
+        ] {
+            let mut ir = variant(symbol, &words);
+            assert!(!TupleReturnPass.run(&mut ir).changed, "{words:?}");
+        }
     }
 }
