@@ -213,3 +213,19 @@ the SDK's not-a-bool marker arm, is the `if` on the `bool` when the selector is
 a parameter the spec declares `bool` or a comparison. Only spec_shaking_v1 and
 v2 changed (12 → 5 errors each). Scores unchanged: corpus bands pass, held-out
 mean 0.7850.
+
+## 2026-10-29 — commit 7773125 (a returned error the declared Result names)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 22/25 | 22 | 3,898 |
+| Stellar examples, multi-contract | 13 | 10/13 | 34 | 4,241 |
+| third-party | 2 | 1/2 | 28 | 788 |
+| SDK 26 test contracts | 39 | 24/39 | 61 | 1,595 |
+
+Errors 147 → 145; SDK 26 add_u64 compiles. An error constant returned from a
+function declared `-> Result<T, E>` takes its variant from `E` when two enums
+declare the same code, or becomes `Error::from_contract_error(code)` when `E` is
+the SDK's own `Error`. Only add_u64 changed; the held-out set is untouched, so
+scores are unchanged.
