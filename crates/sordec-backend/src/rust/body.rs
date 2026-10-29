@@ -1637,6 +1637,53 @@ mod tests {
         Region::Return { values: vec![v(value)] }
     }
 
+    /// `DataKey::Temp(<payload>)` read by a `has`, the variant declaring a
+    /// field of `declared` and the payload being `wrap32(arg)`.
+    fn key_with_payload(declared: sordec_ir::PrimitiveType) -> String {
+        use sordec_ir::{EnumKey, KnownTier, StorageTier};
+        let mut reg = TypeRegistry::default();
+        reg.unions.push(sordec_ir::UnionDef {
+            id: sordec_common::TypeId::new(3),
+            name: "DataKey".to_string(),
+            cases: vec![sordec_ir::UnionCase {
+                name: "Temp".to_string(),
+                fields: vec![sordec_ir::TypeRef::Primitive(declared)],
+            }],
+            exported: true,
+        });
+        let has = known(KnownOp::StorageHas {
+            tier: StorageTier::Known(KnownTier::Temporary),
+            durability: v(0),
+            key: v(0),
+            resolved_key: Some(EnumKey {
+                enum_name: "DataKey".to_string(),
+                variant: "Temp".to_string(),
+                payload: vec![v(1)],
+            }),
+            probe: false,
+        });
+        emitted(
+            vec![
+                (untyped(), Expr::Unary { op: sordec_ir::UnaryOp::Wrap32, value: v(0) }),
+                (IrType::Known(KnownType::Bool), has),
+            ],
+            vec![ret(2)],
+            &reg,
+        )
+    }
+
+    #[test]
+    fn a_variant_payload_of_the_other_sign_is_cast_to_the_declared_field() {
+        let out = key_with_payload(sordec_ir::PrimitiveType::U32);
+        assert!(out.contains("Temp (v1 as u32)") || out.contains("Temp ((v1 as u32))"), "{out}");
+    }
+
+    #[test]
+    fn a_variant_payload_of_the_declared_sign_is_left_alone() {
+        let out = key_with_payload(sordec_ir::PrimitiveType::I32);
+        assert!(out.contains("Temp (v1)"), "{out}");
+    }
+
     // ---- a hole only a conversion through `Val` reads ----
 
     #[test]

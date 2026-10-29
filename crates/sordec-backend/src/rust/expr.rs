@@ -246,7 +246,7 @@ fn arithmetic_type(ctx: &FnCtx, v: sordec_common::ValueId, depth: u32) -> Option
 }
 
 /// A declared field or parameter type that is a 32- or 64-bit word.
-fn machine_word(t: &sordec_ir::TypeRef) -> Option<IrType> {
+pub(crate) fn machine_word(t: &sordec_ir::TypeRef) -> Option<IrType> {
     use sordec_ir::{PrimitiveType as P, TypeRef};
     let k = match t {
         TypeRef::Primitive(P::U32) => KnownType::U32,

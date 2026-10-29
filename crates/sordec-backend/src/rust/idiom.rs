@@ -729,7 +729,22 @@ fn key_expr(ctx: &FnCtx, key: sordec_common::ValueId, resolved: &Option<EnumKey>
         // cloned here — `DataKey::Shares(to)` followed by any later use of
         // `to` is dex-liquidity-pool's last compile error. The same rule
         // every other by-value position already goes through.
-        let payload: Vec<syn::Expr> = ek.payload.iter().map(|v| ctx.arg_ref(*v)).collect();
+        // A machine-word field the value has the other sign of is cast: the
+        // wasm word carries no sign, so the cast keeps every bit.
+        let fields = variant_fields(ctx, ek);
+        let payload: Vec<syn::Expr> = ek
+            .payload
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                fields
+                    .as_ref()
+                    .filter(|f| f.len() == ek.payload.len())
+                    .and_then(|f| crate::rust::expr::machine_word(&f[i]))
+                    .and_then(|want| crate::rust::expr::sign_cast(ctx, *v, &want))
+                    .unwrap_or_else(|| ctx.arg_ref(*v))
+            })
+            .collect();
         // A variant whose single declared field is a struct is handed that
         // struct, not the struct's fields. On the wire there is no
         // difference — the recogniser reads the flattened map and hands
@@ -744,6 +759,19 @@ fn key_expr(ctx: &FnCtx, key: sordec_common::ValueId, resolved: &Option<EnumKey>
         }
         parse_quote!(#enum_name::#variant(#(#payload),*))
     }
+}
+
+/// The declared field types of a key variant, when the enum is known.
+fn variant_fields(ctx: &FnCtx, ek: &EnumKey) -> Option<Vec<sordec_ir::TypeRef>> {
+    let case = ctx
+        .reg
+        .unions
+        .iter()
+        .find(|u| u.name == ek.enum_name)?
+        .cases
+        .iter()
+        .find(|c| c.name == ek.variant)?;
+    Some(case.fields.clone())
 }
 
 /// A vec's elements, with the conversion a mixed one needs.
