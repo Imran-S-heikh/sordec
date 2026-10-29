@@ -1716,8 +1716,12 @@ mod tests {
 
     /// `v1 & -2i32` with `v1: u32` is the same 32 bits as `v1 & 4294967294`.
     fn masked(operand: KnownType) -> String {
+        masked_with(operand, -2)
+    }
+
+    fn masked_with(operand: KnownType, n: i32) -> String {
         let phi = (IrType::Known(operand), Expr::Phi { incoming: vec![] });
-        let lit = (IrType::Known(KnownType::I32), Expr::Literal(sordec_ir::Literal::I32(-2)));
+        let lit = (IrType::Known(KnownType::I32), Expr::Literal(sordec_ir::Literal::I32(n)));
         emitted(
             vec![phi, lit, (IrType::Known(KnownType::U32), mask(1, 2)), (untyped(), store(3))],
             vec![],
@@ -1732,9 +1736,15 @@ mod tests {
     }
 
     #[test]
-    fn a_negative_mask_on_a_signed_word_keeps_its_suffix() {
+    fn a_small_flag_on_an_unsigned_word_takes_the_words_type() {
+        let out = masked_with(KnownType::U32, 1);
+        assert!(out.contains("v1 & 1") && !out.contains("1i32"), "{out}");
+    }
+
+    #[test]
+    fn a_negative_mask_on_a_signed_word_stays_negative() {
         let out = masked(KnownType::I32);
-        assert!(out.contains("2i32") && !out.contains("4294967294"), "{out}");
+        assert!(out.contains("(- 2)") && !out.contains("4294967294"), "{out}");
     }
 
     /// A helper whose declared pair is `(i64, i64)` (the first return site)

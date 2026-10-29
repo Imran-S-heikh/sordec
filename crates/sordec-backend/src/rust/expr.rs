@@ -636,8 +636,8 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 // same bits (`-2i32` on a `u32` is `4294967294`), so no bit
                 // of the result changes.
                 BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => (
-                    same_bits(ctx, *lhs, *rhs),
-                    same_bits(ctx, *rhs, *lhs),
+                    unsuffixed(ctx, *lhs, *rhs).or_else(|| same_bits(ctx, *lhs, *rhs)),
+                    unsuffixed(ctx, *rhs, *lhs).or_else(|| same_bits(ctx, *rhs, *lhs)),
                 ),
                 _ => (None, None),
             };
