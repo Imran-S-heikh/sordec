@@ -122,3 +122,20 @@ disagreement the recovered types do not show; that disagreement is unchanged
 one line earlier (see the working notes). One error in fuzzing changed its
 message, not its site. Holes and compile counts unchanged; corpus bands pass;
 held-out mean 0.7850 unchanged.
+
+## 2026-10-29 — commit 732df9e (enum ordering, Val width move, nested import, key payload)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 22/25 | 26 | 3,898 |
+| Stellar examples, multi-contract | 13 | 10/13 | 35 | 4,243 |
+| third-party | 2 | 0/2 | 36 | 788 |
+| SDK 26 test contracts | 39 | 20/39 | 104 | 1,604 |
+
+Errors 207 → 202: merkle-voting 3 → 2, SDK 26 constructor 7 → 5, errors 3 → 2,
+udt 10 → 9. Holes unchanged. Twelve reconstructions changed: six only in the
+spelling of `auth::Context`, two SDK 26 and one third-party at the fixed
+sites, and token-v22 and token-v23 (four lines each) where a storage key is
+now named from the caller's own frame and its arguments are cloned; both
+still compile with no errors. Scores: see the next row.
