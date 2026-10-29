@@ -163,3 +163,22 @@ table, is measured but held back: it removes 128 holes and adds four errors,
 all of them two decoder shapes not yet recognised (a 128-bit decoder with two
 payload slots, and a `Bytes` decoder whose tag also carries `BytesN<N>`). It
 lands when those two are.
+
+## 2026-10-29 — commit 549ab1b (words that are really bool, Option, Val or nothing)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 22/25 | 22 | 3,898 |
+| Stellar examples, multi-contract | 13 | 10/13 | 34 | 4,241 |
+| third-party | 2 | **1/2** | 28 | 788 |
+| SDK 26 test contracts | 39 | **23/39** | 84 | 1,595 |
+
+Errors 200 → 168. merkle-voting compiles, the first third-party contract to do
+so; so do the SDK 26 constructor, contract_data and events contracts. A value
+the IR kept as a machine word where the program means a `bool`, an `Option`, a
+`Val` or nothing now carries that meaning, each rule with its exactness note in
+its pass. One soundness fix on the way: a storage read whose tag check was
+removed now takes the type the check named, so the check's trap moves into the
+typed read instead of being dropped. Eighteen reconstructions changed, the
+corpus none. Scores unchanged: corpus bands pass, held-out mean 0.7850.
