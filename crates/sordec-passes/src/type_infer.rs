@@ -68,13 +68,64 @@
 //! **60.4% to 80.9%** (`Unknown` 5,425 → 2,618) and `cargo check` errors
 //! from 653 to 345. `Known` did not move: every type this adds is
 //! `Inferred`, and nothing proven is overwritten.
+//!
+//! ## What the host catalog fixes
+//!
+//! A crypto call's object operand is the object the catalog names: a
+//! `BytesObject` operand is a `Bytes`, a `VecObject` one a `Vec` (`Known`,
+//! by the ABI). Exact because an object crosses into the host as its
+//! handle, so the operand is that object whatever computed it — the same
+//! reasoning that types an unnamed host call's object *result*. Two limits
+//! keep it from saying more than the catalog does. It names only an
+//! operand nothing has named, or named only `Val`: a `BytesObject` may be a
+//! `BytesN` the source converted on the way in, and the catalog says
+//! nothing of length, so a `BytesN<32>` is never widened by it. And a small
+//! scalar operand (`U32Val`) is left alone: what the host receives there is
+//! the encoding, not the number.
+//!
+//! "Nothing has named" must mean nothing *will*, so the catalog speaks
+//! last: the module fixpoint settles once without it and then again with
+//! it. Within one fixpoint a `Known(Bytes)` planted in the first round
+//! would outrank a `BytesN<32>` the next round derives — an `unwrap` of an
+//! `Option<BytesN<32>>` typed only once its producer is — and the message
+//! handed to `ed25519_verify` would lose the width it carries.
+//!
+//! ## A vec op's result, and a merge of vecs
+//!
+//! A vec op that hands back its receiver changed — `push_back`, `del`,
+//! `insert`, `slice`, … — hands back the receiver's type (`Inferred`).
+//! Exact because the SDK writes each as a method on one `Vec<T>` that
+//! stores the host's result back into it (`slice` returns `Self`), so the
+//! result and the receiver are one Rust type. The host's `Vec<?>` on the
+//! result is what it says of every vec, not a second type.
+//!
+//! And `Vec<?>` merges with `Vec<T>` as `Vec<T>`, as `Option<?>` already
+//! did ([`merge_partial`]): an unknown element type is less said about the
+//! same type, not a different one. Two named element types that differ
+//! still conflict. The merge's arms are the values of one variable, so an
+//! arm known only as `Vec<?>` is the merge's `Vec<T>` too — the empty vec a
+//! loop starts from is the vec it pushes onto — and so is the `Vec<?>` a
+//! copy typed `Vec<T>` copies. Without that the merge is typed and its arm
+//! still printed `Vec<Val>`, and the assignment moved the type error rather
+//! than removing it. Callers are the exception: separate callers pass
+//! separate vecs, so their `Vec<?>` and `Vec<T>` still conflict.
+//!
+//! ## A struct literal's fields
+//!
+//! A value placed in a `#[contracttype]` struct literal's field is the
+//! field's declared type (`Inferred`): the contract's own declaration says
+//! what the field holds. Only for a value nothing has named, or named only
+//! `Val` — a slot read back, a helper's `Val` result. A value with a type
+//! of its own keeps it: a `BytesN<32>` in a `Bytes` field is a widening the
+//! source wrote, not a mistyping.
 
 use std::collections::{HashMap, HashSet};
 
 use sordec_common::{FuncId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
     BinaryOp, CompositeType, CryptoOpKind, Expr, FunctionSignature, HighFunction, HighIr, IrType, KnownOp,
-    KnownType, Literal, PrimitiveType, SemanticOp, TypeRef, UnaryOp, ValObjectKind, WasmOpcodeKind,
+    KnownType, Literal, PrimitiveType, SemanticOp, StructDef, TypeRef, UnaryOp, ValObjectKind,
+    WasmOpcodeKind,
 };
 
 use crate::dataflow::{resolve_use, HighUseIndex};
@@ -114,25 +165,32 @@ impl Pass<HighIr> for TypeInferPass {
         let seed = seed_signatures(ir);
         let mut sigs = seed.clone();
         let mut disagreements: u64 = 0;
-        for _ in 0..MAX_MODULE_ROUNDS {
-            let mut round = false;
-            // Counted fresh each round, not accumulated: the loop exits on a
-            // round that changed nothing, so that round's count is the
-            // settled one rather than a running total over rounds.
-            disagreements = 0;
-            for func in &mut ir.functions {
-                let (func_changed, func_disagreements) = infer_function(func, &sigs);
-                round |= func_changed;
-                disagreements += func_disagreements;
-            }
-            let next = recompute_signatures(ir, &seed);
-            if next != sigs {
-                sigs = next;
-                round = true;
-            }
-            changed |= round;
-            if !round {
-                break;
+        let structs: Vec<StructDef> =
+            ir.soroban_facts.as_ref().map(|f| f.types.structs.clone()).unwrap_or_default();
+        // Settled twice: first on everything but the host catalog's object
+        // kinds, then with them, so that weakest of named statements only
+        // speaks where nothing else has (see "What the host catalog fixes").
+        for catalog in [false, true] {
+            for _ in 0..MAX_MODULE_ROUNDS {
+                let mut round = false;
+                // Counted fresh each round, not accumulated: the loop exits on
+                // a round that changed nothing, so that round's count is the
+                // settled one rather than a running total over rounds.
+                disagreements = 0;
+                for func in &mut ir.functions {
+                    let (func_changed, func_disagreements) = infer_function(func, &sigs, catalog, &structs);
+                    round |= func_changed;
+                    disagreements += func_disagreements;
+                }
+                let next = recompute_signatures(ir, &seed);
+                if next != sigs {
+                    sigs = next;
+                    round = true;
+                }
+                changed |= round;
+                if !round {
+                    break;
+                }
             }
         }
         if disagreements > 0 {
@@ -159,8 +217,15 @@ impl Pass<HighIr> for TypeInferPass {
 /// signature table. Returns whether any binding's type improved, and how
 /// many times inter-procedural evidence disagreed with an equal-rank
 /// incumbent. Works on a `ValueId -> IrType` snapshot and writes the
-/// improvements back with `TypePropagation` provenance.
-fn infer_function(func: &mut HighFunction, sigs: &SigTable) -> (bool, u64) {
+/// improvements back with `TypePropagation` provenance. `catalog` lets the
+/// host catalog's operand kinds speak ([`crypto_object_args`]); `structs`
+/// are the contract's declared structs, whose literals type their fields.
+fn infer_function(
+    func: &mut HighFunction,
+    sigs: &SigTable,
+    catalog: bool,
+    structs: &[StructDef],
+) -> (bool, u64) {
     let mut types: HashMap<ValueId, IrType> =
         func.bindings.iter().map(|(id, b)| (id, b.ty.clone())).collect();
     // Structure does not change during inference, so this is built once.
@@ -191,7 +256,7 @@ fn infer_function(func: &mut HighFunction, sigs: &SigTable) -> (bool, u64) {
             }
         }
         // Backward: uses constrain their operands / returned values.
-        round_changed |= backward(func, &uses, &mut types, &mut ev);
+        round_changed |= backward(func, &uses, &mut types, &mut ev, catalog, structs);
         round_changed |= backward_calls(func, sigs, &mut types, &mut ev);
         round_changed |= backward_returns(func, sigs, &mut types, &mut ev);
         if !round_changed {
@@ -321,6 +386,13 @@ fn backward_calls(
         };
         for (arg, slot) in args.iter().zip(&sig.params) {
             if let Some(ty) = slot.to_ir(Certainty::Inferred) {
+                // A fixed-width value handed to a `Bytes` parameter keeps
+                // its width: the call is where it widens.
+                if base_of(Some(&ty)) == Some(KnownType::Bytes)
+                    && matches!(base_of(types.get(arg)), Some(KnownType::BytesN(_)))
+                {
+                    continue;
+                }
                 changed |= improve_tracked(types, ev, *arg, ty);
             }
         }
@@ -394,6 +466,8 @@ fn backward(
     uses: &HighUseIndex,
     types: &mut HashMap<ValueId, IrType>,
     ev: &mut Evidence,
+    catalog: bool,
+    structs: &[StructDef],
 ) -> bool {
     let mut changed = false;
     for (id, binding) in func.bindings.iter() {
@@ -458,12 +532,24 @@ fn backward(
             // operand-share guess (a `u32` that is also bit-shifted to build a
             // `Val` stays a `u32`, it does not become a conflict → `Unknown`).
             Expr::Semantic(SemanticOp::Known(op)) => {
-                for (arg, ty) in semantic_arg_types(op) {
+                let pinned = semantic_arg_types(op);
+                for (arg, ty) in pinned.iter().cloned() {
                     // A shadow-stack address handed to the host as a
                     // `U32Val` (the SDK's buffer pointers) is `ptr as u32`
                     // there; the address itself stays the wasm word every
                     // other use of it computes in.
                     if matches!(op, KnownOp::ValEncodeSmall { .. }) && is_frame_address(func, arg) {
+                        continue;
+                    }
+                    changed |= improve(types, ev, arg, IrType::Known(ty));
+                }
+                // The object kind the host's catalog fixes for the rest —
+                // only where nothing better is said ([`crypto_object_args`]).
+                for (arg, ty) in crypto_object_args(op) {
+                    if !catalog
+                        || pinned.iter().any(|(p, _)| *p == arg)
+                        || base_of(types.get(&arg)).is_some_and(|have| have != KnownType::Val)
+                    {
                         continue;
                     }
                     changed |= improve(types, ev, arg, IrType::Known(ty));
@@ -490,11 +576,63 @@ fn backward(
                     let fits = match base_of(types.get(source)) {
                         None => base.is_numeric(),
                         Some(KnownType::Val) => true,
+                        // A `Vec<?>` the copy names `Vec<T>`: one value, the
+                        // element type less said about it, not a conversion.
+                        Some(have @ KnownType::Vec(_)) => {
+                            have != base && merge_partial(&have, &base).as_ref() == Some(&base)
+                        }
                         Some(have) => unsigned_word(&have, &base).is_some(),
                     };
                     if fits {
                         changed |= improve(types, ev, *source, IrType::Inferred(base));
                     }
+                }
+            }
+            // A merge's arm known only as `Vec<?>` is the merge's `Vec<T>`:
+            // the arms are the values of one variable, and an unknown
+            // element type is less said about it, not a different type
+            // ([`merge_partial`]). Only that arm: a named element is left
+            // to stand or conflict on its own evidence.
+            Expr::Phi { incoming } => {
+                if let Some(merged @ KnownType::Vec(_)) = base_of(types.get(&id)) {
+                    for (_, arm) in incoming {
+                        let Some(have @ KnownType::Vec(_)) = base_of(types.get(arm)) else {
+                            continue;
+                        };
+                        if have != merged && merge_partial(&have, &merged).as_ref() == Some(&merged) {
+                            changed |= improve(types, ev, *arm, IrType::Inferred(merged.clone()));
+                        }
+                    }
+                }
+            }
+            // A struct literal's field holds the field's declared type: the
+            // contract's own declaration says so, and the literal puts the
+            // value there. Only a value nothing has named, or named only
+            // `Val` — a field read back from a frame slot or a helper's
+            // `Val` result. A value with a type of its own keeps it, and a
+            // disagreement stays visible rather than being overwritten.
+            Expr::Struct { fields } => {
+                let Some(KnownType::UserDefined(ty)) = base_of(types.get(&id)) else {
+                    continue;
+                };
+                let Some(def) = structs.iter().find(|s| s.id == ty) else {
+                    continue;
+                };
+                for (name, value) in fields {
+                    let Some(declared) = def
+                        .fields
+                        .iter()
+                        .find(|f| f.name == *name)
+                        .and_then(|f| known_of_type_ref(&f.ty))
+                    else {
+                        continue;
+                    };
+                    if declared == KnownType::Val
+                        || base_of(types.get(value)).is_some_and(|have| have != KnownType::Val)
+                    {
+                        continue;
+                    }
+                    changed |= improve(types, ev, *value, IrType::Inferred(declared));
                 }
             }
             // Each component is the tuple's declared slot.
@@ -679,6 +817,17 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
                 .all(|v| base_of(types.get(v)) == Some(first.clone()))
                 .then(|| IrType::Inferred(KnownType::Vec(Box::new(IrType::Inferred(first)))))
         }
+        // A vec op that hands back the vec it was given — `push_back`,
+        // `del`, `slice`, … — hands back that vec's type: the SDK's
+        // `v.push_back(x)` is `v = vec_push_back(v, x)`, one variable before
+        // and after. The host types the result only `Vec<?>`, which left a
+        // loop that pushes onto a `Vec<u32>` merging it with a `Vec<?>`.
+        Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind, args })) if returns_receiver(*kind) => {
+            let ty @ KnownType::Vec(_) = base_of(types.get(args.first()?))? else {
+                return None;
+            };
+            Some(IrType::Inferred(ty))
+        }
         // A 32-bit load is the word its opcode produced, and no `Val` (always
         // 64 bits) fits in it — the same fact a 32-bit parameter carries.
         // `Inferred`, so `u32` evidence settles its sign as for any word.
@@ -688,6 +837,18 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
         // hold a `Val`), stay for later waves.
         _ => None,
     }
+}
+
+/// Whether a vec op's result is a vec of its first operand's type: the
+/// edits the SDK writes as `&mut self` methods, which store the result back
+/// into the receiver, and `slice`, which returns `Self`. `append`'s second
+/// operand is another vec of that type, but the receiver is the first.
+fn returns_receiver(kind: sordec_ir::VecOpKind) -> bool {
+    use sordec_ir::VecOpKind as K;
+    matches!(
+        kind,
+        K::Put | K::Del | K::PushFront | K::PopFront | K::PushBack | K::PopBack | K::Insert | K::Append | K::Slice
+    )
 }
 
 /// Whether two of these values carry *different* recovered bases.
@@ -939,6 +1100,42 @@ fn semantic_arg_types(op: &KnownOp) -> Vec<(ValueId, KnownType)> {
     }
 }
 
+/// The object type the host catalog declares for each operand of a crypto
+/// call: a `BytesObject` operand is a `Bytes`, a `VecObject` one a `Vec`.
+///
+/// Objects only. An object's handle *is* the `Val` the host receives, so
+/// the operand is that object whatever produced it — the same reason
+/// [`infer_expr`] types an unnamed host call's object result. A small
+/// scalar (`U32Val`, `U256Val`) arrives encoded, and the operand is the
+/// encoding, not the number. The caller applies these only to an operand
+/// nothing has named, or named only `Val`: the catalog says the object's
+/// kind, not its length, so a `BytesN<32>` handed to `sha256` stays one.
+fn crypto_object_args(op: &KnownOp) -> Vec<(ValueId, KnownType)> {
+    let KnownOp::CryptoOp { kind, args } = op else {
+        return vec![];
+    };
+    let name = crate::val_abi::crypto_kind_name(*kind);
+    let Some(call) = crate::host_calls::all().iter().find(|c| c.module == "c" && c.friendly_name == name) else {
+        return vec![];
+    };
+    if call.arg_types.len() != args.len() {
+        return vec![];
+    }
+    args.iter()
+        .zip(call.arg_types)
+        .filter_map(|(arg, ty)| {
+            let ty = match *ty {
+                "BytesObject" => KnownType::Bytes,
+                "VecObject" => KnownType::Vec(Box::new(IrType::Unknown(
+                    sordec_common::UnknownReason::InsufficientEvidence,
+                ))),
+                _ => return None,
+            };
+            Some((*arg, ty))
+        })
+        .collect()
+}
+
 /// The scalar operand type of a single-argument `obj_from_*` conversion, or
 /// `None` for the multi-piece / `obj_to_*` forms (whose operand is itself a
 /// Val handle, not an informative scalar).
@@ -1017,7 +1214,33 @@ impl Slot {
     /// Least upper bound. `Bottom` is the identity, `Conflict` absorbing,
     /// and two different agreed types conflict.
     fn join(self, other: Slot) -> Slot {
+        self.join_with(other, false)
+    }
+
+    /// [`join`](Self::join), for witnesses that are values of one variable
+    /// — a function's return sites, a merge's arms — or, with `callers`,
+    /// the arguments separate callers pass one parameter. Two things differ
+    /// between them.
+    ///
+    /// `Vec<?>` and `Vec<T>` are one type only for one variable
+    /// ([`merge_partial_with`]). Each caller builds its own vec, and a
+    /// `Vec<?>` there is often the `Vec<Val>` a client call's arguments
+    /// are, which merging into another caller's `Vec<Address>` would
+    /// declare the parameter as, and leave that caller passing a
+    /// `Vec<Val>` to it.
+    ///
+    /// And a `BytesN<N>` beside a `Bytes` is a `Bytes` parameter only
+    /// across callers: a call is where the SDK's `From<BytesN<N>> for
+    /// Bytes` widens one, and the emitter writes that conversion there.
+    /// Nothing widens a merge's arm or a returned value.
+    fn join_with(self, other: Slot, callers: bool) -> Slot {
         match (self, other) {
+            (Slot::Agreed(KnownType::Bytes), Slot::Agreed(KnownType::BytesN(_)))
+            | (Slot::Agreed(KnownType::BytesN(_)), Slot::Agreed(KnownType::Bytes))
+                if callers =>
+            {
+                Slot::Agreed(KnownType::Bytes)
+            }
             (Slot::Conflict, _) | (_, Slot::Conflict) => Slot::Conflict,
             (Slot::Bottom, s) | (s, Slot::Bottom) => s,
             // `Val` is the lattice's top, not a leaf. Every host object and
@@ -1029,7 +1252,7 @@ impl Slot {
             // other.
             (Slot::Agreed(KnownType::Val), s @ Slot::Agreed(_))
             | (s @ Slot::Agreed(_), Slot::Agreed(KnownType::Val)) => s,
-            (Slot::Agreed(a), Slot::Agreed(b)) => match merge_partial(&a, &b) {
+            (Slot::Agreed(a), Slot::Agreed(b)) => match merge_partial_with(&a, &b, !callers) {
                 Some(merged) => Slot::Agreed(merged),
                 None => Slot::Conflict,
             },
@@ -1254,7 +1477,7 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
                     continue;
                 }
                 let witness = Slot::witness(ty);
-                *slot = std::mem::replace(slot, Slot::Bottom).join(witness);
+                *slot = std::mem::replace(slot, Slot::Bottom).join_with(witness, true);
             }
         }
     }
@@ -1487,12 +1710,8 @@ fn refine_element(slot: &IrType, cand: &IrType) -> Option<IrType> {
         _ => IrType::Inferred(k),
     };
     match (base_of(Some(slot))?, base_of(Some(cand))?) {
-        (KnownType::Vec(have), KnownType::Vec(got))
-            if matches!(*have, IrType::Unknown(_)) && !matches!(*got, IrType::Unknown(_)) =>
-        {
-            Some(rewrap(KnownType::Vec(got)))
-        }
-        (have @ KnownType::Option(_), got @ KnownType::Option(_)) => {
+        (have @ KnownType::Vec(_), got @ KnownType::Vec(_))
+        | (have @ KnownType::Option(_), got @ KnownType::Option(_)) => {
             let merged = merge_partial(&have, &got)?;
             (merged != have).then(|| rewrap(merged))
         }
@@ -1503,13 +1722,24 @@ fn refine_element(slot: &IrType, cand: &IrType) -> Option<IrType> {
 /// Two types that agree wherever both say something, as the one saying
 /// more — `None` when they disagree somewhere.
 ///
-/// Only an `Option` and a tuple have parts that can be partly known here:
-/// `Option<?>` and `Option<u32>` are one type with less and more said about
-/// it, not two. A rewritten `Option` helper's `None` arm says nothing of the
-/// payload and its `Some` arm may not know it yet either, so without this
-/// the merge and the return conflict and the `Option` loses its type
-/// entirely. Every other pair merges only when equal.
+/// Only an `Option`, a `Vec` and a tuple have parts that can be partly
+/// known here: `Option<?>` and `Option<u32>` are one type with less and
+/// more said about it, not two. A rewritten `Option` helper's `None` arm
+/// says nothing of the payload and its `Some` arm may not know it yet
+/// either, so without this the merge and the return conflict and the
+/// `Option` loses its type entirely. A `Vec` is the same case: the host
+/// hands every vec back as `Vec<?>`, so a loop that pushes onto one merges
+/// a `Vec<?>` arm with the `Vec<u32>` the return proves, and conflicted the
+/// merge to `Val`. Every other pair merges only when equal.
 fn merge_partial(a: &KnownType, b: &KnownType) -> Option<KnownType> {
+    merge_partial_with(a, b, true)
+}
+
+/// [`merge_partial`], with the `Vec` case optional: `vecs` false merges two
+/// different vecs no more than two different scalars. For witnesses that
+/// are *different values* — the arguments separate callers pass — rather
+/// than the values of one variable ([`Slot::join_with`]).
+fn merge_partial_with(a: &KnownType, b: &KnownType, vecs: bool) -> Option<KnownType> {
     if a == b {
         return Some(a.clone());
     }
@@ -1518,7 +1748,7 @@ fn merge_partial(a: &KnownType, b: &KnownType) -> Option<KnownType> {
             (None, _) => Some(y.clone()),
             (_, None) => Some(x.clone()),
             (Some(p), Some(q)) => {
-                let m = merge_partial(&p, &q)?;
+                let m = merge_partial_with(&p, &q, vecs)?;
                 Some(match x {
                     IrType::Known(_) => IrType::Known(m),
                     _ => IrType::Inferred(m),
@@ -1528,6 +1758,7 @@ fn merge_partial(a: &KnownType, b: &KnownType) -> Option<KnownType> {
     };
     match (a, b) {
         (KnownType::Option(x), KnownType::Option(y)) => Some(KnownType::Option(Box::new(part(x, y)?))),
+        (KnownType::Vec(x), KnownType::Vec(y)) if vecs => Some(KnownType::Vec(Box::new(part(x, y)?))),
         (KnownType::Tuple(xs), KnownType::Tuple(ys)) if xs.len() == ys.len() => Some(KnownType::Tuple(
             xs.iter().zip(ys).map(|(x, y)| part(x, y)).collect::<Option<_>>()?,
         )),
@@ -1811,7 +2042,7 @@ mod tests {
     /// Run only the intra-procedural half: no inter-procedural evidence, so
     /// a single function can be tested without building a module around it.
     fn infer_isolated(func: &mut HighFunction) -> bool {
-        infer_function(func, &SigTable::new()).0
+        infer_function(func, &SigTable::new(), true, &[]).0
     }
 
     // ---- lattice ----
@@ -2459,6 +2690,382 @@ mod tests {
         );
         let Expr::Phi { incoming } = &f.bindings.get(id(1)).unwrap().expr else { unreachable!() };
         assert_eq!(counter_bounded_by_u32(&f, id(1), incoming, &HashMap::new()), None);
+    }
+
+    /// One function whose `v0..v(n-1)` are untyped parameters handed to
+    /// the crypto op `kind`, which is `v(n)`; `ty` seeds `v0`.
+    fn crypto_on_params(kind: CryptoOpKind, n: u32, ty: Option<IrType>) -> HighIr {
+        let mut exprs: Vec<Expr> = (0..n).map(|_| Expr::Phi { incoming: vec![] }).collect();
+        exprs.push(Expr::Semantic(SemanticOp::Known(KnownOp::CryptoOp {
+            kind,
+            args: (0..n).map(ValueId::from_index).collect(),
+        })));
+        let mut f = func_at(0, exprs, (0..n).map(ValueId::from_index).collect(), vec![n], vec![]);
+        if let Some(ty) = ty {
+            f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = ty;
+        }
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn a_hash_input_nothing_typed_is_the_bytes_the_host_takes() {
+        let mut ir = crypto_on_params(CryptoOpKind::ComputeHashSha256, 1, None);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::Bytes));
+        // A `Val` says less than the catalog and is refined by it.
+        let mut ir = crypto_on_params(CryptoOpKind::ComputeHashKeccak256, 1, Some(IrType::Known(KnownType::Val)));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::Bytes));
+    }
+
+    #[test]
+    fn a_hash_input_already_named_keeps_its_name() {
+        // The catalog says "a bytes object", not its length: a `BytesN<32>`
+        // handed to `sha256` is not widened.
+        let mut ir =
+            crypto_on_params(CryptoOpKind::ComputeHashSha256, 1, Some(IrType::Inferred(KnownType::BytesN(32))));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Inferred(KnownType::BytesN(32)));
+    }
+
+    #[test]
+    fn the_catalog_waits_for_a_width_that_arrives_late() {
+        // fn1(x) { sha256(x) }, called by fn0 with a `BytesN<32>`. `x` is
+        // typed from that call site only once the table is rebuilt, a round
+        // after the catalog could first have said `Bytes`.
+        let callee = func_at(
+            1,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Semantic(SemanticOp::Known(KnownOp::CryptoOp {
+                    kind: CryptoOpKind::ComputeHashSha256,
+                    args: vec![ValueId::from_index(0)],
+                })),
+            ],
+            vec![ValueId::from_index(0)],
+            vec![1],
+            vec![],
+        );
+        let mut caller = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Call { target: FuncId::from_index(1), args: vec![ValueId::from_index(0)] },
+            ],
+            vec![],
+            vec![1],
+            vec![],
+        );
+        caller.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = IrType::Known(KnownType::BytesN(32));
+        let mut ir = crate::marshalling::test_support::module(vec![caller, callee]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 1, 0), IrType::Inferred(KnownType::BytesN(32)));
+    }
+
+    #[test]
+    fn the_catalog_types_objects_only_and_yields_to_a_pinned_width() {
+        // `recover_key_ecdsa_secp256k1(digest, signature, recovery_id)`: the
+        // two objects are bytes, the `U32Val` is the encoding, left alone.
+        let mut ir = crypto_on_params(CryptoOpKind::RecoverKeyEcdsaSecp256k1, 3, None);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::Bytes));
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Known(KnownType::Bytes));
+        assert!(matches!(ty_of(&ir, 0, 2), IrType::Unknown(_)));
+        // `ed25519_verify`'s key and signature keep the widths the SDK's own
+        // signature pins; only the message takes the catalog's `Bytes`.
+        let mut ir = crypto_on_params(CryptoOpKind::VerifySigEd25519, 3, None);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::BytesN(32)));
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Known(KnownType::Bytes));
+        assert_eq!(ty_of(&ir, 0, 2), IrType::Known(KnownType::BytesN(64)));
+    }
+
+    fn vec_of(t: IrType) -> KnownType {
+        KnownType::Vec(Box::new(t))
+    }
+
+    #[test]
+    fn an_unknown_element_type_merges_with_a_named_one() {
+        let u32s = vec_of(IrType::Inferred(KnownType::U32));
+        assert_eq!(merge_partial(&vec_of(unknown()), &u32s), Some(u32s.clone()));
+        assert_eq!(merge_partial(&u32s, &vec_of(unknown())), Some(u32s.clone()));
+        assert_eq!(
+            merge_partial(&u32s, &vec_of(IrType::Known(KnownType::Address))),
+            None,
+            "two named element types still conflict"
+        );
+        // A loop's merge of the empty vec and the pushed one.
+        let phi = Expr::Phi {
+            incoming: vec![(BlockId::from_index(0), ValueId::from_index(0)), (BlockId::from_index(1), ValueId::from_index(1))],
+        };
+        let mut types = HashMap::new();
+        types.insert(ValueId::from_index(0), IrType::Known(vec_of(unknown())));
+        types.insert(ValueId::from_index(1), IrType::Inferred(u32s.clone()));
+        let Expr::Phi { incoming } = &phi else { unreachable!() };
+        assert_eq!(phi_join(incoming, &types), Some(IrType::Inferred(u32s)));
+    }
+
+    /// `v2 = phi [v0, v1]`, returned, with the arms typed as given.
+    fn vec_merge(first: IrType, second: IrType) -> HighIr {
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Phi { incoming: vec![] },
+                Expr::Phi {
+                    incoming: vec![
+                        (BlockId::from_index(0), ValueId::from_index(0)),
+                        (BlockId::from_index(0), ValueId::from_index(1)),
+                    ],
+                },
+            ],
+            vec![ValueId::from_index(0), ValueId::from_index(1)],
+            vec![],
+            vec![vec![ValueId::from_index(2)]],
+        );
+        f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = first;
+        f.bindings.get_mut(ValueId::from_index(1)).unwrap().ty = second;
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn an_untyped_vec_arm_takes_the_merges_element_type() {
+        // The empty vec a loop starts from, and the vec it pushes onto.
+        let mut ir = vec_merge(
+            IrType::Known(vec_of(unknown())),
+            IrType::Inferred(vec_of(IrType::Inferred(KnownType::U32))),
+        );
+        TypeInferPass.run(&mut ir);
+        let u32s = vec_of(IrType::Inferred(KnownType::U32));
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 2))), Some(u32s.clone()));
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 0))), Some(u32s), "the empty vec is the same vec");
+    }
+
+    #[test]
+    fn a_copy_named_vec_of_t_names_the_vec_it_copies() {
+        // `v1 = v0` with `v0: Vec<?>` and `v1` returned as `Vec<u32>`.
+        let mut f = func_at(
+            0,
+            vec![Expr::Phi { incoming: vec![] }, Expr::Use(ValueId::from_index(0))],
+            vec![ValueId::from_index(0)],
+            vec![1],
+            vec![vec![ValueId::from_index(1)]],
+        );
+        let u32s = vec_of(IrType::Known(KnownType::U32));
+        f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = IrType::Known(vec_of(unknown()));
+        f.bindings.get_mut(ValueId::from_index(1)).unwrap().ty = IrType::Known(u32s.clone());
+        let mut ir = crate::marshalling::test_support::module(vec![f]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 0))), Some(u32s));
+    }
+
+    #[test]
+    fn callers_passing_different_vecs_do_not_name_the_parameter() {
+        // fn1(p) called with a `Vec<?>` by fn0 and a `Vec<Address>` by fn2:
+        // two vecs built apart, and the first is not shown to be the second.
+        let callee = func_at(1, vec![Expr::Phi { incoming: vec![] }], vec![ValueId::from_index(0)], vec![], vec![]);
+        let caller = |id: u32, ty: KnownType| {
+            let mut f = func_at(
+                id,
+                vec![
+                    Expr::Phi { incoming: vec![] },
+                    Expr::Call { target: FuncId::from_index(1), args: vec![ValueId::from_index(0)] },
+                ],
+                vec![],
+                vec![1],
+                vec![],
+            );
+            f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = IrType::Known(ty);
+            f
+        };
+        let mut ir = crate::marshalling::test_support::module(vec![
+            caller(0, vec_of(unknown())),
+            callee,
+            caller(2, vec_of(IrType::Known(KnownType::Address))),
+        ]);
+        TypeInferPass.run(&mut ir);
+        assert!(
+            !matches!(base_of(Some(&ty_of(&ir, 1, 0))), Some(KnownType::Vec(_))),
+            "got {:?}",
+            ty_of(&ir, 1, 0)
+        );
+    }
+
+    /// fn`id`(v0) { fn`target`(v0) }, with `v0` typed `ty` (a parameter
+    /// when `param`).
+    fn forwards(id: u32, target: u32, ty: Option<KnownType>, param: bool) -> HighFunction {
+        let mut f = func_at(
+            id,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Call { target: FuncId::from_index(target), args: vec![ValueId::from_index(0)] },
+            ],
+            if param { vec![ValueId::from_index(0)] } else { vec![] },
+            vec![1],
+            vec![],
+        );
+        if let Some(ty) = ty {
+            f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = IrType::Known(ty);
+        }
+        f
+    }
+
+    #[test]
+    fn a_fixed_width_value_handed_on_to_a_bytes_helper_keeps_its_width() {
+        // fn0 holds a `BytesN<32>` and calls fn1(p), which hands `p` on to
+        // fn2, whose parameter its body proved `Bytes`.
+        let bytes_param = func_at(2, vec![Expr::Phi { incoming: vec![] }], vec![ValueId::from_index(0)], vec![], vec![]);
+        let mut ir = crate::marshalling::test_support::module(vec![
+            forwards(0, 1, Some(KnownType::BytesN(32)), false),
+            forwards(1, 2, None, true),
+            bytes_param,
+        ]);
+        ir.functions[2].bindings.get_mut(ValueId::from_index(0)).unwrap().ty = IrType::Known(KnownType::Bytes);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 1, 0), IrType::Inferred(KnownType::BytesN(32)), "p is what every caller passes");
+        assert_eq!(ty_of(&ir, 2, 0), IrType::Known(KnownType::Bytes));
+    }
+
+    #[test]
+    fn callers_passing_bytes_and_a_fixed_width_make_a_bytes_parameter() {
+        let callee = func_at(2, vec![Expr::Phi { incoming: vec![] }], vec![ValueId::from_index(0)], vec![], vec![]);
+        let mut ir = crate::marshalling::test_support::module(vec![
+            forwards(0, 2, Some(KnownType::BytesN(32)), false),
+            forwards(1, 2, Some(KnownType::Bytes), false),
+            callee,
+        ]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 2, 0), IrType::Inferred(KnownType::Bytes));
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::BytesN(32)), "the call widens it");
+    }
+
+    #[test]
+    fn a_merge_of_bytes_and_a_fixed_width_still_conflicts() {
+        assert_eq!(Slot::Agreed(KnownType::Bytes).join(Slot::Agreed(KnownType::BytesN(32))), Slot::Conflict);
+    }
+
+    #[test]
+    fn a_merge_that_names_no_element_fills_no_arm() {
+        let mut ir = vec_merge(IrType::Known(vec_of(unknown())), IrType::Known(vec_of(unknown())));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(vec_of(unknown())));
+    }
+
+    /// `v1 = vec_<kind>(v0, v2)` with `v0` typed `receiver`; the result as
+    /// the host types it, `Vec<?>`.
+    fn vec_op_on(kind: sordec_ir::VecOpKind, receiver: IrType) -> HighIr {
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecOp {
+                    kind,
+                    args: vec![ValueId::from_index(0), ValueId::from_index(2)],
+                })),
+                Expr::Phi { incoming: vec![] },
+            ],
+            vec![ValueId::from_index(0), ValueId::from_index(2)],
+            vec![1],
+            vec![vec![ValueId::from_index(1)]],
+        );
+        f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = receiver;
+        f.bindings.get_mut(ValueId::from_index(1)).unwrap().ty = IrType::Known(vec_of(unknown()));
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn a_pushed_vec_is_the_vec_it_was_pushed_onto() {
+        let u32s = vec_of(IrType::Known(KnownType::U32));
+        let mut ir = vec_op_on(sordec_ir::VecOpKind::PushBack, IrType::Known(u32s.clone()));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 1))), Some(u32s));
+    }
+
+    #[test]
+    fn a_vec_op_names_its_result_only_from_a_vec_receiver() {
+        // `vec_len` does not hand the vec back.
+        let u32s = vec_of(IrType::Known(KnownType::U32));
+        let mut ir = vec_op_on(sordec_ir::VecOpKind::Len, IrType::Known(u32s));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Known(vec_of(unknown())));
+        // A receiver known only as a `Val` says nothing of the elements.
+        let mut ir = vec_op_on(sordec_ir::VecOpKind::Del, IrType::Known(KnownType::Val));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Known(vec_of(unknown())));
+    }
+
+    /// `v3 = State { count: v0, owner: v1, memo: v2 }`, the struct declared
+    /// `{ count: u32, owner: Address, memo: Bytes }`, with the field values
+    /// typed as given, and the literal used.
+    fn struct_literal(count: IrType, owner: IrType, memo: IrType) -> HighIr {
+        use sordec_common::TypeId;
+        use sordec_ir::{EnvCompatibility, SorobanFacts, StructField, TypeRegistry};
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Phi { incoming: vec![] },
+                Expr::Phi { incoming: vec![] },
+                Expr::Struct {
+                    fields: vec![
+                        ("count".into(), ValueId::from_index(0)),
+                        ("owner".into(), ValueId::from_index(1)),
+                        ("memo".into(), ValueId::from_index(2)),
+                    ],
+                },
+            ],
+            (0..3).map(ValueId::from_index).collect(),
+            vec![3],
+            vec![vec![ValueId::from_index(3)]],
+        );
+        for (i, ty) in [count, owner, memo].into_iter().enumerate() {
+            f.bindings.get_mut(ValueId::from_index(i as u32)).unwrap().ty = ty;
+        }
+        f.bindings.get_mut(ValueId::from_index(3)).unwrap().ty =
+            IrType::Known(KnownType::UserDefined(TypeId::new(7)));
+        let field = |name: &str, p| StructField { name: name.into(), ty: TypeRef::Primitive(p) };
+        let mut m = crate::marshalling::test_support::module(vec![f]);
+        m.soroban_facts = Some(SorobanFacts {
+            functions: std::collections::BTreeMap::new(),
+            types: TypeRegistry {
+                structs: vec![StructDef {
+                    id: TypeId::new(7),
+                    name: "State".into(),
+                    fields: vec![
+                        field("count", PrimitiveType::U32),
+                        field("owner", PrimitiveType::Address),
+                        field("memo", PrimitiveType::Bytes),
+                    ],
+                }],
+                ..Default::default()
+            },
+            contract_meta: std::collections::BTreeMap::new(),
+            env_meta: EnvCompatibility::default(),
+        });
+        m
+    }
+
+    #[test]
+    fn a_struct_literal_names_its_untyped_and_val_fields() {
+        let mut ir = struct_literal(unknown(), IrType::Known(KnownType::Val), unknown());
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Inferred(KnownType::U32));
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Inferred(KnownType::Address));
+        assert_eq!(ty_of(&ir, 0, 2), IrType::Inferred(KnownType::Bytes));
+    }
+
+    #[test]
+    fn a_struct_field_value_with_a_type_of_its_own_keeps_it() {
+        // A `BytesN<32>` stored in a `Bytes` field is the source's widening,
+        // and a disagreement is evidence, not something to overwrite.
+        let mut ir = struct_literal(
+            IrType::Inferred(KnownType::I64),
+            IrType::Known(KnownType::Address),
+            IrType::Inferred(KnownType::BytesN(32)),
+        );
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Inferred(KnownType::I64));
+        assert_eq!(ty_of(&ir, 0, 2), IrType::Inferred(KnownType::BytesN(32)));
     }
 
     #[test]

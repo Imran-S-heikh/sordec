@@ -1822,6 +1822,72 @@ mod tests {
         assert!(body.contains("into_val (& v1"), "the reader converts it:\n{body}");
     }
 
+    /// The body of `func0(v0: arg)`, which calls `func1(v0)`, a helper
+    /// whose one parameter is typed `param`.
+    fn call_body(arg: IrType, param: IrType) -> String {
+        use quote::ToTokens;
+        use sordec_common::{Arena, FuncId, Provenance, ProvenanceSource};
+        use sordec_ir::{HighBlock, MemoryImage, WasmFacts};
+        let func = |id: u32, exprs: Vec<(IrType, Expr)>| {
+            let mut bindings: Arena<ValueId, Binding> = Arena::new();
+            for (ty, expr) in exprs {
+                let at = v(bindings.len() as u32);
+                bindings.push(Binding::new(at, ty, expr, Provenance::new("test", ProvenanceSource::DataFlow, "test")));
+            }
+            let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
+            blocks.push(HighBlock { id: BlockId::from_index(0), bindings: (1..bindings.len() as u32).map(v).collect() });
+            HighFunction {
+                id: FuncId::from_index(id),
+                name: None,
+                signature: None,
+                aliases: Vec::new(),
+                blocks,
+                bindings,
+                region: Region::Basic(BlockId::from_index(0)),
+                params: vec![v(0)],
+                returns: vec![],
+            }
+        };
+        let call = Expr::Call { target: sordec_common::FuncId::from_index(1), args: vec![v(0)] };
+        let high = HighIr {
+            facts: WasmFacts {
+                imports: vec![],
+                exports: vec![],
+                function_type_indices: vec![],
+                function_bodies: vec![],
+                function_fingerprints: vec![],
+                table_functions: None,
+                custom_sections: vec![],
+            },
+            soroban_facts: None,
+            functions: vec![
+                func(0, vec![(arg, Expr::Phi { incoming: vec![] }), (untyped(), call)]),
+                func(1, vec![(param, Expr::Phi { incoming: vec![] })]),
+            ],
+            memory: MemoryImage::empty(),
+        };
+        let policy = crate::rust::hole::StrictNoGuess;
+        emit_body(&high, &high.functions[0], &TypeRegistry::default(), &policy).to_token_stream().to_string()
+    }
+
+    #[test]
+    fn a_fixed_width_argument_to_a_bytes_parameter_is_widened() {
+        let body = call_body(IrType::Known(KnownType::BytesN(32)), IrType::Inferred(KnownType::Bytes));
+        assert!(body.contains("soroban_sdk :: Bytes :: from ("), "{body}");
+    }
+
+    #[test]
+    fn only_a_fixed_width_argument_to_a_bytes_parameter_is_widened() {
+        for (arg, param) in [
+            (IrType::Known(KnownType::Bytes), IrType::Inferred(KnownType::Bytes)),
+            (IrType::Known(KnownType::BytesN(32)), IrType::Inferred(KnownType::BytesN(32))),
+            (IrType::Known(KnownType::BytesN(32)), untyped()),
+        ] {
+            let body = call_body(arg, param);
+            assert!(!body.contains("Bytes :: from"), "{body}");
+        }
+    }
+
     #[test]
     fn a_literal_index_get_through_val_annotates_its_receiver() {
         // `get(2)` on a receiver not typed as a `Vec`.

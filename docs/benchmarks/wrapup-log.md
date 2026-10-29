@@ -54,3 +54,17 @@ every changed line is a placeholder gaining a type. Scores not re-run (no body c
 Errors 244 → 228; two more SDK 26 contracts compile (mutability, workspace_contract).
 Scores unchanged: corpus bands pass, held-out mean 0.7850. 42 reconstructions
 changed by casts, decoded constants and dropped literal suffixes, none by value.
+
+## 2026-10-29 — commit f250f02 (four type-inference facts merged)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 22/25 | 26 | 3,898 |
+| Stellar examples, multi-contract | 13 | 10/13 | 35 | 4,243 |
+| third-party | 2 | 0/2 | 39 | 788 |
+| SDK 26 test contracts | 39 | 20/39 | 109 | 1,607 |
+
+Errors 228 → 215; atomic_multiswap and SDK 26's alloc now compile; merkle-voting
+9 → 3, phoenix-vesting 42 → 36, privacy_pools 23 → 19. Scores unchanged (corpus
+bands pass, held-out mean 0.7850).
