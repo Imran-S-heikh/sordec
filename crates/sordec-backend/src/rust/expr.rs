@@ -687,8 +687,8 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             None => ctx.policy.unknown_expr(&annotate::label_known_op(known)),
         },
         Expr::Semantic(SemanticOp::Known(
-            known @ sordec_ir::KnownOp::VecOp { kind: sordec_ir::VecOpKind::Get, args },
-        )) => idiom::vec_get_at_literal(ctx, args, binding.id)
+            known @ sordec_ir::KnownOp::VecOp { kind: sordec_ir::VecOpKind::Get, .. },
+        )) => idiom::vec_get_at_literal(ctx, known, binding.id)
             .unwrap_or_else(|| ctx.policy.unknown_expr(&annotate::label_known_op(known))),
         Expr::Semantic(SemanticOp::Known(known)) => idiom::known_op_expr(ctx, known)
             .unwrap_or_else(|| ctx.policy.unknown_expr(&annotate::label_known_op(known))),

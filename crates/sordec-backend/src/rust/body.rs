@@ -800,8 +800,10 @@ impl<'a> FnCtx<'a> {
                     // fallback makes the binding `()` and every use then
                     // fails (`() - i32`).
                     //
-                    // So annotate only a machine-level `i32` — see
-                    // `has_machine_type` for why that is the one safe case.
+                    // So this branch annotates only a machine word (see
+                    // `has_machine_type`) or a handle nothing does arithmetic
+                    // on (`has_handle_type_untouched`); the branches below
+                    // annotate only for a reader that cannot infer the type.
                     // Measured: annotating unconditionally cost +150 errors
                     // (`Unknown` renders as `Val`, forced onto values rustc
                     // had inferred correctly), and annotating every recovered
@@ -823,9 +825,10 @@ impl<'a> FnCtx<'a> {
                     // at the use site pins it when the value only flows
                     // into field accesses — `let b = …get(&k).unwrap();
                     // b.amount` is `type annotations needed`. This is the
-                    // narrow case the broad experiment in the branch above
-                    // was not: the type came from the contract's own spec,
-                    // and the call genuinely cannot be inferred without it.
+                    // narrow case the broad experiment recorded in the
+                    // machine-type branch was not: the type came from the
+                    // contract's own spec, and the call genuinely cannot be
+                    // inferred without it.
                     let ty = self.value_type(vid);
                     out.push(parse_quote!(let #name: #ty = #value;));
                 } else {
@@ -892,9 +895,10 @@ impl<'a> FnCtx<'a> {
     /// `into_val` of a `Val` into a `Val` is the identity.
     ///
     /// Keyed on the reader, not on the hole — annotating holes as such was
-    /// measured to cost errors (see the comment above the machine-type
-    /// branch). Any other reader that prints it, or a read by the region,
-    /// leaves the hole alone: that reader may pin a type of its own.
+    /// measured to cost errors (see the comment in the machine-type branch
+    /// of `basic_block_stmts`). Any other reader that prints it, or a read
+    /// by the region, leaves the hole alone: that reader may pin a type of
+    /// its own.
     fn converted_to_val_only(&self, vid: ValueId) -> bool {
         let renders_as_val = match self.func.bindings.get(vid).map(|b| &b.ty) {
             Some(IrType::Unknown(reason)) => self.policy.unknown_word(reason).is_none(),
@@ -916,32 +920,43 @@ impl<'a> FnCtx<'a> {
     }
 
     /// A hole the IR has typed as one of the contract's declared structs,
-    /// and whose fields the body reads: `let v72 = todo!("vec::Get");` then
-    /// `v72.min_recv`.
+    /// and which the body reads only by its fields: `let v72 =
+    /// todo!("vec::Get");` then `v72.min_recv`.
     ///
     /// rustc must know a receiver's type at a field access, and a `todo!()`
-    /// gives it none, so the access is "type annotations needed" however
-    /// the rest of the body uses the value. The type is the one the IR
-    /// holds, not one chosen here: a struct decode recovered against the
-    /// contract's own key table, or a spec type, and declared by the same
-    /// reconstruction — so naming it cannot conflict with a field the
-    /// declaration lacks. A struct the registry cannot name would print as
-    /// `Val` and is left alone, as is one that arithmetic reads (the masked
-    /// tag word beside a decode): there the annotation would only move the
-    /// error.
+    /// gives it none, so the access is "type annotations needed". The type
+    /// printed is the one the IR holds, not one chosen here.
+    ///
+    /// Exact by its own gates, whatever pass produced the reads: the type
+    /// is a struct the reconstruction declares (looked up among the
+    /// structs, so an enum, union, error or event sharing the id space
+    /// never qualifies), every emitted reader is a field access naming a
+    /// field that struct declares, and nothing else reads the value — not
+    /// the region (a return, a condition, a merge's input), a merge, or an
+    /// `if let`. So every use the annotation constrains is one it
+    /// satisfies. Requiring *only* field reads is also what keeps out
+    /// arithmetic on the value, including arithmetic behind a rename: a
+    /// rename the IR typed differently is not folded ([`Fold`]) and prints
+    /// as its own `let`, which is a reader that is not a field access.
     fn read_as_declared_struct(&self, vid: ValueId) -> bool {
         let Some(IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id))) =
             self.func.bindings.get(vid).map(|b| &b.ty)
         else {
             return false;
         };
-        if self.reg.name_of(*id).is_none() {
+        let Some(def) = self.reg.structs.iter().find(|s| s.id == *id) else {
             return false;
-        }
-        let (readers, _) = self.emitted_readers(vid);
-        let exprs = || readers.iter().filter_map(|r| self.func.bindings.get(*r).map(|b| &b.expr));
-        exprs().any(|e| matches!(e, Expr::Field { base, .. } if self.fold.reads(*base) == Some(vid)))
-            && !exprs().any(|e| matches!(e, Expr::Binary { .. } | Expr::Unary { .. }))
+        };
+        let (readers, other) = self.emitted_readers(vid);
+        !other
+            && !readers.is_empty()
+            && readers.iter().all(|r| {
+                matches!(
+                    self.func.bindings.get(*r).map(|b| &b.expr),
+                    Some(Expr::Field { base, field })
+                        if self.fold.reads(*base) == Some(vid) && def.fields.iter().any(|f| f.name == *field)
+                )
+            })
     }
 
     /// `Some(v) = …get::<K, T>(&k)`, the head of an `if let` — the pattern
@@ -1539,8 +1554,8 @@ mod tests {
 
     /// The emitted body of a one-block helper whose parameter is `v0` and
     /// whose bindings are `exprs` from `v1` on, all scheduled in order;
-    /// `ret` adds a `return` of that value after the block.
-    fn emitted(exprs: Vec<(IrType, Expr)>, ret: Option<u32>, reg: &TypeRegistry) -> String {
+    /// `tail` follows the block.
+    fn emitted(exprs: Vec<(IrType, Expr)>, tail: Vec<Region>, reg: &TypeRegistry) -> String {
         use quote::ToTokens;
         use sordec_common::{Arena, FuncId, Provenance, ProvenanceSource};
         use sordec_ir::{HighBlock, MemoryImage, WasmFacts};
@@ -1554,9 +1569,10 @@ mod tests {
         let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
         let b0 = BlockId::from_index(0);
         blocks.push(HighBlock { id: b0, bindings: (1..bindings.len() as u32).map(v).collect() });
-        let region = match ret {
-            Some(r) => Region::Sequence(vec![Region::Basic(b0), Region::Return { values: vec![v(r)] }]),
-            None => Region::Basic(b0),
+        let region = if tail.is_empty() {
+            Region::Basic(b0)
+        } else {
+            Region::Sequence(std::iter::once(Region::Basic(b0)).chain(tail).collect())
         };
         let func = HighFunction {
             id: FuncId::from_index(0),
@@ -1601,8 +1617,12 @@ mod tests {
         Expr::Store { addr: v(0), value: v(value), offset: 0, width: sordec_ir::MemWidth::W8 }
     }
 
+    fn known(op: KnownOp) -> Expr {
+        Expr::Semantic(SemanticOp::Known(op))
+    }
+
     fn vec_len(recv: u32) -> Expr {
-        Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::Len, args: vec![v(recv)] }))
+        known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::Len, args: vec![v(recv)] })
     }
 
     fn mask(value: u32, literal: u32) -> Expr {
@@ -1611,6 +1631,10 @@ mod tests {
 
     fn i64_lit(n: i64) -> (IrType, Expr) {
         (IrType::Known(KnownType::I64), Expr::Literal(sordec_ir::Literal::I64(n)))
+    }
+
+    fn ret(value: u32) -> Region {
+        Region::Return { values: vec![v(value)] }
     }
 
     // ---- a hole only a conversion through `Val` reads ----
@@ -1622,11 +1646,37 @@ mod tests {
         // `!` falls back to `()`.
         let body = emitted(
             vec![(untyped(), wide_load()), (untyped(), store(1)), (IrType::Known(KnownType::U32), vec_len(1))],
-            None,
+            vec![],
             &TypeRegistry::default(),
         );
         assert!(body.contains("let v1 : soroban_sdk :: Val = todo !"), "{body}");
         assert!(body.contains("into_val (& v1"), "the reader converts it:\n{body}");
+    }
+
+    #[test]
+    fn a_literal_index_get_through_val_annotates_its_receiver() {
+        // `get(2)` on a receiver not typed as a `Vec`.
+        let get = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::Get, args: vec![v(1), v(2)] });
+        let body = emitted(
+            vec![(untyped(), wide_load()), i64_lit(0x2_0000_0004), (IrType::Known(KnownType::Val), get)],
+            vec![],
+            &TypeRegistry::default(),
+        );
+        assert!(body.contains("let v1 : soroban_sdk :: Val = todo !"), "{body}");
+        assert!(body.contains("into_val (& v1"), "{body}");
+        assert!(body.contains("get_unchecked (2"), "{body}");
+    }
+
+    #[test]
+    fn authorization_entries_through_val_are_annotated() {
+        let auth = known(KnownOp::AuthorizeAsCurrContract { auth_entries: v(1) });
+        let body = emitted(
+            vec![(untyped(), wide_load()), (IrType::Known(KnownType::Unit), auth)],
+            vec![],
+            &TypeRegistry::default(),
+        );
+        assert!(body.contains("let v1 : soroban_sdk :: Val = todo !"), "{body}");
+        assert!(body.contains("authorize_as_current_contract"), "{body}");
     }
 
     #[test]
@@ -1643,19 +1693,59 @@ mod tests {
                 (IrType::Inferred(KnownType::I64), mask(1, 4)),
                 (untyped(), store(5)),
             ],
-            None,
+            vec![],
             &TypeRegistry::default(),
         );
         assert!(body.contains("let v1 = todo !"), "{body}");
     }
 
     #[test]
-    fn a_hole_the_region_reads_is_left_to_inference() {
+    fn a_hole_a_recovered_call_reads_is_left_to_inference() {
+        // A storage write of it: a recovered chain, but not a conversion.
+        let set = known(KnownOp::StorageSet {
+            tier: sordec_ir::StorageTier::Known(sordec_ir::KnownTier::Persistent),
+            durability: v(0),
+            key: v(0),
+            resolved_key: None,
+            value: v(1),
+        });
         let body = emitted(
-            vec![(untyped(), wide_load()), (IrType::Known(KnownType::U32), vec_len(1))],
-            Some(1),
+            vec![
+                (untyped(), wide_load()),
+                (IrType::Known(KnownType::U32), vec_len(1)),
+                (untyped(), store(2)),
+                (IrType::Known(KnownType::Unit), set),
+            ],
+            vec![],
             &TypeRegistry::default(),
         );
+        assert!(body.contains(". set (& arg0 , & v1)"), "{body}");
+        assert!(body.contains("let v1 = todo !"), "{body}");
+    }
+
+    #[test]
+    fn a_hole_the_region_returns_is_left_to_inference() {
+        let body = emitted(
+            vec![(untyped(), wide_load()), (IrType::Known(KnownType::U32), vec_len(1))],
+            vec![ret(1)],
+            &TypeRegistry::default(),
+        );
+        assert!(body.contains("let v1 = todo !"), "{body}");
+    }
+
+    #[test]
+    fn a_hole_a_branch_tests_is_left_to_inference() {
+        let branch = Region::If {
+            cond: v(1),
+            then_region: Box::new(Region::Return { values: vec![] }),
+            else_region: None,
+        };
+        let body = emitted(
+            vec![(untyped(), wide_load()), (IrType::Known(KnownType::U32), vec_len(1)), (untyped(), store(2))],
+            vec![branch],
+            &TypeRegistry::default(),
+        );
+        assert!(body.contains("if v1"), "{body}");
         assert!(body.contains("let v1 = todo !"), "{body}");
     }
 
@@ -1674,25 +1764,22 @@ mod tests {
         reg
     }
 
-    /// `let v1 = todo!("vec::Get"); … v1.min_recv`, with `v1` typed as the
-    /// struct id 7 and `extra` appended after the field read.
-    fn struct_read(extra: Vec<(IrType, Expr)>, reg: &TypeRegistry) -> String {
-        let get = Expr::Semantic(SemanticOp::Known(KnownOp::VecOp {
-            kind: sordec_ir::VecOpKind::Get,
-            args: vec![v(0), v(0)],
-        }));
+    /// `let v1 = todo!("vec::Get"); … v1.<field>` (stored, so read), with
+    /// `v1` typed as the user-defined id 7; `extra` follows the field read.
+    fn struct_read(field: &str, extra: Vec<(IrType, Expr)>, tail: Vec<Region>, reg: &TypeRegistry) -> String {
+        let get = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::Get, args: vec![v(0), v(0)] });
         let mut exprs = vec![
             (IrType::Known(KnownType::UserDefined(sordec_common::TypeId::new(7))), get),
-            (IrType::Known(KnownType::I128), Expr::Field { base: v(1), field: "min_recv".to_string() }),
+            (IrType::Known(KnownType::I128), Expr::Field { base: v(1), field: field.to_string() }),
             (untyped(), store(2)),
         ];
         exprs.extend(extra);
-        emitted(exprs, None, reg)
+        emitted(exprs, tail, reg)
     }
 
     #[test]
     fn a_hole_whose_fields_are_read_takes_its_declared_struct() {
-        let body = struct_read(vec![], &registry_with_struct(7, "SwapSpec"));
+        let body = struct_read("min_recv", vec![], vec![], &registry_with_struct(7, "SwapSpec"));
         assert!(body.contains("let v1 : SwapSpec = todo !"), "{body}");
         assert!(body.contains("v1 . min_recv"), "{body}");
     }
@@ -1700,7 +1787,32 @@ mod tests {
     #[test]
     fn a_struct_the_registry_cannot_name_is_not_annotated() {
         // It would print as `Val`, which has no field to read.
-        let body = struct_read(vec![], &registry_with_struct(8, "Other"));
+        let body = struct_read("min_recv", vec![], vec![], &registry_with_struct(8, "Other"));
+        assert!(body.contains("let v1 = todo !"), "{body}");
+    }
+
+    #[test]
+    fn a_type_that_is_not_a_struct_is_not_annotated() {
+        // An enum shares the id space; it has no fields to read.
+        let mut reg = TypeRegistry::default();
+        reg.enums.push(sordec_ir::EnumDef {
+            id: sordec_common::TypeId::new(7),
+            name: "Kind".to_string(),
+            cases: vec![sordec_ir::EnumCase { name: "A".to_string(), value: 0 }],
+        });
+        let body = struct_read("min_recv", vec![], vec![], &reg);
+        assert!(body.contains("let v1 = todo !"), "{body}");
+    }
+
+    #[test]
+    fn a_field_the_struct_lacks_is_not_annotated() {
+        let body = struct_read("amount", vec![], vec![], &registry_with_struct(7, "SwapSpec"));
+        assert!(body.contains("let v1 = todo !"), "{body}");
+    }
+
+    #[test]
+    fn a_struct_hole_also_returned_is_not_annotated() {
+        let body = struct_read("min_recv", vec![], vec![ret(1)], &registry_with_struct(7, "SwapSpec"));
         assert!(body.contains("let v1 = todo !"), "{body}");
     }
 
@@ -1709,9 +1821,30 @@ mod tests {
         // The tag word masked beside the decode: annotating would move the
         // error onto `SwapSpec & 255`, not remove it.
         let body = struct_read(
+            "min_recv",
             vec![i64_lit(255), (IrType::Inferred(KnownType::I64), mask(1, 4)), (untyped(), store(5))],
+            vec![],
             &registry_with_struct(7, "SwapSpec"),
         );
+        assert!(body.contains("let v1 = todo !"), "{body}");
+    }
+
+    #[test]
+    fn a_struct_arithmetic_reads_behind_a_rename_is_not_annotated() {
+        // A rename the IR typed differently is not folded: it prints as its
+        // own `let`, and the mask reads that.
+        let body = struct_read(
+            "min_recv",
+            vec![
+                (IrType::Inferred(KnownType::I64), Expr::Use(v(1))),
+                i64_lit(255),
+                (IrType::Inferred(KnownType::I64), mask(4, 5)),
+                (untyped(), store(6)),
+            ],
+            vec![],
+            &registry_with_struct(7, "SwapSpec"),
+        );
+        assert!(body.contains("let v4 = v1"), "the rename prints:\n{body}");
         assert!(body.contains("let v1 = todo !"), "{body}");
     }
 
