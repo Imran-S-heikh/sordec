@@ -134,9 +134,14 @@ for set in "${set_list[@]}"; do
       # earlier one's cached verdict (five "compiles" rows were replayed
       # that way on 2026-10-29). A name no other run uses makes each
       # check its own.
-      sed -i "s/^name = \"reconstructed-contract\"/name = \"$PKG_TAG-$set-${n//_/-}\"/" "$crate/Cargo.toml"
-      (cd "$crate" && CARGO_TARGET_DIR=$CHECK_TARGET cargo check -q) >"$clog" 2>&1
+      pkg="$PKG_TAG-$set-${n//_/-}"
+      sed -i "s/^name = \"reconstructed-contract\"/name = \"$pkg\"/" "$crate/Cargo.toml"
+      # No incremental cache: a name no later run reuses would only pile up.
+      (cd "$crate" && CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=$CHECK_TARGET cargo check -q) >"$clog" 2>&1
       if [ $? -eq 0 ]; then ok=yes; else ok=no; fi
+      # And this crate's own artifacts go with the check; the dependencies stay.
+      lib=${pkg//-/_}
+      rm -rf "$CHECK_TARGET"/debug/.fingerprint/"$pkg"-* "$CHECK_TARGET"/debug/deps/lib"$lib"-* "$CHECK_TARGET"/debug/deps/"$lib"-*
       errs=$(count_errors "$clog")
     else
       ok=-; errs=-
