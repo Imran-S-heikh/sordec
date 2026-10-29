@@ -140,3 +140,26 @@ sites, and token-v22 and token-v23 (four lines each) where a storage key is
 now named from the caller's own frame and its arguments are cloned; both
 still compile with no errors. Scores unchanged: corpus bands pass, held-out
 mean 0.7850.
+
+## 2026-10-29 — commit fd1fc6c (symbol constants, wrappers, Option-shaped decoders)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 22/25 | 26 | 3,898 |
+| Stellar examples, multi-contract | 13 | 10/13 | 35 | 4,241 |
+| third-party | 2 | 0/2 | 34 | 788 |
+| SDK 26 test contracts | 39 | 20/39 | 104 | 1,599 |
+
+Errors 202 → 200 (phoenix-vesting 34 → 32: two packed symbol constants read
+back as `symbol_short!`). Holes 10,617 → 10,610 (workspace_contract_a 21 → 19,
+SDK 26 fuzz 18 → 13: an SDK decode inside an outlined wrapper now collapses to
+the wrapper's parameter). Five reconstructions changed, none by value. Scores
+unchanged: corpus bands pass, held-out mean 0.7850.
+
+The larger change these three facts were written for, promoting the pointer
+parameters of decoder helpers in a module that calls through its function
+table, is measured but held back: it removes 128 holes and adds four errors,
+all of them two decoder shapes not yet recognised (a 128-bit decoder with two
+payload slots, and a `Bytes` decoder whose tag also carries `BytesN<N>`). It
+lands when those two are.
