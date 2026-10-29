@@ -13,6 +13,13 @@
 > scoring 0.7570; two unseen third-party contracts score 0.53. Current figures and
 > their caveats: [README — Where it actually stands](README.md#where-it-actually-stands).
 
+> **Update, 2026-10-29.** The acceptance criterion and the result against it are
+> now written up in [`docs/acceptance.md`](docs/acceptance.md): the reference
+> corpus scores 0.9389 with 7 of 7 recompiling, against the submission's 0.90.
+> The 25 Stellar examples recompile 22 of 25 and score 0.7850; the two
+> third-party contracts score 0.53. The wrap-up toward `v0.1.0` is logged in
+> [`docs/benchmarks/wrapup-log.md`](docs/benchmarks/wrapup-log.md).
+
 This document records what Phase 4 was scoped to deliver, what landed, what
 did **not** reach its target, and how to verify all of it end-to-end from a
 clean clone. It mirrors [PHASE_1.md](PHASE_1.md), [PHASE_2.md](PHASE_2.md) and
