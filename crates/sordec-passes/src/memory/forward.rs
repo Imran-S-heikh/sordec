@@ -234,7 +234,7 @@ fn invalidate(
 ///
 /// Written as "what is known safe" so an operator nobody considered
 /// invalidates rather than slipping through.
-fn clobbers_memory(op: &WasmOp) -> bool {
+pub(super) fn clobbers_memory(op: &WasmOp) -> bool {
     use waffle::Operator as O;
     !matches!(
         op.0,

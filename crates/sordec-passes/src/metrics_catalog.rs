@@ -685,6 +685,11 @@ pub const MEMORY_ARGS_PROMOTED: &str = "memory_args_promoted";
 /// per call site, because that is where the work lands.
 pub const MEMORY_LOADS_HOISTED: &str = "memory_loads_hoisted";
 
+/// Read-only pointer parameters `argpromote` refused because something in
+/// the callee could write memory before one of their loads, so a load
+/// hoisted to the call site might read a different value.
+pub const MEMORY_ARGS_REFUSED_WRITE_FIRST: &str = "memory_args_refused_write_first";
+
 /// Loads bound to a preceding store's value within one block, without any
 /// escape analysis. Distinct from `MEMORY_LOADS_FORWARDED`, which counts
 /// the ones `promote` retires as part of promoting a whole slot.
@@ -1064,6 +1069,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_WIDE_LOADS_REBOUND,
         MEMORY_ARGS_PROMOTED,
         MEMORY_LOADS_HOISTED,
+        MEMORY_ARGS_REFUSED_WRITE_FIRST,
         MEMORY_LOADS_FORWARDED_LOCALLY,
         MEMORY_FILL_LOOPS_UNROLLED,
         MEMORY_SRET_CONVERTED,
