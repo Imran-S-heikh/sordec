@@ -37,6 +37,17 @@
 //! source named. Gates 1 and 2 still hold; only gate 3 is replaced, by the
 //! position.
 //!
+//! ## A returned error the declared `Result` names
+//!
+//! A constant that only flows into the function's return, directly or
+//! through the merges before it, in an entrypoint the spec declares
+//! `-> Result<T, E>`, is read by the host as that `Result`: an `Error` `Val`
+//! is its `Err`. So the declared `E` names the variant even when the code
+//! alone does not — two enums declaring the same code, the case gate 3
+//! refuses. `E` a declared error enum: its variant with that code, when it
+//! has one. `E` the SDK's own `Error`: `Error::from_contract_error(code)`.
+//! The emitter then wraps the arm as `Err(..)`, as it does any error.
+//!
 //! Unlike [`enum_key`], the discriminant here is *witnessed* (it is the
 //! literal's own bits, not a declaration-order inference), so a match is
 //! `HostFunctionAbi`-grade. Idempotent: the rewritten binding is a
@@ -101,8 +112,23 @@ impl Pass<HighIr> for ErrorConstPass {
                 let Some(code) = val_abi::decode_contract_error(bits) else {
                     continue;
                 };
-                let Some((enum_name, variant)) = types.variant_by_value(code) else {
-                    if only_panicked(func, id) {
+                let named = types.variant_by_value(code).or_else(|| {
+                    returned_error_type(func)
+                        .filter(|_| only_returned(func, id))
+                        .and_then(|e| match e {
+                            DeclaredError::Enum(enum_id) => types
+                                .errors
+                                .iter()
+                                .find(|d| d.id == enum_id)
+                                .and_then(|d| d.cases.iter().find(|c| c.value == code).map(|c| (d.name.as_str(), c.name.as_str()))),
+                            DeclaredError::Sdk => None,
+                        })
+                });
+                let sdk_error_return = named.is_none()
+                    && matches!(returned_error_type(func), Some(DeclaredError::Sdk))
+                    && only_returned(func, id);
+                let Some((enum_name, variant)) = named else {
+                    if only_panicked(func, id) || sdk_error_return {
                         planned.entry(func.id).or_default().push(Rewrite {
                             id,
                             expr: Expr::Semantic(SemanticOp::Known(KnownOp::MakeError { code, resolved: None })),
@@ -148,6 +174,84 @@ impl Pass<HighIr> for ErrorConstPass {
         }
         result
     }
+}
+
+/// The `E` of the `Result<T, E>` an entrypoint's spec declares it returns.
+enum DeclaredError {
+    /// A declared `#[contracterror]` enum.
+    Enum(sordec_common::TypeId),
+    /// The SDK's own `Error`.
+    Sdk,
+}
+
+fn returned_error_type(func: &sordec_ir::HighFunction) -> Option<DeclaredError> {
+    let [out] = func.signature.as_ref()?.outputs.as_slice() else {
+        return None;
+    };
+    let KnownType::Result(_, err) = crate::type_infer::known_of_type_ref(out)? else {
+        return None;
+    };
+    match *err {
+        IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => {
+            Some(DeclaredError::Enum(id))
+        }
+        IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error) => Some(DeclaredError::Sdk),
+        _ => None,
+    }
+}
+
+/// Whether `id` flows only into the function's return: every reader is a
+/// merge that itself flows only there, or the return.
+fn only_returned(func: &sordec_ir::HighFunction, id: sordec_common::ValueId) -> bool {
+    use sordec_ir::Region;
+    // The merges that reach a return, and the values returned.
+    let mut returned: std::collections::HashSet<sordec_common::ValueId> = std::collections::HashSet::new();
+    func.region.for_each_node(|node| {
+        if let Region::Return { values } = node {
+            returned.extend(values.iter().copied());
+        }
+    });
+    let mut chain: std::collections::HashSet<sordec_common::ValueId> = returned.clone();
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for (m, b) in func.bindings.iter() {
+            if let Expr::Phi { incoming } = &b.expr
+                && chain.contains(&m)
+            {
+                for (_, a) in incoming {
+                    grew |= chain.insert(*a);
+                }
+            }
+        }
+    }
+    if !chain.contains(&id) {
+        return false;
+    }
+    // Every binding reading a chain member (other than the merges that
+    // carry it) must itself be in the chain; nothing else reads `id`.
+    for (reader, b) in func.bindings.iter() {
+        let mut reads = false;
+        b.expr.for_each_value_use(|u| reads |= u == id);
+        if reads && !(chain.contains(&reader) && matches!(b.expr, Expr::Phi { .. })) {
+            return false;
+        }
+    }
+    // In the region: returns, and transfers into a chain merge.
+    let mut ok = true;
+    func.region.for_each_node(|node| match node {
+        Region::If { cond, .. } => ok &= *cond != id,
+        Region::Switch { index, .. } => ok &= *index != id,
+        Region::Break { transfer, .. } | Region::Continue { transfer, .. } | Region::Transfer { transfer, .. } => {
+            for (dest, src) in transfer {
+                if *src == id && !chain.contains(dest) {
+                    ok = false;
+                }
+            }
+        }
+        _ => {}
+    });
+    ok
 }
 
 /// Whether every live reader of `id` is a `panic_with_error` raising it.
@@ -322,6 +426,79 @@ mod tests {
             ],
             &[("EmptyMessage", 1)],
         );
+        ErrorConstPass.run(&mut ir);
+        assert!(matches!(op_at(&ir, 0), Expr::Literal(Literal::I64(_))));
+    }
+
+    /// `fn f() -> Result<u64, E> { r = phi [err, 7]; return r }`, with two
+    /// enums declaring code 1: `Error` (id 0, from `module`) and `MyError`
+    /// (id 1). `err_ty` is `E`.
+    fn returned_error(err_ty: sordec_ir::TypeRef) -> HighIr {
+        use sordec_ir::{CompositeType, FunctionSignature, PrimitiveType, TypeRef};
+        let mut ir = module(
+            vec![
+                Expr::Literal(Literal::I64(contract_error_val(1))), // v0 err
+                Expr::Literal(Literal::I64(7)),                     // v1
+                Expr::Phi {
+                    incoming: vec![(BlockId::from_index(1), ValueId::from_index(0)), (BlockId::from_index(2), ValueId::from_index(1))],
+                }, // v2
+            ],
+            &[("Overflow", 1)],
+        );
+        if let Some(facts) = ir.soroban_facts.as_mut() {
+            facts.types.errors.push(EnumDef {
+                id: sordec_common::TypeId::from_index(1),
+                name: "MyError".to_string(),
+                cases: vec![EnumCase { name: "Overflow".to_string(), value: 1 }],
+            });
+        }
+        let f = &mut ir.functions[0];
+        f.signature = Some(FunctionSignature {
+            name: "f".to_string(),
+            inputs: vec![],
+            outputs: vec![TypeRef::Composite(CompositeType::Result(
+                Box::new(TypeRef::Primitive(PrimitiveType::U64)),
+                Box::new(err_ty),
+            ))],
+        });
+        f.region = Region::Return { values: vec![ValueId::from_index(2)] };
+        ir
+    }
+
+    #[test]
+    fn a_returned_error_shared_by_two_enums_is_the_declared_enum_s() {
+        let mut ir = returned_error(sordec_ir::TypeRef::UserDefined(sordec_common::TypeId::from_index(1)));
+        ErrorConstPass.run(&mut ir);
+        match op_at(&ir, 0) {
+            Expr::Semantic(SemanticOp::Known(KnownOp::MakeError { code: 1, resolved: Some(v) })) => {
+                assert_eq!((v.enum_name.as_str(), v.variant.as_str()), ("MyError", "Overflow"));
+            }
+            other => panic!("expected MyError::Overflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_returned_error_of_the_sdk_error_type_is_the_sdk_error() {
+        let mut ir = returned_error(sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::Error));
+        ErrorConstPass.run(&mut ir);
+        assert!(matches!(
+            op_at(&ir, 0),
+            Expr::Semantic(SemanticOp::Known(KnownOp::MakeError { code: 1, resolved: None }))
+        ));
+    }
+
+    #[test]
+    fn an_error_constant_also_read_elsewhere_is_left_alone() {
+        let mut ir = returned_error(sordec_ir::TypeRef::UserDefined(sordec_common::TypeId::from_index(1)));
+        // A comparison reads it too: not only the return.
+        let f = &mut ir.functions[0];
+        let cmp = f.bindings.push(Binding::new(
+            ValueId::from_index(3),
+            IrType::Unknown(UnknownReason::InsufficientEvidence),
+            Expr::Binary { op: sordec_ir::BinaryOp::Eq, lhs: ValueId::from_index(0), rhs: ValueId::from_index(1) },
+            Provenance::new("test", ProvenanceSource::DataFlow, "seed"),
+        ));
+        f.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings.push(cmp);
         ErrorConstPass.run(&mut ir);
         assert!(matches!(op_at(&ir, 0), Expr::Literal(Literal::I64(_))));
     }
