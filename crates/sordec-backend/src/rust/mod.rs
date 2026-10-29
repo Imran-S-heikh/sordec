@@ -37,7 +37,9 @@ use crate::rust::hole::{HolePolicy, StrictNoGuess};
 /// Emit compilable Rust (`src/lib.rs` contents) reconstructed from `high`.
 ///
 /// The output is produced from a `syn` AST, so it always parses; a module with
-/// no entrypoints yields the bare `#[contract]` struct and no impl block.
+/// no entrypoints yields the bare `#[contract]` struct and no impl block, with
+/// any export that has no recovered signature printed as a free function
+/// beside it.
 ///
 /// # Errors
 ///
@@ -140,10 +142,10 @@ fn build_file(high: &HighIr, policy: &dyn HolePolicy) -> syn::File {
     }
 
     // Assemble the body (types · contract struct · impl when there are
-    // entrypoints · free helpers). The `#[contract]` struct is always there:
-    // the SDK's attribute exports nothing by itself, so a binary with no
-    // entrypoints is exactly the bare struct. with
-    // fully-qualified soroban paths, as each emitter piece produces them.
+    // entrypoints · free helpers) with fully-qualified soroban paths, as each
+    // emitter piece produces them. The `#[contract]` struct is always there:
+    // the SDK's attribute exports nothing by itself, so for a binary with no
+    // entrypoints the bare struct is the smallest source that matches it.
     let has_impl = !methods.is_empty();
     let mut body: Vec<syn::Item> = Vec::new();
     body.extend(type_items);
