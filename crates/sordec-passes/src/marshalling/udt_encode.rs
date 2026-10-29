@@ -122,21 +122,8 @@ impl Pass<HighIr> for UdtEncodePass {
                 if literals.is_empty() {
                     break;
                 }
-                for mut literal in literals {
-                    decode_constant_fields(func, &structs, &mut literal);
-                    retype_renames(func, literal.at, &literal.ty);
-                    if let Some(b) = func.bindings.get_mut(literal.at) {
-                        b.expr = Expr::Struct { fields: literal.fields };
-                        b.ty = literal.ty;
-                        b.add_provenance(Provenance::new(
-                            PASS_NAME,
-                            ProvenanceSource::SdkPattern,
-                            if literal.named_by_use {
-                                "the derived struct encode, as the literal of the one struct its destination declares among those its key table fits"
-                            } else {
-                                "the derived struct encode: its key table and slot stores, as the literal"
-                            },
-                        ));
+                for literal in literals {
+                    if write_literal(func, &structs, literal) {
                         result.metrics.increment(M_ENCODES, 1);
                         result.changed = true;
                     }
@@ -155,6 +142,57 @@ impl Pass<HighIr> for UdtEncodePass {
             }
         }
         result
+    }
+}
+
+/// Rewrite the construction to the literal, its renames retyped with it.
+fn write_literal(func: &mut HighFunction, structs: &[StructDef], mut literal: Literal) -> bool {
+    decode_constant_fields(func, structs, &mut literal);
+    retype_renames(func, literal.at, &literal.ty);
+    let Some(b) = func.bindings.get_mut(literal.at) else { return false };
+    b.expr = Expr::Struct { fields: literal.fields };
+    b.ty = literal.ty;
+    b.add_provenance(Provenance::new(
+        PASS_NAME,
+        ProvenanceSource::SdkPattern,
+        if literal.named_by_use {
+            "the derived struct encode, as the literal of the one struct its destination declares among those its key table fits"
+        } else {
+            "the derived struct encode: its key table and slot stores, as the literal"
+        },
+    ));
+    true
+}
+
+/// Whether the map construction at `at` is struct `id`'s derive: its key
+/// table fits that struct's fields and every slot is proven. For a
+/// destination this pass cannot see — a tuple's component, known only
+/// once the tuple's buffer is read back, after this pass has run.
+pub(super) fn encodes(
+    func: &HighFunction,
+    memory: &sordec_ir::MemoryImage,
+    structs: &[StructDef],
+    at: ValueId,
+    id: TypeId,
+) -> bool {
+    let declared = HashMap::from([(at, id)]);
+    literal_at(func, memory, structs, &declared, at)
+        .is_some_and(|l| l.ty == IrType::Known(KnownType::UserDefined(id)))
+}
+
+/// Rewrite the map construction at `at` to struct `id`'s literal, when
+/// [`encodes`] holds.
+pub(super) fn rebuild_as(
+    func: &mut HighFunction,
+    memory: &sordec_ir::MemoryImage,
+    structs: &[StructDef],
+    at: ValueId,
+    id: TypeId,
+) -> bool {
+    let declared = HashMap::from([(at, id)]);
+    match literal_at(func, memory, structs, &declared, at) {
+        Some(l) if l.ty == IrType::Known(KnownType::UserDefined(id)) => write_literal(func, structs, l),
+        _ => false,
     }
 }
 
