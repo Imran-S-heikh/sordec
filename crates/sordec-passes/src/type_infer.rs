@@ -171,14 +171,18 @@ impl Pass<HighIr> for TypeInferPass {
         // kinds, then with them, so that weakest of named statements only
         // speaks where nothing else has (see "What the host catalog fixes").
         for catalog in [false, true] {
-            for _ in 0..MAX_MODULE_ROUNDS {
+            for round_index in 0..MAX_MODULE_ROUNDS {
+                // Until one round has run, no helper's parameter has been
+                // read from its callers ([`phi_join_with_constants`]).
+                let awaiting_callers = !catalog && round_index == 0;
                 let mut round = false;
                 // Counted fresh each round, not accumulated: the loop exits on
                 // a round that changed nothing, so that round's count is the
                 // settled one rather than a running total over rounds.
                 disagreements = 0;
                 for func in &mut ir.functions {
-                    let (func_changed, func_disagreements) = infer_function(func, &sigs, catalog, &structs);
+                    let (func_changed, func_disagreements) =
+                        infer_function(func, &sigs, catalog, &structs, awaiting_callers);
                     round |= func_changed;
                     disagreements += func_disagreements;
                 }
@@ -225,6 +229,7 @@ fn infer_function(
     sigs: &SigTable,
     catalog: bool,
     structs: &[StructDef],
+    awaiting_callers: bool,
 ) -> (bool, u64) {
     let mut types: HashMap<ValueId, IrType> =
         func.bindings.iter().map(|(id, b)| (id, b.ty.clone())).collect();
@@ -241,7 +246,7 @@ fn infer_function(
         for (id, binding) in func.bindings.iter() {
             let cand = match &binding.expr {
                 Expr::Phi { incoming } => counter_bounded_by_u32(func, id, incoming, &types)
-                    .or_else(|| phi_join_with_constants(func, incoming, &types)),
+                    .or_else(|| phi_join_with_constants(func, incoming, &types, awaiting_callers)),
                 Expr::Binary { op, lhs, rhs } => {
                     offset_of_known(func, *op, *lhs, *rhs, &types).or_else(|| infer_expr(&binding.expr, &types))
                 }
@@ -604,6 +609,18 @@ fn backward(
                         }
                     }
                 }
+                // An untyped arm read from memory in fewer than 64 bits is a
+                // number — no `Val` fits in it — and the merge's number: the
+                // arms are the values of one variable. Only such a read,
+                // which nothing else will ever type: its own opcode names
+                // only the 32-bit word ([`infer_expr`]).
+                if let Some(merged) = base_of(types.get(&id)).filter(is_machine_word) {
+                    for (_, arm) in incoming {
+                        if base_of(types.get(arm)).is_none() && is_narrow_load(func, *arm) {
+                            changed |= improve(types, ev, *arm, IrType::Inferred(merged.clone()));
+                        }
+                    }
+                }
             }
             // A struct literal's field holds the field's declared type: the
             // contract's own declaration says so, and the literal puts the
@@ -659,6 +676,19 @@ fn backward(
         }
     }
     changed
+}
+
+/// One of the four integer words a wasm value is.
+fn is_machine_word(k: &KnownType) -> bool {
+    matches!(k, KnownType::I32 | KnownType::U32 | KnownType::I64 | KnownType::U64)
+}
+
+/// A memory read narrower than 64 bits, widened to the 64-bit word.
+fn is_narrow_load(func: &HighFunction, value: ValueId) -> bool {
+    matches!(
+        func.bindings.get(value).map(|b| &b.expr),
+        Some(Expr::Load { width, ty: IrType::Known(KnownType::I64), .. }) if width.bytes() < 8
+    )
 }
 
 /// Whether `value` is an address in the shadow-stack frame: an offset from
@@ -909,10 +939,19 @@ fn phi_join(
 /// a vote, that constant conflicts the merge and it comes out untyped —
 /// declared `Val`, assigned a `u32`. So the arms that are not constants
 /// decide, and a constant agrees with them when its value fits.
+///
+/// When the other arms say nothing yet the constants are all there is — but
+/// not while one of them is a helper's parameter in the first round
+/// (`awaiting_callers`). A parameter is typed by what its callers pass, and
+/// that is read only after a round; deciding before it is deciding on the
+/// constant alone, and a type once written is never lowered. `2` beside a
+/// `Symbol` parameter is the `Void` a buffer of `Val`s starts as, not an
+/// `i64`: the merge must see the `Symbol` to see it holds neither type.
 fn phi_join_with_constants(
     func: &HighFunction,
     incoming: &[(sordec_common::BlockId, ValueId)],
     types: &HashMap<ValueId, IrType>,
+    awaiting_callers: bool,
 ) -> Option<IrType> {
     let constant = |v: ValueId| match func.bindings.get(v).map(|b| &b.expr) {
         Some(Expr::Literal(Literal::I32(n))) => Some(i128::from(*n)),
@@ -929,6 +968,10 @@ fn phi_join_with_constants(
     // The other arms saying nothing yet — a loop counter's back edge, typed
     // only once its own merge is — leaves the constants as all there is.
     let Some(decided) = phi_join(&others, types) else {
+        let parameter = |v: ValueId| func.signature.is_none() && func.params.contains(&resolve_use(func, v));
+        if awaiting_callers && others.iter().any(|(_, v)| parameter(*v)) {
+            return None;
+        }
         return phi_join(incoming, types);
     };
     let Some(k) = base_of(Some(&decided)) else {
@@ -2044,7 +2087,7 @@ mod tests {
     /// Run only the intra-procedural half: no inter-procedural evidence, so
     /// a single function can be tested without building a module around it.
     fn infer_isolated(func: &mut HighFunction) -> bool {
-        infer_function(func, &SigTable::new(), true, &[]).0
+        infer_function(func, &SigTable::new(), true, &[], false).0
     }
 
     // ---- lattice ----
@@ -2300,13 +2343,76 @@ mod tests {
         types.insert(v(0), IrType::Known(KnownType::I64));
         types.insert(v(1), IrType::Known(KnownType::U32));
         let Expr::Phi { incoming } = &f.bindings.get(v(2)).unwrap().expr else { unreachable!() };
-        assert_eq!(phi_join_with_constants(&f, incoming, &types), Some(IrType::Inferred(KnownType::U32)));
+        assert_eq!(phi_join_with_constants(&f, incoming, &types, false), Some(IrType::Inferred(KnownType::U32)));
         let Expr::Phi { incoming } = &f.bindings.get(v(4)).unwrap().expr else { unreachable!() };
         assert_eq!(
-            phi_join_with_constants(&f, incoming, &types),
+            phi_join_with_constants(&f, incoming, &types, false),
             Some(IrType::Inferred(KnownType::I64)),
             "nothing else typed: the constant is the evidence"
         );
+    }
+
+    /// `r = phi [a + b, load8_u p]`, the sum typed `i64`, the byte untyped;
+    /// `width` is the read's.
+    fn merge_with_a_read(width: sordec_ir::MemWidth) -> HighFunction {
+        use crate::marshalling::test_support::{func_with, v};
+        let (b0, b1) = (BlockId::from_index(0), BlockId::from_index(1));
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                          // v0 a: i64
+                Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(0) },                 // v1
+                Expr::Load { addr: v(0), offset: 17, width, signed: Some(false), ty: IrType::Known(KnownType::I64) }, // v2
+                Expr::Phi { incoming: vec![(b0, v(1)), (b1, v(2))] },                    // v3
+            ],
+            vec![v(0)],
+            vec![1, 2],
+        );
+        f.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(KnownType::I64);
+        f.region = Region::Sequence(vec![Region::Basic(b0), Region::Return { values: vec![v(3)] }]);
+        f.returns = vec![vec![v(3)]];
+        f
+    }
+
+    #[test]
+    fn a_narrow_read_merged_with_a_number_is_that_number() {
+        use crate::marshalling::test_support::v;
+        let mut f = merge_with_a_read(sordec_ir::MemWidth::W1);
+        infer_isolated(&mut f);
+        assert_eq!(f.bindings.get(v(3)).unwrap().ty, IrType::Inferred(KnownType::I64));
+        assert_eq!(f.bindings.get(v(2)).unwrap().ty, IrType::Inferred(KnownType::I64));
+    }
+
+    #[test]
+    fn a_full_word_read_merged_with_a_number_may_be_a_val() {
+        use crate::marshalling::test_support::v;
+        let mut f = merge_with_a_read(sordec_ir::MemWidth::W8);
+        infer_isolated(&mut f);
+        assert!(matches!(f.bindings.get(v(2)).unwrap().ty, IrType::Unknown(_)));
+    }
+
+    /// A helper's slot: `phi [2, param]`. The constant decides nothing while
+    /// the parameter waits for its callers, and decides alone after.
+    #[test]
+    fn a_constant_beside_a_helper_parameter_waits_for_its_callers() {
+        use crate::marshalling::test_support::{func_with, v};
+        let (b0, b1) = (BlockId::from_index(0), BlockId::from_index(1));
+        let f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                         // v0 the parameter
+                Expr::Literal(Literal::I64(2)),                         // v1
+                Expr::Phi { incoming: vec![(b0, v(1)), (b1, v(0))] },   // v2
+            ],
+            vec![v(0)],
+            vec![1],
+        );
+        let mut types: HashMap<ValueId, IrType> = HashMap::new();
+        types.insert(v(1), IrType::Known(KnownType::I64));
+        let Expr::Phi { incoming } = &f.bindings.get(v(2)).unwrap().expr else { unreachable!() };
+        assert_eq!(phi_join_with_constants(&f, incoming, &types, true), None);
+        assert_eq!(phi_join_with_constants(&f, incoming, &types, false), Some(IrType::Inferred(KnownType::I64)));
+        // Once the callers say `Symbol`, the merge holds neither type.
+        types.insert(v(0), IrType::Inferred(KnownType::Symbol));
+        assert_eq!(phi_join_with_constants(&f, incoming, &types, false), None);
     }
 
     #[test]
