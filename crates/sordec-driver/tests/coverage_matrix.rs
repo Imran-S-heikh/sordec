@@ -251,9 +251,14 @@ fn coverage_matrix_prints_and_holds_invariants() {
     // and the refiners re-run after the inliner resolve all six copies —
     // storage-tier 11/13, enum-key 12/14 (+4), ttl 3/4 (+2). The helpers
     // keep their own unresolved originals, so the misses stay counted once.
+    //
+    // 28/33 (84.8%): the inliner no longer copies a key named only by its
+    // variant onto a variant that declares fields, so the enum-key pass
+    // after it names two more copies from their callers' own frames —
+    // enum-key 14/16 (+2), both resolved.
     let (resolved, attempted) = deep_facts("token-v23", &matrix);
-    assert_eq!(attempted, 31, "token-v23 deep facts attempted");
-    assert_eq!(resolved, 26, "token-v23 deep facts resolved");
+    assert_eq!(attempted, 33, "token-v23 deep facts attempted");
+    assert_eq!(resolved, 28, "token-v23 deep facts resolved");
 
     // --- A6/H3: structuring coverage columns (measured 2026-07-20) ---
     //
