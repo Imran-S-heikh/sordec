@@ -40,3 +40,17 @@ entrypoints); same table as the baseline. Baseline moved to this commit.
 Errors 257 → 244. Moved: account 3→2, atomic_multiswap 2→1, privacy_pools 30→25,
 phoenix-vesting 45→43, udt 12→10, spec_shaking_v1/v2 18→17 each. Holes unchanged;
 every changed line is a placeholder gaining a type. Scores not re-run (no body changed).
+
+## 2026-10-29 — commit 69f7e39 (sign and width casts merged)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 22/25 | 27 | 3,898 |
+| Stellar examples, multi-contract | 13 | 9/13 | 40 | 4,243 |
+| third-party | 2 | 0/2 | 51 | 788 |
+| SDK 26 test contracts | 39 | 19/39 | 110 | 1,607 |
+
+Errors 244 → 228; two more SDK 26 contracts compile (mutability, workspace_contract).
+Scores unchanged: corpus bands pass, held-out mean 0.7850. 42 reconstructions
+changed by casts, decoded constants and dropped literal suffixes, none by value.
