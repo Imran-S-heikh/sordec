@@ -120,7 +120,8 @@ impl Pass<HighIr> for UdtEncodePass {
 /// definition, so a constant of exactly that shape, stored in a field the
 /// struct declares of the matching type, is that field's number. The
 /// literal printed as the raw word would be a 64-bit value in a 32-bit
-/// field. The decoded constant is a new binding scheduled before the
+/// field. Only a slot holding the constant itself counts — a constant
+/// behind a `Val` encode is already the number. The decoded constant is a new binding scheduled before the
 /// construction.
 fn decode_constant_fields(func: &mut HighFunction, structs: &[StructDef], literal: &mut Literal) {
     use sordec_ir::{Literal as Lit, PrimitiveType as P, TypeRef};
@@ -128,6 +129,11 @@ fn decode_constant_fields(func: &mut HighFunction, structs: &[StructDef], litera
     let Some(def) = structs.iter().find(|s| s.id == *id) else { return };
     for (name, value) in &mut literal.fields {
         let Some(field) = def.fields.iter().find(|f| f.name == *name) else { continue };
+        // Only the raw stored word: a number found behind a stripped encode
+        // is the field's value itself, whatever its low bits are.
+        if !literal.plain.contains(name) {
+            continue;
+        }
         let bits: u64 = match func.bindings.get(resolve_use(func, *value)).map(|b| &b.expr) {
             Some(Expr::Literal(Lit::I64(n))) => *n as u64,
             Some(Expr::Literal(Lit::U64(n))) => *n,
@@ -198,6 +204,9 @@ struct Literal {
     at: ValueId,
     ty: IrType,
     fields: Vec<(String, ValueId)>,
+    /// The fields whose slot held the value itself, with no `Val` encode
+    /// stripped from it — the only ones a constant word can be decoded in.
+    plain: Vec<String>,
 }
 
 /// The struct literal a map construction is, if it is one.
@@ -219,10 +228,15 @@ fn literal_at(
     let (base, start) = canon_addr(func, raw_address(func, *vals_pos));
     let facts = facts_at(func, id, base);
     let mut by_key = Vec::with_capacity(keys.len());
+    let mut plain = Vec::new();
     for (i, key) in keys.iter().enumerate() {
         let offset = start.checked_add(u32::try_from(i).ok()?.checked_mul(8)?)?;
         let slot = facts.value_at(offset, MemWidth::W8)?;
-        by_key.push((key.clone(), encoded_value(func, slot)));
+        let value = encoded_value(func, slot);
+        if value == resolve_use(func, slot) {
+            plain.push(key.clone());
+        }
+        by_key.push((key.clone(), value));
     }
     // Spelled in the struct's declared order, not the key table's.
     let fields = def
@@ -230,7 +244,7 @@ fn literal_at(
         .iter()
         .map(|f| by_key.iter().find(|(k, _)| *k == f.name).map(|(_, v)| (f.name.clone(), *v)))
         .collect::<Option<Vec<_>>>()?;
-    Some(Literal { at: id, ty: IrType::Known(KnownType::UserDefined(def.id)), fields })
+    Some(Literal { at: id, ty: IrType::Known(KnownType::UserDefined(def.id)), fields, plain })
 }
 
 /// The value behind a field's `Val` encode. A field whose type is already
@@ -407,6 +421,33 @@ mod tests {
         let f = &m.functions[0];
         let Expr::Struct { fields } = &f.bindings.get(v(9)).unwrap().expr else { panic!() };
         assert!(matches!(f.bindings.get(fields[1].1).unwrap().expr, Expr::Literal(Literal::I64(_))));
+    }
+
+    /// A number that merely looks like a tag, found behind an encode, is the
+    /// number: `last_incr: u32 = 4` must not decode to 0.
+    #[test]
+    fn a_number_behind_an_encode_is_not_decoded() {
+        let mut f = encoder(2);
+        f.bindings.get_mut(v(2)).unwrap().expr = Expr::Literal(Literal::I64(4));
+        let mut m = ir(f);
+        assert!(UdtEncodePass.run(&mut m).changed);
+        let f = &m.functions[0];
+        let Expr::Struct { fields } = &f.bindings.get(v(9)).unwrap().expr else { panic!() };
+        assert_eq!(fields[1].1, v(2), "the stripped value is kept as it is");
+    }
+
+    /// The `i32` field takes tag 5, and only an `i32` field does.
+    #[test]
+    fn an_i32_field_decodes_its_tag_five_word() {
+        let mut f = encoder(2);
+        f.bindings.get_mut(v(5)).unwrap().expr = Expr::Literal(Literal::I64((7i64 << 32) | 5));
+        let mut m = ir(f);
+        m.soroban_facts.as_mut().unwrap().types.structs[0].fields[1].ty =
+            TypeRef::Primitive(PrimitiveType::I32);
+        assert!(UdtEncodePass.run(&mut m).changed);
+        let f = &m.functions[0];
+        let Expr::Struct { fields } = &f.bindings.get(v(9)).unwrap().expr else { panic!() };
+        assert!(matches!(f.bindings.get(fields[1].1).unwrap().expr, Expr::Literal(Literal::I32(7))));
     }
 
     #[test]

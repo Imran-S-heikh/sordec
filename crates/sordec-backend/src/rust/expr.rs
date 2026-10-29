@@ -332,9 +332,18 @@ fn bool_like(ctx: &FnCtx, v: sordec_common::ValueId, depth: u32) -> bool {
     }
 }
 
-/// A negative constant compared for equality with an unsigned value,
-/// written as the unsigned number with the same bits.
-fn same_bits(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common::ValueId) -> Option<syn::Expr> {
+/// A negative constant combined with an unsigned value, written as the
+/// unsigned number with the same bits.
+///
+/// `narrow` allows the 64-bit constant against a `u32` (cut to 32 bits):
+/// exact for `&` and `==`, whose result only depends on the low 32 bits of
+/// the constant, but not for `|` and `^`, where the cut drops set bits.
+fn same_bits(
+    ctx: &FnCtx,
+    value: sordec_common::ValueId,
+    against: sordec_common::ValueId,
+    narrow: bool,
+) -> Option<syn::Expr> {
     let other = ctx.func.bindings.get(ctx.fold_target(against))?;
     let binding = ctx.func.bindings.get(ctx.fold_target(value))?;
     let unsigned = match &other.ty {
@@ -348,7 +357,7 @@ fn same_bits(ctx: &FnCtx, value: sordec_common::ValueId, against: sordec_common:
         (Expr::Literal(Literal::I64(n)), KnownType::U64) if *n < 0 => {
             proc_macro2::Literal::u64_unsuffixed(*n as u64)
         }
-        (Expr::Literal(Literal::I64(n)), KnownType::U32) if *n < 0 && i32::try_from(*n).is_ok() => {
+        (Expr::Literal(Literal::I64(n)), KnownType::U32) if narrow && *n < 0 && i32::try_from(*n).is_ok() => {
             proc_macro2::Literal::u32_unsuffixed(*n as i32 as u32)
         }
         _ => return None,
@@ -615,9 +624,9 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 // unsigned value is the same bits read unsigned: the `+ 1`
                 // overflow test `count == -1i32` on a `u32` is `u32::MAX`.
                 BinaryOp::Eq | BinaryOp::Ne => (
-                    unsuffixed(ctx, *lhs, *rhs).or_else(|| same_bits(ctx, *lhs, *rhs)),
+                    unsuffixed(ctx, *lhs, *rhs).or_else(|| same_bits(ctx, *lhs, *rhs, true)),
                     unsuffixed(ctx, *rhs, *lhs)
-                        .or_else(|| same_bits(ctx, *rhs, *lhs))
+                        .or_else(|| same_bits(ctx, *rhs, *lhs, true))
                         // Equality on bits survives a sign change: the right
                         // side takes the left's signedness.
                         .or_else(|| {
@@ -631,13 +640,17 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 | BinaryOp::Ge | BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
                     (unsuffixed(ctx, *lhs, *rhs), unsuffixed(ctx, *rhs, *lhs))
                 }
-                // A mask or flag word keeps its bits: a negative constant
-                // against an unsigned value is the unsigned number with the
-                // same bits (`-2i32` on a `u32` is `4294967294`), so no bit
-                // of the result changes.
-                BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => (
-                    unsuffixed(ctx, *lhs, *rhs).or_else(|| same_bits(ctx, *lhs, *rhs)),
-                    unsuffixed(ctx, *rhs, *lhs).or_else(|| same_bits(ctx, *rhs, *lhs)),
+                // A negative constant of the operand's own width against an
+                // unsigned value is the unsigned number with the same bits
+                // (`-2i32` on a `u32` is `4294967294`). `&` may also cut a
+                // 64-bit constant to a `u32`; `|` and `^` may not.
+                BinaryOp::BitAnd => (
+                    unsuffixed(ctx, *lhs, *rhs).or_else(|| same_bits(ctx, *lhs, *rhs, true)),
+                    unsuffixed(ctx, *rhs, *lhs).or_else(|| same_bits(ctx, *rhs, *lhs, true)),
+                ),
+                BinaryOp::BitOr | BinaryOp::BitXor => (
+                    unsuffixed(ctx, *lhs, *rhs).or_else(|| same_bits(ctx, *lhs, *rhs, false)),
+                    unsuffixed(ctx, *rhs, *lhs).or_else(|| same_bits(ctx, *rhs, *lhs, false)),
                 ),
                 _ => (None, None),
             };

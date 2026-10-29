@@ -1197,11 +1197,9 @@ impl<'a> FnCtx<'a> {
                 let declared: Option<Vec<IrType>> = if self.func.signature.is_some() {
                     None
                 } else {
-                    sig::helper_return_site(self.func).filter(|s| s.len() == many.len()).map(|s| {
-                        s.iter()
-                            .filter_map(|v| self.func.bindings.get(*v).map(|b| b.ty.clone()))
-                            .collect()
-                    })
+                    sig::helper_return_site(self.func)
+                        .filter(|s| s.len() == many.len())
+                        .and_then(|s| s.iter().map(|v| self.func.bindings.get(*v).map(|b| b.ty.clone())).collect())
                 };
                 let vs: Vec<syn::Expr> = many
                     .iter()
@@ -1735,6 +1733,31 @@ mod tests {
         assert!(out.contains("4294967294") && !out.contains("- 2"), "{out}");
     }
 
+    /// `v1 <op> -256i64` with `v1: u32`.
+    fn wide_negative(op: BinaryOp) -> String {
+        let phi = (IrType::Known(KnownType::U32), Expr::Phi { incoming: vec![] });
+        let lit = (IrType::Known(KnownType::I64), Expr::Literal(sordec_ir::Literal::I64(-256)));
+        emitted(
+            vec![
+                phi,
+                lit,
+                (IrType::Known(KnownType::U32), Expr::Binary { op, lhs: v(1), rhs: v(2) }),
+                (untyped(), store(3)),
+            ],
+            vec![],
+            &TypeRegistry::default(),
+        )
+    }
+
+    #[test]
+    fn a_wide_negative_mask_may_be_cut_for_and_but_not_for_or() {
+        assert!(wide_negative(BinaryOp::BitAnd).contains("4294967040"));
+        for op in [BinaryOp::BitOr, BinaryOp::BitXor] {
+            let out = wide_negative(op);
+            assert!(!out.contains("4294967040") && out.contains("256i64"), "{out}");
+        }
+    }
+
     #[test]
     fn a_small_flag_on_an_unsigned_word_takes_the_words_type() {
         let out = masked_with(KnownType::U32, 1);
@@ -1767,6 +1790,14 @@ mod tests {
     fn a_pair_element_of_the_other_sign_is_cast_to_the_declared_type() {
         let out = pair_return(KnownType::U64);
         assert!(out.contains("(v2 as i64)"), "{out}");
+    }
+
+    /// A `u32` element against a declared `i64` is a different width, not a
+    /// sign: no cast.
+    #[test]
+    fn a_pair_element_of_another_width_is_not_cast() {
+        let out = pair_return(KnownType::U32);
+        assert!(!out.contains(" as "), "{out}");
     }
 
     #[test]
