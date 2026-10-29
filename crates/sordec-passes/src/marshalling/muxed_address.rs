@@ -43,6 +43,22 @@
 //! parameter untyped (a placeholder `Val`), and `arg1.address()` on a
 //! `Val` does not compile. So an untyped parameter the collapse fired on
 //! is typed `MuxedAddress`.
+//!
+//! ## A branch with other work: the merge alone
+//!
+//! The collapse needs a branch whose only job is the address. An event
+//! holding both `to.address()` and `to.id()` builds them on one branch on
+//! the tag — the address, and the id's tag and payload — so the branch
+//! stays for the id, and the address merge holds `to` on one arm and the
+//! host's extraction on the others: a `MuxedAddress` and an `Address`.
+//!
+//! That merge alone is `to.address()`, for the reason the collapse is: its
+//! arms are exactly the two `address()` chooses between. So every arm
+//! carries the extraction, moved to the end of the function's first block —
+//! its only operand is the parameter, there from the start — and the merge
+//! holds one `Address`. Gates: a parameter with the two-tag dispatch on it;
+//! every arm of the merge that parameter or one extraction of it, at least
+//! one of each.
 
 use std::collections::HashSet;
 
@@ -63,6 +79,8 @@ pub const PASS_NAME: &str = "marshalling-muxed-address";
 const M_COLLAPSED: &str = "marshalling_muxed_address_collapsed";
 /// Untyped parameters the collapse proved are `MuxedAddress`.
 const M_TYPED: &str = "marshalling_muxed_address_params_typed";
+/// Address merges of a branch with other work, read as `.address()`.
+const M_MERGES: &str = "marshalling_muxed_address_merges";
 
 /// Rewrites the inlined `MuxedAddress::address()` back into the call.
 #[derive(Debug, Default, Clone, Copy)]
@@ -111,7 +129,150 @@ impl Pass<HighIr> for MuxedAddressPass {
                 result.metrics.increment(M_TYPED, typed);
             }
         }
+        // What the collapse left: an address merge on a branch with other work.
+        for func in &mut ir.functions {
+            let merged = merge_extractions(func);
+            if merged > 0 {
+                result.metrics.increment(M_MERGES, merged);
+                result.changed = true;
+            }
+        }
         result
+    }
+}
+
+/// Read each merge of a dispatched muxed parameter and its extraction as
+/// the extraction: hoisted to the end of the first block, carried by every
+/// arm. Returns how many merges it rewrote.
+fn merge_extractions(func: &mut HighFunction) -> i64 {
+    // Parameters the two-tag dispatch tests.
+    let mut dispatched: HashSet<ValueId> = HashSet::new();
+    func.region.for_each_node(|node| {
+        if let Region::Switch { index, arms, default, .. } = node
+            && is_two_tag_check(arms, default)
+            && let Some(m) = tag_dispatch(func, *index)
+            && func.params.contains(&m)
+        {
+            dispatched.insert(m);
+        }
+    });
+    if dispatched.is_empty() {
+        return 0;
+    }
+    let extraction = |func: &HighFunction, v: ValueId| match &func.bindings.get(v).map(|b| &b.expr) {
+        Some(Expr::Semantic(SemanticOp::Known(KnownOp::AddressConversion {
+            kind: AddressOpKind::GetAddressFromMuxedAddress,
+            args,
+        }))) => args.first().map(|a| resolve_use(func, *a)),
+        _ => None,
+    };
+    // Each merge: (merge, parameter, the one extraction).
+    let mut plans: Vec<(ValueId, ValueId, ValueId)> = Vec::new();
+    for (id, b) in func.bindings.iter() {
+        let Expr::Phi { incoming } = &b.expr else { continue };
+        let mut param = None;
+        let mut extract = None;
+        let mut ok = !incoming.is_empty();
+        for (_, arm) in incoming {
+            let a = resolve_use(func, *arm);
+            if dispatched.contains(&a) && param.is_none_or(|p| p == a) {
+                param = Some(a);
+            } else if let Some(m) = extraction(func, a)
+                && dispatched.contains(&m)
+                && extract.is_none_or(|e| e == a)
+            {
+                extract = Some(a);
+            } else {
+                ok = false;
+            }
+        }
+        // An edge must still carry the parameter: once the collapse has
+        // taken the branch, the merge's stale arm names an edge that is gone.
+        if let (true, Some(m), Some(e)) = (ok, param, extract)
+            && extraction(func, e) == Some(m)
+            && carries(&func.region, func, id, m)
+        {
+            plans.push((id, m, e));
+        }
+    }
+    let Some(entry) = first_block(&func.region) else { return 0 };
+    let mut count = 0;
+    for (merge, _, e) in plans {
+        // Hoist the extraction to the end of the first block.
+        for (_, block) in func.blocks.iter_mut() {
+            block.bindings.retain(|b| *b != e);
+        }
+        if let Some(block) = func.blocks.get_mut(entry) {
+            block.bindings.push(e);
+        }
+        if let Some(b) = func.bindings.get_mut(merge)
+            && let Expr::Phi { incoming } = &mut b.expr
+        {
+            for (_, v) in incoming.iter_mut() {
+                *v = e;
+            }
+            b.add_provenance(Provenance::new(
+                PASS_NAME,
+                ProvenanceSource::SdkPattern,
+                "`MuxedAddress::address()`: a merge of the parameter and its extraction, on a branch \
+                 that also carries the id, is the extraction on every arm",
+            ));
+        }
+        carry(&mut func.region, merge, e);
+        count += 1;
+    }
+    count
+}
+
+/// Whether some edge into `merge` carries `value`.
+fn carries(region: &Region, func: &HighFunction, merge: ValueId, value: ValueId) -> bool {
+    let mut found = false;
+    region.for_each_node(|n| {
+        if let Region::Break { transfer, .. } | Region::Continue { transfer, .. } | Region::Transfer { transfer, .. } = n {
+            found |= transfer.iter().any(|(d, s)| *d == merge && resolve_use(func, *s) == value);
+        }
+    });
+    found
+}
+
+/// The first block the region tree runs.
+fn first_block(region: &Region) -> Option<sordec_common::BlockId> {
+    let mut first = None;
+    region.for_each_node(|n| {
+        if first.is_none()
+            && let Region::Basic(b) = n
+        {
+            first = Some(*b);
+        }
+    });
+    first
+}
+
+/// Every edge into `merge` carries `value`.
+fn carry(region: &mut Region, merge: ValueId, value: ValueId) {
+    match region {
+        Region::Sequence(items) => items.iter_mut().for_each(|r| carry(r, merge, value)),
+        Region::Scope { body, .. } | Region::Loop { body, .. } => carry(body, merge, value),
+        Region::If { then_region, else_region, .. } => {
+            carry(then_region, merge, value);
+            if let Some(e) = else_region {
+                carry(e, merge, value);
+            }
+        }
+        Region::Switch { arms, default, .. } => {
+            for arm in arms {
+                carry(&mut arm.body, merge, value);
+            }
+            carry(default, merge, value);
+        }
+        Region::Break { transfer, .. } | Region::Continue { transfer, .. } | Region::Transfer { transfer, .. } => {
+            for (dest, src) in transfer.iter_mut() {
+                if *dest == merge {
+                    *src = value;
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -484,6 +645,53 @@ mod tests {
             matches!(f.bindings.get(v(0)).map(|b| &b.ty), Some(IrType::Known(sordec_ir::KnownType::MuxedAddress))),
             "the untyped parameter is what the dispatch proves it is"
         );
+    }
+
+    /// The branch also carries the id: it stays, and the address merge
+    /// carries the extraction, hoisted to the first block, on every arm.
+    #[test]
+    fn a_merge_on_a_branch_with_other_work_carries_the_extraction() {
+        let mut f = shape(false);
+        // A second merge on the same branch: the id's flag.
+        let id_flag = ValueId::from_index(f.bindings.len() as u32);
+        f.bindings.push(Binding::new(
+            id_flag,
+            IrType::Unknown(UnknownReason::InsufficientEvidence),
+            Expr::Phi { incoming: vec![(bb(0), v(6)), (bb(1), v(7))] },
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        f.bindings.get_mut(v(11)).unwrap().expr = Expr::Phi { incoming: vec![(bb(0), v(0)), (bb(1), v(10))] };
+        if let Region::Sequence(items) = &mut f.region
+            && let Some(Region::If { then_region, else_region: Some(e), .. }) = items.last_mut()
+        {
+            **then_region = Region::Transfer { target: bb(2), transfer: vec![(v(11), v(0)), (id_flag, v(6))] };
+            if let Region::Sequence(inner) = e.as_mut() {
+                inner[1] = Region::Transfer { target: bb(2), transfer: vec![(v(11), v(10)), (id_flag, v(7))] };
+            }
+        }
+        let mut ir = module(vec![f]);
+        assert!(MuxedAddressPass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        assert!(has_if(&f.region), "the branch stays for the id");
+        let Expr::Phi { incoming } = &f.bindings.get(v(11)).unwrap().expr else { unreachable!() };
+        assert!(incoming.iter().all(|(_, a)| *a == v(10)));
+        assert!(f.blocks.get(bb(0)).unwrap().bindings.contains(&v(10)), "hoisted to the first block");
+        let mut carried = true;
+        f.region.for_each_node(|n| {
+            if let Region::Transfer { transfer, .. } = n {
+                for (d, s) in transfer {
+                    carried &= *d != v(11) || *s == v(10);
+                }
+            }
+        });
+        assert!(carried);
+    }
+
+    #[test]
+    fn a_merge_of_the_parameter_and_something_else_is_left_alone() {
+        let mut f = shape(false);
+        f.bindings.get_mut(v(11)).unwrap().expr = Expr::Phi { incoming: vec![(bb(0), v(0)), (bb(1), v(7))] };
+        assert_eq!(merge_extractions(&mut f), 0);
     }
 
     /// The half that matters. When the flag the dispatch sets is read

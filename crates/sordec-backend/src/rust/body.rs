@@ -352,7 +352,8 @@ impl<'a> FnCtx<'a> {
             .collect()
     }
 
-    /// Whether `contractspecv0` declares this function as returning nothing.
+    /// Whether `contractspecv0` declares this function as returning nothing:
+    /// no output, or the one output `()` (`-> ()` written out).
     ///
     /// Only a spec'd function answers `true`: a helper's return arity is
     /// recovered from its body, so its returned value is all the evidence
@@ -361,7 +362,7 @@ impl<'a> FnCtx<'a> {
         self.func
             .signature
             .as_ref()
-            .is_some_and(|sig| sig.outputs.is_empty())
+            .is_some_and(|sig| matches!(sig.outputs.as_slice(), [] | [sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::Void)]))
     }
 
     /// Whether `vid`'s recovered type is one it is safe to annotate a hole
@@ -1010,10 +1011,16 @@ impl<'a> FnCtx<'a> {
                     | KnownType::I128
             )
         };
-        matches!(&binding.ty, IrType::Known(k) | IrType::Inferred(k) if named(k)) && matches!(
-            binding.expr,
-            Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. }))
-        )
+        // The stored `Val` itself, read whole and handed on: named too, or a
+        // reader typed as a number would have `get` decode the `Val` as one.
+        let raw_val = matches!(&binding.ty, IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val))
+            && matches!(
+                binding.expr,
+                Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { missing: sordec_ir::Missing::Unwrap, .. }))
+            );
+        raw_val
+            || matches!(&binding.ty, IrType::Known(k) | IrType::Inferred(k) if named(k))
+                && matches!(binding.expr, Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. })))
     }
 
     /// Whether an emitted value is one of the hole policy's `todo!(…)`
@@ -1048,11 +1055,32 @@ impl<'a> FnCtx<'a> {
                         .or_else(|| expr::val_constant(self, source, phi))
                         .or_else(|| expr::sign_cast(self, source, &b.ty))
                         .or_else(|| self.val_merge_input(source, phi))
+                        .or_else(|| self.word_merge_input(source, phi).and_then(|_| expr::val_bits(self, source, &b.ty)))
                         .or_else(|| expr::bool_to_int(self, source, &b.ty))
                 })
                 .unwrap_or_else(|| self.value_ref(source));
             out.push(parse_quote!(#lhs = #rhs;));
         }
+    }
+
+    /// A merge that is the machine word for a reason of its own: another of
+    /// its arms is a number, not a `Val`. Its `Val` arms hand it their bits
+    /// ([`expr::val_bits`]); a merge whose every arm is a `Val` and typed as
+    /// a number has its type from what the `Val` encodes, and is left to
+    /// fail visibly.
+    fn word_merge_input(&self, source: ValueId, phi: ValueId) -> Option<()> {
+        let Expr::Phi { incoming } = &self.func.bindings.get(phi)?.expr else { return None };
+        let number = |t: &IrType| {
+            matches!(
+                t,
+                IrType::Known(KnownType::I64 | KnownType::U64 | KnownType::I32 | KnownType::U32)
+                    | IrType::Inferred(KnownType::I64 | KnownType::U64 | KnownType::I32 | KnownType::U32)
+            )
+        };
+        incoming
+            .iter()
+            .any(|(_, v)| *v != source && self.func.bindings.get(self.fold_target(*v)).is_some_and(|b| number(&b.ty)))
+            .then_some(())
     }
 
     /// A host object merged into a `Val` — declared one, or untyped and so
@@ -1184,6 +1212,7 @@ impl<'a> FnCtx<'a> {
                     .and_then(|ty| {
                         expr::unsuffixed_against(self, *one, &ty).or_else(|| expr::sign_cast(self, *one, &ty))
                     })
+                    .or_else(|| expr::val_returned_constant(self, *one))
                     .unwrap_or_else(|| self.return_expr(*one));
                 parse_quote!(return #v;)
             }
@@ -2317,5 +2346,49 @@ mod tests {
         a.uses.push((v(7), child));
         assert!(a.finish().is_empty());
     }
-}
 
+    // ---- a word placed in a `bool` field ----
+
+    fn registry_with_flag(ty: sordec_ir::PrimitiveType) -> TypeRegistry {
+        let mut reg = TypeRegistry::default();
+        reg.structs.push(sordec_ir::StructDef {
+            id: sordec_common::TypeId::new(7),
+            name: "Test".to_string(),
+            fields: vec![sordec_ir::StructField { name: "b".to_string(), ty: sordec_ir::TypeRef::Primitive(ty) }],
+        });
+        reg
+    }
+
+    /// `Test { b: v1 }` with `v1` a byte read back as `value_ty`, the struct
+    /// stored so it is read.
+    fn flag_struct(value_ty: IrType, field: sordec_ir::PrimitiveType) -> String {
+        let exprs = vec![
+            (value_ty, Expr::Load { addr: v(0), offset: 12, width: sordec_ir::MemWidth::W1, signed: None, ty: untyped() }),
+            (
+                IrType::Known(KnownType::UserDefined(sordec_common::TypeId::new(7))),
+                Expr::Struct { fields: vec![("b".to_string(), v(1))] },
+            ),
+            (untyped(), store(2)),
+        ];
+        emitted(exprs, vec![], &registry_with_flag(field))
+    }
+
+    #[test]
+    fn a_word_in_a_bool_field_is_its_test() {
+        let body = flag_struct(IrType::Inferred(KnownType::I32), sordec_ir::PrimitiveType::Bool);
+        assert!(body.contains("b : (v1 != 0)"), "{body}");
+    }
+
+    #[test]
+    fn a_word_in_a_number_field_is_the_word() {
+        let body = flag_struct(IrType::Inferred(KnownType::I32), sordec_ir::PrimitiveType::I32);
+        assert!(body.contains("b : v1"), "{body}");
+        assert!(!body.contains("!= 0"), "{body}");
+    }
+
+    #[test]
+    fn an_untyped_value_in_a_bool_field_is_left_alone() {
+        let body = flag_struct(untyped(), sordec_ir::PrimitiveType::Bool);
+        assert!(!body.contains("!= 0"), "{body}");
+    }
+}
