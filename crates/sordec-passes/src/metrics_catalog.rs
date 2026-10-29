@@ -491,6 +491,8 @@ pub const MARSHALLING_OPTION_PARAMS: &str = "marshalling_option_params";
 pub const MARSHALLING_BOOL_RETURNS: &str = "marshalling_bool_returns";
 /// Helpers returning a `bool` in its word, now typed as returning the `bool`.
 pub const MARSHALLING_BOOL_HELPERS: &str = "marshalling_bool_helpers";
+/// Returned `Option` merges whose encoded arms became `None`/`Some`.
+pub const MARSHALLING_OPTION_RETURNS: &str = "marshalling_option_returns";
 /// Storage reads whose SDK `Option` branch folded into
 /// `.unwrap_or(default)`.
 pub const MARSHALLING_OPTION_DEFAULTS_RECOVERED: &str = "marshalling_option_defaults_recovered";
@@ -1018,6 +1020,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_OPTION_PARAMS,
         MARSHALLING_BOOL_RETURNS,
         MARSHALLING_BOOL_HELPERS,
+        MARSHALLING_OPTION_RETURNS,
         MARSHALLING_OPTION_DEFAULTS_RECOVERED,
         MARSHALLING_OPTION_DEFAULT_DECLINED_READ_ON_FALL_THROUGH,
         MARSHALLING_OPTION_DEFAULT_DECLINED_ARM_ALWAYS_TRAPS,

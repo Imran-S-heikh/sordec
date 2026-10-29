@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
-    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, OptionUnwrapPass, ResidualProbePass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, OptionUnwrapPass, ResidualProbePass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -840,6 +840,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // A returned `bool` widened to its tag, once the flags it
             // widens are typed.
             Box::new(BoolReturnPass),
+            // A returned `Option` merge's encoded arms — `Void`, a `T`'s
+            // `Val` — as the `None` and `Some(t)` they encode, once the
+            // arms are typed.
+            Box::new(OptionReturnPass),
             // After the types settle, and outside the group: a stripped
             // module's key union is synthesized with untyped fields, and
             // the values its construction sites put in them are the

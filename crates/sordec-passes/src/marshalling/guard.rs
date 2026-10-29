@@ -62,6 +62,14 @@
 //! - a length check on an entrypoint parameter declared `BytesN<N>`, where
 //!   the tested length is exactly `N`.
 //!
+//! A check on a storage read, a field or a host result is deleted under the
+//! same relocation licence: the typed read, the derived `TryFromVal`, the
+//! typed accessor regenerates it. For a storage read that licence needs the
+//! read emitted at the type the tag names, so when the tag names a handle
+//! type (`Symbol`, `Address`, `MuxedAddress`, `String`, `Bytes`) the read
+//! still typed only `Val` takes that type with the removal — otherwise the
+//! trap would have nowhere to move to.
+//!
 //! The length shape is the second half of one `BytesN<N>::try_from_val`:
 //! the tag check proves it is a `BytesObject`, the length check proves the
 //! width. Both are regenerated together, so both go together — and a
@@ -81,9 +89,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use sordec_common::{BlockId, Diagnostic, IrId, LiftDiagnosticCode, ValueId};
+use sordec_common::{BlockId, Diagnostic, IrId, LiftDiagnosticCode, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
-    BinaryOp, BufOpKind, Expr, HighFunction, HighIr, KnownOp, KnownType, Region, SemanticOp,
+    BinaryOp, BufOpKind, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Region, SemanticOp,
 };
 
 use super::metrics;
@@ -170,9 +178,14 @@ impl crate::pass::Pass<HighIr> for ArgGuardElisionPass {
                 continue;
             }
             let before = elided;
+            // The reads whose checks go: decided before the strip, while the
+            // conditions are still the guards found.
+            let reads: Vec<(ValueId, KnownType)> =
+                guards.keys().chain(inverted.keys()).filter_map(|c| guarded_read(func, *c)).collect();
             let region = std::mem::replace(&mut func.region, Region::Unreachable);
             let region = strip(region, &guards, &empty, &mut elided);
             func.region = strip_inverted(region, &inverted, &empty, &mut elided);
+            type_guarded_reads(func, &reads);
             // One diagnostic per guard actually removed — a reviewer sees
             // every site the unreachability argument was applied to.
             for note in guards.values().chain(inverted.values()).take((elided - before) as usize) {
@@ -696,6 +709,56 @@ fn func_prefix(func: &HighFunction) -> String {
 }
 
 /// Whether `value` is what a storage read produced.
+/// The storage read a tag check guards and the handle type its tag names,
+/// when the check is elided on the storage-read licence
+/// ([`classify_tag_check`]).
+///
+/// That licence holds only if the read *is* emitted at that type: the
+/// check's trap moves into `Storage::get::<K, T>`'s `T::try_from_val`, and
+/// a read still typed `Val` has no conversion to move it to — the trap is
+/// simply lost. So the type travels with the removal. Handle types only,
+/// whose `Val` is the value itself: a `u64`'s object tag is one of its two
+/// encodings, and typing the read as the number would change what it holds.
+fn guarded_read(func: &HighFunction, cond: ValueId) -> Option<(ValueId, KnownType)> {
+    let Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, tag, .. })) =
+        &func.bindings.get(resolve_use(func, cond))?.expr
+    else {
+        return None;
+    };
+    let value = resolve_use(func, *value);
+    if recovered_field_type(func, value).is_some() || !reads_storage(func, value) {
+        return None;
+    }
+    let named = val_abi::object_tag_payload_type(*tag)?;
+    matches!(
+        named,
+        KnownType::Symbol | KnownType::Address | KnownType::MuxedAddress | KnownType::String | KnownType::Bytes
+    )
+    .then_some((value, named))
+}
+
+/// Type each read whose check was removed as the check's type, where it is
+/// still untyped or only the host's `Val`. `Inferred`: a conversion the
+/// reconstruction must spell, which a later, more specific type (a
+/// `BytesN<32>` for `Bytes`) may still refine.
+fn type_guarded_reads(func: &mut HighFunction, reads: &[(ValueId, KnownType)]) {
+    for (read, named) in reads {
+        let Some(binding) = func.bindings.get_mut(*read) else { continue };
+        if !matches!(
+            binding.ty,
+            IrType::Unknown(_) | IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val)
+        ) {
+            continue;
+        }
+        binding.ty = IrType::Inferred(named.clone());
+        binding.add_provenance(Provenance::new(
+            PASS_NAME,
+            ProvenanceSource::SdkPattern,
+            format!("its tag check moved into the typed read: the read is a {named:?}"),
+        ));
+    }
+}
+
 fn reads_storage(func: &HighFunction, value: ValueId) -> bool {
     matches!(
         func.bindings.get(resolve_use(func, value)).map(|b| &b.expr),
@@ -1084,6 +1147,46 @@ mod tests {
         );
         guarded(&mut func, v(1));
         assert!(collect_guards(&func).is_empty());
+    }
+
+    /// `g = get(k); if !has_tag(g, <tag>) { trap }` in an entrypoint, the
+    /// read typed only `Val`.
+    fn guarded_read_of(tag: u8) -> HighIr {
+        use crate::marshalling::test_support::module;
+        use sordec_ir::{KnownTier, Missing, StorageTier};
+        let mut func = entry(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0 the key
+                Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet {
+                    tier: StorageTier::Known(KnownTier::Persistent),
+                    durability: v(0),
+                    key: v(0),
+                    resolved_key: None,
+                    missing: Missing::Option,
+                })), // v1
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value: v(1), tag, negated: true })), // v2
+            ],
+            vec![v(0)],
+            PrimitiveType::Symbol,
+        );
+        func.bindings.get_mut(v(1)).unwrap().ty = IrType::Known(KnownType::Val);
+        guarded(&mut func, v(2));
+        module(vec![func])
+    }
+
+    #[test]
+    fn a_read_whose_handle_check_goes_takes_the_handle_s_type() {
+        let mut ir = guarded_read_of(val_abi::TAG_SYMBOL_OBJECT);
+        assert!(crate::pass::Pass::run(&ArgGuardElisionPass, &mut ir).changed);
+        assert_eq!(ir.functions[0].bindings.get(v(1)).unwrap().ty, IrType::Inferred(KnownType::Symbol));
+    }
+
+    #[test]
+    fn a_read_whose_number_check_goes_keeps_its_type() {
+        // `U64Object` is one of a `u64`'s two encodings, not the value.
+        let mut ir = guarded_read_of(val_abi::TAG_U64_OBJECT);
+        crate::pass::Pass::run(&ArgGuardElisionPass, &mut ir);
+        assert_eq!(ir.functions[0].bindings.get(v(1)).unwrap().ty, IrType::Known(KnownType::Val));
     }
 
     #[test]

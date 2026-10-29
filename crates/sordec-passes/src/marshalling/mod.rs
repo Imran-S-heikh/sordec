@@ -128,6 +128,8 @@ pub mod bool_return;
 pub use bool_return::BoolReturnPass;
 pub mod bool_helper;
 pub use bool_helper::BoolHelperPass;
+pub mod option_return;
+pub use option_return::OptionReturnPass;
 pub use residual_probe::ResidualProbePass;
 pub use option_sret::OptionSretPass;
 pub use optional_out::OptionalOutParamPass;
