@@ -64,6 +64,11 @@ const MACRO_NAMES: &[&str] = &["panic_with_error", "symbol_short", "vec"];
 /// soroban-sdk submodules kept as a short prefix (`token::Client::new`).
 const MODULE_NAMES: &[&str] = &["token"];
 
+/// soroban-sdk items one module down, imported as `module::Name` and
+/// written as the bare `Name`. Each is a type the contract's own item may
+/// also define; `shadowed` keeps that safe, as for the leaf types.
+const NESTED_NAMES: &[(&str, &str)] = &[("auth", "Context")];
+
 /// Rewrite every recognised `soroban_sdk::…` path in `items` to its short
 /// form, returning the names to import. The set is sorted (a `BTreeSet`) so
 /// the emitted `use` list is deterministic.
@@ -108,8 +113,21 @@ pub(crate) fn use_item(names: &BTreeSet<String>) -> Option<syn::Item> {
     if names.is_empty() {
         return None;
     }
-    let idents: Vec<syn::Ident> = names.iter().map(|n| ident(n)).collect();
-    Some(parse_quote!(use soroban_sdk::{#(#idents),*};))
+    // A nested name (`auth::Context`) is a path in the list, not an ident.
+    let paths: Vec<syn::Path> = names
+        .iter()
+        .map(|n| match n.split_once("::") {
+            Some((m, leaf)) => {
+                let (m, leaf) = (ident(m), ident(leaf));
+                parse_quote!(#m::#leaf)
+            }
+            None => {
+                let i = ident(n);
+                parse_quote!(#i)
+            }
+        })
+        .collect();
+    Some(parse_quote!(use soroban_sdk::{#(#paths),*};))
 }
 
 struct Collapser {
@@ -124,6 +142,21 @@ impl VisitMut for Collapser {
         // `soroban_sdk::Vec<soroban_sdk::Address>`) are collapsed before the
         // outer path, so both the container and its argument are rewritten.
         visit_mut::visit_path_mut(self, path);
+
+        // `soroban_sdk::auth::Context[::Variant]` -> `Context[::Variant]`,
+        // importing `auth::Context`. Two segments dropped, not one.
+        if let [first, second, third, ..] = path.segments.iter().collect::<Vec<_>>().as_slice()
+            && first.ident == "soroban_sdk"
+            && !self.shadowed.contains(&third.ident.to_string())
+            && NESTED_NAMES.iter().any(|(m, n)| second.ident == m && third.ident == n)
+        {
+            let import = format!("{}::{}", second.ident, third.ident);
+            let segments = std::mem::take(&mut path.segments);
+            path.segments = segments.into_iter().skip(2).collect();
+            path.leading_colon = None;
+            self.imports.insert(import);
+            return;
+        }
 
         // Decide whether this path is a `soroban_sdk::…` we collapse, and
         // what to import. Scoped so the immutable borrow ends before the
@@ -238,6 +271,30 @@ mod tests {
         let imports = collapse(&mut items);
         assert!(imports.is_empty(), "no import for an unknown type: {imports:?}");
         assert!(render(&items[0]).contains("soroban_sdk :: Unmapped"));
+    }
+
+    #[test]
+    fn auth_context_collapses_and_imports_by_its_module() {
+        let mut items: Vec<syn::Item> = vec![parse_quote!(
+            fn f(c: Vec<soroban_sdk::auth::Context>) { let _ = soroban_sdk::auth::Context::Contract; }
+        )];
+        let imports = collapse(&mut items);
+        assert!(imports.contains("auth::Context"), "{imports:?}");
+        let out = render(&items[0]);
+        assert!(out.contains("Vec < Context >") && out.contains("Context :: Contract"), "{out}");
+        assert!(!out.contains("auth"), "{out}");
+        assert!(render(&use_item(&imports).unwrap()).contains("auth :: Context"));
+    }
+
+    #[test]
+    fn auth_context_stays_qualified_when_the_module_defines_context() {
+        let mut items: Vec<syn::Item> = vec![
+            parse_quote!(pub struct Context;),
+            parse_quote!(fn f(c: soroban_sdk::auth::Context) {}),
+        ];
+        let imports = collapse(&mut items);
+        assert!(imports.is_empty(), "{imports:?}");
+        assert!(render(&items[1]).contains("soroban_sdk :: auth :: Context"));
     }
 
     #[test]

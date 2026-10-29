@@ -61,6 +61,25 @@
 //! once. With a single caller there is nothing to duplicate, and it is
 //! inlined as before.
 //!
+//! # A key named only by its variant is not carried over
+//!
+//! A helper whose key is its own parameter has that key named by a meet
+//! over its callers, and a meet can only agree on the *variant*: each
+//! caller's payload lives in that caller's frame. For a variant that
+//! declares fields the fact is therefore "variant `Temp`, payload not
+//! recorded", and printed as it stands it is the bare `DataKey::Temp` where
+//! the source wrote `DataKey::Temp(n)`. Pasted into a caller that builds
+//! the key itself, the copy's variant-only fact is dropped, so the
+//! enum-key pass that runs after this one names the operation from that
+//! caller's own frame, payload included, as it does for the read beside it.
+//!
+//! Why it is exact: only a *fact* is removed, never an operation or an
+//! operand. An operation without a resolved key prints its key operand
+//! unchanged, which is the meaning the copy always had. Gates: the copy's
+//! key operand is the wrapper's own parameter (the meet-named shape); the
+//! recorded payload is empty; and the named variant declares fields. A
+//! unit variant's bare name is the whole key and stays.
+//!
 //! # Placement
 //!
 //! Late: after every recognizer, inside the marshalling elision group.
@@ -117,6 +136,23 @@ impl Pass<HighIr> for WrapperInlinePass {
         if wrappers.is_empty() {
             return result;
         }
+        // Variants that declare fields, by `(enum, variant)`.
+        let fielded: HashSet<(String, String)> = ir
+            .soroban_facts
+            .as_ref()
+            .map(|f| {
+                f.types
+                    .unions
+                    .iter()
+                    .flat_map(|u| {
+                        u.cases
+                            .iter()
+                            .filter(|c| !c.fields.is_empty())
+                            .map(|c| (u.name.clone(), c.name.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut inlined = 0_i64;
         for func in &mut ir.functions {
             let sites: Vec<(ValueId, FuncId)> = func
@@ -130,7 +166,7 @@ impl Pass<HighIr> for WrapperInlinePass {
                 })
                 .collect();
             for (call, target) in sites {
-                if inline_site(func, call, &wrappers[&target]) {
+                if inline_site(func, call, &wrappers[&target], &fielded) {
                     inlined += 1;
                     result.diagnostics.push(
                         Diagnostic::info(
@@ -489,9 +525,42 @@ fn copyable(expr: &Expr, this: FuncId) -> bool {
     }
 }
 
+/// Drop a storage operation's resolved key when it names only the variant
+/// of a variant that declares fields, and the key is the wrapper's own
+/// parameter. See "A key named only by its variant" in the module docs.
+fn drop_variant_only_key(expr: &mut Expr, params: &[ValueId], fielded: &HashSet<(String, String)>) {
+    use sordec_ir::{KnownOp as K, SemanticOp};
+    let Expr::Semantic(SemanticOp::Known(op)) = expr else {
+        return;
+    };
+    let (key, resolved) = match op {
+        K::StorageGet { key, resolved_key, .. }
+        | K::StorageSet { key, resolved_key, .. }
+        | K::StorageHas { key, resolved_key, .. }
+        | K::StorageRemove { key, resolved_key, .. }
+        | K::StorageExtendTtl { key, resolved_key, .. }
+        | K::StorageExtendTtlV2 { key, resolved_key, .. } => (*key, resolved_key),
+        _ => return,
+    };
+    if !params.contains(&key) {
+        return;
+    }
+    if resolved
+        .as_ref()
+        .is_some_and(|ek| ek.payload.is_empty() && fielded.contains(&(ek.enum_name.clone(), ek.variant.clone())))
+    {
+        *resolved = None;
+    }
+}
+
 /// Paste `w`'s body before `call` in `func`, renaming as described in
 /// the module docs. Returns whether the site was inlined.
-fn inline_site(func: &mut HighFunction, call: ValueId, w: &Wrapper) -> bool {
+fn inline_site(
+    func: &mut HighFunction,
+    call: ValueId,
+    w: &Wrapper,
+    fielded: &HashSet<(String, String)>,
+) -> bool {
     let Some(Expr::Call { args, .. }) = func.bindings.get(call).map(|b| b.expr.clone()) else {
         return false;
     };
@@ -518,6 +587,7 @@ fn inline_site(func: &mut HighFunction, call: ValueId, w: &Wrapper) -> bool {
     let mut fresh: Vec<ValueId> = Vec::new();
     for (id, ty, expr) in &w.items {
         let mut expr = expr.clone();
+        drop_variant_only_key(&mut expr, &w.params, fielded);
         let mut unmapped = false;
         expr.for_each_value_use_mut(|u| match map.get(u) {
             Some(m) => *u = *m,
@@ -626,6 +696,52 @@ mod tests {
 
     fn expr_at(ir: &HighIr, func: u32, value: u32) -> &Expr {
         &ir.function(FuncId::from_index(func)).unwrap().bindings.get(v(value)).unwrap().expr
+    }
+
+    fn keyed_has(key: u32, payload: Vec<ValueId>) -> Expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::StorageHas {
+            tier: StorageTier::Known(KnownTier::Temporary),
+            durability: v(1),
+            key: v(key),
+            resolved_key: Some(sordec_ir::EnumKey {
+                enum_name: "DataKey".to_string(),
+                variant: "Temp".to_string(),
+                payload,
+            }),
+            probe: false,
+        }))
+    }
+
+    fn resolved(expr: &Expr) -> bool {
+        matches!(
+            expr,
+            Expr::Semantic(SemanticOp::Known(KnownOp::StorageHas { resolved_key: Some(_), .. }))
+        )
+    }
+
+    #[test]
+    fn a_variant_only_key_on_a_fielded_variant_is_not_copied() {
+        let fielded: HashSet<(String, String)> = [("DataKey".to_string(), "Temp".to_string())].into();
+        let mut e = keyed_has(0, vec![]);
+        drop_variant_only_key(&mut e, &[v(0)], &fielded);
+        assert!(!resolved(&e));
+    }
+
+    #[test]
+    fn a_unit_variant_a_payload_or_a_built_key_keeps_its_name() {
+        let fielded: HashSet<(String, String)> = [("DataKey".to_string(), "Temp".to_string())].into();
+        // The variant declares no fields.
+        let mut e = keyed_has(0, vec![]);
+        drop_variant_only_key(&mut e, &[v(0)], &HashSet::new());
+        assert!(resolved(&e));
+        // The payload is recorded.
+        let mut e = keyed_has(0, vec![v(5)]);
+        drop_variant_only_key(&mut e, &[v(0)], &fielded);
+        assert!(resolved(&e));
+        // The key is built inside the wrapper, not its parameter.
+        let mut e = keyed_has(3, vec![]);
+        drop_variant_only_key(&mut e, &[v(0)], &fielded);
+        assert!(resolved(&e));
     }
 
     #[test]

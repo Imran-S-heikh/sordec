@@ -68,6 +68,44 @@ fn bool_against_bit(
     Some(if itself { x } else { parse_quote!(!#x) })
 }
 
+/// An ordering against a unit enum's discriminant.
+///
+/// A `#[contracttype]` enum with explicit discriminants crosses the ABI as
+/// its `u32` discriminant, and the guest may range-check it (`flag > 4`)
+/// before decoding. Rust cannot order an enum, so the operand that is
+/// typed as one is read as its discriminant: `(flag as u32) > 4`.
+///
+/// Exact: the declaration is printed with the spec's own discriminant
+/// values, so `x as u32` is the very number the wasm compared. Gated on
+/// an ordering operator and an operand whose type is a declared integer
+/// enum (never an error enum, never a payload union).
+fn enum_ordering(
+    ctx: &FnCtx,
+    op: BinaryOp,
+    lhs: sordec_common::ValueId,
+    rhs: sordec_common::ValueId,
+    l: &syn::Expr,
+    r: &syn::Expr,
+) -> Option<syn::Expr> {
+    if !op.is_ordered() {
+        return None;
+    }
+    let is_enum = |v: sordec_common::ValueId| {
+        matches!(
+            ctx.func.bindings.get(ctx.fold_target(v)).map(|b| &b.ty),
+            Some(IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)))
+                if ctx.reg.enums.iter().any(|d| d.id == *id)
+        )
+    };
+    let (le, re) = (is_enum(lhs), is_enum(rhs));
+    if !le && !re {
+        return None;
+    }
+    let l: syn::Expr = if le { parse_quote!((#l as u32)) } else { l.clone() };
+    let r: syn::Expr = if re { parse_quote!((#r as u32)) } else { r.clone() };
+    Some(binary_expr(op, l, r))
+}
+
 /// Arithmetic on two `bool`s: each is the `i32` `0` or `1` a wasm
 /// comparison yields. `(a > b) - (a < b)` is how rustc lowers `Ord::cmp`
 /// to `-1`/`0`/`1`, and Rust has no `bool - bool`.
@@ -736,7 +774,20 @@ fn raw_bits(ctx: &FnCtx, value: sordec_common::ValueId) -> syn::Expr {
             )
         )
     );
-    if object { parse_quote!(#v.to_val().get_payload()) } else { v }
+    let val = match ctx.func.bindings.get(value).map(|b| &b.ty) {
+        Some(IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val)) => true,
+        Some(IrType::Unknown(reason)) => {
+            ctx.func.params.contains(&value) && ctx.policy.unknown_word(reason).is_none()
+        }
+        _ => false,
+    };
+    if object {
+        parse_quote!(#v.to_val().get_payload())
+    } else if val {
+        parse_quote!(#v.get_payload())
+    } else {
+        v
+    }
 }
 
 /// A raw constant handed to a `Val`, spelled as the `Val` it is.
@@ -874,6 +925,9 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             let r = r.unwrap_or_else(|| ctx.value_ref(*rhs));
             if let Some(reread) = sign_honoured(ctx, *op, *lhs, *rhs, &l, &r) {
                 return reread;
+            }
+            if let Some(ordered) = enum_ordering(ctx, *op, *lhs, *rhs, &l, &r) {
+                return ordered;
             }
             binary_expr(*op, l, r)
         }
