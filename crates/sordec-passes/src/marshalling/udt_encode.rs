@@ -44,7 +44,7 @@
 //!   the derive, so the literal is spelled in the struct's own order
 //!   rather than the table's.
 
-use sordec_common::{Provenance, ProvenanceSource, ValueId};
+use sordec_common::{IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
     Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, MemWidth, SemanticOp, StructDef,
 };
@@ -83,7 +83,8 @@ impl Pass<HighIr> for UdtEncodePass {
                 .iter()
                 .filter_map(|(id, _)| literal_at(func, &memory, &structs, id))
                 .collect();
-            for literal in literals {
+            for mut literal in literals {
+                decode_constant_fields(func, &structs, &mut literal);
                 if let Some(b) = func.bindings.get_mut(literal.at) {
                     b.expr = Expr::Struct { fields: literal.fields };
                     b.ty = literal.ty;
@@ -109,6 +110,49 @@ impl Pass<HighIr> for UdtEncodePass {
             }
         }
         result
+    }
+}
+
+/// A field stored as a constant `Val` word is the number inside it.
+///
+/// A `u32` or `i32` `Val` is the payload in the high 32 bits and the tag
+/// (`U32Val` 4, `I32Val` 5) alone in the low 32 — that is the encoding's
+/// definition, so a constant of exactly that shape, stored in a field the
+/// struct declares of the matching type, is that field's number. The
+/// literal printed as the raw word would be a 64-bit value in a 32-bit
+/// field. The decoded constant is a new binding scheduled before the
+/// construction.
+fn decode_constant_fields(func: &mut HighFunction, structs: &[StructDef], literal: &mut Literal) {
+    use sordec_ir::{Literal as Lit, PrimitiveType as P, TypeRef};
+    let IrType::Known(KnownType::UserDefined(id)) = &literal.ty else { return };
+    let Some(def) = structs.iter().find(|s| s.id == *id) else { return };
+    for (name, value) in &mut literal.fields {
+        let Some(field) = def.fields.iter().find(|f| f.name == *name) else { continue };
+        let bits: u64 = match func.bindings.get(resolve_use(func, *value)).map(|b| &b.expr) {
+            Some(Expr::Literal(Lit::I64(n))) => *n as u64,
+            Some(Expr::Literal(Lit::U64(n))) => *n,
+            _ => continue,
+        };
+        let payload = (bits >> 32) as u32;
+        let (lit, ty) = match (&field.ty, bits & 0xFFFF_FFFF) {
+            (TypeRef::Primitive(P::U32), 4) => (Lit::U32(payload), KnownType::U32),
+            (TypeRef::Primitive(P::I32), 5) => (Lit::I32(payload as i32), KnownType::I32),
+            _ => continue,
+        };
+        let fresh = ValueId::from_index(func.bindings.len() as u32);
+        func.bindings.push(sordec_ir::Binding::new(
+            fresh,
+            IrType::Known(ty),
+            Expr::Literal(lit),
+            Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, "a constant field stored in its encoded form, decoded"),
+        ));
+        for (_, block) in func.blocks.iter_mut() {
+            if let Some(pos) = block.bindings.iter().position(|v| *v == literal.at) {
+                block.bindings.insert(pos, fresh);
+                break;
+            }
+        }
+        *value = fresh;
     }
 }
 
@@ -340,6 +384,29 @@ mod tests {
     fn a_table_that_names_no_struct_declines() {
         let mut m = ir(encoder(1));
         assert!(!UdtEncodePass.run(&mut m).changed);
+    }
+
+    /// A `u32` field stored as the constant `5 << 32 | U32Val` is `5`; a
+    /// constant with another tag in the low word is left as it is.
+    #[test]
+    fn a_constant_field_in_encoded_form_is_its_number() {
+        let build = |word: i64| {
+            let mut f = encoder(2);
+            f.bindings.get_mut(v(5)).unwrap().expr = Expr::Literal(Literal::I64(word));
+            f
+        };
+        let mut m = ir(build((5i64 << 32) | 4));
+        assert!(UdtEncodePass.run(&mut m).changed);
+        let f = &m.functions[0];
+        let Expr::Struct { fields } = &f.bindings.get(v(9)).unwrap().expr else { panic!() };
+        let decoded = f.bindings.get(fields[1].1).unwrap();
+        assert!(matches!(decoded.expr, Expr::Literal(Literal::U32(5))), "{:?}", decoded.expr);
+        assert!(f.blocks.iter().any(|(_, b)| b.bindings.contains(&fields[1].1)), "scheduled");
+        let mut m = ir(build((5i64 << 32) | 5));
+        assert!(UdtEncodePass.run(&mut m).changed);
+        let f = &m.functions[0];
+        let Expr::Struct { fields } = &f.bindings.get(v(9)).unwrap().expr else { panic!() };
+        assert!(matches!(f.bindings.get(fields[1].1).unwrap().expr, Expr::Literal(Literal::I64(_))));
     }
 
     #[test]
