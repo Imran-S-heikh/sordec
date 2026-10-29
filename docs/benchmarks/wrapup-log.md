@@ -80,3 +80,20 @@ fuzzing 7 → 6. Scores unchanged (corpus bands pass, held-out mean 0.7850).
 Not compiling: account 2, fuzzing 6, other_custom_types 18 · privacy_pools 19,
 groth16_bn254 8, groth16_bls12_381 8 · phoenix-vesting 36, merkle-voting 3 ·
 and 19 of the 39 SDK 26 contracts.
+
+## 2026-10-29 — commit 41d2250 (pointer parameters promoted one by one)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 22/25 | 26 | 3,898 |
+| Stellar examples, multi-contract | 13 | 10/13 | 35 | 4,243 |
+| third-party | 2 | 0/2 | 39 | 788 |
+| SDK 26 test contracts | 39 | 20/39 | 109 | 1,604 |
+
+One reconstruction changed: SDK 26 `events_ref`, holes 51 → 48 (a helper now
+takes its three arguments by value). Every other reconstruction is
+byte-identical to 5a598a6, so scores are unchanged (held-out mean 0.7850 on the
+branch). The larger shape this work was aimed at, a decoder helper reached only
+through a function table, is blocked by a module-wide rule and is recorded as
+the next task.
