@@ -55,9 +55,29 @@
 //!   function.
 //! - **One width and type per offset, and no partial overlap.** A narrower
 //!   read of a wider one is a reinterpretation, not a read of that field.
-//! - **Exactly one parameter qualifies.** Two would be sound but the corpus
-//!   has none, and an untested rewrite path is worth less than an honest
-//!   decline.
+//! - **Each parameter is judged alone.** Every gate here is about one
+//!   pointer, so a function with two read-only pointers — `f(&from, &to)`
+//!   — promotes both, each by the same argument. The call site drops all
+//!   of them in one rewrite and appends the loads in the order the callee
+//!   appends its parameters (ascending pointer position, then ascending
+//!   offset), so arguments and parameters cannot pair up wrongly.
+//! - **With more than one, no write may precede a load.** A hoisted load
+//!   reads memory as the call begins; the callee read it at the load. They
+//!   agree exactly when nothing between the callee's entry and the load can
+//!   have written those bytes, which [`no_write_precedes_a_load`] proves
+//!   by a forward "may have written" dataflow: any store outside the
+//!   callee's own fresh frame, any call, and any bulk-memory operator
+//!   counts. A pointer that fails it stays a pointer; the others still go.
+//!
+//!   The single-parameter path predates this proof and does not ask for
+//!   it; it relies instead on what rustc emits for an `&T` (nothing may
+//!   write through a shared borrow while the callee holds it, and an
+//!   `&mut T` has no other name to be written through). Asked of it too,
+//!   the proof refuses three functions this pass converts today — a store
+//!   through the out-pointer, or a call, before the read — and one of those
+//!   costs a contract that now reconstructs with no holes 21 of them. So
+//!   that premise is stated rather than changed here; every rewrite this
+//!   pass was not already making carries the proof.
 //! - **Every load's block dominates every reachable return.** This is the
 //!   hoisting-safety gate, and the only one not shared: it establishes that
 //!   the callee would have performed the load on *every* path, so moving it
@@ -101,7 +121,9 @@ use super::frame::canon_addr;
 use super::slots::{access_shape, address_closure, addresses_only_flow_to, scheduled};
 use crate::dataflow::CfgFacts;
 use crate::declutter::drop_params;
-use crate::metrics_catalog::{MEMORY_ARGS_PROMOTED, MEMORY_LOADS_HOISTED};
+use crate::metrics_catalog::{
+    MEMORY_ARGS_PROMOTED, MEMORY_ARGS_REFUSED_WRITE_FIRST, MEMORY_LOADS_HOISTED,
+};
 use crate::pass::{Pass, PassResult};
 
 /// Unique pipeline name of this pass.
@@ -123,14 +145,30 @@ struct Field {
     loads: Vec<ValueId>,
 }
 
-/// How one function's pointer parameter maps onto scalar parameters.
+/// One pointer parameter and the fields read through it.
 #[derive(Debug, Clone)]
-struct ArgPlan {
+struct PromotedParam {
     /// Position of the pointer among the entry block's parameters.
     param_index: usize,
-    /// Fields in ascending offset order; the new parameters are appended
-    /// in this order.
+    /// Fields in ascending offset order.
     fields: Vec<Field>,
+}
+
+/// How one function's read-only pointer parameters map onto scalar
+/// parameters.
+#[derive(Debug, Clone)]
+struct ArgPlan {
+    /// In ascending parameter position. The new parameters are appended in
+    /// this order, each pointer's fields in ascending offset order, and the
+    /// call sites append the hoisted loads in the same order.
+    params: Vec<PromotedParam>,
+}
+
+impl ArgPlan {
+    /// Every field, in the order its parameter is appended.
+    fn fields(&self) -> impl Iterator<Item = &Field> {
+        self.params.iter().flat_map(|p| p.fields.iter())
+    }
 }
 
 /// Converts read-only pointer parameters into scalar parameters.
@@ -147,6 +185,7 @@ impl Pass<LiftedIr> for ArgPromotionPass {
 
         let calls = CallIndex::build(ir);
 
+        let mut refused = 0i64;
         let mut plans: HashMap<FuncId, ArgPlan> = ir
             .functions
             .iter()
@@ -165,8 +204,11 @@ impl Pass<LiftedIr> for ArgPromotionPass {
             // Nothing calls it, so there is no load to hoist anywhere and
             // the rewrite would strand the parameter.
             .filter(|f| !calls.sites_targeting(f.id).is_empty())
-            .filter_map(|f| promotable(f).map(|plan| (f.id, plan)))
+            .filter_map(|f| promotable(f, &mut refused).map(|plan| (f.id, plan)))
             .collect();
+        if refused > 0 {
+            result.metrics.increment(MEMORY_ARGS_REFUSED_WRITE_FIRST, refused);
+        }
         if plans.is_empty() {
             return result;
         }
@@ -203,27 +245,34 @@ impl Pass<LiftedIr> for ArgPromotionPass {
 // Callee analysis
 // ---------------------------------------------------------------------
 
-/// Can one of `func`'s pointer parameters become scalar parameters?
-fn promotable(func: &LiftedFunction) -> Option<ArgPlan> {
+/// Which of `func`'s pointer parameters can become scalar parameters?
+///
+/// Each parameter is judged on its own: every gate in [`loaded_fields`] is
+/// about one pointer, and a parameter that is only read through is
+/// relocatable whatever its neighbours are. When more than one qualifies,
+/// each must also pass [`no_write_precedes_a_load`] — see the module doc
+/// for why that proof is asked of every rewrite this pass was not already
+/// making. Each parameter that proof refuses is counted in `refused`.
+fn promotable(func: &LiftedFunction, refused: &mut i64) -> Option<ArgPlan> {
     let cfg = CfgFacts::build(func);
     let params = func.blocks.get(func.entry)?.params.clone();
 
-    let mut found: Option<ArgPlan> = None;
-    for (param_index, param) in params.into_iter().enumerate() {
-        let Some(fields) = loaded_fields(func, param, &cfg) else {
-            continue;
-        };
-        if found.is_some() {
-            // Two promotable parameters is a rewrite path the corpus does
-            // not exercise. Declining is the honest answer.
-            return None;
-        }
-        found = Some(ArgPlan {
-            param_index,
-            fields,
-        });
+    let mut found: Vec<PromotedParam> = params
+        .into_iter()
+        .enumerate()
+        .filter_map(|(param_index, param)| {
+            loaded_fields(func, param, &cfg).map(|fields| PromotedParam {
+                param_index,
+                fields,
+            })
+        })
+        .collect();
+    if found.len() > 1 {
+        let before = found.len();
+        found.retain(|p| no_write_precedes_a_load(func, &p.fields, &cfg));
+        *refused += (before - found.len()) as i64;
     }
-    found
+    (!found.is_empty()).then_some(ArgPlan { params: found })
 }
 
 /// The fields `param` is read through, or `None` when any gate declines.
@@ -345,6 +394,105 @@ fn every_load_is_unconditional(
         .all(|b| returns.iter().all(|r| cfg.dominates(*b, *r)))
 }
 
+/// Whether every load runs before anything in the callee could have
+/// written memory.
+///
+/// Hoisting a load to the call site reads memory as it is when the call
+/// begins; the callee read it at the load. The two agree exactly when
+/// nothing between the callee's entry and the load can have changed those
+/// bytes. Stores to the callee's own fresh frame cannot — it lies below
+/// the caller's stack pointer, where no live object the caller could point
+/// at exists — but any other store, any call, and any bulk-memory operator
+/// might.
+///
+/// A forward "may have written" dataflow over the CFG: a block is dirty on
+/// entry when any predecessor is dirty on exit, and the facts only ever go
+/// from clean to dirty, so a load seen dirty on any sweep is dirty in the
+/// fixed point too.
+fn no_write_precedes_a_load(func: &LiftedFunction, fields: &[Field], cfg: &CfgFacts) -> bool {
+    let own_frame = super::frame::detect(func);
+    let loads: HashSet<ValueId> = fields.iter().flat_map(|f| f.loads.iter().copied()).collect();
+    let mut dirty_out: HashMap<sordec_common::BlockId, bool> = HashMap::new();
+    loop {
+        let mut changed = false;
+        for &block_id in cfg.rpo() {
+            let mut dirty = cfg
+                .preds(block_id)
+                .iter()
+                .any(|p| dirty_out.get(p).copied().unwrap_or(false));
+            let Some(block) = func.blocks.get(block_id) else {
+                continue;
+            };
+            for &id in &block.instructions {
+                if dirty && loads.contains(&id) {
+                    return false;
+                }
+                dirty |= may_write(func, id, own_frame.as_ref());
+            }
+            if dirty_out.insert(block_id, dirty) != Some(dirty) {
+                changed = true;
+            }
+        }
+        if !changed {
+            return true;
+        }
+    }
+}
+
+/// Whether one instruction may write memory a caller's pointer reaches.
+///
+/// Written as "what is known not to", like
+/// [`super::forward::clobbers_memory`], which it defers to for every
+/// operator that is not a load or store.
+fn may_write(
+    func: &LiftedFunction,
+    id: ValueId,
+    own_frame: Option<&super::frame::FrameLayout>,
+) -> bool {
+    let Some(LiftedValueDef::Operator { op, args }) = func.values.get(id).map(|v| &v.def) else {
+        return false;
+    };
+    if let Some(shape) = access_shape(op) {
+        if !shape.is_store {
+            return false;
+        }
+        // A store wholly inside this function's own fresh frame: based on
+        // its frame pointer, and ending before the frame does — `fp + size`
+        // and above is the caller's frame.
+        let into_own_frame = own_frame.is_some_and(|frame| {
+            args.first().is_some_and(|a| {
+                let (base, delta) = canon_addr(func, *a);
+                base == frame.base
+                    && u64::from(delta) + u64::from(shape.memarg_offset) + u64::from(shape.width)
+                        <= u64::from(frame.size)
+            })
+        });
+        return !into_own_frame;
+    }
+    if is_sub_word_load(op) {
+        return false;
+    }
+    super::forward::clobbers_memory(op)
+}
+
+/// A narrow load, which reads and therefore writes nothing.
+fn is_sub_word_load(op: &sordec_ir::WasmOp) -> bool {
+    use waffle::Operator as O;
+    matches!(
+        op.0,
+        O::I32Load8S { .. }
+            | O::I32Load8U { .. }
+            | O::I32Load16S { .. }
+            | O::I32Load16U { .. }
+            | O::I64Load8S { .. }
+            | O::I64Load8U { .. }
+            | O::I64Load16S { .. }
+            | O::I64Load16U { .. }
+            | O::I64Load32S { .. }
+            | O::I64Load32U { .. }
+    )
+}
+
 // ---------------------------------------------------------------------
 // Caller analysis
 // ---------------------------------------------------------------------
@@ -367,8 +515,8 @@ fn unpromotable_callees(
             let LiftedValueDef::Operator { args, .. } = &value.def else {
                 return true;
             };
-            // The pointer argument must be there to replace.
-            args.get(plan.param_index).is_none()
+            // Every pointer argument must be there to replace.
+            plan.params.iter().any(|p| args.get(p.param_index).is_none())
         });
         if unrewritable {
             vetoed.push(target);
@@ -416,25 +564,28 @@ fn rewrite_call_sites(
     // the positions still to be processed.
     for (block_id, position, call, target) in sites.into_iter().rev() {
         let plan = &plans[&target];
-        let Some(pointer) = drop_pointer_arg(func, call, plan.param_index) else {
+        let Some(pointers) = drop_pointer_args(func, call, plan) else {
             continue;
         };
-        let mut loads = Vec::with_capacity(plan.fields.len());
-        for field in &plan.fields {
-            // The callee's own load operator, re-based onto the pointer the
-            // caller holds: the whole displacement moves into the memarg,
-            // so `p + delta` with memarg `m` becomes `p` with memarg
-            // `delta + m` — the offset already accumulated in `field`.
-            let mut op = field.load_op;
-            op.update_memory_arg(|memarg| memarg.offset = field.offset);
-            let load = func.values.push(LiftedValue {
-                def: LiftedValueDef::Operator {
-                    op: sordec_ir::WasmOp(op),
-                    args: vec![pointer],
-                },
-                types: vec![field.ty],
-            });
-            loads.push(load);
+        let mut loads = Vec::new();
+        for (promoted, &pointer) in plan.params.iter().zip(&pointers) {
+            for field in &promoted.fields {
+                // The callee's own load operator, re-based onto the pointer
+                // the caller holds: the whole displacement moves into the
+                // memarg, so `p + delta` with memarg `m` becomes `p` with
+                // memarg `delta + m` — the offset already accumulated in
+                // `field`.
+                let mut op = field.load_op;
+                op.update_memory_arg(|memarg| memarg.offset = field.offset);
+                let load = func.values.push(LiftedValue {
+                    def: LiftedValueDef::Operator {
+                        op: sordec_ir::WasmOp(op),
+                        args: vec![pointer],
+                    },
+                    types: vec![field.ty],
+                });
+                loads.push(load);
+            }
         }
         // Parameters were appended in field order, so arguments are too.
         if let Some(LiftedValueDef::Operator { args, .. }) =
@@ -450,16 +601,29 @@ fn rewrite_call_sites(
     hoisted
 }
 
-/// Remove the pointer argument from a call, returning the value it held.
-fn drop_pointer_arg(
+/// Remove every promoted pointer argument from a call, returning the
+/// values they held in the plan's (ascending) order.
+///
+/// All-or-nothing: a call missing any of them is left untouched, so a
+/// partly rewritten call cannot exist.
+fn drop_pointer_args(
     func: &mut LiftedFunction,
     call: ValueId,
-    param_index: usize,
-) -> Option<ValueId> {
+    plan: &ArgPlan,
+) -> Option<Vec<ValueId>> {
     let LiftedValueDef::Operator { args, .. } = &mut func.values.get_mut(call)?.def else {
         return None;
     };
-    (param_index < args.len()).then(|| args.remove(param_index))
+    if plan.params.iter().any(|p| p.param_index >= args.len()) {
+        return None;
+    }
+    let pointers = plan.params.iter().map(|p| args[p.param_index]).collect();
+    // Highest position first, so each removal leaves the positions still
+    // to be removed where they were.
+    for promoted in plan.params.iter().rev() {
+        args.remove(promoted.param_index);
+    }
+    Some(pointers)
 }
 
 /// Give the callee one parameter per field, bind its loads to them, and
@@ -475,7 +639,7 @@ fn promote_params(func: &mut LiftedFunction, plan: &ArgPlan) {
     let entry = func.entry;
     let base = func.blocks.get(entry).map_or(0, |b| b.params.len());
 
-    for (offset, field) in plan.fields.iter().enumerate() {
+    for (offset, field) in plan.fields().enumerate() {
         let param = func.values.push(LiftedValue {
             def: LiftedValueDef::BlockParam {
                 block: entry,
@@ -496,17 +660,15 @@ fn promote_params(func: &mut LiftedFunction, plan: &ArgPlan) {
         }
     }
 
-    let retired: HashSet<ValueId> = plan
-        .fields
-        .iter()
-        .flat_map(|f| f.loads.iter().copied())
-        .collect();
+    let retired: HashSet<ValueId> = plan.fields().flat_map(|f| f.loads.iter().copied()).collect();
     for (_, block) in func.blocks.iter_mut() {
         block.instructions.retain(|id| !retired.contains(id));
     }
 
-    let mut mask = vec![true; base + plan.fields.len()];
-    mask[plan.param_index] = false;
+    let mut mask = vec![true; base + plan.fields().count()];
+    for promoted in &plan.params {
+        mask[promoted.param_index] = false;
+    }
     drop_params(func, &HashMap::from([(entry, mask)]));
 }
 
@@ -620,11 +782,13 @@ mod tests {
 
     #[test]
     fn a_read_only_pointer_parameter_is_promotable() {
-        let plan = promotable(&read_only_callee()).expect("promotable");
-        assert_eq!(plan.param_index, 0);
-        assert_eq!(plan.fields.len(), 2);
-        assert_eq!(plan.fields[0].offset, 0);
-        assert_eq!(plan.fields[1].offset, 8);
+        let plan = promotable(&read_only_callee(), &mut 0).expect("promotable");
+        assert_eq!(plan.params.len(), 1);
+        let promoted = &plan.params[0];
+        assert_eq!(promoted.param_index, 0);
+        assert_eq!(promoted.fields.len(), 2);
+        assert_eq!(promoted.fields[0].offset, 0);
+        assert_eq!(promoted.fields[1].offset, 8);
     }
 
     #[test]
@@ -640,7 +804,7 @@ mod tests {
                 LiftedTerminator::Return { values: vec![] },
             )],
         );
-        assert!(promotable(&f).is_none());
+        assert!(promotable(&f, &mut 0).is_none());
     }
 
     #[test]
@@ -654,7 +818,7 @@ mod tests {
                 LiftedTerminator::Return { values: vec![] },
             )],
         );
-        assert!(promotable(&f).is_none());
+        assert!(promotable(&f, &mut 0).is_none());
     }
 
     #[test]
@@ -682,7 +846,7 @@ mod tests {
                 block(2, vec![], vec![], LiftedTerminator::Return { values: vec![] }),
             ],
         );
-        assert!(promotable(&f).is_none());
+        assert!(promotable(&f, &mut 0).is_none());
     }
 
     #[test]
@@ -711,7 +875,7 @@ mod tests {
                 LiftedTerminator::Return { values: vec![] },
             )],
         );
-        assert!(promotable(&f).is_none());
+        assert!(promotable(&f, &mut 0).is_none());
     }
 
     #[test]
@@ -726,11 +890,13 @@ mod tests {
                 LiftedTerminator::Return { values: vec![] },
             )],
         );
-        assert!(promotable(&f).is_none());
+        assert!(promotable(&f, &mut 0).is_none());
     }
 
     #[test]
-    fn two_promotable_parameters_decline() {
+    fn two_read_only_parameters_both_promote() {
+        // `f(&from, &to)`: each pointer is only read, so each is promoted
+        // by the same argument as one alone.
         let f = func_with(
             vec![param(0), param(1), load(0, v(0)), load(0, v(1))],
             vec![block(
@@ -740,7 +906,37 @@ mod tests {
                 LiftedTerminator::Return { values: vec![] },
             )],
         );
-        assert!(promotable(&f).is_none());
+        let plan = promotable(&f, &mut 0).expect("both promote");
+        let positions: Vec<usize> = plan.params.iter().map(|p| p.param_index).collect();
+        assert_eq!(positions, vec![0, 1]);
+    }
+
+    #[test]
+    fn a_write_before_a_load_keeps_that_pointer_when_there_are_two() {
+        // `(out, &a, &b)`: a store through `out` precedes the read of `b`,
+        // so a load of `b` hoisted to the call site could read the bytes
+        // before that store. `a` is read first and still goes.
+        let f = func_with(
+            vec![
+                param(0),             // v0 out
+                param(1),             // v1 &a
+                param(2),             // v2 &b
+                load(0, v(1)),        // v3 read a
+                store(0, v(0), v(3)), // v4 write out
+                load(0, v(2)),        // v5 read b, after the write
+            ],
+            vec![block(
+                0,
+                vec![v(0), v(1), v(2)],
+                vec![v(3), v(4), v(5)],
+                LiftedTerminator::Return { values: vec![] },
+            )],
+        );
+        let mut refused = 0;
+        let plan = promotable(&f, &mut refused).expect("`a` still promotes");
+        let positions: Vec<usize> = plan.params.iter().map(|p| p.param_index).collect();
+        assert_eq!(positions, vec![1]);
+        assert_eq!(refused, 1, "the refusal is counted");
     }
 
     #[test]
@@ -760,15 +956,15 @@ mod tests {
                 LiftedTerminator::Return { values: vec![] },
             )],
         );
-        let plan = promotable(&f).expect("promotable");
-        assert_eq!(plan.fields.len(), 1);
-        assert_eq!(plan.fields[0].offset, 8, "the add folds into the offset");
+        let plan = promotable(&f, &mut 0).expect("promotable");
+        assert_eq!(plan.params[0].fields.len(), 1);
+        assert_eq!(plan.params[0].fields[0].offset, 8, "the add folds into the offset");
     }
 
     #[test]
     fn conversion_drops_the_pointer_and_binds_the_loads() {
         let mut func = read_only_callee();
-        let plan = promotable(&func).expect("promotable");
+        let plan = promotable(&func, &mut 0).expect("promotable");
         promote_params(&mut func, &plan);
 
         let params = &func.blocks.get(func.entry).unwrap().params;
@@ -894,6 +1090,157 @@ mod tests {
         indirect.id = FuncId::new(2);
         let mut ir = module(vec![read_only_callee(), caller(), indirect]);
         assert!(!ArgPromotionPass.run(&mut ir).changed);
+    }
+
+    /// `(p)` reading `p+0` after a prologue reserving a 32-byte frame and
+    /// then `extra` — the instruction under test — before the load.
+    fn framed_reader(extra: LiftedValueDef) -> LiftedFunction {
+        func_with(
+            vec![
+                param(0), // v0 p
+                op(
+                    waffle::Operator::GlobalGet {
+                        global_index: waffle::Global::from(0),
+                    },
+                    vec![],
+                ), // v1 sp
+                i32_const(32),                                  // v2
+                op(waffle::Operator::I32Sub, vec![v(1), v(2)]), // v3 fp
+                op(
+                    waffle::Operator::GlobalSet {
+                        global_index: waffle::Global::from(0),
+                    },
+                    vec![v(3)],
+                ), // v4
+                i32_const(7),  // v5
+                extra,         // v6
+                load(0, v(0)), // v7
+            ],
+            vec![block(
+                0,
+                vec![v(0)],
+                vec![v(1), v(2), v(3), v(4), v(5), v(6), v(7)],
+                LiftedTerminator::Return { values: vec![] },
+            )],
+        )
+    }
+
+    fn write_first(func: &LiftedFunction) -> bool {
+        let cfg = CfgFacts::build(func);
+        let fields = loaded_fields(func, v(0), &cfg).expect("p is only read");
+        !no_write_precedes_a_load(func, &fields, &cfg)
+    }
+
+    #[test]
+    fn a_store_into_the_callees_own_frame_is_not_a_write_the_caller_sees() {
+        // `fp+24`, 8 bytes, inside the 32 the prologue reserved.
+        assert!(!write_first(&framed_reader(store(24, v(3), v(5)))));
+    }
+
+    #[test]
+    fn a_store_past_the_callees_frame_is_a_write() {
+        // `fp+32` is the first byte above the frame: the caller's.
+        assert!(write_first(&framed_reader(store(32, v(3), v(5)))));
+    }
+
+    #[test]
+    fn a_call_before_the_load_is_a_write() {
+        assert!(write_first(&framed_reader(call(9, vec![v(5)]))));
+    }
+
+    #[test]
+    fn a_write_on_one_incoming_path_reaches_the_load() {
+        // bb1 calls out and bb2 does not; both reach the load in bb3. One
+        // path writes first, so the load is not safe to hoist.
+        let f = func_with(
+            vec![
+                param(0),        // v0 p
+                param(1),        // v1 cond
+                call(9, vec![]), // v2, in bb1
+                load(0, v(0)),   // v3, in bb3
+            ],
+            vec![
+                block(
+                    0,
+                    vec![v(0), v(1)],
+                    vec![],
+                    LiftedTerminator::BranchIf {
+                        cond: v(1),
+                        if_true: target(1, vec![]),
+                        if_false: target(2, vec![]),
+                    },
+                ),
+                block(1, vec![], vec![v(2)], LiftedTerminator::Branch(target(3, vec![]))),
+                block(2, vec![], vec![], LiftedTerminator::Branch(target(3, vec![]))),
+                block(3, vec![], vec![v(3)], LiftedTerminator::Return { values: vec![] }),
+            ],
+        );
+        assert!(write_first(&f));
+    }
+
+    #[test]
+    fn a_call_with_two_pointers_gets_both_sets_of_loads_in_parameter_order() {
+        // callee `f(p, x, q)` reads `p+0`, `p+8` and `q+0`.
+        let callee = func_with(
+            vec![
+                param(0),      // v0 p
+                param(1),      // v1 x
+                param(2),      // v2 q
+                load(0, v(0)), // v3
+                load(8, v(0)), // v4
+                load(0, v(2)), // v5
+            ],
+            vec![block(
+                0,
+                vec![v(0), v(1), v(2)],
+                vec![v(3), v(4), v(5)],
+                LiftedTerminator::Return { values: vec![] },
+            )],
+        );
+        // caller `g(a, y, b)` calling `f(a, y, b)`.
+        let mut caller = func_with(
+            vec![
+                param(0),                        // v0 a
+                param(1),                        // v1 y
+                param(2),                        // v2 b
+                call(0, vec![v(0), v(1), v(2)]), // v3
+            ],
+            vec![block(
+                0,
+                vec![v(0), v(1), v(2)],
+                vec![v(3)],
+                LiftedTerminator::Return { values: vec![] },
+            )],
+        );
+        caller.id = FuncId::new(1);
+        let mut ir = module(vec![callee, caller]);
+        assert!(ArgPromotionPass.run(&mut ir).changed);
+
+        // The callee keeps `x` and gains three parameters: `p`'s two fields,
+        // then `q`'s one.
+        let callee = &ir.functions[0];
+        assert_eq!(callee.blocks.get(callee.entry).unwrap().params.len(), 4);
+
+        let caller = &ir.functions[1];
+        let LiftedValueDef::Operator { args, .. } = &caller.values.get(v(3)).unwrap().def else {
+            panic!("still a call");
+        };
+        assert_eq!(args.len(), 4);
+        assert_eq!(args[0], v(1), "the untouched argument keeps its place");
+        let read: Vec<(ValueId, u32)> = args[1..]
+            .iter()
+            .map(|&a| {
+                let LiftedValueDef::Operator {
+                    op: sordec_ir::WasmOp(waffle::Operator::I64Load { memory }),
+                    args: load_args,
+                } = &caller.values.get(a).unwrap().def
+                else {
+                    panic!("not a load");
+                };
+                (load_args[0], memory.offset)
+            })
+            .collect();
+        assert_eq!(read, vec![(v(0), 0), (v(0), 8), (v(2), 0)]);
     }
 
     #[test]
