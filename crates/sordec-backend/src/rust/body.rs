@@ -1714,6 +1714,76 @@ mod tests {
         assert!(out.contains("Temp (v1)"), "{out}");
     }
 
+    /// `v1 op 4` where `v1` is typed as the declared type `id`, which the
+    /// registry holds as an integer enum, an error enum, or not at all.
+    fn ordered_on(op: BinaryOp, kind: &str) -> String {
+        let id = sordec_common::TypeId::new(5);
+        let mut reg = TypeRegistry::default();
+        let def = sordec_ir::EnumDef {
+            id,
+            name: "Flag".to_string(),
+            cases: vec![sordec_ir::EnumCase { name: "A".to_string(), value: 0 }],
+        };
+        match kind {
+            "enum" => reg.enums.push(def),
+            "error" => reg.errors.push(def),
+            _ => {}
+        }
+        emitted(
+            vec![
+                (IrType::Known(KnownType::UserDefined(id)), Expr::Unary { op: sordec_ir::UnaryOp::Wrap32, value: v(0) }),
+                (IrType::Known(KnownType::U32), Expr::Literal(sordec_ir::Literal::U32(4))),
+                (IrType::Known(KnownType::Bool), Expr::Binary { op, lhs: v(1), rhs: v(2) }),
+            ],
+            vec![ret(3)],
+            &reg,
+        )
+    }
+
+    #[test]
+    fn an_ordering_of_an_integer_enum_compares_its_discriminant() {
+        let out = packed(&ordered_on(BinaryOp::GtU, "enum"));
+        assert!(out.contains("(v1asu32)>4"), "{out}");
+    }
+
+    #[test]
+    fn an_equality_of_an_integer_enum_is_left_alone() {
+        let out = packed(&ordered_on(BinaryOp::Eq, "enum"));
+        assert!(!out.contains("asu32"), "{out}");
+    }
+
+    #[test]
+    fn an_ordering_of_a_non_enum_or_an_error_enum_is_left_alone() {
+        for kind in ["error", "none"] {
+            let out = packed(&ordered_on(BinaryOp::GtU, kind));
+            assert!(!out.contains("(v1asu32)"), "{kind}: {out}");
+        }
+    }
+
+    /// `wrap32` of a binding typed `ty`, returned.
+    fn wrapped(ty: IrType) -> String {
+        emitted(
+            vec![
+                (ty, Expr::Use(v(0))),
+                (IrType::Known(KnownType::I32), Expr::Unary { op: sordec_ir::UnaryOp::Wrap32, value: v(1) }),
+            ],
+            vec![ret(2)],
+            &TypeRegistry::default(),
+        )
+    }
+
+    #[test]
+    fn a_width_move_of_a_val_reads_its_bits() {
+        let out = packed(&wrapped(IrType::Known(KnownType::Val)));
+        assert!(out.contains("(v1.get_payload()asi32)"), "{out}");
+    }
+
+    #[test]
+    fn a_width_move_of_an_integer_is_a_plain_cast() {
+        let out = packed(&wrapped(IrType::Known(KnownType::I64)));
+        assert!(out.contains("(v1asi32)") && !out.contains("get_payload"), "{out}");
+    }
+
     /// The text with its spaces removed, so a check does not depend on
     /// token spacing.
     fn packed(s: &str) -> String {
