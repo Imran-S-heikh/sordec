@@ -1106,23 +1106,24 @@ pub fn crypto_kind_arity(kind: CryptoOpKind) -> usize {
 pub fn crypto_kind_result_type(kind: CryptoOpKind) -> KnownType {
     use CryptoOpKind as K;
     match kind {
-        // Hashes, point ops, key recovery → BytesObject.
-        K::ComputeHashSha256
-        | K::ComputeHashKeccak256
-        | K::RecoverKeyEcdsaSecp256k1
-        | K::Bls12381G1Add
+        // Hashes and key recovery → BytesObject.
+        K::ComputeHashSha256 | K::ComputeHashKeccak256 | K::RecoverKeyEcdsaSecp256k1 => KnownType::Bytes,
+        // Curve points → a BytesObject whose length the protocol fixes: an
+        // uncompressed BLS12-381 G1 point is 96 bytes and a G2 point 192,
+        // a BN254 G1 point 64. The SDK wraps each result in a `BytesN` of
+        // that length without checking it (`G1Affine`, `G2Affine`,
+        // `Bn254G1Affine`), so that is the type the value has.
+        K::Bls12381G1Add
         | K::Bls12381G1Mul
         | K::Bls12381G1Msm
         | K::Bls12381MapFpToG1
-        | K::Bls12381HashToG1
-        | K::Bls12381G2Add
+        | K::Bls12381HashToG1 => KnownType::BytesN(96),
+        K::Bls12381G2Add
         | K::Bls12381G2Mul
         | K::Bls12381G2Msm
         | K::Bls12381MapFp2ToG2
-        | K::Bls12381HashToG2
-        | K::Bn254G1Add
-        | K::Bn254G1Mul
-        | K::Bn254G1Msm => KnownType::Bytes,
+        | K::Bls12381HashToG2 => KnownType::BytesN(192),
+        K::Bn254G1Add | K::Bn254G1Mul | K::Bn254G1Msm => KnownType::BytesN(64),
         // Signature verifies → Void; subgroup / on-curve / pairing
         // checks → Bool.
         K::VerifySigEd25519 | K::VerifySigEcdsaSecp256r1 => KnownType::Unit,
@@ -1875,5 +1876,13 @@ mod tests {
         assert_eq!(buf_kind_arity(BufOpKind::SymbolIndexInLinearMemory), 3);
         assert_eq!(map_kind_arity(MapOpKind::New), 0);
         assert_eq!(buf_kind_arity(BufOpKind::BytesNewEmpty), 0);
+    }
+
+    #[test]
+    fn a_curve_point_s_result_has_the_length_the_protocol_fixes() {
+        assert_eq!(crypto_kind_result_type(CryptoOpKind::Bls12381G1Add), KnownType::BytesN(96));
+        assert_eq!(crypto_kind_result_type(CryptoOpKind::Bls12381G2Mul), KnownType::BytesN(192));
+        assert_eq!(crypto_kind_result_type(CryptoOpKind::Bn254G1Mul), KnownType::BytesN(64));
+        assert_eq!(crypto_kind_result_type(CryptoOpKind::ComputeHashSha256), KnownType::Bytes);
     }
 }
