@@ -1188,14 +1188,33 @@ impl<'a> FnCtx<'a> {
             // Each element is declared by its binding's type (`sig::
             // helper_return`), and a flag typed as the wasm word it travels
             // in is still printed as the comparison it is: cast it back.
+            //
+            // The declaration is one site's; another site's element may be
+            // the same word in the other sign (`u64` from an object decode
+            // beside an `i64` shift), so it is cast to the declared type —
+            // all of its bits kept.
             many => {
+                let declared: Option<Vec<IrType>> = if self.func.signature.is_some() {
+                    None
+                } else {
+                    sig::helper_return_site(self.func)
+                        .filter(|s| s.len() == many.len())
+                        .and_then(|s| s.iter().map(|v| self.func.bindings.get(*v).map(|b| b.ty.clone())).collect())
+                };
                 let vs: Vec<syn::Expr> = many
                     .iter()
-                    .map(|v| {
+                    .enumerate()
+                    .map(|(i, v)| {
+                        let want = declared.as_ref().and_then(|d| d.get(i));
                         self.func
                             .bindings
                             .get(*v)
                             .and_then(|b| expr::bool_to_int(self, *v, &b.ty))
+                            .or_else(|| {
+                                let b = self.func.bindings.get(*v)?;
+                                let ty = want.filter(|t| **t != b.ty)?;
+                                expr::unsuffixed_against(self, *v, ty).or_else(|| expr::sign_cast(self, *v, ty))
+                            })
                             .unwrap_or_else(|| self.value_ref(*v))
                     })
                     .collect();
@@ -1556,6 +1575,15 @@ mod tests {
     /// whose bindings are `exprs` from `v1` on, all scheduled in order;
     /// `tail` follows the block.
     fn emitted(exprs: Vec<(IrType, Expr)>, tail: Vec<Region>, reg: &TypeRegistry) -> String {
+        emitted_returning(exprs, tail, reg, vec![])
+    }
+
+    fn emitted_returning(
+        exprs: Vec<(IrType, Expr)>,
+        tail: Vec<Region>,
+        reg: &TypeRegistry,
+        returns: Vec<Vec<ValueId>>,
+    ) -> String {
         use quote::ToTokens;
         use sordec_common::{Arena, FuncId, Provenance, ProvenanceSource};
         use sordec_ir::{HighBlock, MemoryImage, WasmFacts};
@@ -1583,7 +1611,7 @@ mod tests {
             bindings,
             region,
             params: vec![v(0)],
-            returns: vec![],
+            returns,
         };
         let high = HighIr {
             facts: WasmFacts {
@@ -1635,6 +1663,147 @@ mod tests {
 
     fn ret(value: u32) -> Region {
         Region::Return { values: vec![v(value)] }
+    }
+
+    /// `DataKey::Temp(<payload>)` read by a `has`, the variant declaring a
+    /// field of `declared` and the payload being `wrap32(arg)`.
+    fn key_with_payload(declared: sordec_ir::PrimitiveType) -> String {
+        use sordec_ir::{EnumKey, KnownTier, StorageTier};
+        let mut reg = TypeRegistry::default();
+        reg.unions.push(sordec_ir::UnionDef {
+            id: sordec_common::TypeId::new(3),
+            name: "DataKey".to_string(),
+            cases: vec![sordec_ir::UnionCase {
+                name: "Temp".to_string(),
+                fields: vec![sordec_ir::TypeRef::Primitive(declared)],
+            }],
+            exported: true,
+        });
+        let has = known(KnownOp::StorageHas {
+            tier: StorageTier::Known(KnownTier::Temporary),
+            durability: v(0),
+            key: v(0),
+            resolved_key: Some(EnumKey {
+                enum_name: "DataKey".to_string(),
+                variant: "Temp".to_string(),
+                payload: vec![v(1)],
+            }),
+            probe: false,
+        });
+        emitted(
+            vec![
+                (untyped(), Expr::Unary { op: sordec_ir::UnaryOp::Wrap32, value: v(0) }),
+                (IrType::Known(KnownType::Bool), has),
+            ],
+            vec![ret(2)],
+            &reg,
+        )
+    }
+
+    #[test]
+    fn a_variant_payload_of_the_other_sign_is_cast_to_the_declared_field() {
+        let out = key_with_payload(sordec_ir::PrimitiveType::U32);
+        assert!(out.contains("Temp (v1 as u32)") || out.contains("Temp ((v1 as u32))"), "{out}");
+    }
+
+    #[test]
+    fn a_variant_payload_of_the_declared_sign_is_left_alone() {
+        let out = key_with_payload(sordec_ir::PrimitiveType::I32);
+        assert!(out.contains("Temp (v1)"), "{out}");
+    }
+
+    /// `v1 & -2i32` with `v1: u32` is the same 32 bits as `v1 & 4294967294`.
+    fn masked(operand: KnownType) -> String {
+        masked_with(operand, -2)
+    }
+
+    fn masked_with(operand: KnownType, n: i32) -> String {
+        let phi = (IrType::Known(operand), Expr::Phi { incoming: vec![] });
+        let lit = (IrType::Known(KnownType::I32), Expr::Literal(sordec_ir::Literal::I32(n)));
+        emitted(
+            vec![phi, lit, (IrType::Known(KnownType::U32), mask(1, 2)), (untyped(), store(3))],
+            vec![],
+            &TypeRegistry::default(),
+        )
+    }
+
+    #[test]
+    fn a_negative_mask_on_an_unsigned_word_is_the_same_bits_unsigned() {
+        let out = masked(KnownType::U32);
+        assert!(out.contains("4294967294") && !out.contains("- 2"), "{out}");
+    }
+
+    /// `v1 <op> -256i64` with `v1: u32`.
+    fn wide_negative(op: BinaryOp) -> String {
+        let phi = (IrType::Known(KnownType::U32), Expr::Phi { incoming: vec![] });
+        let lit = (IrType::Known(KnownType::I64), Expr::Literal(sordec_ir::Literal::I64(-256)));
+        emitted(
+            vec![
+                phi,
+                lit,
+                (IrType::Known(KnownType::U32), Expr::Binary { op, lhs: v(1), rhs: v(2) }),
+                (untyped(), store(3)),
+            ],
+            vec![],
+            &TypeRegistry::default(),
+        )
+    }
+
+    #[test]
+    fn a_wide_negative_mask_may_be_cut_for_and_but_not_for_or() {
+        assert!(wide_negative(BinaryOp::BitAnd).contains("4294967040"));
+        for op in [BinaryOp::BitOr, BinaryOp::BitXor] {
+            let out = wide_negative(op);
+            assert!(!out.contains("4294967040") && out.contains("256i64"), "{out}");
+        }
+    }
+
+    #[test]
+    fn a_small_flag_on_an_unsigned_word_takes_the_words_type() {
+        let out = masked_with(KnownType::U32, 1);
+        assert!(out.contains("v1 & 1") && !out.contains("1i32"), "{out}");
+    }
+
+    #[test]
+    fn a_negative_mask_on_a_signed_word_stays_negative() {
+        let out = masked(KnownType::I32);
+        assert!(out.contains("(- 2)") && !out.contains("4294967294"), "{out}");
+    }
+
+    /// A helper whose declared pair is `(i64, i64)` (the first return site)
+    /// returning `(0, <u64>)` at another site: the `u64` is cast to the
+    /// declared `i64`, keeping its bits.
+    fn pair_return(second: KnownType) -> String {
+        let exprs = vec![
+            (IrType::Known(KnownType::I64), Expr::Phi { incoming: vec![] }), // v1 declared
+            (IrType::Known(second), Expr::Phi { incoming: vec![] }),         // v2 returned
+        ];
+        emitted_returning(
+            exprs,
+            vec![Region::Return { values: vec![v(1), v(2)] }],
+            &TypeRegistry::default(),
+            vec![vec![v(1), v(1)]],
+        )
+    }
+
+    #[test]
+    fn a_pair_element_of_the_other_sign_is_cast_to_the_declared_type() {
+        let out = pair_return(KnownType::U64);
+        assert!(out.contains("(v2 as i64)"), "{out}");
+    }
+
+    /// A `u32` element against a declared `i64` is a different width, not a
+    /// sign: no cast.
+    #[test]
+    fn a_pair_element_of_another_width_is_not_cast() {
+        let out = pair_return(KnownType::U32);
+        assert!(!out.contains(" as "), "{out}");
+    }
+
+    #[test]
+    fn a_pair_element_of_the_declared_type_is_left_alone() {
+        let out = pair_return(KnownType::I64);
+        assert!(!out.contains(" as "), "{out}");
     }
 
     // ---- a hole only a conversion through `Val` reads ----
