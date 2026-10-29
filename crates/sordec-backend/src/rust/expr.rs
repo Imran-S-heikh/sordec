@@ -500,6 +500,47 @@ fn as_operand(e: &syn::Expr) -> syn::Expr {
     }
 }
 
+/// A `Val` handed back inside an `Option<T>`, as the `T`: the decoder that
+/// hands it back checked its tag on this path, and a `Val` carrying `T`'s
+/// tag is a `T`, so the conversion cannot fail and `unwrap` is exact. Only
+/// a host type — a word arrives through a decode operation, not a cast —
+/// and only when the value really prints as a `Val`.
+fn val_as_payload(ctx: &FnCtx, v: sordec_common::ValueId, option: &IrType) -> Option<syn::Expr> {
+    let (IrType::Known(KnownType::Option(inner)) | IrType::Inferred(KnownType::Option(inner))) = option else {
+        return None;
+    };
+    let (IrType::Known(t) | IrType::Inferred(t)) = &**inner else {
+        return None;
+    };
+    if matches!(
+        t,
+        KnownType::Val
+            | KnownType::Bool
+            | KnownType::Unit
+            | KnownType::I32
+            | KnownType::U32
+            | KnownType::I64
+            | KnownType::U64
+            | KnownType::I128
+            | KnownType::U128
+            | KnownType::Option(_)
+            | KnownType::Tuple(_)
+    ) {
+        return None;
+    }
+    // A `Val` by type, or by default: an untyped value prints as one.
+    let from = ctx.func.bindings.get(ctx.fold_target(v))?;
+    if !matches!(from.ty, IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val) | IrType::Unknown(_)) {
+        return None;
+    }
+    let x = ctx.value_ref(v);
+    let e = ctx.env_borrow();
+    let ty = crate::rust::ty::ir_type(&IrType::Inferred(t.clone()), ctx.reg, ctx.policy);
+    Some(parse_quote!(
+        <#ty as soroban_sdk::TryFromVal<soroban_sdk::Env, soroban_sdk::Val>>::try_from_val(#e, &#x).unwrap()
+    ))
+}
+
 /// A declared field or parameter type that is a 32- or 64-bit word.
 pub(crate) fn machine_word(t: &sordec_ir::TypeRef) -> Option<IrType> {
     use sordec_ir::{PrimitiveType as P, TypeRef};
@@ -1001,6 +1042,9 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
         Expr::Optional { payload: None } => parse_quote!(None),
         Expr::Optional { payload: Some(values) } => match values.as_slice() {
             [one] => {
+                if let Some(converted) = val_as_payload(ctx, *one, &binding.ty) {
+                    return parse_quote!(Some(#converted));
+                }
                 let one = ctx.arg_ref(*one);
                 parse_quote!(Some(#one))
             }

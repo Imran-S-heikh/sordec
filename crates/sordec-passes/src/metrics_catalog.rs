@@ -413,6 +413,9 @@ pub const MARSHALLING_DECODE_COLLAPSED: &str = "marshalling_decode_collapsed";
 /// 128-bit argument-decode results (discriminant, low limb, high limb)
 /// rebound to the value, plus the type planted on that value.
 pub const MARSHALLING_WIDE_DECODE_COLLAPSED: &str = "marshalling_wide_decode_collapsed";
+/// Calls to an `Option`-shaped decoder, and the `Some` arms in its body,
+/// typed as the `Option<T>` the tags it tests name.
+pub const MARSHALLING_DECODE_OPTION_TYPED: &str = "marshalling_decode_option_typed";
 /// 128-bit `IntoVal` helper calls collapsed to a wide join.
 pub const MARSHALLING_WIDE_ENCODE_COLLAPSED: &str = "marshalling_wide_encode_collapsed";
 /// 128-bit decode helper calls elided with their results.
@@ -984,6 +987,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         REFINE_AND_MERGE_BLOCKED,
         // Marshalling elision.
         MARSHALLING_DECODE_COLLAPSED,
+        MARSHALLING_DECODE_OPTION_TYPED,
         MARSHALLING_WIDE_DECODE_COLLAPSED,
         MARSHALLING_WIDE_ENCODE_COLLAPSED,
         MARSHALLING_WIDE_CODEC_CALLS_ELIDED,

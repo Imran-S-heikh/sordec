@@ -66,15 +66,22 @@
 //!   the type `contractspecv0` declares for the argument being passed. A
 //!   helper that accepts `AddressObject` fed a parameter declared `u64`
 //!   means our picture is wrong somewhere, so nothing is elided.
-//! - **Entry parameters only.** The collapse rests on the ABI guarantee
-//!   that the host already validated this value against the spec. That
-//!   guarantee exists for an entrypoint parameter and for nothing else.
+//! - **Entry parameters, and helper parameters that only ever receive
+//!   one.** The collapse rests on the ABI guarantee that the host already
+//!   validated this value against the spec. That guarantee exists for an
+//!   entrypoint parameter, and it survives a helper every one of whose
+//!   callers hands it such a parameter untouched — the wrapper the compiler
+//!   outlines around an entrypoint's body keeps the host's validation.
+//!   [`guaranteed_params`] is that reading, module-wide; it needs the
+//!   helper's callers to all be visible (not exported, not held by the
+//!   function table when the module calls through one) and to agree.
+//!   Nothing else carries the guarantee.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sordec_common::{FuncId, ValueId};
 use sordec_ir::{
-    Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, SemanticOp, ValObjectKind,
+    Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region, SemanticOp, ValObjectKind,
 };
 
 use super::sret::{self, SretShape};
@@ -122,6 +129,23 @@ enum HelperShape {
         disc_index: usize,
         /// Component index of the decoded payload.
         payload_index: usize,
+    },
+    /// `T::try_from_val(env, val).ok()`: the helper hands back an `Option`,
+    /// `Some` of its argument on the path where the tag check passed and
+    /// `None` otherwise — the shape [`super::optional_out`] leaves behind.
+    /// Its call sites keep the `Option`: a guaranteed argument makes it
+    /// `Some(arg)`, any other keeps the call, typed `Option<T>`.
+    Optional {
+        /// The payload type every tag the helper tests names, when the
+        /// tags name exactly one host object: a `BytesObject` may carry a
+        /// `Bytes` or any `BytesN<N>`, a `VecObject` a `Vec<T>` or a
+        /// `#[contracttype]`, and a word's `Some` still holds the raw `Val`
+        /// until a decode unpacks it; then only a declared type at the
+        /// call site can say what the value is.
+        payload: Option<KnownType>,
+        /// The `Some` bindings in the helper's own body, typed `Option<T>`
+        /// too so the helper's return agrees with its call sites.
+        some_arms: Vec<ValueId>,
     },
 }
 
@@ -175,10 +199,14 @@ impl Pass<HighIr> for ValDecodeCollapsePass {
             .filter_map(|f| classify(f).map(|h| (f.id, h)))
             .collect();
 
+        // Helper parameters that carry an entrypoint's guarantee, read
+        // once over the whole module before any function changes.
+        let guaranteed = guaranteed_params(ir, &helpers);
+
         // No early return on an empty helper set: an inline decode (SDK 27)
         // needs no helper, and `plan` collapses those too.
         for func in &mut ir.functions {
-            let (elisions, metrics) = plan(func, &helpers);
+            let (elisions, metrics) = plan(func, &helpers, &guaranteed);
             if elisions.is_empty() {
                 continue;
             }
@@ -205,7 +233,9 @@ impl Pass<HighIr> for ValDecodeCollapsePass {
 /// `Val` parameter, at least one tag tested) is shared below, so the two
 /// paths cannot drift apart on the question that matters.
 pub(crate) fn classify(func: &HighFunction) -> Option<DecodeHelper> {
-    classify_out_param(func).or_else(|| classify_multi_value(func))
+    classify_out_param(func)
+        .or_else(|| classify_multi_value(func))
+        .or_else(|| classify_optional(func))
 }
 
 /// The untouched rustc shape: results written through an out-pointer.
@@ -278,6 +308,94 @@ fn classify_multi_value(func: &HighFunction) -> Option<DecodeHelper> {
         },
         val_index: 0,
         arity: 1,
+        tags,
+    })
+}
+
+/// The `Option` shape: every return is `None`, or `Some` of a value that
+/// comes from the one tag-checked parameter through decode operations
+/// only, the helper touches no host state, and every tag it tests names
+/// one payload type. The parameters beside the `Val` (an `Env` pointer,
+/// scratch) are left alone: the call keeps them.
+fn classify_optional(func: &HighFunction) -> Option<DecodeHelper> {
+    if func.signature.is_some() {
+        return None;
+    }
+    // The return sites as the region has them, like `analyze_returns`.
+    let mut returns: Vec<Vec<ValueId>> = Vec::new();
+    func.region.for_each_node(|node| {
+        if let Region::Return { values } = node {
+            returns.push(values.clone());
+        }
+    });
+    if returns.is_empty() {
+        return None;
+    }
+    let checked: Vec<usize> = (0..func.params.len())
+        .filter(|i| !tested_tags(func, func.params[*i]).is_empty())
+        .collect();
+    let [val_index] = checked.as_slice() else {
+        return None;
+    };
+    let val_param = func.params[*val_index];
+    if !touches_no_host_state(func, &[]) {
+        return None;
+    }
+    let mut some_arms = Vec::new();
+    for values in &returns {
+        let [value] = values.as_slice() else {
+            return None;
+        };
+        for arm in arms_of(func, *value)? {
+            let id = resolve_use(func, arm);
+            match &func.bindings.get(id)?.expr {
+                Expr::Optional { payload: None } => {}
+                Expr::Optional { payload: Some(items) } => {
+                    let [p] = items.as_slice() else {
+                        return None;
+                    };
+                    if !decodes_to(func, *p, val_param, TRACE_DEPTH) {
+                        return None;
+                    }
+                    some_arms.push(id);
+                }
+                _ => return None,
+            }
+        }
+    }
+    if some_arms.is_empty() {
+        return None;
+    }
+    let tags = tested_tags(func, val_param);
+    if tags.is_empty() {
+        return None;
+    }
+    let mut payload: Option<KnownType> = None;
+    for tag in &tags {
+        let named = val_abi::tag_payload_type(*tag)?;
+        match &payload {
+            None => payload = Some(named),
+            Some(have) if *have == named => {}
+            Some(_) => return None,
+        }
+    }
+    // Only a tag that names one type can type the `Option` on its own, and
+    // only a host object is the type its tag names as it stands: a word's
+    // `Some` holds the raw `Val` until a decode operation unpacks it, and
+    // that decode, not a type, is what the caller then needs.
+    let ambiguous = tags
+        .iter()
+        .any(|t| matches!(*t, val_abi::TAG_BYTES_OBJECT | val_abi::TAG_VEC_OBJECT | val_abi::TAG_MAP_OBJECT));
+    let host_object = payload.as_ref().is_some_and(|p| {
+        matches!(p, KnownType::Address | KnownType::MuxedAddress | KnownType::Symbol | KnownType::String)
+    });
+    Some(DecodeHelper {
+        shape: HelperShape::Optional {
+            payload: if ambiguous || !host_object { None } else { payload },
+            some_arms,
+        },
+        val_index: *val_index,
+        arity: func.params.len(),
         tags,
     })
 }
@@ -629,11 +747,50 @@ enum SlotKey {
 fn plan(
     func: &HighFunction,
     helpers: &HashMap<FuncId, DecodeHelper>,
+    guaranteed: &Guaranteed,
 ) -> (Vec<Elision>, PassMetrics) {
     let mut elisions = Vec::new();
     let mut metrics = PassMetrics::new();
-    // Only an entrypoint carries the ABI guarantee the collapse rests on.
-    if func.signature.is_none() {
+    // An `Option`-shaped decoder's own `Some` arms, typed as its call sites
+    // will be.
+    if let Some(helper) = helpers.get(&func.id)
+        && let HelperShape::Optional { payload: Some(payload), some_arms } = &helper.shape
+    {
+        let ty = IrType::Inferred(KnownType::Option(Box::new(IrType::Inferred(payload.clone()))));
+        for arm in some_arms {
+            if let Some(binding) = func.bindings.get(*arm)
+                && binding.ty != ty
+            {
+                elisions.push(Elision {
+                    id: *arm,
+                    expr: binding.expr.clone(),
+                    ty: Some(ty.clone()),
+                    note: format!(
+                        "`Some` of a value whose tag this helper checked: the payload is the {} the tag names",
+                        tag_list(&helper.tags)
+                    ),
+                    metric: metrics::DECODE_OPTION_TYPED,
+                });
+            }
+        }
+    }
+    // Only an entrypoint carries the ABI guarantee the collapse rests on —
+    // or a helper handed nothing but an entrypoint's parameters. The other
+    // functions still see what an `Option`-shaped decoder hands back.
+    if func.signature.is_none() && !guaranteed.keys().any(|(f, _)| *f == func.id) {
+        for id in sret::emission_order(func) {
+            let Some(Expr::Call { target, args }) = func.bindings.get(id).map(|b| &b.expr) else {
+                continue;
+            };
+            if let Some(helper) = helpers.get(target)
+                && let HelperShape::Optional { payload, .. } = &helper.shape
+                && args.len() == helper.arity
+                && let Claimed::Elided(el) =
+                    optional_call(func, id, *target, args, payload.clone(), helper, guaranteed)
+            {
+                elisions.push(el);
+            }
+        }
         elisions.extend(host_decodes(func));
         for el in &elisions {
             metrics.increment(el.metric, 1);
@@ -668,7 +825,7 @@ fn plan(
         };
         match &binding.expr {
             Expr::Call { target, args } => {
-                let (invalidate, claimed) = on_call(func, helpers, &active, id, *target, args);
+                let (invalidate, claimed) = on_call(func, helpers, &active, id, *target, args, guaranteed);
                 for frame in invalidate {
                     finished.extend(active.remove(&frame));
                     restored.retain(|(f, _), _| *f != frame);
@@ -680,6 +837,7 @@ fn plan(
                     Claimed::Call(act) => {
                         by_call.insert(id, act);
                     }
+                    Claimed::Elided(el) => elisions.push(el),
                     Claimed::None => {}
                 }
             }
@@ -761,7 +919,7 @@ fn plan(
             metric: metrics::DECODE_CALLS_ELIDED,
         });
     }
-    elisions.extend(inline_decodes(func));
+    elisions.extend(inline_decodes(func, guaranteed));
     elisions.extend(host_decodes(func));
     for el in &elisions {
         metrics.increment(el.metric, 1);
@@ -784,6 +942,7 @@ fn on_call(
     id: ValueId,
     target: FuncId,
     args: &[ValueId],
+    guaranteed: &Guaranteed,
 ) -> (Vec<ValueId>, Claimed) {
     let mut invalidate: Vec<ValueId> = args
         .iter()
@@ -797,8 +956,11 @@ fn on_call(
     if args.len() != helper.arity {
         return (invalidate, Claimed::None);
     }
+    if let HelperShape::Optional { payload, .. } = &helper.shape {
+        return (invalidate, optional_call(func, id, target, args, payload.clone(), helper, guaranteed));
+    }
     let actual = resolve_use(func, args[helper.val_index]);
-    let Some(declared) = declared_param_type(func, actual) else {
+    let Some(declared) = abi_param_type(func, actual, guaranteed) else {
         return (invalidate, Claimed::None);
     };
     // Every tag the helper tests must be able to *carry* the declared
@@ -826,13 +988,63 @@ fn on_call(
         }
         // No frame to claim: the results come back in SSA.
         HelperShape::MultiValue { .. } => (invalidate, Claimed::Call(act)),
+        // Handled above, where the call is rewritten on the spot.
+        HelperShape::Optional { .. } => (invalidate, Claimed::None),
     }
+}
+
+/// What a call to an `Option`-shaped decoder becomes: `Some` of its
+/// argument where the argument carries the ABI guarantee and every tag the
+/// helper tests carries that type; otherwise the call it is, typed as the
+/// `Option<T>` the tags name, so the value it hands back is the `T` the
+/// caller then uses.
+fn optional_call(
+    func: &HighFunction,
+    id: ValueId,
+    target: FuncId,
+    args: &[ValueId],
+    payload: Option<KnownType>,
+    helper: &DecodeHelper,
+    guaranteed: &Guaranteed,
+) -> Claimed {
+    let option = |k: KnownType| IrType::Inferred(KnownType::Option(Box::new(IrType::Inferred(k))));
+    let actual = resolve_use(func, args[helper.val_index]);
+    if let Some(declared) = abi_param_type(func, actual, guaranteed)
+        && helper.tags.iter().all(|t| val_abi::tag_carries(*t, &declared))
+    {
+        return Claimed::Elided(Elision {
+            id,
+            expr: Expr::Optional { payload: Some(vec![actual]) },
+            ty: Some(option(declared)),
+            note: format!(
+                "argument decode collapsed to `Some` of its parameter ({})",
+                tag_list(&helper.tags)
+            ),
+            metric: metrics::DECODE_COLLAPSED,
+        });
+    }
+    let Some(payload) = payload else {
+        return Claimed::None;
+    };
+    let ty = option(payload);
+    if func.bindings.get(id).is_some_and(|b| b.ty == ty) {
+        return Claimed::None;
+    }
+    Claimed::Elided(Elision {
+        id,
+        expr: Expr::Call { target, args: args.to_vec() },
+        ty: Some(ty),
+        note: format!("the `Option` a decoder hands back, typed by the tags it tests ({})", tag_list(&helper.tags)),
+        metric: metrics::DECODE_OPTION_TYPED,
+    })
 }
 
 /// What a call claims when it is itself an elidable decode.
 enum Claimed {
     /// Not a decode we can collapse.
     None,
+    /// Rewritten on the spot: an `Option`-shaped decoder's call.
+    Elided(Elision),
     /// Out-parameter shape: this call now owns the given frame pointer.
     Frame(ValueId, Active),
     /// Converted shape: tracked by the call's own id.
@@ -863,7 +1075,7 @@ fn projected_half(
 /// shift *is* the conversion the regenerated wrapper performs — those two
 /// types have one encoding, whose payload is the high word — so the decode
 /// is the parameter.
-fn inline_decodes(func: &HighFunction) -> Vec<Elision> {
+fn inline_decodes(func: &HighFunction, guaranteed: &Guaranteed) -> Vec<Elision> {
     sret::emission_order(func)
         .into_iter()
         .filter_map(|id| {
@@ -875,7 +1087,7 @@ fn inline_decodes(func: &HighFunction) -> Vec<Elision> {
                 return None;
             }
             let param = resolve_use(func, *value);
-            let declared = declared_param_type(func, param)?;
+            let declared = abi_param_type(func, param, guaranteed)?;
             matches!(declared, KnownType::U32 | KnownType::I32).then(|| Elision {
                 id,
                 expr: Expr::Use(param),
@@ -939,6 +1151,107 @@ fn typed_host_u32(func: &HighFunction, value: ValueId) -> Option<KnownType> {
     matches!(ty, KnownType::U32 | KnownType::I32).then_some(ty)
 }
 
+/// Helper parameters that carry an entrypoint's ABI guarantee, with the
+/// declared type each one carries. See [`guaranteed_params`].
+type Guaranteed = HashMap<(FuncId, usize), KnownType>;
+
+/// The `contractspecv0` type a helper's parameter is guaranteed to hold:
+/// every call site hands it, untouched, an entrypoint's own declared
+/// parameter — or a parameter of another helper this map already covers —
+/// and all of them name one type. The host validated the entrypoint's value
+/// against the spec, and a helper that only passes the value along keeps
+/// that validation, so a decode it performs on the value collapses exactly
+/// as it would in the entrypoint.
+///
+/// Only a helper whose callers are all visible: one with an ABI signature
+/// is called by the host, and one the function table holds may be called
+/// through it, so neither has a caller set the scan can close. A helper
+/// that calls itself is skipped: its guarantee would rest on itself. A
+/// decode helper is skipped too: its parameter is the raw `Val` it decodes,
+/// which is what the collapse at its call sites retires. The map is a
+/// fixed point, so a wrapper of a wrapper is covered too.
+fn guaranteed_params(ir: &HighIr, helpers: &HashMap<FuncId, DecodeHelper>) -> Guaranteed {
+    let has_indirect = ir
+        .functions
+        .iter()
+        .any(|f| f.bindings.iter().any(|(_, b)| matches!(b.expr, Expr::IndirectCall { .. })));
+    let table: Option<HashSet<FuncId>> = ir
+        .facts
+        .table_functions
+        .as_ref()
+        .map(|t| t.iter().map(|i| FuncId::new(*i)).collect());
+    let complete = |f: &HighFunction| {
+        f.signature.is_none() && (!has_indirect || table.as_ref().is_some_and(|t| !t.contains(&f.id)))
+    };
+    let mut sites: HashMap<FuncId, Vec<(FuncId, Vec<ValueId>)>> = HashMap::new();
+    for caller in &ir.functions {
+        for (_, binding) in caller.bindings.iter() {
+            if let Expr::Call { target, args } = &binding.expr {
+                sites.entry(*target).or_default().push((caller.id, args.clone()));
+            }
+        }
+    }
+    let by_id: HashMap<FuncId, &HighFunction> = ir.functions.iter().map(|f| (f.id, f)).collect();
+    let mut out = Guaranteed::new();
+    for _ in 0..8 {
+        let mut changed = false;
+        for func in &ir.functions {
+            if !complete(func) || helpers.contains_key(&func.id) {
+                continue;
+            }
+            let Some(calls) = sites.get(&func.id) else {
+                continue;
+            };
+            if calls.iter().any(|(caller, _)| *caller == func.id) {
+                continue;
+            }
+            for index in 0..func.params.len() {
+                if out.contains_key(&(func.id, index)) {
+                    continue;
+                }
+                let mut agreed: Option<KnownType> = None;
+                let every_site = calls.iter().all(|(caller_id, args)| {
+                    let Some(caller) = by_id.get(caller_id) else {
+                        return false;
+                    };
+                    let Some(&arg) = args.get(index) else {
+                        return false;
+                    };
+                    let Some(ty) = abi_param_type(caller, resolve_use(caller, arg), &out) else {
+                        return false;
+                    };
+                    match &agreed {
+                        None => {
+                            agreed = Some(ty);
+                            true
+                        }
+                        Some(have) => *have == ty,
+                    }
+                });
+                if every_site && let Some(ty) = agreed {
+                    out.insert((func.id, index), ty);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    out
+}
+
+/// The `contractspecv0` type `value` carries as a parameter of `func`:
+/// declared, when `func` is an entrypoint, or guaranteed through its
+/// callers, when it is a helper.
+fn abi_param_type(func: &HighFunction, value: ValueId, guaranteed: &Guaranteed) -> Option<KnownType> {
+    if let Some(declared) = declared_param_type(func, value) {
+        return Some(declared);
+    }
+    let index = func.params.iter().position(|p| *p == value)?;
+    guaranteed.get(&(func.id, index)).cloned()
+}
+
 /// The `contractspecv0` type of `value`, when it is one of this
 /// entrypoint's parameters.
 fn declared_param_type(func: &HighFunction, value: ValueId) -> Option<KnownType> {
@@ -967,7 +1280,7 @@ fn tag_list(tags: &[u8]) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::marshalling::test_support::{func_with, load, store, v};
+    use crate::marshalling::test_support::{func_with, load, module, store, v};
     use sordec_common::{BlockId, IrId};
     use sordec_ir::{BinaryOp, FunctionParam, FunctionSignature, PrimitiveType, Region, TypeRef};
 
@@ -1219,7 +1532,7 @@ pub(crate) mod tests {
     #[test]
     fn each_load_binds_to_the_call_that_produced_it() {
         let func = caller(PrimitiveType::U64);
-        let (elisions, _) = plan(&func, &helpers());
+        let (elisions, _) = plan(&func, &helpers(), &HashMap::new());
         let by_id: HashMap<ValueId, &Expr> =
             elisions.iter().map(|e| (e.id, &e.expr)).collect();
 
@@ -1240,7 +1553,7 @@ pub(crate) mod tests {
         // The helper tests U64 tags; the spec says the argument is an
         // Address. Something is wrong with our picture, so elide nothing.
         let func = caller(PrimitiveType::Address);
-        let (elisions, _) = plan(&func, &helpers());
+        let (elisions, _) = plan(&func, &helpers(), &HashMap::new());
         assert!(elisions.is_empty(), "a tag/type disagreement must elide nothing");
     }
 
@@ -1250,18 +1563,245 @@ pub(crate) mod tests {
         // against the spec, which is only true for an ABI entrypoint.
         let mut func = caller(PrimitiveType::U64);
         func.signature = None;
-        let (elisions, _) = plan(&func, &helpers());
+        let (elisions, _) = plan(&func, &helpers(), &HashMap::new());
         assert!(elisions.is_empty(), "only entrypoint parameters carry the guarantee");
+    }
+
+    /// `add(a, b)` as the compiler outlines it: the entrypoint hands its
+    /// declared parameters, untouched, to a wrapper, and the wrapper calls
+    /// the decoder. The wrapper's parameters carry the entrypoint's
+    /// guarantee, so the decodes collapse there.
+    fn entry_calling(wrapper: FuncId, param_ty: PrimitiveType) -> HighFunction {
+        let mut func = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                          // v0 param `a`
+                Expr::Phi { incoming: vec![] },                          // v1 param `b`
+                Expr::Call { target: wrapper, args: vec![v(0), v(1)] }, // v2
+            ],
+            vec![v(0), v(1)],
+            vec![2],
+        );
+        func.id = FuncId::from_index(3);
+        func.signature = Some(FunctionSignature {
+            name: "add".to_string(),
+            inputs: vec![
+                FunctionParam { name: "a".to_string(), ty: TypeRef::Primitive(param_ty) },
+                FunctionParam { name: "b".to_string(), ty: TypeRef::Primitive(param_ty) },
+            ],
+            outputs: vec![],
+        });
+        func
+    }
+
+    /// The entrypoint's body, outlined: `caller` with no signature.
+    fn wrapper() -> HighFunction {
+        let mut func = caller(PrimitiveType::U64);
+        func.signature = None;
+        func.id = FuncId::from_index(2);
+        func
+    }
+
+    /// A function calling through the table, with `held` the functions the
+    /// table holds.
+    fn table_caller(held: Vec<u32>) -> (HighFunction, Option<Vec<u32>>) {
+        let mut func = func_with(
+            vec![
+                Expr::Literal(Literal::I32(0)), // v0
+                Expr::IndirectCall { table: 0, sig: 0, callee: v(0), args: vec![] }, // v1
+            ],
+            vec![],
+            vec![0, 1],
+        );
+        func.id = FuncId::from_index(4);
+        (func, Some(held))
+    }
+
+    #[test]
+    fn a_wrapper_handed_only_entrypoint_parameters_carries_the_guarantee() {
+        let ir = module(vec![
+            u64_decode_helper(),
+            caller(PrimitiveType::U64),
+            wrapper(),
+            entry_calling(FuncId::from_index(2), PrimitiveType::U64),
+        ]);
+        let guaranteed = guaranteed_params(&ir, &helpers());
+        assert_eq!(guaranteed.get(&(FuncId::from_index(2), 0)), Some(&KnownType::U64));
+        assert_eq!(guaranteed.get(&(FuncId::from_index(2), 1)), Some(&KnownType::U64));
+
+        let (elisions, _) = plan(&ir.functions[2], &helpers(), &guaranteed);
+        let by_id: HashMap<ValueId, &Expr> = elisions.iter().map(|e| (e.id, &e.expr)).collect();
+        assert!(matches!(by_id.get(&v(5)), Some(Expr::Use(p)) if *p == v(1)), "the wrapper's decode collapses");
+        assert!(matches!(by_id.get(&v(3)), Some(Expr::Literal(Literal::Unit))));
+    }
+
+    #[test]
+    fn a_wrapper_some_caller_hands_an_unknown_value_carries_no_guarantee() {
+        // A second caller passes the wrapper constants, which are not an
+        // entrypoint's parameters: the guarantee does not reach it.
+        let mut other = func_with(
+            vec![
+                Expr::Literal(Literal::I64(7)),                                        // v0
+                Expr::Literal(Literal::I64(8)),                                        // v1
+                Expr::Call { target: FuncId::from_index(2), args: vec![v(0), v(1)] }, // v2
+            ],
+            vec![],
+            vec![0, 1, 2],
+        );
+        other.id = FuncId::from_index(4);
+        let ir = module(vec![
+            u64_decode_helper(),
+            caller(PrimitiveType::U64),
+            wrapper(),
+            entry_calling(FuncId::from_index(2), PrimitiveType::U64),
+            other,
+        ]);
+        assert!(guaranteed_params(&ir, &helpers()).is_empty());
+    }
+
+    #[test]
+    fn a_wrapper_the_function_table_holds_carries_no_guarantee() {
+        for (held, expected) in [(vec![2], 0), (vec![4], 2)] {
+            let (through_table, table) = table_caller(held);
+            let mut ir = module(vec![
+                u64_decode_helper(),
+                caller(PrimitiveType::U64),
+                wrapper(),
+                entry_calling(FuncId::from_index(2), PrimitiveType::U64),
+                through_table,
+            ]);
+            ir.facts.table_functions = table;
+            assert_eq!(guaranteed_params(&ir, &helpers()).len(), expected, "table holds {:?}", ir.facts.table_functions);
+        }
+        // An unknown table beside an indirect call closes no caller set.
+        let (through_table, _) = table_caller(vec![]);
+        let mut ir = module(vec![
+            u64_decode_helper(),
+            caller(PrimitiveType::U64),
+            wrapper(),
+            entry_calling(FuncId::from_index(2), PrimitiveType::U64),
+            through_table,
+        ]);
+        ir.facts.table_functions = None;
+        assert!(guaranteed_params(&ir, &helpers()).is_empty());
+    }
+
+    /// `Address::try_from_val(env, v).ok()` as `optional_out` leaves it:
+    /// `(scratch, val)`, a negated tag check, `None` on one path and
+    /// `Some(val)` on the other, merged and returned.
+    fn address_option_helper() -> HighFunction {
+        let mut func = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0 scratch pointer
+                Expr::Phi { incoming: vec![] }, // v1 the Val
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                    value: v(1),
+                    tag: val_abi::TAG_ADDRESS_OBJECT,
+                    negated: true,
+                })), // v2
+                Expr::Optional { payload: None },             // v3
+                Expr::Optional { payload: Some(vec![v(1)]) }, // v4
+                Expr::Phi { incoming: vec![(BlockId::from_index(1), v(3)), (BlockId::from_index(2), v(4))] }, // v5
+            ],
+            vec![v(0), v(1)],
+            vec![2, 3, 4],
+        );
+        func.region = Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::Return { values: vec![v(5)] },
+        ]);
+        func
+    }
+
+    #[test]
+    fn the_option_shaped_decode_helper_is_classified() {
+        let helper = classify(&address_option_helper()).expect("an Option-shaped decoder");
+        assert_eq!(helper.val_index, 1);
+        assert_eq!(helper.arity, 2);
+        assert_eq!(helper.tags, vec![val_abi::TAG_ADDRESS_OBJECT]);
+        assert!(
+            matches!(&helper.shape, HelperShape::Optional { payload: Some(KnownType::Address), some_arms } if some_arms == &vec![v(4)]),
+            "{:?}",
+            helper.shape
+        );
+    }
+
+    #[test]
+    fn an_option_helper_whose_payload_is_not_its_argument_declines() {
+        let mut func = address_option_helper();
+        // `Some(scratch)`: the value handed back is not the checked Val.
+        func.bindings.get_mut(v(4)).unwrap().expr = Expr::Optional { payload: Some(vec![v(0)]) };
+        assert!(classify(&func).is_none());
+    }
+
+    #[test]
+    fn an_option_decode_of_a_guaranteed_argument_is_some_of_it() {
+        // An entrypoint declared `(a: Address)` calls the helper on `a`.
+        let mut caller = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0 scratch
+                Expr::Phi { incoming: vec![] }, // v1 param `a`
+                Expr::Call { target: FuncId::from_index(0), args: vec![v(0), v(1)] }, // v2
+            ],
+            vec![v(0), v(1)],
+            vec![2],
+        );
+        caller.id = FuncId::from_index(1);
+        caller.signature = Some(FunctionSignature {
+            name: "f".to_string(),
+            inputs: vec![
+                FunctionParam { name: "scratch".to_string(), ty: TypeRef::Primitive(PrimitiveType::U32) },
+                FunctionParam { name: "a".to_string(), ty: TypeRef::Primitive(PrimitiveType::Address) },
+            ],
+            outputs: vec![],
+        });
+        let mut helpers = HashMap::new();
+        helpers.insert(FuncId::from_index(0), classify(&address_option_helper()).unwrap());
+        let (elisions, _) = plan(&caller, &helpers, &HashMap::new());
+        let el = elisions.iter().find(|e| e.id == v(2)).expect("the call is rewritten");
+        assert!(matches!(&el.expr, Expr::Optional { payload: Some(p) } if p == &vec![v(1)]), "{:?}", el.expr);
+        assert!(
+            matches!(&el.ty, Some(IrType::Inferred(KnownType::Option(inner))) if **inner == IrType::Inferred(KnownType::Address)),
+            "{:?}",
+            el.ty
+        );
+    }
+
+    #[test]
+    fn an_option_decode_of_any_other_value_is_typed_by_its_tags() {
+        // A helper with no guarantee calls the decoder on a value it loaded.
+        let mut caller = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0 scratch
+                Expr::Phi { incoming: vec![] }, // v1 some Val
+                Expr::Call { target: FuncId::from_index(0), args: vec![v(0), v(1)] }, // v2
+            ],
+            vec![v(0), v(1)],
+            vec![2],
+        );
+        caller.id = FuncId::from_index(1);
+        let mut helpers = HashMap::new();
+        helpers.insert(FuncId::from_index(0), classify(&address_option_helper()).unwrap());
+        let (elisions, _) = plan(&caller, &helpers, &HashMap::new());
+        let el = elisions.iter().find(|e| e.id == v(2)).expect("the call is typed");
+        assert!(matches!(&el.expr, Expr::Call { .. }), "the call stays: {:?}", el.expr);
+        assert!(
+            matches!(&el.ty, Some(IrType::Inferred(KnownType::Option(inner))) if **inner == IrType::Inferred(KnownType::Address)),
+            "{:?}",
+            el.ty
+        );
+        // And the helper's own `Some` arm agrees.
+        let (own, _) = plan(&address_option_helper(), &helpers, &HashMap::new());
+        assert!(own.iter().any(|e| e.id == v(4) && matches!(&e.ty, Some(IrType::Inferred(KnownType::Option(_))))));
     }
 
     #[test]
     fn second_run_reports_no_work() {
         let mut func = caller(PrimitiveType::U64);
         let helpers = helpers();
-        let (first, _) = plan(&func, &helpers);
+        let (first, _) = plan(&func, &helpers, &HashMap::new());
         assert!(!first.is_empty());
         apply_elisions(&mut func, PASS_NAME, first);
-        let (second, _) = plan(&func, &helpers);
+        let (second, _) = plan(&func, &helpers, &HashMap::new());
         assert!(second.is_empty(), "idempotent: the loads and calls are gone");
     }
 }
