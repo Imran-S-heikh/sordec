@@ -126,6 +126,8 @@ pub mod option_param;
 pub use option_param::OptionParamPass;
 pub mod bool_return;
 pub use bool_return::BoolReturnPass;
+pub mod bool_helper;
+pub use bool_helper::BoolHelperPass;
 pub use residual_probe::ResidualProbePass;
 pub use option_sret::OptionSretPass;
 pub use optional_out::OptionalOutParamPass;

@@ -554,6 +554,33 @@ pub(crate) fn machine_word(t: &sordec_ir::TypeRef) -> Option<IrType> {
     Some(IrType::Known(k))
 }
 
+/// A machine word placed in a field declared `bool`, as the `bool` it is.
+///
+/// rustc keeps a `bool` as a byte that is `0` or `1`, and a struct built
+/// from one copies the byte: the wasm holds the word where Rust holds the
+/// `bool`. Rust has no coercion between them, so the test is written out —
+/// `b != 0` is `false` for `0` and `true` for `1`, the same value. A
+/// language-surface adaptation, as a branch on a word is ([`super::body`]):
+/// nothing in the IR is wrong. Only a value typed as a machine integer; an
+/// untyped one is left to fail visibly.
+fn bool_from_word(ctx: &FnCtx, value: sordec_common::ValueId, declared: &sordec_ir::TypeRef) -> Option<syn::Expr> {
+    if !matches!(declared, sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::Bool)) {
+        return None;
+    }
+    let word = matches!(
+        ctx.func.bindings.get(ctx.fold_target(value)).map(|b| &b.ty),
+        Some(
+            IrType::Known(KnownType::I32 | KnownType::U32 | KnownType::I64 | KnownType::U64)
+                | IrType::Inferred(KnownType::I32 | KnownType::U32 | KnownType::I64 | KnownType::U64)
+        )
+    );
+    if !word {
+        return None;
+    }
+    let x = ctx.value_ref(value);
+    Some(parse_quote!((#x != 0)))
+}
+
 /// The type a helper is declared returning at component `index`, when
 /// `call` is a call to one: what `sig::helper_return` prints there.
 fn projected_type(ctx: &FnCtx, call: sordec_common::ValueId, index: u32) -> Option<KnownType> {
@@ -1146,14 +1173,16 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                     let items: Vec<syn::FieldValue> = fields
                         .iter()
                         .map(|(field, value)| {
+                            let declared_ty = declared
+                                .and_then(|d| d.fields.iter().find(|f| f.name == *field))
+                                .map(|f| &f.ty);
                             // A same-width word of the other sign is cast to
                             // the field's declared type, as for an argument.
-                            let want = declared
-                                .and_then(|d| d.fields.iter().find(|f| f.name == *field))
-                                .and_then(|f| machine_word(&f.ty));
+                            let want = declared_ty.and_then(machine_word);
                             let field = ty::ident(field);
                             let value = want
                                 .and_then(|w| sign_cast(ctx, *value, &w))
+                                .or_else(|| declared_ty.and_then(|t| bool_from_word(ctx, *value, t)))
                                 .unwrap_or_else(|| ctx.value_ref(*value));
                             parse_quote!(#field: #value)
                         })

@@ -2319,5 +2319,49 @@ mod tests {
         a.uses.push((v(7), child));
         assert!(a.finish().is_empty());
     }
-}
 
+    // ---- a word placed in a `bool` field ----
+
+    fn registry_with_flag(ty: sordec_ir::PrimitiveType) -> TypeRegistry {
+        let mut reg = TypeRegistry::default();
+        reg.structs.push(sordec_ir::StructDef {
+            id: sordec_common::TypeId::new(7),
+            name: "Test".to_string(),
+            fields: vec![sordec_ir::StructField { name: "b".to_string(), ty: sordec_ir::TypeRef::Primitive(ty) }],
+        });
+        reg
+    }
+
+    /// `Test { b: v1 }` with `v1` a byte read back as `value_ty`, the struct
+    /// stored so it is read.
+    fn flag_struct(value_ty: IrType, field: sordec_ir::PrimitiveType) -> String {
+        let exprs = vec![
+            (value_ty, Expr::Load { addr: v(0), offset: 12, width: sordec_ir::MemWidth::W1, signed: None, ty: untyped() }),
+            (
+                IrType::Known(KnownType::UserDefined(sordec_common::TypeId::new(7))),
+                Expr::Struct { fields: vec![("b".to_string(), v(1))] },
+            ),
+            (untyped(), store(2)),
+        ];
+        emitted(exprs, vec![], &registry_with_flag(field))
+    }
+
+    #[test]
+    fn a_word_in_a_bool_field_is_its_test() {
+        let body = flag_struct(IrType::Inferred(KnownType::I32), sordec_ir::PrimitiveType::Bool);
+        assert!(body.contains("b : (v1 != 0)"), "{body}");
+    }
+
+    #[test]
+    fn a_word_in_a_number_field_is_the_word() {
+        let body = flag_struct(IrType::Inferred(KnownType::I32), sordec_ir::PrimitiveType::I32);
+        assert!(body.contains("b : v1"), "{body}");
+        assert!(!body.contains("!= 0"), "{body}");
+    }
+
+    #[test]
+    fn an_untyped_value_in_a_bool_field_is_left_alone() {
+        let body = flag_struct(untyped(), sordec_ir::PrimitiveType::Bool);
+        assert!(!body.contains("!= 0"), "{body}");
+    }
+}
