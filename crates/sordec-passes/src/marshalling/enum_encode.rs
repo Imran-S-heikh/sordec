@@ -179,7 +179,7 @@ fn variant_test(func: &HighFunction, cond: ValueId) -> Option<(ValueId, String, 
         return None;
     };
     [(*lhs, *rhs), (*rhs, *lhs)].into_iter().find_map(|(value, variant)| {
-        let Expr::Variant { name } = &func.bindings.get(resolve_use(func, variant))?.expr else {
+        let Expr::Variant { name, .. } = &func.bindings.get(resolve_use(func, variant))?.expr else {
             return None;
         };
         Some((resolve_use(func, value), name.clone(), *op))

@@ -20,7 +20,7 @@ use crate::wat::annotate;
 /// registry can name.
 fn variant_path(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<syn::Path> {
     let binding = ctx.func.bindings.get(ctx.fold_target(value))?;
-    let Expr::Variant { name } = &binding.expr else {
+    let Expr::Variant { name, .. } = &binding.expr else {
         return None;
     };
     let owner = match &binding.ty {
@@ -1195,9 +1195,14 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 None => ctx.policy.unknown_expr("struct literal of an unnamed type"),
             }
         }
-        // `Name::Variant`, the enum named by the binding's type.
-        Expr::Variant { name: _ } => match variant_path(ctx, binding.id) {
-            Some(path) => parse_quote!(#path),
+        // `Name::Variant`, the enum named by the binding's type, and
+        // `Name::Variant(a, b)` when it carries values.
+        Expr::Variant { name: _, payload } => match variant_path(ctx, binding.id) {
+            Some(path) if payload.is_empty() => parse_quote!(#path),
+            Some(path) => {
+                let args = payload.iter().map(|v| ctx.value_ref(*v));
+                parse_quote!(#path(#(#args),*))
+            }
             None => ctx.policy.unknown_expr("variant of an unnamed type"),
         },
         // A raw memory access names its address and, for a store, the

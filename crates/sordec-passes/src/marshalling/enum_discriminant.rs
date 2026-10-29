@@ -73,7 +73,7 @@ impl Pass<HighIr> for EnumDiscriminantPass {
                 func.bindings.push(sordec_ir::Binding::new(
                     variant,
                     ty,
-                    Expr::Variant { name },
+                    Expr::Variant { name, payload: Vec::new() },
                     Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, "the variant this discriminant is"),
                 ));
                 for (_, block) in func.blocks.iter_mut() {
@@ -220,7 +220,7 @@ mod tests {
                 panic!("a comparison against a variant");
             };
             assert_eq!(*lhs, v(0));
-            assert!(matches!(&f.bindings.get(*rhs).unwrap().expr, Expr::Variant { name } if name == want));
+            assert!(matches!(&f.bindings.get(*rhs).unwrap().expr, Expr::Variant { name, .. } if name == want));
         }
     }
 

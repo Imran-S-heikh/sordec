@@ -34,8 +34,10 @@
 //! # Gates
 //!
 //! - **The keys name exactly one declared struct.** A table matching no
-//!   struct, or more than one, is left alone — it may be a `Map` the source
-//!   really built.
+//!   struct is left alone — it may be a `Map` the source really built. A
+//!   table matching several (`StructA { f1, f2 }` beside `StructB { f1,
+//!   f2 }`) is named only by where the value goes, below; with no such
+//!   place it is left alone too.
 //! - **Every field has a slot.** The vals array is `len` slots at 8-byte
 //!   stride from the base, and every one must hold a value proven at the
 //!   construction point. A missing slot means the frame analysis lost the
@@ -43,10 +45,38 @@
 //! - **The field order is the declaration's.** The key table is sorted by
 //!   the derive, so the literal is spelled in the struct's own order
 //!   rather than the table's.
+//!
+//! # Field names several structs share
+//!
+//! Field names are not unique across a contract's types: `{ val: u32 }`
+//! is a common shape, and three structs may carry it. The key table then
+//! says only "one of these". Where the value goes can say which:
+//!
+//! - **an entrypoint's return**, which the spec declares as one of them —
+//!   bare, or as a `Result`'s `Ok` (a map is never an error's encoding);
+//! - **a field of a recovered struct literal**, which the outer struct's
+//!   declaration gives one of them.
+//!
+//! Why that is exact: at those places the contract's own metadata says
+//! the value *is* that struct, so the encode that produced it is that
+//! struct's derive. The key table must still match it field for field —
+//! the declaration picks among the candidates, it never overrides them —
+//! and two places naming different structs name none.
+//!
+//! # The renames
+//!
+//! A construction is often reached through renames — the inliner's
+//! `v21 = v46` where a wrapper call stood — typed `Map` while it was one.
+//! A rename is the same value, so each takes the struct's type with the
+//! literal. Left as `Map`, a helper returning the rename is declared to
+//! return a `Map`, and every caller inherits the mistake.
 
-use sordec_common::{IrId, Provenance, ProvenanceSource, ValueId};
+use std::collections::HashMap;
+
+use sordec_common::{IrId, Provenance, ProvenanceSource, TypeId, ValueId};
 use sordec_ir::{
-    Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, MemWidth, SemanticOp, StructDef,
+    CompositeType, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, MemWidth, SemanticOp,
+    StructDef, TypeRef,
 };
 
 use super::udt_decode::{raw_address, read_keys, struct_for};
@@ -78,23 +108,25 @@ impl Pass<HighIr> for UdtEncodePass {
         }
         let memory = ir.memory.clone();
         for func in &mut ir.functions {
-            let literals: Vec<_> = func
-                .bindings
-                .iter()
-                .filter_map(|(id, _)| literal_at(func, &memory, &structs, id))
-                .collect();
-            for mut literal in literals {
-                decode_constant_fields(func, &structs, &mut literal);
-                if let Some(b) = func.bindings.get_mut(literal.at) {
-                    b.expr = Expr::Struct { fields: literal.fields };
-                    b.ty = literal.ty;
-                    b.add_provenance(Provenance::new(
-                        PASS_NAME,
-                        ProvenanceSource::SdkPattern,
-                        "the derived struct encode: its key table and slot stores, as the literal",
-                    ));
-                    result.metrics.increment(M_ENCODES, 1);
-                    result.changed = true;
+            // A literal recovered this round declares its fields' structs,
+            // which may name an inner construction the next round can
+            // read. Each round rewrites at least one `MapNew`, which no
+            // later round matches again, so the loop ends.
+            loop {
+                let declared = declared_structs(func, &structs);
+                let literals: Vec<_> = func
+                    .bindings
+                    .iter()
+                    .filter_map(|(id, _)| literal_at(func, &memory, &structs, &declared, id))
+                    .collect();
+                if literals.is_empty() {
+                    break;
+                }
+                for literal in literals {
+                    if write_literal(func, &structs, literal) {
+                        result.metrics.increment(M_ENCODES, 1);
+                        result.changed = true;
+                    }
                 }
             }
             for (at, whole) in rebuilds(func, &structs) {
@@ -110,6 +142,138 @@ impl Pass<HighIr> for UdtEncodePass {
             }
         }
         result
+    }
+}
+
+/// Rewrite the construction to the literal, its renames retyped with it.
+fn write_literal(func: &mut HighFunction, structs: &[StructDef], mut literal: Literal) -> bool {
+    decode_constant_fields(func, structs, &mut literal);
+    retype_renames(func, literal.at, &literal.ty);
+    let Some(b) = func.bindings.get_mut(literal.at) else { return false };
+    b.expr = Expr::Struct { fields: literal.fields };
+    b.ty = literal.ty;
+    b.add_provenance(Provenance::new(
+        PASS_NAME,
+        ProvenanceSource::SdkPattern,
+        if literal.named_by_use {
+            "the derived struct encode, as the literal of the one struct its destination declares among those its key table fits"
+        } else {
+            "the derived struct encode: its key table and slot stores, as the literal"
+        },
+    ));
+    true
+}
+
+/// Whether the map construction at `at` is struct `id`'s derive: its key
+/// table fits that struct's fields and every slot is proven. For a
+/// destination this pass cannot see — a tuple's component, known only
+/// once the tuple's buffer is read back, after this pass has run.
+pub(super) fn encodes(
+    func: &HighFunction,
+    memory: &sordec_ir::MemoryImage,
+    structs: &[StructDef],
+    at: ValueId,
+    id: TypeId,
+) -> bool {
+    let declared = HashMap::from([(at, id)]);
+    literal_at(func, memory, structs, &declared, at)
+        .is_some_and(|l| l.ty == IrType::Known(KnownType::UserDefined(id)))
+}
+
+/// Rewrite the map construction at `at` to struct `id`'s literal, when
+/// [`encodes`] holds.
+pub(super) fn rebuild_as(
+    func: &mut HighFunction,
+    memory: &sordec_ir::MemoryImage,
+    structs: &[StructDef],
+    at: ValueId,
+    id: TypeId,
+) -> bool {
+    let declared = HashMap::from([(at, id)]);
+    match literal_at(func, memory, structs, &declared, at) {
+        Some(l) if l.ty == IrType::Known(KnownType::UserDefined(id)) => write_literal(func, structs, l),
+        _ => false,
+    }
+}
+
+/// The struct each value is declared to be where it goes: what an
+/// entrypoint returns, where the spec names a struct (bare, or as a
+/// `Result`'s `Ok`), and what fills a recovered literal's field that the
+/// declaration gives a struct type. A value two places name differently
+/// is named by neither.
+fn declared_structs(func: &HighFunction, structs: &[StructDef]) -> HashMap<ValueId, TypeId> {
+    let is_struct = |id: &TypeId| structs.iter().any(|s| s.id == *id);
+    let mut found: Vec<(ValueId, TypeId)> = Vec::new();
+    let returned = match func.signature.as_ref().map(|s| s.outputs.as_slice()) {
+        Some([TypeRef::UserDefined(id)]) => Some(*id),
+        Some([TypeRef::Composite(CompositeType::Result(ok, _))]) => match ok.as_ref() {
+            TypeRef::UserDefined(id) => Some(*id),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(id) = returned.filter(is_struct) {
+        for site in &func.returns {
+            if let [value] = site.as_slice() {
+                found.push((resolve_use(func, *value), id));
+            }
+        }
+    }
+    for (_, b) in func.bindings.iter() {
+        let Expr::Struct { fields } = &b.expr else { continue };
+        let (IrType::Known(KnownType::UserDefined(outer)) | IrType::Inferred(KnownType::UserDefined(outer))) =
+            &b.ty
+        else {
+            continue;
+        };
+        let Some(def) = structs.iter().find(|s| s.id == *outer) else { continue };
+        for (name, value) in fields {
+            if let Some(TypeRef::UserDefined(id)) = def.fields.iter().find(|f| f.name == *name).map(|f| &f.ty)
+                && is_struct(id)
+            {
+                found.push((resolve_use(func, *value), *id));
+            }
+        }
+    }
+    let mut declared: HashMap<ValueId, Option<TypeId>> = HashMap::new();
+    for (value, id) in found {
+        let slot = declared.entry(value).or_insert(Some(id));
+        if *slot != Some(id) {
+            *slot = None;
+        }
+    }
+    declared.into_iter().filter_map(|(v, id)| Some((v, id?))).collect()
+}
+
+/// The renames of `at` — `Use` chains ending there — take the type it is
+/// about to have, where they were typed as the map it was, or not at all.
+/// A rename typed anything else keeps it, and the disagreement shows.
+fn retype_renames(func: &mut HighFunction, at: ValueId, ty: &IrType) {
+    let renames: Vec<ValueId> = func
+        .bindings
+        .iter()
+        .filter(|(id, b)| {
+            *id != at
+                && matches!(b.expr, Expr::Use(_))
+                && resolve_use(func, *id) == at
+                && matches!(
+                    &b.ty,
+                    IrType::Unknown(_)
+                        | IrType::Known(KnownType::Map(..) | KnownType::Val)
+                        | IrType::Inferred(KnownType::Map(..) | KnownType::Val)
+                )
+        })
+        .map(|(id, _)| id)
+        .collect();
+    for id in renames {
+        if let Some(b) = func.bindings.get_mut(id) {
+            b.ty = ty.clone();
+            b.add_provenance(Provenance::new(
+                PASS_NAME,
+                ProvenanceSource::SdkPattern,
+                "a rename of a recovered struct literal is that struct",
+            ));
+        }
     }
 }
 
@@ -207,6 +371,9 @@ struct Literal {
     /// The fields whose slot held the value itself, with no `Val` encode
     /// stripped from it — the only ones a constant word can be decoded in.
     plain: Vec<String>,
+    /// The key table fit several structs, and the value's destination
+    /// named this one.
+    named_by_use: bool,
 }
 
 /// The struct literal a map construction is, if it is one.
@@ -214,6 +381,7 @@ fn literal_at(
     func: &HighFunction,
     memory: &sordec_ir::MemoryImage,
     structs: &[StructDef],
+    declared: &HashMap<ValueId, TypeId>,
     id: ValueId,
 ) -> Option<Literal> {
     let Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos, vals_pos, len })) =
@@ -223,7 +391,16 @@ fn literal_at(
     };
     let len = trace_u32val(func, *len)?;
     let keys = read_keys(memory, trace_u32val(func, *keys_pos)?, len)?;
-    let def = struct_for(structs, &keys)?;
+    let (def, named_by_use) = match struct_for(structs, &keys) {
+        Some(def) => (def, false),
+        // Several structs carry these names: the destination picks one of
+        // them, never one outside them.
+        None => {
+            let want = declared.get(&id)?;
+            let def = structs.iter().find(|s| s.id == *want)?;
+            (struct_for(std::slice::from_ref(def), &keys)?, true)
+        }
+    };
     // Where the slots live, and what each holds at the construction.
     let (base, start) = canon_addr(func, raw_address(func, *vals_pos));
     let facts = facts_at(func, id, base);
@@ -244,7 +421,7 @@ fn literal_at(
         .iter()
         .map(|f| by_key.iter().find(|(k, _)| *k == f.name).map(|(_, v)| (f.name.clone(), *v)))
         .collect::<Option<Vec<_>>>()?;
-    Some(Literal { at: id, ty: IrType::Known(KnownType::UserDefined(def.id)), fields, plain })
+    Some(Literal { at: id, ty: IrType::Known(KnownType::UserDefined(def.id)), fields, plain, named_by_use })
 }
 
 /// The value behind a field's `Val` encode. A field whose type is already
@@ -485,6 +662,147 @@ mod tests {
         assert!(UdtEncodePass.run(&mut m).changed);
         assert!(matches!(m.functions[0].bindings.get(v(4)).unwrap().expr, Expr::Use(w) if w == v(0)));
         let mut m = ir(build(1));
+        assert!(!UdtEncodePass.run(&mut m).changed);
+    }
+
+    // -----------------------------------------------------------------
+    // Field names several structs share
+    // -----------------------------------------------------------------
+
+    /// A second struct with `State`'s field names, and a third with other
+    /// names: the key table fits `State` (7) and `Twin` (8).
+    fn twins(m: &mut HighIr) {
+        let mut twin = registry().remove(0);
+        twin.id = TypeId::new(8);
+        twin.name = "Twin".to_string();
+        let mut other = registry().remove(0);
+        other.id = TypeId::new(9);
+        other.name = "Other".to_string();
+        other.fields[0].name = "elsewhere".to_string();
+        let structs = &mut m.soroban_facts.as_mut().unwrap().types.structs;
+        structs.push(twin);
+        structs.push(other);
+    }
+
+    /// The encoder, returned through a rename from an entrypoint the spec
+    /// declares to return `output`.
+    fn returned_as(output: TypeRef) -> HighIr {
+        let mut f = encoder(2);
+        let id = ValueId::from_index(f.bindings.len() as u32);
+        f.bindings.push(sordec_ir::Binding::new(
+            id,
+            IrType::Known(KnownType::Map(
+                Box::new(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)),
+                Box::new(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)),
+            )),
+            Expr::Use(v(9)),
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        )); // v10 the rename
+        f.blocks.iter_mut().next().unwrap().1.bindings.push(id);
+        f.returns = vec![vec![id]];
+        f.signature = Some(sordec_ir::FunctionSignature {
+            name: "get".to_string(),
+            inputs: vec![],
+            outputs: vec![output],
+        });
+        let mut m = ir(f);
+        twins(&mut m);
+        m
+    }
+
+    fn named(m: &HighIr, at: u32) -> Option<TypeId> {
+        let b = m.functions[0].bindings.get(v(at)).unwrap();
+        match (&b.expr, &b.ty) {
+            (Expr::Struct { .. }, IrType::Known(KnownType::UserDefined(id))) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Two structs fit the keys; the spec's return names `Twin`, and the
+    /// rename the value is returned through takes its type.
+    #[test]
+    fn a_shared_key_table_is_named_by_the_declared_return() {
+        let mut m = returned_as(TypeRef::UserDefined(TypeId::new(8)));
+        assert!(UdtEncodePass.run(&mut m).changed);
+        assert_eq!(named(&m, 9), Some(TypeId::new(8)));
+        let rename = m.functions[0].bindings.get(v(10)).unwrap();
+        assert!(matches!(rename.ty, IrType::Known(KnownType::UserDefined(id)) if id == TypeId::new(8)));
+    }
+
+    /// `Result<Twin, E>`: a map is never the error's encoding, so it is
+    /// the `Ok`.
+    #[test]
+    fn a_result_return_names_its_ok_struct() {
+        let ok = TypeRef::Composite(CompositeType::Result(
+            Box::new(TypeRef::UserDefined(TypeId::new(8))),
+            Box::new(TypeRef::Primitive(PrimitiveType::Error)),
+        ));
+        let mut m = returned_as(ok);
+        assert!(UdtEncodePass.run(&mut m).changed);
+        assert_eq!(named(&m, 9), Some(TypeId::new(8)));
+    }
+
+    /// No destination, or one declaring a struct the keys do not fit:
+    /// the table says only "one of these", and the map is left alone.
+    #[test]
+    fn a_shared_key_table_with_nothing_to_name_it_declines() {
+        let mut m = ir(encoder(2));
+        twins(&mut m);
+        assert!(!UdtEncodePass.run(&mut m).changed);
+        let mut m = returned_as(TypeRef::UserDefined(TypeId::new(9)));
+        assert!(!UdtEncodePass.run(&mut m).changed);
+        let mut m = returned_as(TypeRef::Primitive(PrimitiveType::U32));
+        assert!(!UdtEncodePass.run(&mut m).changed);
+    }
+
+    /// The field of a recovered literal names the struct its value is:
+    /// `Outer { inner: <map> }` with `inner: Twin` declared.
+    #[test]
+    fn a_shared_key_table_is_named_by_the_field_it_fills() {
+        let build = |declared: TypeId| {
+            let mut f = encoder(2);
+            let id = ValueId::from_index(f.bindings.len() as u32);
+            f.bindings.push(sordec_ir::Binding::new(
+                id,
+                IrType::Known(KnownType::UserDefined(TypeId::new(10))),
+                Expr::Struct { fields: vec![("inner".to_string(), v(9))] },
+                Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+            )); // v10 Outer { inner: v9 }
+            f.blocks.iter_mut().next().unwrap().1.bindings.push(id);
+            let mut m = ir(f);
+            twins(&mut m);
+            m.soroban_facts.as_mut().unwrap().types.structs.push(StructDef {
+                id: TypeId::new(10),
+                name: "Outer".to_string(),
+                fields: vec![StructField { name: "inner".to_string(), ty: TypeRef::UserDefined(declared) }],
+            });
+            m
+        };
+        let mut m = build(TypeId::new(7));
+        assert!(UdtEncodePass.run(&mut m).changed);
+        assert_eq!(named(&m, 9), Some(TypeId::new(7)));
+        let mut m = build(TypeId::new(9));
+        assert!(!UdtEncodePass.run(&mut m).changed);
+    }
+
+    /// Two destinations naming different structs name neither.
+    #[test]
+    fn destinations_that_disagree_name_nothing() {
+        let mut m = returned_as(TypeRef::UserDefined(TypeId::new(8)));
+        let f = &mut m.functions[0];
+        let id = ValueId::from_index(f.bindings.len() as u32);
+        f.bindings.push(sordec_ir::Binding::new(
+            id,
+            IrType::Known(KnownType::UserDefined(TypeId::new(10))),
+            Expr::Struct { fields: vec![("inner".to_string(), v(9))] },
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        f.blocks.iter_mut().next().unwrap().1.bindings.push(id);
+        m.soroban_facts.as_mut().unwrap().types.structs.push(StructDef {
+            id: TypeId::new(10),
+            name: "Outer".to_string(),
+            fields: vec![StructField { name: "inner".to_string(), ty: TypeRef::UserDefined(TypeId::new(7)) }],
+        });
         assert!(!UdtEncodePass.run(&mut m).changed);
     }
 }

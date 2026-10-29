@@ -123,6 +123,9 @@ pub enum Expr {
         /// Variant name as declared.
         // JUSTIFY: variant names come from the contract's own spec.
         name: String,
+        /// The values the variant carries, in declaration order: empty
+        /// for a unit variant, `[a, b]` for `Name(a, b)`.
+        payload: Vec<ValueId>,
     },
 
     /// Direct call to a local function (not a host call).
@@ -344,7 +347,11 @@ impl Expr {
                 f(*if_true);
                 f(*if_false);
             }
-            Expr::Variant { name: _ } => {}
+            Expr::Variant { name: _, payload } => {
+                for &value in payload {
+                    f(value);
+                }
+            }
             Expr::IndirectCall {
                 table: _,
                 sig: _,
@@ -420,7 +427,11 @@ impl Expr {
                 f(if_true);
                 f(if_false);
             }
-            Expr::Variant { name: _ } => {}
+            Expr::Variant { name: _, payload } => {
+                for value in payload {
+                    f(value);
+                }
+            }
             Expr::Unary { op: _, value } => f(value),
             Expr::Binary { op: _, lhs, rhs } => {
                 f(lhs);

@@ -760,9 +760,9 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // above have had their chance at it.
             Box::new(OptionIfLetPass),
             Box::new(VecElementsPass),
-            // A returned vec is the tuple the spec declares, once its
-            // elements are known. Before the buffer collection below, which
-            // then takes the encodes of its components with the stores.
+            // A returned vec is the tuple or enum variant the spec declares,
+            // once its elements are known. Before the buffer collection below,
+            // which then takes the encodes of its components with the stores.
             Box::new(TupleReturnPass),
             // Collecting the buffer the elements came out of, in a group of
             // its own.

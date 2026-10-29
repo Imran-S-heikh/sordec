@@ -2391,4 +2391,35 @@ mod tests {
         let body = flag_struct(untyped(), sordec_ir::PrimitiveType::Bool);
         assert!(!body.contains("!= 0"), "{body}");
     }
+
+    /// A variant carrying values prints them as its tuple: `Kind::A(v1)`;
+    /// a unit one prints its path alone.
+    #[test]
+    fn a_variant_prints_the_values_it_carries() {
+        let mut reg = TypeRegistry::default();
+        reg.unions.push(sordec_ir::UnionDef {
+            id: sordec_common::TypeId::new(5),
+            name: "Kind".to_string(),
+            cases: vec![
+                sordec_ir::UnionCase {
+                    name: "A".to_string(),
+                    fields: vec![sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::U32)],
+                },
+                sordec_ir::UnionCase { name: "B".to_string(), fields: vec![] },
+            ],
+            exported: true,
+        });
+        let kind = IrType::Known(KnownType::UserDefined(sordec_common::TypeId::new(5)));
+        let exprs = vec![
+            (untyped(), Expr::Load { addr: v(0), offset: 0, width: sordec_ir::MemWidth::W4, signed: None, ty: untyped() }),
+            (kind.clone(), Expr::Variant { name: "A".to_string(), payload: vec![v(1)] }),
+            (untyped(), store(2)),
+            (kind, Expr::Variant { name: "B".to_string(), payload: vec![] }),
+            (untyped(), store(4)),
+        ];
+        let body = emitted(exprs, vec![], &reg);
+        assert!(body.contains("Kind :: A (v1)"), "{body}");
+        assert!(body.contains("Kind :: B"), "{body}");
+        assert!(!body.contains("Kind :: B ("), "{body}");
+    }
 }
