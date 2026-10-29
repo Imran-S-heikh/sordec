@@ -37,7 +37,10 @@
 //! - **A read typed as what is stored unwraps.** The host's read returns the
 //!   stored value and traps on a missing key; `get(&k).unwrap()` is that.
 //!   Only for a read typed as a value: one typed `Option` is a fold's real
-//!   `get(&k)`, and one typed nothing or `Val` names no value to unwrap to.
+//!   `get(&k)`, and one typed nothing names no value to unwrap to. One typed
+//!   `Val` does when it is used as the `Val` it is — handed to a helper that
+//!   decodes it — and never as an `Option`: the stored `Val` is then the
+//!   value, `get::<_, Val>(&k).unwrap()`.
 //!
 //! After every fold and type recovery, so it sees only what they left.
 
@@ -111,7 +114,7 @@ impl Pass<HighIr> for ResidualProbePass {
                         }
                     }
                     Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { missing: Missing::Option, .. }))
-                        if stored_value(&binding.ty) =>
+                        if stored_value(&binding.ty) || raw_val_read(func, &uses, id) =>
                     {
                         reads.push(id);
                     }
@@ -151,6 +154,27 @@ impl Pass<HighIr> for ResidualProbePass {
         }
         result
     }
+}
+
+/// A read typed `Val` that something uses, and nothing as an `Option`: the
+/// stored `Val` itself, handed on as one — to a helper that decodes it, a
+/// tag check. `get::<_, Val>(&k).unwrap()` is that read: the `Val` the host
+/// stores, and a trap on a missing key.
+fn raw_val_read(func: &sordec_ir::HighFunction, uses: &HighUseIndex, id: ValueId) -> bool {
+    let typed_val = matches!(
+        func.bindings.get(id).map(|b| &b.ty),
+        Some(IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val))
+    );
+    if !typed_val || uses.is_unused(id) {
+        return false;
+    }
+    !func.bindings.iter().any(|(_, b)| match &b.expr {
+        Expr::IsSome { value } | Expr::Unwrap { value, .. } | Expr::UnwrapOr { value, .. } => {
+            resolve_use(func, *value) == id
+        }
+        Expr::Optional { payload: Some(values) } => values.iter().any(|v| resolve_use(func, *v) == id),
+        _ => false,
+    })
 }
 
 /// Whether a read's type names a stored value: not an `Option`, not the
@@ -248,6 +272,43 @@ mod tests {
     fn a_probe_an_if_let_claims_stays_the_sdk_s() {
         let mut ir = pair(Missing::Present(v(1)), IrType::Known(KnownType::I128));
         assert!(!ResidualProbePass.run(&mut ir).changed);
+    }
+
+    #[test]
+    fn a_val_read_used_as_a_val_unwraps() {
+        let mut ir = pair(Missing::Option, IrType::Known(KnownType::Val));
+        let f = &mut ir.functions[0];
+        // A reader: the read handed to a helper that decodes it.
+        let call = ValueId::new(f.bindings.len() as u32);
+        f.bindings.push(sordec_ir::Binding::new(
+            call,
+            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            Expr::Call { target: sordec_common::FuncId::new(0), args: vec![v(3)] },
+            sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+        ));
+        assert!(ResidualProbePass.run(&mut ir).changed);
+        assert!(matches!(
+            &ir.functions[0].bindings.get(v(3)).unwrap().expr,
+            Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { missing: Missing::Unwrap, .. }))
+        ));
+    }
+
+    #[test]
+    fn a_val_read_tested_as_an_option_stays() {
+        let mut ir = pair(Missing::Option, IrType::Known(KnownType::Val));
+        let f = &mut ir.functions[0];
+        let test = ValueId::new(f.bindings.len() as u32);
+        f.bindings.push(sordec_ir::Binding::new(
+            test,
+            IrType::Known(KnownType::Bool),
+            Expr::IsSome { value: v(3) },
+            sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+        ));
+        ResidualProbePass.run(&mut ir);
+        assert!(matches!(
+            &ir.functions[0].bindings.get(v(3)).unwrap().expr,
+            Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { missing: Missing::Option, .. }))
+        ));
     }
 
     #[test]

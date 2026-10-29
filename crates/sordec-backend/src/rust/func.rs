@@ -142,6 +142,175 @@ mod tests {
         assert!(out[1].ends_with("{ }"), "{}", out[1]);
     }
 
+    /// A helper whose `Val` parameter flows into a merge typed `merge`, whose
+    /// other arm is the constant `7` typed `other`.
+    fn val_into_merge(merge: KnownType, other: KnownType) -> String {
+        let mut bindings: Arena<ValueId, Binding> = Arena::new();
+        let prov = || Provenance::new("test", ProvenanceSource::DataFlow, "test");
+        bindings.push(Binding::new(ValueId::new(0), IrType::Inferred(KnownType::Val), Expr::Phi { incoming: vec![] }, prov()));
+        let (b0, b1) = (BlockId::from_index(0), BlockId::from_index(1));
+        bindings.push(Binding::new(
+            ValueId::new(1),
+            IrType::Inferred(merge),
+            Expr::Phi { incoming: vec![(b0, ValueId::new(0)), (b0, ValueId::new(2))] },
+            prov(),
+        ));
+        bindings.push(Binding::new(ValueId::new(2), IrType::Known(other), Expr::Literal(Literal::I64(7)), prov()));
+        let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
+        blocks.push(HighBlock { id: b0, bindings: vec![] });
+        blocks.push(HighBlock { id: b1, bindings: vec![] });
+        let func = HighFunction {
+            id: FuncId::from_index(0),
+            name: None,
+            signature: None,
+            aliases: vec![],
+            blocks,
+            bindings,
+            region: Region::Sequence(vec![
+                Region::Scope {
+                    out: b1,
+                    body: Box::new(Region::Sequence(vec![
+                        Region::Basic(b0),
+                        Region::Break { target: b1, transfer: vec![(ValueId::new(1), ValueId::new(0))] },
+                    ])),
+                },
+                Region::Basic(b1),
+                Region::Return { values: vec![ValueId::new(1)] },
+            ]),
+            params: vec![ValueId::new(0)],
+            returns: vec![vec![ValueId::new(1)]],
+        };
+        let high = HighIr {
+            facts: WasmFacts {
+                imports: vec![],
+                exports: vec![],
+                function_type_indices: vec![],
+                function_bodies: vec![],
+                function_fingerprints: vec![],
+                table_functions: None,
+                custom_sections: vec![],
+            },
+            soroban_facts: None,
+            functions: vec![func],
+            memory: MemoryImage::empty(),
+        };
+        let policy = crate::rust::hole::StrictNoGuess;
+        match emit_function(&high, &high.functions[0], &TypeRegistry::default(), &policy).remove(0) {
+            Emitted::Method(m) => m.to_token_stream().to_string(),
+            Emitted::Free(f) => f.to_token_stream().to_string(),
+        }
+    }
+
+    #[test]
+    fn a_val_merged_into_a_word_beside_a_number_is_its_bits() {
+        let out = val_into_merge(KnownType::I64, KnownType::I64);
+        assert!(out.contains("arg0 . get_payload () as i64"), "{out}");
+        let out = val_into_merge(KnownType::U64, KnownType::U64);
+        assert!(out.contains("arg0 . get_payload ()"), "{out}");
+    }
+
+    #[test]
+    fn a_word_merge_of_vals_only_is_left_alone() {
+        // Every other arm a `Val` too: the number type came from what they
+        // encode, which is a wrong type, not a word.
+        let out = val_into_merge(KnownType::U64, KnownType::Val);
+        assert!(!out.contains("get_payload"), "{out}");
+    }
+
+    #[test]
+    fn a_val_merged_into_a_val_is_itself() {
+        let out = val_into_merge(KnownType::Val, KnownType::I64);
+        assert!(!out.contains("get_payload"), "{out}");
+    }
+
+    /// The caller (func 0) hands its `Val` parameter to func 1, whose `i64`
+    /// parameter its own body tag-checks when `checked`.
+    fn val_into_helper(checked: bool) -> String {
+        let prov = || Provenance::new("test", ProvenanceSource::DataFlow, "test");
+        let b0 = BlockId::from_index(0);
+        let mut caller_bindings: Arena<ValueId, Binding> = Arena::new();
+        caller_bindings.push(Binding::new(ValueId::new(0), IrType::Inferred(KnownType::Val), Expr::Phi { incoming: vec![] }, prov()));
+        caller_bindings.push(Binding::new(
+            ValueId::new(1),
+            IrType::Known(KnownType::Unit),
+            Expr::Call { target: FuncId::from_index(1), args: vec![ValueId::new(0)] },
+            prov(),
+        ));
+        let mut caller_blocks: Arena<BlockId, HighBlock> = Arena::new();
+        caller_blocks.push(HighBlock { id: b0, bindings: vec![ValueId::new(1)] });
+        let caller = HighFunction {
+            id: FuncId::from_index(0),
+            name: None,
+            signature: None,
+            aliases: vec![],
+            blocks: caller_blocks,
+            bindings: caller_bindings,
+            region: Region::Basic(b0),
+            params: vec![ValueId::new(0)],
+            returns: vec![],
+        };
+        let mut callee_bindings: Arena<ValueId, Binding> = Arena::new();
+        callee_bindings.push(Binding::new(ValueId::new(0), IrType::Inferred(KnownType::I64), Expr::Phi { incoming: vec![] }, prov()));
+        callee_bindings.push(Binding::new(
+            ValueId::new(1),
+            IrType::Inferred(KnownType::Bool),
+            if checked {
+                Expr::Semantic(sordec_ir::SemanticOp::Known(sordec_ir::KnownOp::ValTagCheck {
+                    value: ValueId::new(0),
+                    tag: 69,
+                    negated: false,
+                }))
+            } else {
+                Expr::Literal(Literal::Bool(true))
+            },
+            prov(),
+        ));
+        let mut callee_blocks: Arena<BlockId, HighBlock> = Arena::new();
+        callee_blocks.push(HighBlock { id: b0, bindings: vec![ValueId::new(1)] });
+        let callee = HighFunction {
+            id: FuncId::from_index(1),
+            name: None,
+            signature: None,
+            aliases: vec![],
+            blocks: callee_blocks,
+            bindings: callee_bindings,
+            region: Region::Basic(b0),
+            params: vec![ValueId::new(0)],
+            returns: vec![],
+        };
+        let high = HighIr {
+            facts: WasmFacts {
+                imports: vec![],
+                exports: vec![],
+                function_type_indices: vec![],
+                function_bodies: vec![],
+                function_fingerprints: vec![],
+                table_functions: None,
+                custom_sections: vec![],
+            },
+            soroban_facts: None,
+            functions: vec![caller, callee],
+            memory: MemoryImage::empty(),
+        };
+        let policy = crate::rust::hole::StrictNoGuess;
+        match emit_function(&high, &high.functions[0], &TypeRegistry::default(), &policy).remove(0) {
+            Emitted::Method(m) => m.to_token_stream().to_string(),
+            Emitted::Free(f) => f.to_token_stream().to_string(),
+        }
+    }
+
+    #[test]
+    fn a_val_handed_to_a_parameter_its_helper_tag_checks_is_its_bits() {
+        let out = val_into_helper(true);
+        assert!(out.contains("arg0 . get_payload () as i64"), "{out}");
+    }
+
+    #[test]
+    fn a_val_handed_to_a_plain_number_parameter_is_not_converted() {
+        let out = val_into_helper(false);
+        assert!(!out.contains("get_payload"), "{out}");
+    }
+
     #[test]
     fn another_return_type_keeps_the_word() {
         let out = emitted(signature("count", vec![TypeRef::Primitive(PrimitiveType::I64)]), vec![]);

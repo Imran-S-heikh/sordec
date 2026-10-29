@@ -1048,6 +1048,9 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                     want.as_ref()
                         .and_then(|ty| unsuffixed_against(ctx, *v, ty))
                         .or_else(|| want.as_ref().and_then(|ty| val_coerced(ctx, *v, ty)))
+                        .or_else(|| {
+                            want.as_ref().filter(|_| takes_val_bits(ctx, *target, i)).and_then(|ty| val_bits(ctx, *v, ty))
+                        })
                         .or_else(|| want.as_ref().and_then(|ty| bytes_widened(ctx, *v, ty)))
                         .or_else(|| want.as_ref().and_then(|ty| sign_cast(ctx, *v, ty)))
                         .unwrap_or_else(|| ctx.arg_ref(*v))
@@ -1278,6 +1281,70 @@ fn val_coerced(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<
             ))
         }
     }
+}
+
+/// A `Val` handed to a 64-bit word, as the word: its bits.
+///
+/// The wasm moves a `Val` as its 64 bits, so a slot that *is* the machine
+/// word receives exactly those bits, and `get_payload` is them, unencoded
+/// and unchanged. The reverse of [`val_constant`]. Only where the slot is
+/// the word for a reason of its own — a helper parameter its own body tests
+/// the tag of ([`takes_val_bits`]), a merge with an arm that is a number
+/// (the caller checks that) — never where a number type was only read back
+/// from what the `Val` encodes: that is a wrong type, not a word.
+///
+/// The value is typed `Val`, or a copy of one printed as the copy it is.
+pub(crate) fn val_bits(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<syn::Expr> {
+    let signed = match want {
+        IrType::Known(KnownType::I64) | IrType::Inferred(KnownType::I64) => true,
+        IrType::Known(KnownType::U64) | IrType::Inferred(KnownType::U64) => false,
+        _ => return None,
+    };
+    if !prints_as_val(ctx, v) {
+        return None;
+    }
+    let x = ctx.value_ref(v);
+    Some(if signed { parse_quote!((#x.get_payload() as i64)) } else { parse_quote!(#x.get_payload()) })
+}
+
+/// Whether `v` prints as a `Val`: typed one, or a plain copy of one (a copy
+/// is printed as its source, whatever type it was given). Not a hole: a
+/// `todo!()` has no type of its own, takes the one its reader asks for, and
+/// never yields a value to convert.
+fn prints_as_val(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
+    let is_val = |t: &IrType| matches!(t, IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val));
+    let mut at = ctx.fold_target(v);
+    for _ in 0..8 {
+        let Some(b) = ctx.func.bindings.get(at) else { return false };
+        if is_val(&b.ty) {
+            // A merge or a parameter is a declared variable, never a hole.
+            if matches!(b.expr, Expr::Phi { .. }) {
+                return true;
+            }
+            let rendered = binding_expr(ctx, b);
+            return !matches!(rendered, syn::Expr::Macro(m) if m.mac.path.is_ident("todo"));
+        }
+        match &b.expr {
+            Expr::Use(next) => at = *next,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Whether a helper's parameter is a `Val` it works on as its word: typed
+/// as a 64-bit number, while its own body checks the parameter's tag or
+/// unpacks it — which only a `Val` has.
+fn takes_val_bits(ctx: &FnCtx, target: FuncId, index: usize) -> bool {
+    let Some(callee) = ctx.high.function(target) else { return false };
+    let Some(param) = callee.params.get(index).copied() else { return false };
+    callee.bindings.iter().any(|(_, b)| match &b.expr {
+        Expr::Semantic(SemanticOp::Known(
+            sordec_ir::KnownOp::ValTagCheck { value, .. } | sordec_ir::KnownOp::ValDecodeSmall { value, .. },
+        )) => *value == param,
+        Expr::Semantic(SemanticOp::Known(sordec_ir::KnownOp::ValObject { args, .. })) => args.first() == Some(&param),
+        _ => false,
+    })
 }
 
 /// A fixed-width `BytesN<N>` handed to a `Bytes` parameter, widened on the

@@ -1011,10 +1011,16 @@ impl<'a> FnCtx<'a> {
                     | KnownType::I128
             )
         };
-        matches!(&binding.ty, IrType::Known(k) | IrType::Inferred(k) if named(k)) && matches!(
-            binding.expr,
-            Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. }))
-        )
+        // The stored `Val` itself, read whole and handed on: named too, or a
+        // reader typed as a number would have `get` decode the `Val` as one.
+        let raw_val = matches!(&binding.ty, IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val))
+            && matches!(
+                binding.expr,
+                Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { missing: sordec_ir::Missing::Unwrap, .. }))
+            );
+        raw_val
+            || matches!(&binding.ty, IrType::Known(k) | IrType::Inferred(k) if named(k))
+                && matches!(binding.expr, Expr::Semantic(SemanticOp::Known(KnownOp::StorageGet { .. })))
     }
 
     /// Whether an emitted value is one of the hole policy's `todo!(…)`
@@ -1049,11 +1055,32 @@ impl<'a> FnCtx<'a> {
                         .or_else(|| expr::val_constant(self, source, phi))
                         .or_else(|| expr::sign_cast(self, source, &b.ty))
                         .or_else(|| self.val_merge_input(source, phi))
+                        .or_else(|| self.word_merge_input(source, phi).and_then(|_| expr::val_bits(self, source, &b.ty)))
                         .or_else(|| expr::bool_to_int(self, source, &b.ty))
                 })
                 .unwrap_or_else(|| self.value_ref(source));
             out.push(parse_quote!(#lhs = #rhs;));
         }
+    }
+
+    /// A merge that is the machine word for a reason of its own: another of
+    /// its arms is a number, not a `Val`. Its `Val` arms hand it their bits
+    /// ([`expr::val_bits`]); a merge whose every arm is a `Val` and typed as
+    /// a number has its type from what the `Val` encodes, and is left to
+    /// fail visibly.
+    fn word_merge_input(&self, source: ValueId, phi: ValueId) -> Option<()> {
+        let Expr::Phi { incoming } = &self.func.bindings.get(phi)?.expr else { return None };
+        let number = |t: &IrType| {
+            matches!(
+                t,
+                IrType::Known(KnownType::I64 | KnownType::U64 | KnownType::I32 | KnownType::U32)
+                    | IrType::Inferred(KnownType::I64 | KnownType::U64 | KnownType::I32 | KnownType::U32)
+            )
+        };
+        incoming
+            .iter()
+            .any(|(_, v)| *v != source && self.func.bindings.get(self.fold_target(*v)).is_some_and(|b| number(&b.ty)))
+            .then_some(())
     }
 
     /// A host object merged into a `Val` — declared one, or untyped and so
