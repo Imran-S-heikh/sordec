@@ -562,6 +562,16 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             let lit = syn::LitStr::new(text, proc_macro2::Span::call_site());
             Some(parse_quote!(soroban_sdk::Symbol::new(#eb, #lit)))
         }
+        // `String::from_str` hands the host the literal's bytes with
+        // `string_new_from_linear_memory`; `resolved` holds exactly those
+        // bytes (strict UTF-8, never lossy), so the call is the same one.
+        KnownOp::StringNew {
+            resolved: Some(text),
+            ..
+        } => {
+            let lit = syn::LitStr::new(text, proc_macro2::Span::call_site());
+            Some(parse_quote!(soroban_sdk::String::from_str(#eb, #lit)))
+        }
 
         // Everything else stays an honest hole (later waves).
         _ => None,
@@ -586,7 +596,10 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
 /// **Any lowering added above that drops operands must be listed here.**
 /// The pairing is checked by `an_operand_dropping_lowering_is_declared`.
 pub(crate) fn ignores_operands(op: &KnownOp) -> bool {
-    matches!(op, KnownOp::SymbolNew { resolved: Some(_), .. })
+    matches!(
+        op,
+        KnownOp::SymbolNew { resolved: Some(_), .. } | KnownOp::StringNew { resolved: Some(_), .. }
+    )
 }
 
 /// The values the chain for `op` prints, when that is narrower than the
