@@ -51,6 +51,22 @@
 //! choice adds no claim: the declaration picks among the structs the
 //! table matches, and the table must still match it field for field.
 //!
+//! **An `Option<T>` parameter's payload.** `o: Option<T>` arrives as
+//! `Void` or as a `T`'s map, and the derived conversion unpacks it only on
+//! the `Some` path. The unpack itself proves which: the host traps on
+//! anything but a map, and `Void` is not one, so where it returns the
+//! value is a `T` — and the spec says it is one of those two. The decode
+//! is taken only when no read needs a name for the payload's field (there
+//! is no `o.f` to write): every read must be the field's derived check —
+//! its tag byte as below, or the whole word with every use a tag test
+//! against the field type's one tag, a mismatch test guarding
+//! `if t { trap }` or a match test guarding `if t { .. } else { trap }`
+//! (which gives way to its `then` arm). Arithmetic on the word that
+//! nothing reads (the `word & 255` a tag test was recognised from) goes
+//! with it. The regenerated `#[contractimpl]` wrapper converts the
+//! `Option<T>` — the unpack and each field check — so all of it is
+//! relocated, and the parameter keeps its `Option` type.
+//!
 //! Rewriting a read and removing the decode are two more claims, and each
 //! has its own argument.
 //!
@@ -116,7 +132,8 @@
 //! - The key table reads out of rodata as identifiers, and exactly one
 //!   declared struct has those field names — or several do, and the
 //!   value's declaration names one of them.
-//! - The decoded value is proven to be that struct (see above).
+//! - The decoded value is proven to be that struct (see above), or is an
+//!   entrypoint parameter declared `Option` of it, read only by checks.
 //! - A helper is `(out, val)`, `val` typed as the struct, touches no host
 //!   state, uses `out` only as a store address, and stores each slot from
 //!   exactly one field of `val` or a constant; each slot is stored at one
@@ -238,6 +255,13 @@ impl Pass<HighIr> for UdtDecodePass {
                 func.region = super::guard::strip(region, &planned.guards, &empty, &mut stripped);
                 result.metrics.increment(metrics::GUARDS_ELIDED, stripped);
             }
+            if !planned.inverted.is_empty() {
+                let empty = super::guard::empty_blocks(func);
+                let region = std::mem::replace(&mut func.region, sordec_ir::Region::Unreachable);
+                let mut stripped = 0_i64;
+                func.region = strip_inverted(region, &planned.inverted, &empty, &mut stripped);
+                result.metrics.increment(metrics::GUARDS_ELIDED, stripped);
+            }
             apply_elisions(func, PASS_NAME, planned.elisions);
             let mut shared: HashMap<(ValueId, String), ValueId> = HashMap::new();
             for (load, base, field, ty, half) in planned.limbs {
@@ -267,6 +291,10 @@ struct Planned {
     /// Guard conditions (in `guard::strip`'s shape) that test a niche
     /// discriminant the collapse has just made a field.
     guards: HashMap<ValueId, String>,
+    /// Conditions of guards written the other way round, `if c { .. }
+    /// else { trap }`, whose test is a derived check: the `if` gives way
+    /// to its `then` arm.
+    inverted: HashMap<ValueId, String>,
     /// Loads of one half of a wide field: `(load, struct value, field,
     /// field type, WideLo/WideHi)`. Each needs the field as a binding of
     /// its own, which an [`Elision`] cannot create.
@@ -315,6 +343,10 @@ struct Candidate<'a> {
     /// values (a helper's out-parameter): only then is a slot's first
     /// byte its field's tag.
     vals: bool,
+    /// The map is an `Option<T>` parameter, unpacked on its `Some` path:
+    /// no expression spells "this field of the payload", so the decode is
+    /// taken only when every read of it is a relocated check.
+    payload: bool,
 }
 
 impl Candidate<'_> {
@@ -385,7 +417,7 @@ impl Candidate<'_> {
 /// form (`u64`, `i128`, `Symbol`, ...), a `bool` (two tags), and a type
 /// whose conversion reads past the tag (`BytesN<N>` checks its length,
 /// a `#[contracttype]` type unpacks or matches its body) have no entry.
-fn sole_tag(ty: &KnownType) -> Option<u8> {
+pub(super) fn sole_tag(ty: &KnownType) -> Option<u8> {
     use crate::val_abi::{
         TAG_ADDRESS_OBJECT, TAG_BYTES_OBJECT, TAG_I32_VAL, TAG_MAP_OBJECT, TAG_STRING_OBJECT, TAG_U32_VAL,
         TAG_VEC_OBJECT,
@@ -533,26 +565,37 @@ fn plan<'a>(
                 let map = resolve_use(func, map);
                 // Field names several structs share say only "one of
                 // these"; the value's own declaration says which.
-                let Some(def) =
-                    struct_for(structs, &keys).or_else(|| declared_struct(func, map, structs, &keys, param_types))
+                let payload_of = option_payload(func, map);
+                let Some(def) = struct_for(structs, &keys)
+                    .or_else(|| declared_struct(func, map, structs, &keys, param_types))
+                    .or_else(|| {
+                        let def = structs.iter().find(|s| Some(s.id) == payload_of)?;
+                        has_keys(def, &keys).then_some(def)
+                    })
                 else {
                     declines.push(metrics::UDT_DECLINED_NO_STRUCT);
                     trace(func, &format!("no struct has exactly these keys {keys:?}, and {map:?} declares none of them"));
                     continue;
                 };
-                let Some(evidence) = value_evidence(func, map, def.id, param_types) else {
-                    declines.push(metrics::UDT_DECLINED_EVIDENCE);
-                    trace(func, "map value not proven to be the struct");
-                    continue;
-                };
+                // An `Option<T>` parameter's payload: the unpack traps on
+                // `None` (`Void` is no map), so where it returns the value is
+                // a `T`. The parameter itself stays typed `Option<T>`.
+                let payload = payload_of == Some(def.id);
+                if !payload {
+                    let Some(evidence) = value_evidence(func, map, def.id, param_types) else {
+                        declines.push(metrics::UDT_DECLINED_EVIDENCE);
+                        trace(func, "map value not proven to be the struct");
+                        continue;
+                    };
+                    typed.push((map, evidence));
+                }
                 let (base, start) = canon_addr(func, vals);
-                typed.push((map, evidence));
                 let slots = keys
                     .into_iter()
                     .enumerate()
                     .map(|(i, k)| Slot { rel: SLOT * i as u32, width: SLOT, role: Role::Field(k) })
                     .collect();
-                candidates.push(Candidate { base, start, producer: id, map, def, slots, vals: true });
+                candidates.push(Candidate { base, start, producer: id, map, def, slots, vals: true, payload });
             }
             // A helper-shaped decode: its out-parameter holds the struct's
             // fields, provided the value it was handed is proven to be
@@ -582,13 +625,22 @@ fn plan<'a>(
                 };
                 trace(func, &format!("helper frame claimed for func_{}", IrId::index(*target)));
                 let (base, start) = canon_addr(func, args[0]);
-                candidates.push(Candidate { base, start, producer: id, map, def, slots: h.slots.clone(), vals: false });
+                candidates.push(Candidate {
+                    base,
+                    start,
+                    producer: id,
+                    map,
+                    def,
+                    slots: h.slots.clone(),
+                    vals: false,
+                    payload: false,
+                });
             }
             _ => {}
         }
     }
     if candidates.is_empty() {
-        return Planned { elisions, declines, typed, guards, limbs };
+        return Planned { elisions, declines, typed, guards, inverted: HashMap::new(), limbs };
     }
 
     // Each decode's reads, or why the site is refused. The other decodes
@@ -601,6 +653,11 @@ fn plan<'a>(
     let mut checks: Vec<(usize, ValueId, Vec<ValueId>, String, u8)> = Vec::new();
     let uses = crate::dataflow::HighUseIndex::build(func);
     let traps = trap_guards(func);
+    let inverted_traps = inverted_trap_guards(func);
+    // Whole-word reads of an `Option` payload's slots, each only tested by
+    // its field's derived check: `(decode, load, field, tag, check)`.
+    let mut words: Vec<(usize, ValueId, String, u8, WordCheck)> = Vec::new();
+    let mut inverted: HashMap<ValueId, String> = HashMap::new();
     for (ci, cand) in candidates.iter().enumerate() {
         match reach::check(func, cand, &certain, access) {
             Ok(reads) if reads.fields.is_empty() && reads.tags.is_empty() => {}
@@ -617,13 +674,34 @@ fn plan<'a>(
                         }
                     }
                 }
+                // An `Option`'s payload has no field to read into: each
+                // read must be its field's derived check, relocated whole.
+                let mut held = Vec::new();
+                if why.is_none() && cand.payload {
+                    for (load, slot) in &reads.fields {
+                        let Role::Field(field) = &cand.slots[*slot].role else { continue };
+                        let tag = cand.field_type(field).as_ref().and_then(sole_tag);
+                        match tag.and_then(|t| Some((t, checked_word(func, &uses, &traps, &inverted_traps, *load, t)?))) {
+                            Some((t, found)) => held.push((ci, *load, field.clone(), t, found)),
+                            None => {
+                                why = Some(format!("{load:?} reads the payload's {field}, which no expression spells"));
+                                break;
+                            }
+                        }
+                    }
+                }
                 if let Some(why) = why {
                     declines.push(metrics::UDT_DECLINED_READS);
                     trace(func, &format!("decode {:?} refused: {why}", cand.producer));
                     continue;
                 }
                 checks.extend(found);
-                accepted.push((ci, reads.fields));
+                if cand.payload {
+                    words.extend(held);
+                    accepted.push((ci, Vec::new()));
+                } else {
+                    accepted.push((ci, reads.fields));
+                }
             }
             Err(why) => {
                 declines.push(metrics::UDT_DECLINED_READS);
@@ -639,18 +717,41 @@ fn plan<'a>(
             *claims.entry(*load).or_default() += 1;
         }
     }
-    for (_, load, ..) in &checks {
-        *claims.entry(*load).or_default() += 1;
+    for load in checks.iter().map(|c| c.1).chain(words.iter().map(|w| w.1)) {
+        *claims.entry(load).or_default() += 1;
     }
     accepted.retain(|(ci, reads)| {
         let alone = reads.iter().all(|(load, _)| claims.get(load) == Some(&1))
-            && checks.iter().filter(|c| c.0 == *ci).all(|(_, load, ..)| claims.get(load) == Some(&1));
+            && checks.iter().map(|c| (c.0, c.1)).chain(words.iter().map(|w| (w.0, w.1))).filter(|c| c.0 == *ci).all(|(_, load)| claims.get(&load) == Some(&1));
         if !alone {
             trace(func, &format!("decode {:?} refused: a read is claimed twice", candidates[*ci].producer));
         }
         alone
     });
     checks.retain(|c| accepted.iter().any(|(ci, _)| *ci == c.0));
+    words.retain(|c| accepted.iter().any(|(ci, _)| *ci == c.0));
+    for (ci, load, field, tag, check) in &words {
+        let def = &candidates[*ci].def.name;
+        let what = crate::val_abi::tag_name(*tag).unwrap_or("its tag");
+        let note = format!(
+            "derived `{def}` decode of an `Option`'s payload: `{field}` is checked to be a {what}, regenerated by `TryFromVal`"
+        );
+        for cond in &check.guards {
+            guards.insert(*cond, note.clone());
+        }
+        for cond in &check.inverted {
+            inverted.insert(*cond, note.clone());
+        }
+        for id in std::iter::once(load).chain(&check.tests) {
+            elisions.push(Elision {
+                id: *id,
+                expr: Expr::Literal(Literal::Unit),
+                ty: Some(IrType::Known(KnownType::Unit)),
+                note: note.clone(),
+                metric: metrics::UDT_FIELDS_RECOVERED,
+            });
+        }
+    }
     // The derived per-field type check: relocated with the decode, as a
     // declared parameter's own tag check is (`guard`). The byte read goes
     // with it; nothing else reads it.
@@ -767,12 +868,12 @@ fn plan<'a>(
             }
         }
     }
-    Planned { elisions, declines, typed, guards, limbs }
+    Planned { elisions, declines, typed, guards, inverted, limbs }
 }
 
 /// The conditions of every `if c { trap }` with no else arm, by how many
 /// such guards test each.
-fn trap_guards(func: &HighFunction) -> HashMap<ValueId, usize> {
+pub(super) fn trap_guards(func: &HighFunction) -> HashMap<ValueId, usize> {
     let empty = super::guard::empty_blocks(func);
     let mut out: HashMap<ValueId, usize> = HashMap::new();
     func.region.for_each_node(|r| {
@@ -785,6 +886,126 @@ fn trap_guards(func: &HighFunction) -> HashMap<ValueId, usize> {
     out
 }
 
+/// The conditions of every `if c { .. } else { trap }`, by how many such
+/// guards test each.
+fn inverted_trap_guards(func: &HighFunction) -> HashMap<ValueId, usize> {
+    let empty = super::guard::empty_blocks(func);
+    let mut out: HashMap<ValueId, usize> = HashMap::new();
+    func.region.for_each_node(|r| {
+        if let sordec_ir::Region::If { cond, else_region: Some(e), .. } = r
+            && super::guard::is_trap(e, &empty)
+        {
+            *out.entry(*cond).or_default() += 1;
+        }
+    });
+    out
+}
+
+/// How a whole-slot read is only its field's derived check.
+#[derive(Debug, Default)]
+struct WordCheck {
+    /// The tag tests on the word.
+    tests: Vec<ValueId>,
+    /// Their uses as `if t { trap }` (a mismatch test).
+    guards: Vec<ValueId>,
+    /// Their uses as `if t { .. } else { trap }` (a match test).
+    inverted: Vec<ValueId>,
+}
+
+/// The tag tests through which a whole-slot read is only its field's
+/// derived check, or `None` when the word is used for anything else.
+///
+/// Every use of the word must be a tag test against `tag`, the one tag
+/// the field's declared type is carried by; a mismatch test may only be
+/// the condition of `if t { trap }`, a match test only of
+/// `if t { .. } else { trap }`. Then the word decides nothing but "trap
+/// unless the field is a `tag`".
+fn checked_word(
+    func: &HighFunction,
+    uses: &crate::dataflow::HighUseIndex,
+    traps: &HashMap<ValueId, usize>,
+    inverted: &HashMap<ValueId, usize>,
+    load: ValueId,
+    tag: u8,
+) -> Option<WordCheck> {
+    use crate::dataflow::HighUseSite;
+    let sites = uses.uses_of(load);
+    if sites.is_empty() {
+        return None;
+    }
+    let mut out = WordCheck::default();
+    for site in sites {
+        let HighUseSite::Binding { user } = site else { return None };
+        let expr = func.bindings.get(*user).map(|b| &b.expr);
+        // Arithmetic on the word that nothing reads — the `word & 255` the
+        // tag test was recognised from — decides nothing; it goes too.
+        if matches!(expr, Some(Expr::Binary { .. } | Expr::Unary { .. })) && uses.uses_of(*user).is_empty() {
+            out.tests.push(*user);
+            continue;
+        }
+        let Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, tag: t, negated }))) = expr else {
+            return None;
+        };
+        if resolve_use(func, *value) != load || *t != tag {
+            return None;
+        }
+        let n = uses.uses_of(*user);
+        if n.is_empty() || !n.iter().all(|s| matches!(s, HighUseSite::Region)) {
+            return None;
+        }
+        let (table, into) = if *negated { (traps, &mut out.guards) } else { (inverted, &mut out.inverted) };
+        if table.get(user).copied().unwrap_or(0) != n.len() {
+            return None;
+        }
+        into.push(*user);
+        out.tests.push(*user);
+    }
+    Some(out)
+}
+
+/// `if c { then } else { trap }` with `c` in `conds` becomes `then`: the
+/// trap is a derived check that moved into the regenerated conversion.
+fn strip_inverted(
+    region: sordec_ir::Region,
+    conds: &HashMap<ValueId, String>,
+    empty: &std::collections::HashSet<sordec_common::BlockId>,
+    elided: &mut i64,
+) -> sordec_ir::Region {
+    use sordec_ir::Region;
+    let go = |r: Region, elided: &mut i64| strip_inverted(r, conds, empty, elided);
+    match region {
+        Region::Sequence(items) => {
+            crate::structuring::seq(items.into_iter().map(|i| go(i, elided)).collect())
+        }
+        Region::Scope { out, body } => Region::Scope { out, body: Box::new(go(*body, elided)) },
+        Region::Loop { header, body, kind } => Region::Loop { header, body: Box::new(go(*body, elided)), kind },
+        Region::Switch { index, arms, default, dispatch } => Region::Switch {
+            index,
+            arms: arms
+                .into_iter()
+                .map(|mut arm| {
+                    arm.body = go(arm.body, elided);
+                    arm
+                })
+                .collect(),
+            default: Box::new(go(*default, elided)),
+            dispatch,
+        },
+        Region::If { cond, then_region, else_region: Some(e) }
+            if conds.contains_key(&cond) && super::guard::is_trap(&e, empty) =>
+        {
+            *elided += 1;
+            go(*then_region, elided)
+        }
+        Region::If { cond, then_region, else_region } => Region::If {
+            cond,
+            then_region: Box::new(go(*then_region, elided)),
+            else_region: else_region.map(|e| Box::new(go(*e, elided))),
+        },
+        other => other,
+    }
+}
+
 /// The guard conditions through which a one-byte read of a field's tag
 /// is the derived conversion's check of that field, or `None` when it is
 /// read for anything else.
@@ -794,7 +1015,7 @@ fn trap_guards(func: &HighFunction) -> HashMap<ValueId, usize> {
 /// comparison must be the condition of a guard whose arm is a bare trap
 /// with no else: then the byte decides nothing but "trap unless the field
 /// is a `tag`", which is the derived `TryFromVal`'s check for that type.
-fn derived_tag_check(
+pub(super) fn derived_tag_check(
     func: &HighFunction,
     uses: &crate::dataflow::HighUseIndex,
     traps: &HashMap<ValueId, usize>,
@@ -1015,11 +1236,30 @@ fn declared_struct<'a>(
         }
     })?;
     let def = structs.iter().find(|s| s.id == id)?;
+    has_keys(def, keys).then_some(def)
+}
+
+/// Whether `def`'s field names are exactly `keys`.
+fn has_keys(def: &StructDef, keys: &[String]) -> bool {
     let mut want: Vec<&str> = keys.iter().map(String::as_str).collect();
     want.sort_unstable();
     let mut have: Vec<&str> = def.fields.iter().map(|f| f.name.as_str()).collect();
     have.sort_unstable();
-    (have == want).then_some(def)
+    have == want
+}
+
+/// The struct `T` when `map` is an entrypoint parameter the spec declares
+/// `Option<T>`.
+fn option_payload(func: &HighFunction, map: ValueId) -> Option<TypeId> {
+    let sig = func.signature.as_ref()?;
+    let index = func.params.iter().position(|p| *p == map)?;
+    match known_of_type_ref(&sig.inputs.get(index)?.ty)? {
+        KnownType::Option(inner) => match *inner {
+            IrType::Known(KnownType::UserDefined(id)) => Some(id),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Why the map value may be read as the struct: a host operation's result
@@ -1800,15 +2040,16 @@ mod reach {
             }
             // The first byte of a `Val` slot the decode wrote whole on
             // every path is that field's tag.
+            let exact = self.cand.exact_read(at, width, signed).filter(|i| touched == [*i] && live.must.contains(i));
             let tag = self.cand.tag_read(at, width).filter(|(i, _)| touched == [*i] && live.must.contains(i));
-            match self.cand.exact_read(at, width, signed) {
-                Some(i) if touched == [i] && live.must.contains(&i) => {
+            match (exact, tag) {
+                (Some(i), _) => {
                     self.reads.insert(id, i);
                 }
-                _ if tag.is_some() => {
-                    self.tags.insert(id, tag.unwrap_or_default());
+                (None, Some(t)) => {
+                    self.tags.insert(id, t);
                 }
-                _ => self.refuse(format!(
+                (None, None) => self.refuse(format!(
                     "{id:?} reads {} bytes at +{at}: not one whole slot the decode wrote on every path",
                     width.bytes()
                 )),
@@ -2645,6 +2886,76 @@ mod tests {
         let mut m = ir(f);
         UdtDecodePass.run(&mut m);
         untouched(&m, 0, 5, &[6, 7]);
+    }
+
+    // -----------------------------------------------------------------
+    // An `Option<T>` parameter's payload, read only by its checks
+    // -----------------------------------------------------------------
+
+    /// `f(o: Option<Balance>)`: the unpack of `o` (v2, the parameter), the
+    /// token slot read whole (v7) and tested for an `AddressObject` (v8)
+    /// under `if v8 { } else { trap }`; `amount` (v6) is `read`.
+    fn option_payload_fn(read: Expr) -> HighFunction {
+        use sordec_ir::{CompositeType, FunctionParam, FunctionSignature};
+        let mut exprs: Vec<Expr> = decoder().bindings.iter().map(|(_, b)| b.expr.clone()).collect();
+        exprs[2] = Expr::Phi { incoming: vec![] }; // v2: the parameter
+        exprs[6] = read;
+        exprs.push(Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+            value: v(7),
+            tag: crate::val_abi::TAG_ADDRESS_OBJECT,
+            negated: false,
+        }))); // v8
+        let region = sordec_ir::Region::Sequence(vec![
+            bb(0),
+            sordec_ir::Region::If {
+                cond: v(8),
+                then_region: Box::new(bb(1)),
+                else_region: Some(Box::new(sordec_ir::Region::Unreachable)),
+            },
+        ]);
+        let mut f = func_regions(exprs, vec![v(2), v(0), v(1)], vec![vec![3, 4, 5, 6, 7, 8], vec![]], region);
+        let opt = TypeRef::Composite(CompositeType::Option(Box::new(TypeRef::UserDefined(TypeId::new(7)))));
+        f.signature = Some(FunctionSignature {
+            name: "f".into(),
+            inputs: vec![FunctionParam { name: "o".into(), ty: opt }],
+            outputs: vec![],
+        });
+        f
+    }
+
+    /// Every read of the payload is its field's derived check: the unpack
+    /// and the check go, and the parameter keeps its `Option` type.
+    #[test]
+    fn an_option_payload_read_only_by_its_checks_is_relocated() {
+        let mut f = option_payload_fn(Expr::Literal(Literal::Unit));
+        f.bindings.get_mut(v(2)).unwrap().ty = IrType::Known(KnownType::Option(Box::new(IrType::Known(
+            KnownType::UserDefined(TypeId::new(7)),
+        ))));
+        let mut m = ir(f);
+        assert!(UdtDecodePass.run(&mut m).changed);
+        assert!(matches!(expr_at(&m, 5), Expr::Literal(Literal::Unit)));
+        assert!(matches!(expr_at(&m, 7), Expr::Literal(Literal::Unit)));
+        assert!(matches!(expr_at(&m, 8), Expr::Literal(Literal::Unit)));
+        assert!(!has_guard(&m.functions[0]), "the inverted guard gives way to its then arm");
+        assert!(matches!(m.functions[0].bindings.get(v(2)).unwrap().ty, IrType::Known(KnownType::Option(_))));
+    }
+
+    /// A payload field read for its value has no expression to become.
+    #[test]
+    fn an_option_payload_read_for_its_value_keeps_the_decode() {
+        let mut f = option_payload_fn(load(v(0), 0));
+        let id = ValueId::from_index(f.bindings.len() as u32);
+        f.bindings.push(sordec_ir::Binding::new(
+            id,
+            IrType::Unknown(UnknownReason::InsufficientEvidence),
+            store(v(1), v(6), 0),
+            sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+        ));
+        f.blocks.get_mut(sordec_common::BlockId::from_index(1)).unwrap().bindings.push(id);
+        let mut m = ir(f);
+        UdtDecodePass.run(&mut m);
+        untouched(&m, 0, 5, &[6, 7]);
+        assert!(has_guard(&m.functions[0]));
     }
 
     /// A function with the given blocks (binding ids per block) and region.
