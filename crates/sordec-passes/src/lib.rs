@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
-    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, OptionUnwrapPass, ResidualProbePass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideInlineDecodePass, WideReturnPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
@@ -565,6 +565,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // probe becomes `true`, which the constant-branch fold at the
             // top of the group then drops.
             Box::new(OptionDefaultPass),
+            // A declared tuple argument's unpack, as the element stores it
+            // performs. After the inliner, which pastes the SDK's unpack
+            // wrapper into the entrypoint; the forwarder at the top of the
+            // group then hands each slot load its element, and the struct
+            // decode below may find its map value is one of them.
+            Box::new(TupleParamPass),
             // The derived `#[contracttype]` struct decode: once the unpack
             // wrapper is inlined, the key table names the struct and the
             // slot loads become its fields. After the inliner for that
@@ -888,7 +894,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 33..85],
+        vec![1..7, 33..86],
     )
 }
 
@@ -971,6 +977,7 @@ mod tests {
                 marshalling::folded_encode::PASS_NAME,
                 marshalling::option_sret::PASS_NAME,
                 marshalling::option_default::PASS_NAME,
+                marshalling::tuple_param::PASS_NAME,
                 marshalling::udt_decode::PASS_NAME,
                 marshalling::udt_encode::PASS_NAME,
                 SPEC_FROM_GUARDS_ON_FIELDS,

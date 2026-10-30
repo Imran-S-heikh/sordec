@@ -59,6 +59,10 @@
 //!   behind, so this half deletes provably dead code and nothing else;
 //! - a tag check on an entrypoint parameter whose tested tag *carries* the
 //!   parameter's declared type ([`val_abi::tag_carries`]);
+//! - a tag check on an element of an entrypoint parameter declared a tuple
+//!   (`arg.k`, see [`super::tuple_param`]) whose tested tag the element's
+//!   declared type admits — the tuple's conversion in the regenerated
+//!   wrapper converts each element by that type;
 //! - a length check on an entrypoint parameter declared `BytesN<N>`, where
 //!   the tested length is exactly `N`.
 //!
@@ -608,6 +612,20 @@ fn classify_tag_check(
         return Ok(format!(
             "tag check ({}) on a cross-contract call's result: the generated client method \
              returns {named:?}, and its `try_from_val` regenerates it",
+            val_abi::tag_name(*tag).unwrap_or("?")
+        ));
+    }
+    // An element of a tuple parameter carries the parameter's licence:
+    // the regenerated wrapper converts the tuple, and converting a tuple
+    // converts each element by the type the spec declares for it — this
+    // check, on this element.
+    if let Some(element) = super::tuple_param::element_type(func, value) {
+        if !val_abi::tag_admits(*tag, &element) {
+            return Err(DECLINED_TAG_MISMATCH);
+        }
+        return Ok(format!(
+            "argument tag check ({}) on an element of a tuple parameter contractspecv0 declares, \
+             typed {element:?}: `#[contractimpl]` regenerates it in the dispatch wrapper",
             val_abi::tag_name(*tag).unwrap_or("?")
         ));
     }
@@ -1261,6 +1279,73 @@ mod tests {
                 "BytesN<{width}> is carried by a BytesObject"
             );
         }
+    }
+
+    // ---- a tuple parameter and its elements ----
+
+    /// `(u32, i64)`, the shape a tuple argument is declared with.
+    fn pair() -> TypeRef {
+        TypeRef::Composite(CompositeType::Tuple(vec![
+            TypeRef::Primitive(PrimitiveType::U32),
+            TypeRef::Primitive(PrimitiveType::I64),
+        ]))
+    }
+
+    /// A negated tag check on element `index` of tuple parameter `v0`.
+    fn tag_guard_on_element(index: u32, tag: u8) -> HighFunction {
+        let mut func = entry_typed(
+            vec![
+                Expr::Phi { incoming: vec![] },              // v0 — the tuple
+                Expr::Project { value: v(0), index },        // v1 — its element
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                    value: v(1),
+                    tag,
+                    negated: true,
+                })), // v2
+            ],
+            vec![v(0)],
+            vec![pair()],
+        );
+        guarded(&mut func, v(2));
+        func
+    }
+
+    #[test]
+    fn a_vec_object_tag_guard_on_a_tuple_parameter_is_removed() {
+        // A tuple travels as the vec of its elements.
+        let mut func = entry_typed(
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                    value: v(0),
+                    tag: val_abi::TAG_VEC_OBJECT,
+                    negated: true,
+                })),
+            ],
+            vec![v(0)],
+            vec![pair()],
+        );
+        guarded(&mut func, v(1));
+        assert_eq!(collect_guards(&func).len(), 1);
+    }
+
+    #[test]
+    fn a_tag_guard_on_a_tuple_element_of_its_declared_type_is_removed() {
+        assert_eq!(collect_guards(&tag_guard_on_element(0, val_abi::TAG_U32_VAL)).len(), 1);
+    }
+
+    #[test]
+    fn a_tag_guard_on_a_tuple_element_of_another_type_stays() {
+        // Element 1 is declared `i64`; a `U32Val` check on it is not its
+        // conversion.
+        let func = tag_guard_on_element(1, val_abi::TAG_U32_VAL);
+        assert!(collect_guards(&func).is_empty());
+        assert_eq!(collect_declines(&func), vec![DECLINED_TAG_MISMATCH]);
+    }
+
+    #[test]
+    fn a_tag_guard_on_an_element_past_the_arity_stays() {
+        assert!(collect_guards(&tag_guard_on_element(2, val_abi::TAG_U32_VAL)).is_empty());
     }
 
     #[test]

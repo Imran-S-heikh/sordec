@@ -45,7 +45,10 @@
 //! # Gates
 //!
 //! - **The type is proven, not inferred.** `Known` on a host operation's
-//!   result — what a recognizer read off the ABI. An inferred type is
+//!   result — what a recognizer read off the ABI — or the type
+//!   `contractspecv0` declares for an element of a tuple parameter
+//!   ([`super::tuple_param::element_type`]), whose conversion the
+//!   regenerated wrapper runs as it does a scalar parameter's. An inferred type is
 //!   our own reasoning about the code, and folding a conversion away on
 //!   the strength of a guess would make the output disagree with the
 //!   binary rather than with the source.
@@ -151,12 +154,18 @@ fn two_encodings(ty: &KnownType) -> bool {
     )
 }
 
-/// The type a recognizer proved for a host operation's result.
+/// The type a recognizer proved for a host operation's result, or the
+/// spec declares for an element of a tuple parameter.
 ///
 /// Deliberately the same rule [`super::guard`] uses to licence the trap
-/// beside this unpack: `Known`, and on a host operation. The two have to
-/// agree, or one would fold a conversion whose trap the other keeps.
+/// beside this unpack: `Known`, and on a host operation — or the element,
+/// whose conversion the regenerated wrapper runs as it does a scalar
+/// parameter's. The two have to agree, or one would fold a conversion
+/// whose trap the other keeps.
 fn proven(func: &HighFunction, value: ValueId) -> Option<KnownType> {
+    if let Some(element) = super::tuple_param::element_type(func, value) {
+        return Some(element);
+    }
     let binding = func.bindings.get(value)?;
     if !matches!(binding.expr, Expr::Semantic(SemanticOp::Known(_))) {
         return None;
@@ -221,6 +230,54 @@ mod tests {
         let mut m = shape(Some(KnownType::I128), ValObjectKind::ObjToI128Lo64);
         ScalarDecodePass.run(&mut m);
         assert!(!folded(&m, v(2)));
+    }
+
+    /// Element `index` of a parameter declared `(u32, i64)`, unpacked
+    /// both ways as an `i64`.
+    fn element_shape(index: u32) -> HighIr {
+        use sordec_ir::{CompositeType, FunctionParam, FunctionSignature, PrimitiveType, TypeRef};
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },       // v0 — the tuple
+                Expr::Project { value: v(0), index }, // v1 — its element
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value: v(1) })), // v2
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValObject {
+                    kind: ValObjectKind::ObjToI64,
+                    args: vec![v(1)],
+                })), // v3
+            ],
+            vec![v(0)],
+            vec![1, 2, 3],
+        );
+        f.signature = Some(FunctionSignature {
+            name: "tuple2".to_string(),
+            inputs: vec![FunctionParam {
+                name: "arg".to_string(),
+                ty: TypeRef::Composite(CompositeType::Tuple(vec![
+                    TypeRef::Primitive(PrimitiveType::U32),
+                    TypeRef::Primitive(PrimitiveType::I64),
+                ])),
+            }],
+            outputs: vec![],
+        });
+        module(vec![f])
+    }
+
+    #[test]
+    fn both_encodings_of_a_declared_tuple_element_are_the_element() {
+        let mut m = element_shape(1);
+        assert!(ScalarDecodePass.run(&mut m).changed);
+        assert!(folded(&m, v(2)), "the small decode");
+        assert!(folded(&m, v(3)), "the object unpack");
+    }
+
+    /// Element 0 is declared `u32`: `obj_to_i64` is not its conversion,
+    /// and a `u32` has one encoding, so the small decode is not this
+    /// pass's either.
+    #[test]
+    fn an_element_of_another_type_keeps_its_unpack() {
+        let mut m = element_shape(0);
+        assert!(!ScalarDecodePass.run(&mut m).changed);
     }
 
     #[test]
