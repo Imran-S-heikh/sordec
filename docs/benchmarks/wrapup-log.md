@@ -347,3 +347,22 @@ struct field declared `u64` held the helper's encoded output. A field filled
 through such a helper now takes the helper's argument, and an encoder's result
 stays a `Val`. phoenix-vesting 23 → 17; the three contracttrait builds lose two
 gaps each. Scores unchanged: corpus bands pass, held-out mean 0.7850.
+
+## 2026-10-30 — commit 2db10d1 (a tuple argument unpacked into memory is its elements)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 23/25 | 16 | 3,879 |
+| Stellar examples, multi-contract | 13 | 10/13 | 34 | 4,240 |
+| third-party | 2 | 1/2 | 17 | 776 |
+| SDK 26 test contracts | 39 | **31/39** | 26 | 1,444 |
+
+Errors 98 → 93, holes 10,476 → 10,424. The SDK converts a tuple argument by
+unpacking its vec into the stack frame and checking each element; that unpack
+was a gap. A declared tuple parameter's unpack is now the stores it performs, so
+each element reaches its reader, and the checks the typed signature already
+makes go. SDK 26 tuples compiles and reads `(arg.0, arg.1)`, as its source does;
+other_custom_types' `tuple` is fixed (12 → 10 errors); spec_shaking v1/v2 lose
+three gaps each. Held-out mean 0.7850 → 0.7851 (other_custom_types); corpus
+bands pass.
