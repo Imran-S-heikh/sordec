@@ -755,3 +755,19 @@ pass; held-out mean 0.7865.
 
 **Totals:** 84 of 86 contracts pass `cargo check` (from 55 of 86 at the start of the
 week, 257 errors → 9). Gap work: 10,355 → 9,591 gaps (−764).
+
+## 2026-10-31 — commit 9d199bb (a resolved string literal prints as `String::from_str`)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,821 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 4,066 |
+| third-party | 2 | 1/2 | 8 | 646 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 927 |
+
+A string the contract builds from constant UTF-8 bytes in its binary printed as a gap,
+and its pointer and length kept two more alive; it now reads as the source wrote it,
+`String::from_str(&e, "Hello")`. hello_world, associated_type and
+associated_type_contracttrait have no gaps left. Holes 9,591 → 9,545 (summed); errors
+unchanged at 9; corpus byte-identical; held-out mean 0.7865.
