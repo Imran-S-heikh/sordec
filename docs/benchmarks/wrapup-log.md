@@ -561,3 +561,20 @@ A soundness fix shared by four signature-changing passes: they checked for indir
 calls only in a form the pipeline never produces. They now keep the signature of
 any helper the function table declares (table entries read with imports
 subtracted). No helper they rewrote on these sets is in a table.
+
+## 2026-10-30 — commit 8af9004 (a Result returned as a register pair is the Result)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 24/25 | 4 | 3,882 |
+| Stellar examples, multi-contract | 13 | 12/13 | 3 | 4,220 |
+| third-party | 2 | 1/2 | 11 | 765 |
+| SDK 26 test contracts | 39 | 37/39 | 3 | 1,371 |
+
+Errors 25 → 22. A helper returning `Result<u32, E>` as two registers (tag and
+payload), stored by a wrapper for the SDK's converter, now returns the `Result`
+itself per path; the converter's error for the code read back is exactly that
+code's contract error (its two constants cancel). It follows the shared rule that a
+helper a function table may reach keeps its signature. Only privacy_pools changed
+(6 → 3); scores as for 8631f8a.
