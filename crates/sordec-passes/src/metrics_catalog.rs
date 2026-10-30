@@ -739,6 +739,10 @@ pub const MEMORY_LOADS_HOISTED: &str = "memory_loads_hoisted";
 /// hoisted to the call site might read a different value.
 pub const MEMORY_ARGS_REFUSED_WRITE_FIRST: &str = "memory_args_refused_write_first";
 
+/// Calls and memory writes removed from just before a trap, where nothing
+/// can observe them: the panic-message formatting rustc emits.
+pub const MEMORY_TRAP_TAIL_REMOVED: &str = "memory_trap_tail_removed";
+
 /// Loads bound to a preceding store's value within one block, without any
 /// escape analysis. Distinct from `MEMORY_LOADS_FORWARDED`, which counts
 /// the ones `promote` retires as part of promoting a whole slot.
@@ -1136,6 +1140,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MEMORY_ARGS_PROMOTED,
         MEMORY_LOADS_HOISTED,
         MEMORY_ARGS_REFUSED_WRITE_FIRST,
+        MEMORY_TRAP_TAIL_REMOVED,
         MEMORY_LOADS_FORWARDED_LOCALLY,
         MEMORY_FILL_LOOPS_UNROLLED,
         MEMORY_SRET_CONVERTED,

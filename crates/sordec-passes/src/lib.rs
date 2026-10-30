@@ -93,7 +93,7 @@ pub use interproc::{
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use memory::{
-    ArgPromotionPass, SlotPromotionPass, SretReturnPass, StoreForwardPass, UnrollFillLoopsPass,
+    ArgPromotionPass, SlotPromotionPass, SretReturnPass, StoreForwardPass, TrapTailPass, UnrollFillLoopsPass,
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
@@ -146,6 +146,11 @@ use sordec_ir::{HighIr, LiftedIr};
 ///   fixpoint. Promotion depends on the pair *jointly*: it inserts a
 ///   parameter in every reachable block and neither cleanup alone removes
 ///   the surplus.
+/// - [`TrapTailPass`] precedes [`ArgPromotionPass`]: the panic-message
+///   formatting it removes hands the formatter a frame pointer, an escape
+///   neither of the ABI passes can take away, and once the call is gone
+///   the frame it kept is theirs (and [`SlotPromotionPass`]'s) to work on
+///   within the same iteration.
 /// - [`ArgPromotionPass`] and [`SretReturnPass`] both precede
 ///   [`SlotPromotionPass`] — LLVM's SROA-then-mem2reg order. Escape is
 ///   mem2reg's precondition, so the ABI changes have to happen before the
@@ -187,12 +192,16 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
             // whole frame decline promotion, and the dead body it leaves is
             // the sweep's to collect on the next round.
             Box::new(UnrollFillLoopsPass),
+            // The panic-message formatting before a trap goes first: the
+            // frame pointer it hands the formatter is an escape nothing
+            // else here can remove, and the trap discards what it wrote.
+            Box::new(TrapTailPass),
             Box::new(ArgPromotionPass),
             Box::new(SretReturnPass),
             Box::new(StoreForwardPass),
             Box::new(SlotPromotionPass),
         ],
-        vec![0..11],
+        vec![0..12],
     )
 }
 
