@@ -16,6 +16,7 @@
 //! outlining direction) and dead-argument elimination belong here next.
 
 pub mod const_return;
+pub mod dead_param;
 pub mod inline;
 pub mod specialize;
 pub mod struct_arg;
@@ -24,6 +25,7 @@ pub mod wide_param;
 pub mod wide_promote;
 
 pub use const_return::ConstReturnPass;
+pub use dead_param::DeadParamPass;
 pub use inline::WrapperInlinePass;
 pub use specialize::SpecializePass;
 pub use struct_arg::StructArgPass;
