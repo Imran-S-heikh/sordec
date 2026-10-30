@@ -213,6 +213,46 @@
 //! `i32`), so no widening a collapse folded is read back as the merge's
 //! type; the source is a merge with arms (not a parameter) that nothing
 //! has typed yet.
+//!
+//! ## A literal's word waits for the callee
+//!
+//! An integer literal is typed by the `i64.const` (or `i32.const`) that
+//! loaded it: the machine's word, not a statement about the value. Beside
+//! a call's result it used to type that result at once, in the first
+//! module round, while the call still said nothing: a call's type crosses
+//! only once the round has typed its callee's return, and a type once
+//! written is never lowered. So `next = get(&k).unwrap_or(0); next + 1`
+//! made `next` an `i64` a round before the `u64` the helper returns
+//! reached it, and every helper `next` was handed took the `i64` against
+//! callers passing the declared `u64` (phoenix-vesting's vesting counter).
+//!
+//! So during the first settling, a literal operand of arithmetic or a
+//! comparison says nothing of, and gives no type to, a value whose type is
+//! still on its way from a call ([`awaits_callee`]): a call's result, or a
+//! component of one, whose callee's return slot no witness has spoken for
+//! — or has named only its outside, `Option<?>`; a value unwrapped from
+//! one; the sum of one and a literal; and a loop counter compared with one
+//! (below), which waits rather than take its start's word.
+//!
+//! Why it is exact: it changes only when the literal is read, never what
+//! it says. Every type written is one the evidence names: the callee's,
+//! once it crosses; the literal's, in the second settling, when the callee
+//! never spoke. Gates: integer literals only, beside a value nothing has
+//! typed (or typed only as the outside of a container) that comes from a
+//! guest call through at most [`AWAIT_DEPTH`] steps; in the first settling
+//! only, as the host catalog speaks only in the second.
+//!
+//! ## A loop counter is the number it counts to
+//!
+//! `for i in 0..n` steps a merge from a constant by a constant until it
+//! equals `n`. Its start and step are literals, so nothing about it says
+//! what it is but its bound; `==` and `!=` compare two values of one type,
+//! and every value it takes, from its start up to the bound, is one of the
+//! bound's. So a counter ([`counter_of`]: constant arms that are not
+//! negative, the other arms the merge plus a positive constant) compared
+//! with a `u32` is a `u32`, and — when its constants are 64-bit words, the
+//! word a `u64` is compared in — compared with a `u64` is a `u64`
+//! ([`counter_bounded`]). Any other merge is typed by its arms, as before.
 
 use std::collections::{HashMap, HashSet};
 
@@ -361,9 +401,24 @@ fn infer_function(
         // Forward: each binding's type from its own expression.
         for (id, binding) in func.bindings.iter() {
             let cand = match &binding.expr {
-                Expr::Phi { incoming } => counter_bounded_by_u32(func, id, incoming, &types)
+                // A counter compared with a value still awaiting its
+                // callee waits with it, rather than taking its start's word.
+                Expr::Phi { incoming }
+                    if !catalog
+                        && counter_of(func, id, incoming).is_some_and(|c| {
+                            c.partners.iter().any(|p| awaits_callee(func, *p, &types, sigs, AWAIT_DEPTH))
+                        }) =>
+                {
+                    None
+                }
+                Expr::Phi { incoming } => counter_bounded(func, id, incoming, &types)
                     .or_else(|| phi_join_with_constants(func, incoming, &types, awaiting_callers))
                     .filter(|c| !ok_arms_of(types.get(&id), c)),
+                Expr::Binary { op, lhs, rhs }
+                    if is_arithmetic(*op) && literal_waits(func, *lhs, *rhs, &types, sigs, !catalog) =>
+                {
+                    None
+                }
                 Expr::Binary { op, lhs, rhs } => {
                     offset_of_known(func, *op, *lhs, *rhs, &types).or_else(|| infer_expr(&binding.expr, &types))
                 }
@@ -381,7 +436,7 @@ fn infer_function(
             }
         }
         // Backward: uses constrain their operands / returned values.
-        round_changed |= backward(func, &uses, &mut types, &mut ev, catalog, structs);
+        round_changed |= backward(func, &uses, &mut types, &mut ev, catalog, structs, (sigs, !catalog));
         round_changed |= backward_calls(func, sigs, &mut types, &mut ev);
         round_changed |= backward_returns(func, sigs, &mut types, &mut ev);
         if !round_changed {
@@ -730,6 +785,7 @@ fn backward(
     ev: &mut Evidence,
     catalog: bool,
     structs: &[StructDef],
+    (sigs, waiting): (&SigTable, bool),
 ) -> bool {
     let mut changed = false;
     for (id, binding) in func.bindings.iter() {
@@ -745,6 +801,12 @@ fn backward(
             }
         }
         match &binding.expr {
+            // A literal beside a value whose call has not handed its type
+            // across yet says nothing of it, in arithmetic or a comparison
+            // ("A literal's word waits for the callee").
+            Expr::Binary { op, lhs, rhs }
+                if (is_arithmetic(*op) || is_comparison(*op))
+                    && literal_waits(func, *lhs, *rhs, types, sigs, waiting) => {}
             // Numeric arithmetic: both operands share the numeric type. A
             // bitwise op that involves a logical type (`address & 255`) is a
             // tag extraction, not shared-type arithmetic — so only a
@@ -1384,61 +1446,199 @@ fn ok_arms_of(merge: Option<&IrType>, cand: &IrType) -> bool {
     }
 }
 
-/// A loop counter whose bound is a `u32` is a `u32`.
+/// A loop counter, and the values it is compared `==` / `!=` with.
+struct Counter {
+    /// What it is compared with, through copies.
+    partners: Vec<ValueId>,
+    /// Whether its start and step constants are all 64-bit words.
+    wide: bool,
+}
+
+/// `phi` as a loop counter: a merge whose constant arms are non-negative,
+/// whose other arms are this merge plus a positive constant, and which is
+/// compared `==` / `!=` with something. `None` for any other merge.
+fn counter_of(
+    func: &HighFunction,
+    phi: ValueId,
+    incoming: &[(sordec_common::BlockId, ValueId)],
+) -> Option<Counter> {
+    let literal = |v: ValueId| match func.bindings.get(resolve_use(func, v)).map(|b| &b.expr) {
+        Some(Expr::Literal(Literal::I32(n))) => Some((i128::from(*n), false)),
+        Some(Expr::Literal(Literal::I64(n))) => Some((i128::from(*n), true)),
+        Some(Expr::Literal(Literal::U32(n))) => Some((i128::from(*n), false)),
+        Some(Expr::Literal(Literal::U64(n))) => Some((i128::from(*n), true)),
+        _ => None,
+    };
+    // The step's constant, with whether it is a 64-bit word.
+    let step = |v: ValueId| match func.bindings.get(resolve_use(func, v)).map(|b| &b.expr) {
+        Some(Expr::Binary { op: BinaryOp::Add, lhs, rhs }) => {
+            let (lhs, rhs) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
+            let by = if lhs == phi {
+                literal(rhs)
+            } else if rhs == phi {
+                literal(lhs)
+            } else {
+                None
+            };
+            by.filter(|(n, _)| *n > 0)
+        }
+        _ => None,
+    };
+    let mut wide = true;
+    let mut started = false;
+    for &(_, v) in incoming {
+        match literal(v) {
+            Some((n, w)) if n >= 0 => {
+                started = true;
+                wide &= w;
+            }
+            Some(_) => return None,
+            None => wide &= step(v)?.1,
+        }
+    }
+    if !started {
+        return None;
+    }
+    let partners: Vec<ValueId> = func
+        .bindings
+        .iter()
+        .filter_map(|(_, b)| match &b.expr {
+            Expr::Binary { op: BinaryOp::Eq | BinaryOp::Ne, lhs, rhs } => {
+                let (lhs, rhs) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
+                if lhs == phi {
+                    Some(rhs)
+                } else if rhs == phi {
+                    Some(lhs)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    (!partners.is_empty()).then_some(Counter { partners, wide })
+}
+
+/// A loop counter is the unsigned number it is compared with: a `u32`, or
+/// — counted in the 64-bit word — a `u64`.
 ///
 /// `for i in 0..v.len()` keeps `i` in whatever word the wasm compares it
 /// in, and a length decoded by an `i64.shr_u` makes that an `i64`: the
 /// counter's start and step are `i64` literals and nothing else about it
 /// says `u32` but the bound. Read as votes, those literals conflict with
 /// the bound's comparison and the counter comes out untyped — `account`'s
-/// signature loop declared `i: Val`, stepped with `+ 1i64`.
+/// signature loop declared `i: Val`, stepped with `+ 1i64`. A `u64` bound
+/// is the same case one width up: phoenix-vesting's
+/// `for i in 0..get(&k).unwrap_or(0)` steps an `i64` word towards the `u64`
+/// the storage read hands back.
 ///
-/// The shape is the induction variable: a phi whose constant arms are
-/// non-negative, whose other arms are this phi plus a positive constant,
-/// and which is compared `==` / `!=` with a `u32`. It runs from its start
-/// up to that bound and stops there, so every value it takes is a `u32`.
-fn counter_bounded_by_u32(
+/// The shape is the induction variable ([`counter_of`]). It runs from its
+/// start up to that bound and stops there, so every value it takes is one
+/// of the bound's type; and `==` / `!=` compare two values of one type,
+/// which is the type the bound already has. A `u64` only for a counter
+/// whose constants are 64-bit words, the word a `u64` is compared in; a
+/// `u32` bound wins over a `u64` one, as it did before the `u64` case.
+fn counter_bounded(
     func: &HighFunction,
     phi: ValueId,
     incoming: &[(sordec_common::BlockId, ValueId)],
     types: &HashMap<ValueId, IrType>,
 ) -> Option<IrType> {
-    let literal = |v: ValueId| match func.bindings.get(resolve_use(func, v)).map(|b| &b.expr) {
-        Some(Expr::Literal(Literal::I32(n))) => Some(i128::from(*n)),
-        Some(Expr::Literal(Literal::I64(n))) => Some(i128::from(*n)),
-        Some(Expr::Literal(Literal::U32(n))) => Some(i128::from(*n)),
-        Some(Expr::Literal(Literal::U64(n))) => Some(i128::from(*n)),
+    let counter = counter_of(func, phi, incoming)?;
+    let bound = |k: KnownType| counter.partners.iter().any(|p| base_of(types.get(p)) == Some(k.clone()));
+    if bound(KnownType::U32) {
+        return Some(IrType::Inferred(KnownType::U32));
+    }
+    (counter.wide && bound(KnownType::U64)).then_some(IrType::Inferred(KnownType::U64))
+}
+
+/// How many steps [`awaits_callee`] follows from a value to the call it
+/// waits on.
+const AWAIT_DEPTH: u32 = 6;
+
+/// The other operand, when exactly one of `lhs`, `rhs` is an integer
+/// literal.
+fn beside_literal(func: &HighFunction, lhs: ValueId, rhs: ValueId) -> Option<ValueId> {
+    let (lhs, rhs) = (resolve_use(func, lhs), resolve_use(func, rhs));
+    match (int_constant(func, lhs), int_constant(func, rhs)) {
+        (Some(_), None) => Some(rhs),
+        (None, Some(_)) => Some(lhs),
         _ => None,
-    };
-    let step = |v: ValueId| match func.bindings.get(resolve_use(func, v)).map(|b| &b.expr) {
-        Some(Expr::Binary { op: BinaryOp::Add, lhs, rhs }) => {
-            let (lhs, rhs) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
-            (lhs == phi && literal(rhs).is_some_and(|n| n > 0))
-                || (rhs == phi && literal(lhs).is_some_and(|n| n > 0))
-        }
-        _ => false,
-    };
-    let mut started = false;
-    for &(_, v) in incoming {
-        match literal(v) {
-            Some(n) if n >= 0 => started = true,
-            Some(_) => return None,
-            None if step(v) => {}
-            None => return None,
-        }
     }
-    if !started {
-        return None;
+}
+
+/// Whether `v` is untyped only because the call it comes from has not
+/// handed its type across yet ("A literal's word waits for the callee").
+///
+/// A call's result, or a component of one, whose callee's return slot no
+/// witness has spoken for; a value unwrapped from such a result; the sum of
+/// one and a literal; and a loop counter compared with one. Each is still
+/// untyped. Only these: anything else untyped has no type on its way.
+fn awaits_callee(
+    func: &HighFunction,
+    v: ValueId,
+    types: &HashMap<ValueId, IrType>,
+    sigs: &SigTable,
+    depth: u32,
+) -> bool {
+    let v = resolve_use(func, v);
+    if depth == 0 || base_of(types.get(&v)).is_some_and(|k| !partial(&k)) {
+        return false;
     }
-    let is_u32 = |v: ValueId| base_of(types.get(&resolve_use(func, v))) == Some(KnownType::U32);
-    let bounded = func.bindings.iter().any(|(_, b)| match &b.expr {
-        Expr::Binary { op: BinaryOp::Eq | BinaryOp::Ne, lhs, rhs } => {
-            let (lhs, rhs) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
-            (lhs == phi && is_u32(rhs)) || (rhs == phi && is_u32(lhs))
+    // The callee's return component has said nothing yet, or only the
+    // outside of it (`Option<?>`, typed before its payload is).
+    let pending = |target: &FuncId, index: usize, whole: bool| {
+        sigs.get(target).is_some_and(|sig| {
+            sig.declared.as_ref().is_none_or(|d| base_of(Some(d)).is_none_or(|k| partial(&k)))
+                && (!whole || sig.returns.len() == 1)
+                && match sig.returns.get(index) {
+                    Some(Slot::Bottom) => true,
+                    Some(Slot::Agreed(k)) => partial(k),
+                    _ => false,
+                }
+        })
+    };
+    match func.bindings.get(v).map(|b| &b.expr) {
+        Some(Expr::Call { target, .. }) => pending(target, 0, true),
+        Some(Expr::Project { value, index }) => match func.bindings.get(resolve_use(func, *value)).map(|b| &b.expr) {
+            Some(Expr::Call { target, .. }) => pending(target, *index as usize, false),
+            _ => false,
+        },
+        Some(Expr::Unwrap { value, .. } | Expr::UnwrapOr { value, .. }) => {
+            awaits_callee(func, *value, types, sigs, depth - 1)
         }
+        Some(Expr::Binary { op, lhs, rhs }) if is_arithmetic(*op) => beside_literal(func, *lhs, *rhs)
+            .is_some_and(|other| awaits_callee(func, other, types, sigs, depth - 1)),
+        Some(Expr::Phi { incoming }) => counter_of(func, v, incoming)
+            .is_some_and(|c| c.partners.iter().any(|p| awaits_callee(func, *p, types, sigs, depth - 1))),
         _ => false,
-    });
-    bounded.then_some(IrType::Inferred(KnownType::U32))
+    }
+}
+
+/// Whether a type leaves a part unnamed: an `Option`, a `Vec` or a tuple
+/// whose payload, element or item is still unknown.
+fn partial(k: &KnownType) -> bool {
+    let open = |t: &IrType| base_of(Some(t)).is_none_or(|k| partial(&k));
+    match k {
+        KnownType::Option(x) | KnownType::Vec(x) => open(x),
+        KnownType::Tuple(items) => items.iter().any(open),
+        _ => false,
+    }
+}
+
+/// Whether, while calls are still handing their types across (`waiting`),
+/// the literal operand of `lhs op rhs` stands beside a value that awaits
+/// its callee ([`awaits_callee`]): its word must not type that value, nor
+/// the result.
+fn literal_waits(
+    func: &HighFunction,
+    lhs: ValueId,
+    rhs: ValueId,
+    types: &HashMap<ValueId, IrType>,
+    sigs: &SigTable,
+    waiting: bool,
+) -> bool {
+    waiting && beside_literal(func, lhs, rhs).is_some_and(|other| awaits_callee(func, other, types, sigs, AWAIT_DEPTH))
 }
 
 fn unary_result(op: UnaryOp, operand: Option<&IrType>) -> Option<IrType> {
@@ -3554,13 +3754,139 @@ mod tests {
                 Expr::Phi { incoming: vec![(b(0), id(0)), (b(1), id(3))] },
                 Expr::Literal(Literal::I64(1)),
                 Expr::Binary { op: BinaryOp::Add, lhs: id(1), rhs: id(2) },
+                Expr::Phi { incoming: vec![] },                             // v4 a bound
+                Expr::Binary { op: BinaryOp::Ne, lhs: id(1), rhs: id(4) },  // v5
             ],
             vec![],
-            vec![0, 1, 2, 3],
+            vec![0, 1, 2, 3, 5],
             vec![],
         );
         let Expr::Phi { incoming } = &f.bindings.get(id(1)).unwrap().expr else { unreachable!() };
-        assert_eq!(counter_bounded_by_u32(&f, id(1), incoming, &HashMap::new()), None);
+        assert!(counter_of(&f, id(1), incoming).is_none());
+    }
+
+    /// func_1: returns `v0`, inferred `ret` (or nothing): evidence, not
+    /// proof, so a call to it is typed at the literal's own certainty.
+    fn returning(ret: Option<KnownType>) -> HighFunction {
+        let mut f = func_at(1, vec![Expr::Phi { incoming: vec![] }], vec![], vec![0], vec![vec![ValueId::from_index(0)]]);
+        if let Some(ret) = ret {
+            f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = IrType::Inferred(ret);
+        }
+        f
+    }
+
+    /// func_0: `r = func_1(); return r + 1i64`.
+    fn adds_one_to_a_call() -> HighFunction {
+        let id = ValueId::from_index;
+        func_at(
+            0,
+            vec![
+                Expr::Call { target: FuncId::from_index(1), args: vec![] }, // v0 r
+                Expr::Literal(Literal::I64(1)),                              // v1
+                Expr::Binary { op: BinaryOp::Add, lhs: id(0), rhs: id(1) },  // v2
+            ],
+            vec![],
+            vec![0, 1, 2],
+            vec![vec![id(2)]],
+        )
+    }
+
+    /// `next = get(&k).unwrap_or(0); next + 1`: the `1i64` beside a call's
+    /// result does not make it an `i64` before the callee's `u64` crosses.
+    #[test]
+    fn a_literal_waits_for_the_callee_s_type() {
+        let mut ir = crate::marshalling::test_support::module(vec![adds_one_to_a_call(), returning(Some(KnownType::U64))]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 0))), Some(KnownType::U64), "the call is the u64 its callee returns");
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 2))), Some(KnownType::U64), "and so is the sum");
+    }
+
+    /// A callee that never says what it returns leaves the literal's word
+    /// as the evidence, once the first settling is over: as before.
+    #[test]
+    fn a_literal_speaks_when_the_callee_never_does() {
+        let mut ir = crate::marshalling::test_support::module(vec![adds_one_to_a_call(), returning(None)]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Inferred(KnownType::I64));
+        assert_eq!(ty_of(&ir, 0, 2), IrType::Inferred(KnownType::I64));
+    }
+
+    /// func_0: `n = func_1(); i = 0; while i != n { i += 1 }`, the counter
+    /// and its step in `width`-bit literals.
+    fn counts_to_a_call(wide: bool) -> HighFunction {
+        let b = sordec_common::BlockId::from_index;
+        let id = ValueId::from_index;
+        let lit = |n: i64| if wide { Expr::Literal(Literal::I64(n)) } else { Expr::Literal(Literal::I32(n as i32)) };
+        func_at(
+            0,
+            vec![
+                Expr::Call { target: FuncId::from_index(1), args: vec![] }, // v0 n
+                lit(0),                                                      // v1 start
+                Expr::Phi { incoming: vec![(b(0), id(1)), (b(1), id(4))] }, // v2 i
+                lit(1),                                                      // v3
+                Expr::Binary { op: BinaryOp::Add, lhs: id(2), rhs: id(3) },  // v4 i + 1
+                Expr::Binary { op: BinaryOp::Ne, lhs: id(0), rhs: id(2) },   // v5
+            ],
+            vec![],
+            vec![0, 1, 3, 4, 5],
+            vec![vec![id(5)]],
+        )
+    }
+
+    /// The counter is the `u64` it counts up to, though that `u64` arrives
+    /// from a call a round after the counter's start is typed.
+    #[test]
+    fn a_loop_counter_bounded_by_a_call_s_u64_is_a_u64() {
+        let mut ir = crate::marshalling::test_support::module(vec![counts_to_a_call(true), returning(Some(KnownType::U64))]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 2), IrType::Inferred(KnownType::U64), "the counter");
+        assert_eq!(ty_of(&ir, 0, 4), IrType::Inferred(KnownType::U64), "its step");
+    }
+
+    /// A `u64` is compared in the 64-bit word: a counter in 32-bit
+    /// literals is not read as one. And a counter compared with nothing
+    /// typed is not a counter of anything.
+    #[test]
+    fn a_counter_takes_a_u64_only_in_the_64_bit_word() {
+        let id = ValueId::from_index;
+        for (wide, partner, want) in [
+            (true, Some(KnownType::U64), Some(IrType::Inferred(KnownType::U64))),
+            (false, Some(KnownType::U64), None),
+            (true, Some(KnownType::I64), None),
+            (true, None, None),
+            (false, Some(KnownType::U32), Some(IrType::Inferred(KnownType::U32))),
+        ] {
+            let f = counts_to_a_call(wide);
+            let mut types = HashMap::new();
+            if let Some(k) = partner.clone() {
+                types.insert(id(0), IrType::Inferred(k));
+            }
+            let Expr::Phi { incoming } = &f.bindings.get(id(2)).unwrap().expr else { unreachable!() };
+            assert_eq!(counter_bounded(&f, id(2), incoming, &types), want, "wide {wide}, bound {partner:?}");
+        }
+    }
+
+    /// A merge that steps by something other than a positive constant is
+    /// no counter, and a value with a type of its own waits for nothing.
+    #[test]
+    fn only_untyped_values_from_a_pending_call_wait() {
+        let id = ValueId::from_index;
+        let f = counts_to_a_call(true);
+        let mut sigs = SigTable::new();
+        sigs.insert(FuncId::from_index(1), FnSig { params: vec![], returns: vec![Slot::Bottom], declared: None });
+        let mut types = HashMap::new();
+        assert!(awaits_callee(&f, id(0), &types, &sigs, AWAIT_DEPTH), "the call");
+        assert!(awaits_callee(&f, id(2), &types, &sigs, AWAIT_DEPTH), "the counter compared with it");
+        assert!(awaits_callee(&f, id(4), &types, &sigs, AWAIT_DEPTH), "the counter's step");
+        assert!(!awaits_callee(&f, id(1), &types, &sigs, AWAIT_DEPTH), "a literal");
+        types.insert(id(0), IrType::Inferred(KnownType::I64));
+        assert!(!awaits_callee(&f, id(0), &types, &sigs, AWAIT_DEPTH), "typed already");
+        types.clear();
+        sigs.insert(FuncId::from_index(1), FnSig { params: vec![], returns: vec![Slot::Agreed(KnownType::U64)], declared: None });
+        assert!(!awaits_callee(&f, id(0), &types, &sigs, AWAIT_DEPTH), "the callee has spoken");
+        let partial = KnownType::Option(Box::new(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)));
+        sigs.insert(FuncId::from_index(1), FnSig { params: vec![], returns: vec![Slot::Agreed(partial)], declared: None });
+        assert!(awaits_callee(&f, id(0), &types, &sigs, AWAIT_DEPTH), "only the outside of its type");
     }
 
     /// One function whose `v0..v(n-1)` are untyped parameters handed to
