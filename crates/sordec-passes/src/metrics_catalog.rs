@@ -479,6 +479,9 @@ pub const MARSHALLING_TUPLE_RETURNS_RECOVERED: &str = "marshalling_tuple_returns
 /// Returned vecs of a tuple-returning function left as vecs: read
 /// elsewhere, or a component of another type.
 pub const MARSHALLING_TUPLE_RETURNS_DECLINED: &str = "marshalling_tuple_returns_declined";
+/// Unpacks of a declared tuple parameter rewritten as the element stores
+/// they perform.
+pub const MARSHALLING_TUPLE_PARAMS_UNPACKED: &str = "marshalling_tuple_params_unpacked";
 /// Returned vecs rewritten to the enum variant the spec declares.
 pub const MARSHALLING_VARIANT_RETURNS_RECOVERED: &str = "marshalling_variant_returns_recovered";
 /// Returned vecs of an enum-returning function left as vecs: read
@@ -1022,6 +1025,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_OPTIONAL_PAIR_REWRITTEN,
         MARSHALLING_TUPLE_RETURNS_RECOVERED,
         MARSHALLING_TUPLE_RETURNS_DECLINED,
+        MARSHALLING_TUPLE_PARAMS_UNPACKED,
         MARSHALLING_VARIANT_RETURNS_RECOVERED,
         MARSHALLING_VARIANT_RETURNS_DECLINED,
         MARSHALLING_HOST_LEN_CODECS,
