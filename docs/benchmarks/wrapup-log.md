@@ -330,3 +330,20 @@ spec_import; other_custom_types), which had been converting the packed number
 rather than publishing the symbol. Also: a host object handed to a helper that
 tests its word passes that word, and a small decode of an integer enum is its
 `u32` discriminant. Scores unchanged: corpus bands pass, held-out mean 0.7850.
+
+## 2026-10-30 — commit e54ba23 (an encoded number is not the number)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 23/25 | 18 | 3,894 |
+| Stellar examples, multi-contract | 13 | 10/13 | 34 | 4,240 |
+| third-party | 2 | 1/2 | 17 | 776 |
+| SDK 26 test contracts | 39 | 30/39 | 29 | 1,481 |
+
+Errors 104 → 98; holes 10,482 → 10,476. The SDK's `u64`-to-`Val` conversion,
+outlined into a helper, had its result typed as the `u64` it was given, because a
+struct field declared `u64` held the helper's encoded output. A field filled
+through such a helper now takes the helper's argument, and an encoder's result
+stays a `Val`. phoenix-vesting 23 → 17; the three contracttrait builds lose two
+gaps each. Scores unchanged: corpus bands pass, held-out mean 0.7850.
