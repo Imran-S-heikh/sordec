@@ -453,3 +453,21 @@ writing a tag byte and a payload into memory its caller passes, followed by the
 SDK's conversion of that memory to a `Val`, is now the `Result` itself, built as
 `Ok(..)` / `Err(E::Variant)` on each path. Both groth16 verifiers compile; only
 they changed. Corpus bands pass; the held-out set is untouched (0.7851).
+
+## 2026-10-30 — commit 6fd1253 (a symbol helper whose length the compiler fixed)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 23/25 | 11 | 3,882 |
+| Stellar examples, multi-contract | 13 | 12/13 | 13 | 4,228 |
+| third-party | 2 | 1/2 | 11 | 765 |
+| SDK 26 test contracts | 39 | **34/39** | 20 | 1,410 |
+
+Errors 58 → 55. When every name a helper builds has the same length, rustc folds
+the length into the helper; such pointer-only calls were left unfolded, so enum
+variant names went unknown. The length is now read from the helper itself and the
+call folds to the symbol. The three contracttrait builds compile: their
+enum-variant function returns its declared type, with honest gaps on two of its
+three paths (rebuilding it as the argument itself is parked). Only SDK 26
+changed; scores as for 5aff83a.
