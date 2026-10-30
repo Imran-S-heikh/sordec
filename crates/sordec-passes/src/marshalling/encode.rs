@@ -52,6 +52,17 @@
 //! whose discriminant is the word's payload — the derive writes exactly
 //! that word for that variant and no other, since the discriminants of one
 //! enum are distinct. A payload no variant carries is left as it is.
+//!
+//! ## A short symbol returned as a constant
+//!
+//! `Ok(symbol_short!("hello"))` returned from an entrypoint the spec
+//! declares to return a `Symbol` (bare or as a `Result`'s `Ok`) is the
+//! constant word the macro packs: the characters six bits each over the
+//! `SymbolSmall` tag. The path returns the symbol whose text the word
+//! decodes to. Exact: the packing is one-to-one on the short alphabet, and
+//! the decode ([`crate::val_abi::decode_small_symbol`]) is strict — a word
+//! with another tag, a body too wide, or a gap between characters is no
+//! short symbol, and is left as it is.
 
 use sordec_common::ValueId;
 use sordec_ir::{
@@ -575,6 +586,9 @@ pub(super) fn encoded_constant(func: &HighFunction, value: ValueId, declared: &K
         // for a `u64`.
         KnownType::I64 if tag == crate::val_abi::TAG_I64_SMALL => Some(Literal::I64((bits as i64) >> 8)),
         KnownType::U64 if tag == crate::val_abi::TAG_U64_SMALL => Some(Literal::U64(bits >> 8)),
+        // A short symbol is its text packed into the word: the strict
+        // decode reads it back, or declines a word that is not one.
+        KnownType::Symbol => crate::val_abi::decode_small_symbol(bits).map(Literal::Symbol),
         _ => None,
     }
 }
@@ -731,6 +745,40 @@ mod tests {
         let elisions = plan(&f, &EncoderTable::default(), &[]);
         assert_eq!(elisions.len(), 1);
         assert!(matches!(elisions[0].expr, Expr::Literal(Literal::U32(0))));
+    }
+
+    /// `Result<Symbol, Error>` returning `symbol_short!("hello")` as its
+    /// word.
+    fn returning_symbol(word: i64) -> HighFunction {
+        let mut f = returning(PrimitiveType::Symbol, vec![Expr::Literal(Literal::I64(word))], v(0));
+        f.signature.as_mut().unwrap().outputs = vec![TypeRef::Composite(sordec_ir::CompositeType::Result(
+            Box::new(TypeRef::Primitive(PrimitiveType::Symbol)),
+            Box::new(TypeRef::Primitive(PrimitiveType::Error)),
+        ))];
+        f
+    }
+
+    /// The word `symbol_short!("hello")` packs, returned as the `Ok`
+    /// payload, is that symbol.
+    #[test]
+    fn a_returned_short_symbol_word_is_its_symbol() {
+        let f = returning_symbol(196_144_296_974);
+        let elisions = plan(&f, &EncoderTable::default(), &[]);
+        assert_eq!(elisions.len(), 1);
+        assert_eq!(elisions[0].id, v(0));
+        assert!(matches!(&elisions[0].expr, Expr::Literal(Literal::Symbol(s)) if s == "hello"));
+        assert_eq!(elisions[0].ty, Some(IrType::Known(KnownType::Symbol)));
+    }
+
+    /// A word of another tag, or one with a gap between its characters,
+    /// is no short symbol: left as it is.
+    #[test]
+    fn a_word_that_is_no_short_symbol_is_left_alone() {
+        // `U32Val(7)`, and "hello" with an empty code slot under the `o`.
+        for word in [(7 << 32) | 4, 196_144_296_974 & !(0x3F << 8)] {
+            let f = returning_symbol(word);
+            assert!(plan(&f, &EncoderTable::default(), &[]).is_empty(), "{word:#x}");
+        }
     }
 
     /// `EnumIntA { V1 = 1, V2 = 2, V3 = 3 }`, declared as the return.
