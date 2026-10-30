@@ -465,6 +465,13 @@ pub const MARSHALLING_OPTIONAL_OUT_SITES: &str = "marshalling_optional_out_sites
 pub const MARSHALLING_OPTIONAL_OUT_SITES_REFUSED: &str = "marshalling_optional_out_sites_refused";
 /// Those helpers rewritten to return `Option<T>`, every call site with them.
 pub const MARSHALLING_OPTIONAL_OUT_REWRITTEN: &str = "marshalling_optional_out_rewritten";
+/// Call sites of `Result` out-parameter writers paired with the
+/// conversion of their result to the entrypoint's `Val`.
+pub const MARSHALLING_RESULT_OUT_SITES: &str = "marshalling_result_out_sites";
+/// Call sites of those writers refused, for any reason.
+pub const MARSHALLING_RESULT_OUT_SITES_REFUSED: &str = "marshalling_result_out_sites_refused";
+/// Those writers rewritten to return the `Result`, every call site with them.
+pub const MARSHALLING_RESULT_OUT_REWRITTEN: &str = "marshalling_result_out_rewritten";
 /// Helpers returning `(tag, value)` in two registers, the tag a different
 /// constant on different paths.
 pub const MARSHALLING_OPTIONAL_PAIR_HELPERS: &str = "marshalling_optional_pair_helpers";
@@ -1019,6 +1026,9 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_OPTIONAL_OUT_SITES,
         MARSHALLING_OPTIONAL_OUT_SITES_REFUSED,
         MARSHALLING_OPTIONAL_OUT_REWRITTEN,
+        MARSHALLING_RESULT_OUT_SITES,
+        MARSHALLING_RESULT_OUT_SITES_REFUSED,
+        MARSHALLING_RESULT_OUT_REWRITTEN,
         MARSHALLING_OPTIONAL_PAIR_HELPERS,
         MARSHALLING_OPTIONAL_PAIR_SITES,
         MARSHALLING_OPTIONAL_PAIR_SITES_REFUSED,
