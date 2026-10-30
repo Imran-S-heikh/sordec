@@ -488,7 +488,7 @@ fn known(ty: &IrType) -> Option<&sordec_ir::KnownType> {
 
 /// Whether `param` is read by anything but the address of a store — or
 /// address arithmetic feeding one.
-fn escapes(func: &HighFunction, order: &[ValueId], param: ValueId) -> bool {
+pub(super) fn escapes(func: &HighFunction, order: &[ValueId], param: ValueId) -> bool {
     let mut derived: HashSet<ValueId> = HashSet::from([param]);
     for &id in order {
         if let Some(Expr::Binary { op: BinaryOp::Add, lhs, rhs }) = func.bindings.get(id).map(|b| &b.expr)
@@ -892,7 +892,7 @@ fn retarget(region: &mut Region, last: &mut Option<BlockId>, tag_phi: ValueId, b
 }
 
 /// Every bare `return` hands the `Option` back.
-fn give_back(region: &mut Region, value: ValueId) {
+pub(super) fn give_back(region: &mut Region, value: ValueId) {
     match region {
         Region::Return { values } if values.is_empty() => values.push(value),
         Region::Sequence(items) => items.iter_mut().for_each(|r| give_back(r, value)),
@@ -1455,7 +1455,7 @@ fn leaves(region: &Region) -> bool {
 
 /// `value` evaluated with every tag load reading `tag`, when it is a short
 /// enough chain of integer operators over them and constants.
-fn eval(func: &HighFunction, value: ValueId, tag_loads: &[ValueId], tag: i128, depth: usize) -> Option<i128> {
+pub(super) fn eval(func: &HighFunction, value: ValueId, tag_loads: &[ValueId], tag: i128, depth: usize) -> Option<i128> {
     let value = resolve_use(func, value);
     if tag_loads.contains(&value) {
         return Some(tag);

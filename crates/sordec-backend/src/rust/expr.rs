@@ -17,7 +17,8 @@ use crate::rust::{idiom, sig, ty};
 use crate::wat::annotate;
 
 /// `Owner::Variant`, when this value is a named variant of a type the
-/// registry can name.
+/// registry can name — or `Ok` / `Err`, the prelude's own constructors,
+/// when it is a variant of a `Result`.
 fn variant_path(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<syn::Path> {
     let binding = ctx.func.bindings.get(ctx.fold_target(value))?;
     let Expr::Variant { name, .. } = &binding.expr else {
@@ -26,6 +27,13 @@ fn variant_path(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<syn::Path>
     let owner = match &binding.ty {
         IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => {
             ctx.reg.name_of(*id)?
+        }
+        IrType::Known(KnownType::Result(..)) | IrType::Inferred(KnownType::Result(..)) => {
+            return match name.as_str() {
+                "Ok" => Some(parse_quote!(Ok)),
+                "Err" => Some(parse_quote!(Err)),
+                _ => None,
+            };
         }
         _ => return None,
     };
