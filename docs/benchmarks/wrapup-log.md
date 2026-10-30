@@ -736,3 +736,22 @@ Those helpers print in their out-pointer form again, +9 gaps; the `BytesN` conve
 into a tag half and a length half now folds into a typed storage read, −6. Holes 9,659 →
 9,662 (summed); errors unchanged at 11. Only those two reconstructions differ; corpus and
 held-out byte-identical, so their scores are unchanged (held-out mean 0.7865).
+
+## 2026-10-31 — commit 80e4116 (an enum decoded into memory is taken apart by a match)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,823 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 4,087 |
+| third-party | 2 | 1/2 | 8 | 661 |
+| SDK 26 test contracts | 39 | **39/39** | **0** | 935 |
+
+A `#[contracttype]` enum with payloads that the SDK decodes into the caller's frame, and
+the caller's switch on its tag, now print as one `match` binding each variant's payload
+(`UdtEnum::UdtB(p) => p.a + p.b`). udt compiles (2/175 → 0/104); every other
+reconstruction byte-identical. Errors 11 → 9; holes 9,662 → 9,591 (summed). Corpus bands
+pass; held-out mean 0.7865.
+
+**Totals:** 84 of 86 contracts pass `cargo check` (from 55 of 86 at the start of the
+week, 257 errors → 9). Gap work: 10,355 → 9,591 gaps (−764).
