@@ -73,6 +73,23 @@
 //!   that 0 in its own width (the low bytes of zero are zero). The helper
 //!   must write the slot on every path it returns by; a constant slot it
 //!   writes on some paths only explains no read.
+//! - **A field's tag byte, read only to trap on a mismatch, is the derived
+//!   check.** Where a field's value is never used, rustc keeps only the
+//!   check its conversion makes: `if load8(slot) != 4 { trap }` for a
+//!   `u32`. That is not the field's value (the old rewrite printed it as
+//!   `s.a != 4`, wrong for every `a` but 4); it is the derived
+//!   `TryFromVal`'s type check, and the re-emitted derive regenerates it
+//!   with the unpack, so it is relocated with the decode exactly as a
+//!   declared parameter's tag check is (`guard`). Taken only when the
+//!   slots hold `Val`s (a host unpack, not a helper's decoded values),
+//!   the byte is the first of a slot the decode wrote whole on every path,
+//!   the field's declared type is carried by exactly one tag (`u32`,
+//!   `i32`, `Address`, `Bytes`, `String`, `Vec`, `Map` — a two-tag type
+//!   such as `u64` or `Symbol`, a `bool`, `BytesN` (its length) or a
+//!   contract type have no one-byte check that is their whole
+//!   conversion), every use of the byte is `byte != that tag`, and every
+//!   use of that comparison is a guard `if c { trap }` with no else arm.
+//!   Anything else that reads the byte refuses the whole site.
 //! - **Removing the decode loses no read.** Once the unpack or the helper
 //!   call is gone nothing writes its slots, so every read that could still
 //!   see a byte it wrote must have been rewritten. A load the decode *may*
@@ -294,6 +311,10 @@ struct Candidate<'a> {
     def: &'a StructDef,
     /// Ascending by offset, none overlapping.
     slots: Vec<Slot>,
+    /// The slots hold the fields' `Val`s (a host unpack), not decoded
+    /// values (a helper's out-parameter): only then is a slot's first
+    /// byte its field's tag.
+    vals: bool,
 }
 
 impl Candidate<'_> {
@@ -342,6 +363,43 @@ impl Candidate<'_> {
     fn field_type(&self, name: &str) -> Option<KnownType> {
         self.def.fields.iter().find(|f| f.name == name).and_then(|f| known_of_type_ref(&f.ty))
     }
+
+    /// The slot whose tag byte a one-byte load at `offset` reads, with the
+    /// one tag the field's declared type is carried by — when the slots
+    /// hold `Val`s and the field's type has exactly one tag.
+    fn tag_read(&self, offset: u32, width: MemWidth) -> Option<(usize, u8)> {
+        if !self.vals || width != MemWidth::W1 {
+            return None;
+        }
+        let rel = offset.checked_sub(self.start)?;
+        let i = self.slots.iter().position(|s| s.rel == rel && s.width == SLOT)?;
+        let Role::Field(name) = &self.slots[i].role else { return None };
+        Some((i, sole_tag(&self.field_type(name)?)?))
+    }
+}
+
+/// The one tag a `Val` of type `ty` is carried by, when it has exactly
+/// one: then "the tag byte is `t`" is the whole of the derived
+/// conversion's check for it, which is what lets a check of the byte
+/// alone stand for that conversion. A type with a small and an object
+/// form (`u64`, `i128`, `Symbol`, ...), a `bool` (two tags), and a type
+/// whose conversion reads past the tag (`BytesN<N>` checks its length,
+/// a `#[contracttype]` type unpacks or matches its body) have no entry.
+fn sole_tag(ty: &KnownType) -> Option<u8> {
+    use crate::val_abi::{
+        TAG_ADDRESS_OBJECT, TAG_BYTES_OBJECT, TAG_I32_VAL, TAG_MAP_OBJECT, TAG_STRING_OBJECT, TAG_U32_VAL,
+        TAG_VEC_OBJECT,
+    };
+    Some(match ty {
+        KnownType::U32 => TAG_U32_VAL,
+        KnownType::I32 => TAG_I32_VAL,
+        KnownType::Address => TAG_ADDRESS_OBJECT,
+        KnownType::Bytes => TAG_BYTES_OBJECT,
+        KnownType::String => TAG_STRING_OBJECT,
+        KnownType::Vec(_) => TAG_VEC_OBJECT,
+        KnownType::Map(..) => TAG_MAP_OBJECT,
+        _ => return None,
+    })
 }
 
 /// Whether a narrow load's widening (`signed`: sign- or zero-extension)
@@ -482,7 +540,6 @@ fn plan<'a>(
                     trace(func, &format!("no struct has exactly these keys {keys:?}, and {map:?} declares none of them"));
                     continue;
                 };
-
                 let Some(evidence) = value_evidence(func, map, def.id, param_types) else {
                     declines.push(metrics::UDT_DECLINED_EVIDENCE);
                     trace(func, "map value not proven to be the struct");
@@ -495,7 +552,7 @@ fn plan<'a>(
                     .enumerate()
                     .map(|(i, k)| Slot { rel: SLOT * i as u32, width: SLOT, role: Role::Field(k) })
                     .collect();
-                candidates.push(Candidate { base, start, producer: id, map, def, slots });
+                candidates.push(Candidate { base, start, producer: id, map, def, slots, vals: true });
             }
             // A helper-shaped decode: its out-parameter holds the struct's
             // fields, provided the value it was handed is proven to be
@@ -525,7 +582,7 @@ fn plan<'a>(
                 };
                 trace(func, &format!("helper frame claimed for func_{}", IrId::index(*target)));
                 let (base, start) = canon_addr(func, args[0]);
-                candidates.push(Candidate { base, start, producer: id, map, def, slots: h.slots.clone() });
+                candidates.push(Candidate { base, start, producer: id, map, def, slots: h.slots.clone(), vals: false });
             }
             _ => {}
         }
@@ -539,10 +596,35 @@ fn plan<'a>(
     let certain: Vec<CertainWrite> =
         candidates.iter().map(|c| (c.producer, c.base, c.certain_writes())).collect();
     let mut accepted: Vec<(usize, Vec<(ValueId, usize)>)> = Vec::new();
+    // The derived per-field tag checks each accepted decode carries, as
+    // `(decode, load, guard conditions, field, tag)`.
+    let mut checks: Vec<(usize, ValueId, Vec<ValueId>, String, u8)> = Vec::new();
+    let uses = crate::dataflow::HighUseIndex::build(func);
+    let traps = trap_guards(func);
     for (ci, cand) in candidates.iter().enumerate() {
         match reach::check(func, cand, &certain, access) {
-            Ok(reads) if reads.is_empty() => {}
-            Ok(reads) => accepted.push((ci, reads)),
+            Ok(reads) if reads.fields.is_empty() && reads.tags.is_empty() => {}
+            Ok(reads) => {
+                let mut found = Vec::new();
+                let mut why = None;
+                for (load, slot, tag) in &reads.tags {
+                    let Role::Field(field) = &cand.slots[*slot].role else { continue };
+                    match derived_tag_check(func, &uses, &traps, *load, *tag) {
+                        Some(conds) => found.push((ci, *load, conds, field.clone(), *tag)),
+                        None => {
+                            why = Some(format!("{load:?} reads {field}'s tag for something other than its derived check"));
+                            break;
+                        }
+                    }
+                }
+                if let Some(why) = why {
+                    declines.push(metrics::UDT_DECLINED_READS);
+                    trace(func, &format!("decode {:?} refused: {why}", cand.producer));
+                    continue;
+                }
+                checks.extend(found);
+                accepted.push((ci, reads.fields));
+            }
             Err(why) => {
                 declines.push(metrics::UDT_DECLINED_READS);
                 trace(func, &format!("decode {:?} refused: {why}", cand.producer));
@@ -557,13 +639,38 @@ fn plan<'a>(
             *claims.entry(*load).or_default() += 1;
         }
     }
+    for (_, load, ..) in &checks {
+        *claims.entry(*load).or_default() += 1;
+    }
     accepted.retain(|(ci, reads)| {
-        let alone = reads.iter().all(|(load, _)| claims.get(load) == Some(&1));
+        let alone = reads.iter().all(|(load, _)| claims.get(load) == Some(&1))
+            && checks.iter().filter(|c| c.0 == *ci).all(|(_, load, ..)| claims.get(load) == Some(&1));
         if !alone {
             trace(func, &format!("decode {:?} refused: a read is claimed twice", candidates[*ci].producer));
         }
         alone
     });
+    checks.retain(|c| accepted.iter().any(|(ci, _)| *ci == c.0));
+    // The derived per-field type check: relocated with the decode, as a
+    // declared parameter's own tag check is (`guard`). The byte read goes
+    // with it; nothing else reads it.
+    for (ci, load, conds, field, tag) in &checks {
+        let def = &candidates[*ci].def.name;
+        let what = crate::val_abi::tag_name(*tag).unwrap_or("its tag");
+        for cond in conds {
+            guards.insert(
+                *cond,
+                format!("derived `{def}` decode: `{field}` is checked to be a {what}, regenerated by `TryFromVal`"),
+            );
+        }
+        elisions.push(Elision {
+            id: *load,
+            expr: Expr::Literal(Literal::Unit),
+            ty: Some(IrType::Known(KnownType::Unit)),
+            note: format!("derived `{def}` decode: the tag byte of `{field}`, read only by its type check"),
+            metric: metrics::UDT_FIELDS_RECOVERED,
+        });
+    }
 
     // Rewrite the reads in emission order: a wide field's two halves share
     // one binding when the second follows the first.
@@ -661,6 +768,73 @@ fn plan<'a>(
         }
     }
     Planned { elisions, declines, typed, guards, limbs }
+}
+
+/// The conditions of every `if c { trap }` with no else arm, by how many
+/// such guards test each.
+fn trap_guards(func: &HighFunction) -> HashMap<ValueId, usize> {
+    let empty = super::guard::empty_blocks(func);
+    let mut out: HashMap<ValueId, usize> = HashMap::new();
+    func.region.for_each_node(|r| {
+        if let sordec_ir::Region::If { cond, then_region, else_region: None } = r
+            && super::guard::is_trap(then_region, &empty)
+        {
+            *out.entry(*cond).or_default() += 1;
+        }
+    });
+    out
+}
+
+/// The guard conditions through which a one-byte read of a field's tag
+/// is the derived conversion's check of that field, or `None` when it is
+/// read for anything else.
+///
+/// Every use of the byte must be `byte != tag`, against the one tag the
+/// field's declared type is carried by, and every use of each such
+/// comparison must be the condition of a guard whose arm is a bare trap
+/// with no else: then the byte decides nothing but "trap unless the field
+/// is a `tag`", which is the derived `TryFromVal`'s check for that type.
+fn derived_tag_check(
+    func: &HighFunction,
+    uses: &crate::dataflow::HighUseIndex,
+    traps: &HashMap<ValueId, usize>,
+    load: ValueId,
+    tag: u8,
+) -> Option<Vec<ValueId>> {
+    use crate::dataflow::HighUseSite;
+    let sites = uses.uses_of(load);
+    if sites.is_empty() {
+        return None;
+    }
+    let mut conds = Vec::new();
+    for site in sites {
+        let HighUseSite::Binding { user } = site else { return None };
+        let Some(Expr::Binary { op: sordec_ir::BinaryOp::Ne, lhs, rhs }) = func.bindings.get(*user).map(|b| &b.expr)
+        else {
+            return None;
+        };
+        let (l, r) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
+        let other = if l == load {
+            r
+        } else if r == load {
+            l
+        } else {
+            return None;
+        };
+        if trace_int(func, other) != Some(i128::from(tag)) {
+            return None;
+        }
+        // Every use of the comparison is a trap guard's condition.
+        let n = uses.uses_of(*user);
+        if n.is_empty() || !n.iter().all(|s| matches!(s, HighUseSite::Region)) {
+            return None;
+        }
+        if traps.get(user).copied().unwrap_or(0) != n.len() {
+            return None;
+        }
+        conds.push(*user);
+    }
+    Some(conds)
 }
 
 /// A zero discriminant in the width the load claimed.
@@ -1362,9 +1536,22 @@ mod reach {
         may: BTreeMap<usize, u8>,
     }
 
-    /// A decode's reads, as `(load, slot)`, when every read it may reach is
-    /// an exact read of a slot it wrote on every path and nothing else may
-    /// read its bytes meanwhile; otherwise why not.
+    /// What a decode's value is read for, once every read it may reach
+    /// is accounted for.
+    #[derive(Debug, Default)]
+    pub(super) struct Reads {
+        /// Exact reads of a slot, as `(load, slot)`.
+        pub fields: Vec<(ValueId, usize)>,
+        /// One-byte reads of a `Val` slot's tag, as `(load, slot, the
+        /// field type's one tag)`. Each is the derived check only if every
+        /// use of it is that check — which the caller decides, having the
+        /// region tree.
+        pub tags: Vec<(ValueId, usize, u8)>,
+    }
+
+    /// A decode's reads, when every read it may reach is an exact read of
+    /// a slot, or of a `Val` slot's tag byte, that it wrote on every path,
+    /// and nothing else may read its bytes meanwhile; otherwise why not.
     ///
     /// `certain` names every decode in the function with its base and the
     /// bytes it certainly writes; `access`, what each helper does through
@@ -1374,7 +1561,7 @@ mod reach {
         cand: &Candidate<'_>,
         certain: &[CertainWrite],
         access: &HashMap<FuncId, Vec<Option<ParamAccess>>>,
-    ) -> Result<Vec<(ValueId, usize)>, String> {
+    ) -> Result<Reads, String> {
         let mut flow = DecodeFlow {
             func,
             cand,
@@ -1382,6 +1569,7 @@ mod reach {
             access,
             derived: HashMap::new(),
             reads: BTreeMap::new(),
+            tags: BTreeMap::new(),
             refused: None,
         };
         let walked = walk(func, &mut flow, Live::default());
@@ -1391,7 +1579,10 @@ mod reach {
         if !walked.complete {
             return Err("the control flow is not fully structured".to_string());
         }
-        Ok(flow.reads.into_iter().collect())
+        Ok(Reads {
+            fields: flow.reads.into_iter().collect(),
+            tags: flow.tags.into_iter().map(|(load, (slot, tag))| (load, slot, tag)).collect(),
+        })
     }
 
     /// Where an operand points relative to the decode's frame base.
@@ -1415,6 +1606,8 @@ mod reach {
         derived: HashMap<ValueId, bool>,
         /// Exact reads seen so far, load -> slot.
         reads: BTreeMap<ValueId, usize>,
+        /// Tag-byte reads seen so far, load -> (slot, tag).
+        tags: BTreeMap<ValueId, (usize, u8)>,
         refused: Option<String>,
     }
 
@@ -1605,9 +1798,15 @@ mod reach {
             if touched.is_empty() {
                 return;
             }
+            // The first byte of a `Val` slot the decode wrote whole on
+            // every path is that field's tag.
+            let tag = self.cand.tag_read(at, width).filter(|(i, _)| touched == [*i] && live.must.contains(i));
             match self.cand.exact_read(at, width, signed) {
                 Some(i) if touched == [i] && live.must.contains(&i) => {
                     self.reads.insert(id, i);
+                }
+                _ if tag.is_some() => {
+                    self.tags.insert(id, tag.unwrap_or_default());
                 }
                 _ => self.refuse(format!(
                     "{id:?} reads {} bytes at +{at}: not one whole slot the decode wrote on every path",
@@ -2353,6 +2552,97 @@ mod tests {
         m.soroban_facts.as_mut().unwrap().types.structs[1].fields[1].name = "owner".to_string();
         // Only `Balance` has these keys now, and the value is declared a
         // `Wallet`: the evidence gate refuses the mismatch.
+        UdtDecodePass.run(&mut m);
+        untouched(&m, 0, 5, &[6, 7]);
+    }
+
+    // -----------------------------------------------------------------
+    // The derived per-field tag check
+    // -----------------------------------------------------------------
+
+    /// `decoder()` where the token slot is read only for its tag byte,
+    /// compared with `tag` under a guard `if byte != tag { trap }`.
+    fn tag_checked(tag: i64) -> HighFunction {
+        let mut exprs: Vec<Expr> = decoder().bindings.iter().map(|(_, b)| b.expr.clone()).collect();
+        exprs[7] = load_w(v(0), 8, MemWidth::W1, Some(false)); // v7 token's tag byte
+        exprs.push(Expr::Literal(Literal::I64(tag))); // v8
+        exprs.push(Expr::Binary { op: sordec_ir::BinaryOp::Ne, lhs: v(7), rhs: v(8) }); // v9
+        let region = sordec_ir::Region::Sequence(vec![
+            bb(0),
+            sordec_ir::Region::If {
+                cond: v(9),
+                then_region: Box::new(sordec_ir::Region::Unreachable),
+                else_region: None,
+            },
+            bb(1),
+        ]);
+        func_regions(exprs, vec![v(0), v(1)], vec![vec![2, 3, 4, 5, 6, 7, 8, 9], vec![]], region)
+    }
+
+    fn has_guard(f: &HighFunction) -> bool {
+        let mut found = false;
+        f.region.for_each_node(|r| found |= matches!(r, sordec_ir::Region::If { .. }));
+        found
+    }
+
+    /// `token: Address` is carried only by an `AddressObject` (77): the
+    /// byte test is the derived check, relocated with the decode.
+    #[test]
+    fn the_fields_own_tag_check_goes_with_the_decode() {
+        let mut m = ir(tag_checked(77));
+        assert!(UdtDecodePass.run(&mut m).changed);
+        assert!(matches!(expr_at(&m, 5), Expr::Literal(Literal::Unit)));
+        assert!(matches!(expr_at(&m, 6), Expr::Field { field, .. } if field == "amount"));
+        assert!(matches!(expr_at(&m, 7), Expr::Literal(Literal::Unit)));
+        assert!(!has_guard(&m.functions[0]), "the derived check is relocated");
+    }
+
+    /// A test against another tag is not `Address`'s check.
+    #[test]
+    fn a_tag_test_the_type_does_not_make_keeps_the_decode() {
+        let mut m = ir(tag_checked(75));
+        UdtDecodePass.run(&mut m);
+        untouched(&m, 0, 5, &[6, 7]);
+        assert!(has_guard(&m.functions[0]));
+    }
+
+    /// A type with two tags (`i128`: small or object) has no one-byte
+    /// check that is the whole of its conversion.
+    #[test]
+    fn a_tag_byte_of_a_two_tag_type_keeps_the_decode() {
+        let mut m = ir(tag_checked(11));
+        m.soroban_facts.as_mut().unwrap().types.structs[0].fields[1].ty = TypeRef::Primitive(PrimitiveType::I128);
+        UdtDecodePass.run(&mut m);
+        untouched(&m, 0, 5, &[6, 7]);
+    }
+
+    /// The byte read for anything besides the check is a value the
+    /// decode's removal would lose.
+    #[test]
+    fn a_tag_byte_with_another_use_keeps_the_decode() {
+        let mut f = tag_checked(77);
+        let id = ValueId::from_index(f.bindings.len() as u32);
+        f.bindings.push(sordec_ir::Binding::new(
+            id,
+            IrType::Unknown(UnknownReason::InsufficientEvidence),
+            store(v(1), v(7), 0),
+            sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+        ));
+        f.blocks.get_mut(sordec_common::BlockId::from_index(1)).unwrap().bindings.push(id);
+        let mut m = ir(f);
+        UdtDecodePass.run(&mut m);
+        untouched(&m, 0, 5, &[6, 7]);
+    }
+
+    /// A comparison that steers real work, not a trap, is the author's.
+    #[test]
+    fn a_tag_test_that_does_not_guard_a_trap_keeps_the_decode() {
+        let mut f = tag_checked(77);
+        f.region = sordec_ir::Region::Sequence(vec![
+            bb(0),
+            sordec_ir::Region::If { cond: v(9), then_region: Box::new(bb(1)), else_region: None },
+        ]);
+        let mut m = ir(f);
         UdtDecodePass.run(&mut m);
         untouched(&m, 0, 5, &[6, 7]);
     }
