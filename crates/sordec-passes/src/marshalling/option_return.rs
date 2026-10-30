@@ -320,7 +320,7 @@ fn scheduled_blocks(func: &HighFunction) -> HashSet<BlockId> {
 /// Nothing reads `v` but the merges in `merges`, the return, and the edges
 /// into those merges. Pruning residue left unscheduled is not a reader; a
 /// merge is, scheduled or not.
-fn read_only_by(func: &HighFunction, v: ValueId, merges: &HashSet<ValueId>) -> bool {
+pub(super) fn read_only_by(func: &HighFunction, v: ValueId, merges: &HashSet<ValueId>) -> bool {
     let live: HashSet<ValueId> =
         scheduled_blocks(func).iter().filter_map(|b| func.blocks.get(*b)).flat_map(|b| b.bindings.iter().copied()).collect();
     for (id, b) in func.bindings.iter() {
@@ -417,7 +417,7 @@ fn apply(func: &mut HighFunction, option: &KnownType, plan: Plan, in_result: boo
 /// Rewrite each edge into a merge from the block it leaves, as `built`
 /// says, counting the edges `expected` names. `last` is the block the walk
 /// most recently left, which is the edge's predecessor at a transfer.
-fn retarget(
+pub(super) fn retarget(
     region: &mut Region,
     last: &mut Option<BlockId>,
     expected: &HashMap<(ValueId, BlockId), ValueId>,
