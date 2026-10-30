@@ -758,7 +758,7 @@ fn classify_converter(ir: &HighIr, func: &HighFunction) -> Option<Converter> {
 
 /// The value one side of the converter's `if` hands its merge: the side is
 /// at most one block, then the edge.
-fn branch_value(region: &Region, merged: ValueId) -> Option<ValueId> {
+pub(super) fn branch_value(region: &Region, merged: ValueId) -> Option<ValueId> {
     let edge = |r: &Region| match r {
         Region::Transfer { transfer, .. } | Region::Break { transfer, .. } => match transfer.as_slice() {
             [(phi, value)] if *phi == merged => Some(*value),
@@ -1216,7 +1216,7 @@ fn rewrite_writer(func: &mut HighFunction, writer: &Writer, kinds: &[ArmKind], t
 }
 
 /// Add `(merged, built)` to the edge right after each writing block.
-fn carry(region: &mut Region, by_block: &HashMap<BlockId, ValueId>, merged: ValueId) {
+pub(super) fn carry(region: &mut Region, by_block: &HashMap<BlockId, ValueId>, merged: ValueId) {
     match region {
         Region::Sequence(items) => {
             for i in 0..items.len() {
