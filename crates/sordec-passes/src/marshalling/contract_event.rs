@@ -85,6 +85,16 @@
 //! rewrite. A prefix too long to pack is read from its recovered
 //! `Symbol::new(&e, "…")`.
 //!
+//! A field declared a `#[contracttype]` struct may hold that struct's
+//! derived encode still unread — a map built from a key table that
+//! several structs share (`{ inner }`, `{ val }`), which the struct pass
+//! leaves for want of a name. The event's declaration names it, and the
+//! named struct's own declaration names each struct field inside it, the
+//! naming by destination the struct pass already does for a return or a
+//! recovered literal's field; each table must still fit the struct it is
+//! named as field for field, and every level must be readable, or nothing
+//! is rewritten. The literals are written with the publish.
+//!
 //! # The call sites
 //!
 //! Each field's value is what the caller stored at its offset. An `i128`
@@ -164,9 +174,15 @@ impl Pass<HighIr> for ContractEventPass {
             .map(|(i, f)| (i, inline_sites(ir, f, &events)))
             .filter(|(_, sites)| !sites.is_empty())
             .collect();
+        let structs: Vec<sordec_ir::StructDef> =
+            ir.soroban_facts.as_ref().map(|f| f.types.structs.clone()).unwrap_or_default();
         for (i, sites) in inline {
+            let memory = &ir.memory;
             let Some(func) = ir.functions.get_mut(i) else { continue };
             for site in sites {
+                for (at, id) in &site.rebuilds {
+                    super::udt_encode::rebuild_as(func, memory, &structs, *at, *id);
+                }
                 apply_inline(func, site);
                 result.metrics.increment(M_RECOVERED, 1);
                 result.changed = true;
@@ -462,6 +478,9 @@ struct InlineSite {
     /// Fields whose stored word is a constant: the field's index and the
     /// value that word decodes to, planted just before the publish.
     constants: Vec<(usize, Constant)>,
+    /// Struct encodes among the field values, with the struct the event's
+    /// declaration names for each, outermost first.
+    rebuilds: Vec<(ValueId, sordec_common::TypeId)>,
 }
 
 /// The value a constant word stored for a field decodes to, as the field's
@@ -565,6 +584,7 @@ fn inline_site(
     let mut topic_values = elements.get(event.prefix_topics.len()..)?.iter();
     let mut fields = Vec::with_capacity(event.params.len());
     let mut constants = Vec::new();
+    let mut rebuilds = Vec::new();
     for param in &event.params {
         let value = match param.location {
             EventParamLocation::Topic => resolve_use(func, *topic_values.next()?),
@@ -582,12 +602,12 @@ fn inline_site(
             crate::type_infer::known_of_type_ref(&func.signature.as_ref()?.inputs.get(i)?.ty)
         });
         if *ty != IrType::Known(declared.clone()) && as_param.as_ref() != Some(&declared) {
-            match constant_field(func, value, &declared, enums_of(ir)) {
-                Some(c) => constants.push((fields.len(), c)),
-                None => {
-                    trace(func, publish, &format!("{}: {value:?} is {ty:?}, not the declared type", param.name));
-                    return None;
-                }
+            if let Some(c) = constant_field(func, value, &declared, enums_of(ir)) {
+                constants.push((fields.len(), c));
+            } else if !matches!(declared, KnownType::UserDefined(id) if struct_constructions(ir, func, value, id, &mut rebuilds))
+            {
+                trace(func, publish, &format!("{}: {value:?} is {ty:?}, not the declared type", param.name));
+                return None;
             }
         }
         fields.push((param.name.clone(), Some(value)));
@@ -624,7 +644,47 @@ fn inline_site(
             spent.push(v);
         }
     }
-    Some(InlineSite { publish, event: event.name.clone(), fields, spent, constants })
+    Some(InlineSite { publish, event: event.name.clone(), fields, spent, constants, rebuilds })
+}
+
+/// Whether the map built at `at` is struct `id`'s derived encode, and so
+/// is every field of it that is itself a struct's map; each such
+/// construction, outermost first, into `out`.
+///
+/// The key table alone may fit several structs; here the event's
+/// declaration names the field's struct, and the outer struct's
+/// declaration each inner one — the same naming by destination
+/// `udt_encode` does for a return or a recovered literal's field, and the
+/// table must still fit the named struct field for field.
+fn struct_constructions(
+    ir: &HighIr,
+    func: &HighFunction,
+    at: ValueId,
+    id: sordec_common::TypeId,
+    out: &mut Vec<(ValueId, sordec_common::TypeId)>,
+) -> bool {
+    let at = resolve_use(func, at);
+    let Some(structs) = ir.soroban_facts.as_ref().map(|f| f.types.structs.as_slice()) else { return false };
+    let Some(def) = structs.iter().find(|s| s.id == id) else { return false };
+    let Some(fields) = super::udt_encode::literal_fields(func, &ir.memory, structs, at, id) else { return false };
+    out.push((at, id));
+    for (name, value) in fields {
+        let v = resolve_use(func, value);
+        let is_map = matches!(
+            func.bindings.get(v).map(|b| &b.expr),
+            Some(Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { .. })))
+        );
+        if !is_map {
+            continue;
+        }
+        let Some(TypeRef::UserDefined(inner)) = def.fields.iter().find(|f| f.name == name).map(|f| &f.ty) else {
+            return false;
+        };
+        if !struct_constructions(ir, func, v, *inner, out) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Whether a helper's only effect is the vec it returns: every other
@@ -1386,6 +1446,99 @@ mod tests {
     #[test]
     fn a_constant_of_another_tag_leaves_the_publish() {
         let mut ir = with_constant((7 << 32) | 5);
+        assert!(!ContractEventPass.run(&mut ir).changed);
+    }
+
+    /// `Nest { #[topic] a: Address, payload: Inner }` published inline, its
+    /// payload a struct encode whose key table `Inner` shares with `Twin`.
+    fn nested() -> HighIr {
+        use sordec_ir::{StructDef, StructField};
+        let st = |addr: u32, value: u32, offset: u32| Expr::Store { addr: v(addr), value: v(value), offset, width: MemWidth::W8 };
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                  // v0 a
+                Expr::Phi { incoming: vec![] },                  // v1 the frame
+                Expr::Literal(Literal::Symbol("nest".into())),   // v2
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                    vals_pos: v(1),
+                    len: v(1),
+                    elements: Some(vec![v(2), v(0)]),
+                })), // v3 topics
+                Expr::Literal(Literal::I64((42 << 32) | 4)),     // v4 U32Val(42)
+                st(1, 4, 16),                                    // v5 the inner slot
+                Expr::Literal(Literal::U32(2008)),               // v6 inner keys
+                Expr::Literal(Literal::U32(1)),                  // v7 len
+                Expr::Literal(Literal::I32(16)),                 // v8
+                Expr::Binary { op: sordec_ir::BinaryOp::Add, lhs: v(1), rhs: v(8) }, // v9
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(6), vals_pos: v(9), len: v(7) })), // v10
+                st(1, 10, 0),                                    // v11 the data slot
+                Expr::Literal(Literal::U32(2000)),               // v12 data keys
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(12), vals_pos: v(1), len: v(7) })), // v13
+                Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics: v(3), data: v(13) })), // v14
+            ],
+            vec![v(0)],
+            (1..15).collect(),
+        );
+        f.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(KnownType::Address);
+        let mut ir = module(vec![f]);
+        let mut table = Vec::new();
+        for (ptr, n) in [(2100u32, 7u32), (2110, 3)] {
+            table.extend_from_slice(&ptr.to_le_bytes());
+            table.extend_from_slice(&n.to_le_bytes());
+        }
+        ir.memory = sordec_ir::MemoryImage::from_segments(vec![
+            sordec_ir::DataSegment { offset: 2000, bytes: table },
+            sordec_ir::DataSegment { offset: 2100, bytes: b"payload".to_vec() },
+            sordec_ir::DataSegment { offset: 2110, bytes: b"val".to_vec() },
+        ]);
+        let one = |id: u32, name: &str| StructDef {
+            id: TypeId::from_index(id),
+            name: name.into(),
+            fields: vec![StructField { name: "val".into(), ty: TypeRef::Primitive(PrimitiveType::U32) }],
+        };
+        let mut facts = SorobanFacts::default();
+        facts.types.structs = vec![one(10, "Inner"), one(11, "Twin")];
+        facts.types.events.push(EventDef {
+            id: TypeId::from_index(12),
+            name: "Nest".into(),
+            prefix_topics: vec!["nest".into()],
+            params: vec![
+                EventParam {
+                    name: "a".into(),
+                    ty: TypeRef::Primitive(PrimitiveType::Address),
+                    location: EventParamLocation::Topic,
+                },
+                EventParam {
+                    name: "payload".into(),
+                    ty: TypeRef::UserDefined(TypeId::from_index(10)),
+                    location: EventParamLocation::Data,
+                },
+            ],
+            data_format: "map".into(),
+        });
+        ir.soroban_facts = Some(facts);
+        ir
+    }
+
+    /// The event declares the payload an `Inner`: the shared table is
+    /// `Inner`'s, its literal written with the publish.
+    #[test]
+    fn a_struct_field_is_named_by_the_events_declaration() {
+        let mut ir = nested();
+        assert!(ContractEventPass.run(&mut ir).changed);
+        assert!(matches!(expr(&ir, 14), Expr::Semantic(SemanticOp::Known(KnownOp::PublishContractEvent { .. }))));
+        assert!(matches!(expr(&ir, 10), Expr::Struct { .. }));
+        assert_eq!(
+            ir.functions[0].bindings.get(v(10)).unwrap().ty,
+            IrType::Known(KnownType::UserDefined(TypeId::from_index(10)))
+        );
+    }
+
+    /// A field declared as neither struct is not named by guessing.
+    #[test]
+    fn a_struct_field_whose_table_fits_no_declared_field_type_leaves_the_publish() {
+        let mut ir = nested();
+        ir.soroban_facts.as_mut().unwrap().types.structs[0].fields[0].name = "other".into();
         assert!(!ContractEventPass.run(&mut ir).changed);
     }
 
