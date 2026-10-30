@@ -310,3 +310,23 @@ Errors 111 → 110; account compiles. A library helper that checks a value is a
 proven to be 32 bytes is `Some` of it, which also removes an unused helper from
 multisig_1_of_n_account (holes 3 → 2). Scores unchanged: corpus bands pass,
 held-out mean 0.7850 (account 0.7941, as before).
+
+## 2026-10-30 — commit aa34a17 (constant words read through their decode)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 23/25 | 18 | 3,894 |
+| Stellar examples, multi-contract | 13 | 10/13 | 34 | 4,240 |
+| third-party | 2 | 1/2 | 23 | 776 |
+| SDK 26 test contracts | 39 | **30/39** | 29 | 1,487 |
+
+Errors 110 → 104; SDK 26 errors, auth and bls compile. A constant `Val` word
+could be printed as the 64-bit number it is packed into: a short symbol returned
+inside a `Result`, and the elements of a vec built from constants. Each is now
+read through its tag as the `u32`, `i32`, `bool` or short symbol it encodes. This
+also corrects the topic of an event in five contracts (sdk26 events, events_ref,
+spec_import; other_custom_types), which had been converting the packed number
+rather than publishing the symbol. Also: a host object handed to a helper that
+tests its word passes that word, and a small decode of an integer enum is its
+`u32` discriminant. Scores unchanged: corpus bands pass, held-out mean 0.7850.
