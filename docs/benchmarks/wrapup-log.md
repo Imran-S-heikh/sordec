@@ -717,3 +717,22 @@ held-out mean 0.7865.
 
 **Gap work so far:** 10,355 → 9,659 gaps (−696) since the start of the gap phase, with no
 new errors and the corpus output unchanged apart from one unused argument.
+
+## 2026-10-30 — commit 5f6b2a0 (an out-parameter rewrite only in the caller's own frame; the split BytesN conversion)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,823 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 4,087 |
+| third-party | 2 | 1/2 | 8 | 661 |
+| SDK 26 test contracts | 39 | 38/39 | 2 | 1,006 |
+
+A correctness fix. A helper that writes its result through a pointer it was handed (not
+into its caller's own frame) is no longer turned into one returning an `Option`: the
+caller's caller reads that memory after the call, and the rewrite had stopped writing it
+(privacy_pools' and groth16_bn254's `BytesN` length checks lost their result on one path).
+Those helpers print in their out-pointer form again, +9 gaps; the `BytesN` conversion split
+into a tag half and a length half now folds into a typed storage read, −6. Holes 9,659 →
+9,662 (summed); errors unchanged at 11. Only those two reconstructions differ; corpus and
+held-out byte-identical, so their scores are unchanged (held-out mean 0.7865).
