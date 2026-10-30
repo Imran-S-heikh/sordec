@@ -274,7 +274,10 @@ impl Pass<HighIr> for TypeInferPass {
                     round |= func_changed;
                     disagreements += func_disagreements;
                 }
-                let next = recompute_signatures(ir, &seed, &encoders);
+                // The first settling waits for call results to be typed
+                // before a parameter they are handed to agrees; the second
+                // lets the parameters whose wait never ended decide.
+                let next = recompute_signatures(ir, &seed, &encoders, !catalog);
                 if next != sigs {
                     sigs = next;
                     round = true;
@@ -585,11 +588,39 @@ fn backward_calls(
                 {
                     continue;
                 }
+                if copy_of_another_type(func, *arg, &ty, types) {
+                    continue;
+                }
                 changed |= improve_tracked(types, ev, *arg, ty);
             }
         }
     }
     changed
+}
+
+/// Whether `arg` is a copy of a value whose own type is not `slot`'s.
+///
+/// A parameter's slot is the join of what *every* caller passes, so where
+/// one caller hands over a copy of something else — a struct where the
+/// others pass vecs — the slot names the others' type, and pushing it onto
+/// the copy contradicts the copy's source. The copy then conflicts and
+/// loses its type for good, its caller never witnesses the struct, and the
+/// slot never learns the callers disagree (which, for values that cross
+/// only as a `Val`, is what makes it a `Val`). The copy is its source
+/// (forward), so the disagreement belongs to the slot, which the next
+/// round recomputes.
+///
+/// Only a source that can cross a call only as a `Val` (a host object, a
+/// contract type, a wide number): two numbers that disagree are settled by
+/// the sign and width rules, not here.
+fn copy_of_another_type(func: &HighFunction, arg: ValueId, slot: &IrType, types: &HashMap<ValueId, IrType>) -> bool {
+    if !matches!(func.bindings.get(arg).map(|b| &b.expr), Some(Expr::Use(_))) {
+        return false;
+    }
+    let (Some(source), Some(want)) = (base_of(types.get(&resolve_use(func, arg))), base_of(Some(slot))) else {
+        return false;
+    };
+    crosses_only_as_val(&source) && source != want && merge_partial(&source, &want).is_none()
 }
 
 /// Back-type **every** return site's components from the settled return
@@ -1769,6 +1800,15 @@ fn seed_signatures(ir: &HighIr) -> SigTable {
     table
 }
 
+/// Whether `v` is a call's result or one component of it, through copies.
+fn from_call(func: &HighFunction, v: ValueId) -> bool {
+    match func.bindings.get(resolve_use(func, v)).map(|b| &b.expr) {
+        Some(Expr::Call { .. }) => true,
+        Some(Expr::Project { value, .. }) => is_call(func, *value),
+        _ => false,
+    }
+}
+
 /// Whether `v` is the result of a call.
 fn is_call(func: &HighFunction, v: ValueId) -> bool {
     matches!(func.bindings.get(resolve_use(func, v)).map(|b| &b.expr), Some(Expr::Call { .. }))
@@ -1779,7 +1819,10 @@ fn is_call(func: &HighFunction, v: ValueId) -> bool {
 /// Returns are witnessed by the function's own return sites; parameters by
 /// every call site in the module that names it. Functions carrying a
 /// `contractspecv0` signature keep the seeded ABI types untouched.
-fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable) -> SigTable {
+///
+/// With `wait`, a parameter some caller hands an untyped call result stays
+/// unsettled until that result is typed (see the parameter loop).
+fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable, wait: bool) -> SigTable {
     let mut table = seed.clone();
     let used_as = result_uses(ir, &table);
 
@@ -1874,6 +1917,9 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable) -
     let mut val_only: HashSet<(FuncId, usize)> = HashSet::new();
     // Constant arguments, held back until the other callers have spoken.
     let mut constants: HashMap<(FuncId, usize), Vec<(i128, Slot)>> = HashMap::new();
+    // Positions some caller hands a call's result the callee's signature
+    // has not typed yet ([`from_call`]).
+    let mut pending: HashSet<(FuncId, usize)> = HashSet::new();
     for caller in &ir.functions {
         for (_, binding) in caller.bindings.iter() {
             let Expr::Call { target, args } = &binding.expr else {
@@ -1886,6 +1932,9 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable) -
                 let ty = caller.bindings.get(*arg).map(|b| &b.ty);
                 if base_of(ty).is_some_and(|k| crosses_only_as_val(&k)) {
                     val_only.insert((*target, index));
+                }
+                if base_of(ty).is_none() && from_call(caller, *arg) {
+                    pending.insert((*target, index));
                 }
                 // A constant votes last: its type is the wasm word it was
                 // loaded as, not a claim about the parameter.
@@ -1926,6 +1975,15 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable) -
         for (index, slot) in slots.iter_mut().enumerate() {
             if *slot == Slot::Conflict && val_only.contains(&(id, index)) {
                 *slot = Slot::Agreed(KnownType::Val);
+            }
+            // A caller still waiting on a call's result has not spoken, but
+            // it will: agreeing without it would plant the others' type on
+            // the parameter, which the `Val` it may yet force can never
+            // displace (`Val` adds nothing to a named type). So the slot
+            // waits, while `wait` holds; after that, what has not spoken
+            // never will, and the others decide.
+            if wait && matches!(slot, Slot::Agreed(_)) && pending.contains(&(id, index)) {
+                *slot = Slot::Bottom;
             }
         }
         if let Some(entry) = table.get_mut(&id) {
@@ -3971,6 +4029,41 @@ mod tests {
         let mut ir = eqz_of_merge(Expr::Binary { op: BinaryOp::BitOr, lhs: v(2), rhs: v(2) });
         TypeInferPass.run(&mut ir);
         assert_eq!(base_of(Some(&ty_of(&ir, 0, 3))), None);
+    }
+
+    /// Two callers of `f` (3): one passes a `Vec`, the other a copy (v0) of
+    /// a struct only a helper's return (`g`, 2) types — so the copy is
+    /// still untyped when `f`'s slot first names the `Vec`.
+    #[test]
+    fn a_copy_of_a_struct_keeps_its_type_and_makes_the_slot_a_val() {
+        use crate::marshalling::test_support::v;
+        let ud = KnownType::UserDefined(TypeId::new(5));
+        let mut vec_caller = func_at(
+            0,
+            vec![Expr::Phi { incoming: vec![] }, Expr::Call { target: FuncId::from_index(3), args: vec![v(0)] }],
+            vec![v(0)],
+            vec![1],
+            vec![],
+        );
+        vec_caller.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(vec_of(unknown()));
+        let copy_caller = func_at(
+            1,
+            vec![
+                Expr::Use(v(2)),
+                Expr::Call { target: FuncId::from_index(3), args: vec![v(0)] },
+                Expr::Call { target: FuncId::from_index(2), args: vec![] },
+            ],
+            vec![],
+            vec![2, 0, 1],
+            vec![],
+        );
+        let mut g = func_at(2, vec![Expr::Struct { fields: vec![] }], vec![], vec![0], vec![vec![v(0)]]);
+        g.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(ud.clone());
+        let f = func_at(3, vec![Expr::Phi { incoming: vec![] }], vec![v(0)], vec![], vec![]);
+        let mut ir = crate::marshalling::test_support::module(vec![vec_caller, copy_caller, g, f]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 1, 0))), Some(ud), "the copy is the struct");
+        assert_eq!(base_of(Some(&ty_of(&ir, 3, 0))), Some(KnownType::Val), "callers disagree on objects");
     }
 
     /// `v3 = State { count: v0, owner: v1, memo: v2 }`, the struct declared
