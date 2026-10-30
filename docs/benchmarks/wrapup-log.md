@@ -285,3 +285,11 @@ changed only by dropping redundant renames.
 
 **Day total (2026-10-29):** errors 257 → 111; compiling contracts 55 → 67 of 86;
 holes 10,618 → 10,483; scores unchanged (corpus 0.9389, held-out 0.7850).
+
+## 2026-10-30 — commit 0524957 (a returned 64-bit constant is its decoded value)
+
+Numbers unchanged from ec10975 (errors 111, holes 10,483), output byte-identical
+on all five sets. The fix guards a case no measured contract hits: a small
+`i64`/`u64` constant on an entrypoint's return path could be printed as its raw
+encoded word. Scores confirmed for both commits: corpus bands pass, held-out
+mean 0.7850.
