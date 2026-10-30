@@ -93,6 +93,28 @@
 //! A first element that is not a constant symbol, a name the enum does
 //! not declare, a length that disagrees, or any value of another type
 //! declines the vec.
+//!
+//! # A tuple struct, the same way
+//!
+//! `#[contracttype] struct TupleStruct(Test, SimpleEnum)` travels exactly
+//! as the tuple `(Test, SimpleEnum)` does: a vec of its fields' encodings
+//! in order. The spec records it as a struct whose fields are named `0`,
+//! `1`, … — the full sequence, nothing else — so a returned vec of that
+//! length is the struct, read component by component as a tuple's is, and
+//! becomes the [`Expr::Struct`] literal naming each positional field. Same
+//! argument as the tuple's: the spec says the vec is the struct's
+//! encoding, and the derive writes field `k` at position `k`.
+//!
+//! # A component read out of memory
+//!
+//! A component an encode helper wrote into the frame comes back as a load
+//! of eight bytes nothing has typed: an opaque word. Its slot is the only
+//! thing that says what it is — the encoding of the declared component —
+//! and where that component's type *is* its `Val` (a host object, a symbol,
+//! a contract type: [`is_own_val`]) the word is the component, and takes
+//! its type. A number's slot holds its encoding instead, never the number,
+//! so a word in a number's place still declines the vec. The word is typed
+//! only once every other component has settled.
 
 use std::collections::HashSet;
 
@@ -113,7 +135,7 @@ use crate::metrics_catalog::{
     MARSHALLING_VARIANT_RETURNS_RECOVERED as M_VARIANT_RECOVERED,
 };
 use crate::pass::{Pass, PassResult};
-use crate::type_infer::known_of_type_ref;
+use crate::type_infer::{is_own_val, known_of_type_ref};
 use crate::val_abi::decode_small_symbol;
 
 /// Pass name — also the provenance `pass` field for every rewrite.
@@ -139,18 +161,18 @@ impl Pass<HighIr> for TupleReturnPass {
         let encoders = EncoderTable::build(ir);
         let memory = &ir.memory;
         for func in &mut ir.functions {
-            let Some(declared) = declared(func, &unions) else {
+            let Some(declared) = declared(func, &unions, &structs) else {
                 continue;
             };
             let (recovered, declined) = match declared {
-                Declared::Tuple(_) => (M_RECOVERED, M_DECLINED),
+                Declared::Tuple(_) | Declared::TupleStruct(..) => (M_RECOVERED, M_DECLINED),
                 Declared::Variant(_) => (M_VARIANT_RECOVERED, M_VARIANT_DECLINED),
             };
             let uses = HighUseIndex::build(func);
             let mut any = false;
             for leaf in returned_vecs(func) {
                 let planned = match declared {
-                    Declared::Tuple(ref slots) => {
+                    Declared::Tuple(ref slots) | Declared::TupleStruct(_, ref slots) => {
                         plan(func, memory, &structs, &encoders, &uses, &leaf, slots).map(|c| (None, c))
                     }
                     Declared::Variant(def) => plan_variant(func, memory, &structs, &encoders, &uses, &leaf, def)
@@ -174,6 +196,15 @@ impl Pass<HighIr> for TupleReturnPass {
                         Expr::Tuple { items },
                         IrType::Known(KnownType::Tuple(slots.clone())),
                         "returned vec is the tuple the spec declares",
+                    ),
+                    // The spec names positional fields `0`, `1`, …, and a
+                    // struct literal names each field it sets.
+                    (Declared::TupleStruct(id, _), _) => (
+                        Expr::Struct {
+                            fields: items.into_iter().enumerate().map(|(k, v)| (k.to_string(), v)).collect(),
+                        },
+                        IrType::Known(KnownType::UserDefined(*id)),
+                        "returned vec is the tuple struct the spec declares",
                     ),
                     (Declared::Variant(_), None) => continue,
                 };
@@ -206,14 +237,16 @@ impl Pass<HighIr> for TupleReturnPass {
 enum Declared<'a> {
     /// A tuple, by its components' types.
     Tuple(Vec<IrType>),
+    /// A `#[contracttype]` tuple struct, by its fields' types in order.
+    TupleStruct(TypeId, Vec<IrType>),
     /// One variant of this `#[contracttype]` enum.
     Variant(&'a UnionDef),
 }
 
 /// What the function's spec says it returns, bare or as a `Result`'s `Ok`,
 /// and either of those as an `Option`'s `Some`, when that travels as a
-/// vec: a tuple, or an enum with variants.
-fn declared<'a>(func: &HighFunction, unions: &'a [UnionDef]) -> Option<Declared<'a>> {
+/// vec: a tuple, a tuple struct, or an enum with variants.
+fn declared<'a>(func: &HighFunction, unions: &'a [UnionDef], structs: &[StructDef]) -> Option<Declared<'a>> {
     let ty = match func.signature.as_ref()?.outputs.as_slice() {
         [TypeRef::Composite(CompositeType::Result(ok, _))] => ok.as_ref(),
         [one] => one,
@@ -226,9 +259,31 @@ fn declared<'a>(func: &HighFunction, unions: &'a [UnionDef]) -> Option<Declared<
     };
     match known_of_type_ref(ty)? {
         KnownType::Tuple(slots) if !slots.is_empty() => Some(Declared::Tuple(slots)),
-        KnownType::UserDefined(id) => unions.iter().find(|u| u.id == id).map(Declared::Variant),
+        KnownType::UserDefined(id) => {
+            if let Some(union) = unions.iter().find(|u| u.id == id) {
+                return Some(Declared::Variant(union));
+            }
+            let def = structs.iter().find(|s| s.id == id)?;
+            tuple_struct_slots(def).map(|slots| Declared::TupleStruct(id, slots))
+        }
         _ => None,
     }
+}
+
+/// A tuple struct's field types in order, or `None` for a struct with
+/// named fields — which travels as a map, not a vec — or a field type the
+/// spec does not name.
+///
+/// `contractspecv0` records a tuple struct's fields under the names `0`,
+/// `1`, … in declaration order; only that full sequence is one, so a named
+/// struct with a numeric-looking field is not reshaped.
+fn tuple_struct_slots(def: &StructDef) -> Option<Vec<IrType>> {
+    let positional =
+        !def.fields.is_empty() && def.fields.iter().enumerate().all(|(k, f)| f.name.parse::<usize>() == Ok(k));
+    if !positional {
+        return None;
+    }
+    def.fields.iter().map(|f| known_of_type_ref(&f.ty).map(IrType::Known)).collect()
 }
 
 /// A vec constructor that reaches a return, and the renames it reaches it
@@ -288,6 +343,9 @@ enum Component {
     Struct(ValueId, TypeId),
     /// A constant word in its encoded form, and the number it encodes.
     Word(Literal, KnownType),
+    /// A word read out of memory that nothing has typed, and the declared
+    /// type whose `Val` it is.
+    Opaque(ValueId, KnownType),
 }
 
 /// Put each component in place: rewrite the struct encodes to their
@@ -302,6 +360,7 @@ fn settle(
     components: Vec<Component>,
 ) -> Option<Vec<ValueId>> {
     let mut items = Vec::with_capacity(components.len());
+    let mut opaque: Vec<(ValueId, KnownType)> = Vec::new();
     for component in components {
         let item = match component {
             Component::Value(v) => v,
@@ -335,8 +394,23 @@ fn settle(
                 block.1.bindings.insert(pos, fresh);
                 fresh
             }
+            Component::Opaque(word, ty) => {
+                opaque.push((word, ty));
+                word
+            }
         };
         items.push(item);
+    }
+    // Typed last, once every other component has settled: a vec left a
+    // vec keeps its words as they were.
+    for (word, ty) in opaque {
+        let binding = func.bindings.get_mut(word)?;
+        binding.ty = IrType::Known(ty);
+        binding.add_provenance(Provenance::new(
+            PASS_NAME,
+            ProvenanceSource::SdkPattern,
+            "a word read into a returned vec's slot: the declared component it encodes",
+        ));
     }
     Some(items)
 }
@@ -461,9 +535,22 @@ fn components(
             {
                 return Some(Component::Struct(item, id));
             }
+            if is_own_val(&want) && opaque_word(func, element) {
+                return Some(Component::Opaque(element, want));
+            }
             None
         })
         .collect()
+}
+
+/// Whether `element` is a full-width word read out of memory that nothing
+/// has typed beyond `Val`: a value whose only description is the slot of
+/// the vec it lands in.
+fn opaque_word(func: &HighFunction, element: ValueId) -> bool {
+    func.bindings.get(element).is_some_and(|b| {
+        matches!(b.expr, Expr::Load { width, .. } if width.bytes() == 8)
+            && matches!(base(&b.ty), None | Some(KnownType::Val))
+    })
 }
 
 /// What a component is, by its own type or, before type inference has run,
@@ -884,5 +971,107 @@ mod tests {
         let f = &ir.functions[1];
         assert!(matches!(f.bindings.get(v(5)).unwrap().expr, Expr::Semantic(_)));
         assert!(matches!(f.bindings.get(v(1)).unwrap().expr, Expr::Call { .. }));
+    }
+
+    // -----------------------------------------------------------------
+    // A tuple struct, and a component read out of memory
+    // -----------------------------------------------------------------
+
+    /// `Pair` (6), declared with `fields`, returned through a rename (v4) of
+    /// the vec `[v1, v2]` (v3): `v1` a `Test` (0), `v2` a word loaded from
+    /// the frame (`v0`) that nothing has typed. `SimpleEnum` (3) is a unit
+    /// enum.
+    fn pair(fields: Vec<(&str, TypeRef)>) -> HighIr {
+        use sordec_ir::{EnvCompatibility, SorobanFacts, StructField, TypeRegistry, UnionCase};
+        let exprs = vec![
+            Expr::Phi { incoming: vec![] },
+            Expr::Phi { incoming: vec![] },
+            crate::marshalling::test_support::load(v(0), 8),
+            Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                vals_pos: v(0),
+                len: v(0),
+                elements: Some(vec![v(1), v(2)]),
+            })),
+            Expr::Use(v(3)),
+        ];
+        let mut func = func_with(exprs, vec![v(0), v(1)], vec![2, 3, 4]);
+        func.bindings.get_mut(v(1)).unwrap().ty = IrType::Inferred(KnownType::UserDefined(TypeId::new(0)));
+        func.signature = Some(FunctionSignature {
+            name: "pair".to_string(),
+            inputs: vec![],
+            outputs: vec![TypeRef::UserDefined(TypeId::new(6))],
+        });
+        func.returns = vec![vec![v(4)]];
+        let field = |name: &str, ty: TypeRef| StructField { name: name.to_string(), ty };
+        let mut m = module(vec![func]);
+        m.soroban_facts = Some(SorobanFacts {
+            functions: std::collections::BTreeMap::new(),
+            types: TypeRegistry {
+                structs: vec![
+                    StructDef {
+                        id: TypeId::new(0),
+                        name: "Test".to_string(),
+                        fields: vec![field("a", TypeRef::Primitive(PrimitiveType::U32))],
+                    },
+                    StructDef {
+                        id: TypeId::new(6),
+                        name: "Pair".to_string(),
+                        fields: fields.into_iter().map(|(n, t)| field(n, t)).collect(),
+                    },
+                ],
+                unions: vec![UnionDef {
+                    id: TypeId::new(3),
+                    name: "SimpleEnum".to_string(),
+                    cases: vec![UnionCase { name: "First".to_string(), fields: vec![] }],
+                    exported: true,
+                }],
+                ..Default::default()
+            },
+            contract_meta: std::collections::BTreeMap::new(),
+            env_meta: EnvCompatibility::default(),
+        });
+        m
+    }
+
+    fn ud(id: u32) -> TypeRef {
+        TypeRef::UserDefined(TypeId::new(id))
+    }
+
+    /// `struct Pair(Test, SimpleEnum)` returned is the literal
+    /// `Pair(v1, v2)`, and the loaded word is the `SimpleEnum` its slot
+    /// encodes.
+    #[test]
+    fn a_returned_vec_is_the_tuple_struct_the_spec_declares() {
+        let mut ir = pair(vec![("0", ud(0)), ("1", ud(3))]);
+        assert!(TupleReturnPass.run(&mut ir).changed);
+        let func = &ir.functions[0];
+        let vec = func.bindings.get(v(3)).unwrap();
+        let Expr::Struct { fields } = &vec.expr else {
+            panic!("the vec is the struct literal, got {:?}", vec.expr);
+        };
+        assert_eq!(fields, &[("0".to_string(), v(1)), ("1".to_string(), v(2))]);
+        assert_eq!(vec.ty, IrType::Known(KnownType::UserDefined(TypeId::new(6))));
+        assert_eq!(func.bindings.get(v(4)).unwrap().ty, vec.ty, "the rename takes the struct's type");
+        assert_eq!(func.bindings.get(v(2)).unwrap().ty, IrType::Known(KnownType::UserDefined(TypeId::new(3))));
+    }
+
+    /// A struct with named fields travels as a map, not a vec; and a word
+    /// in a number's slot is that number's encoding, not the number — both
+    /// leave the vec, and the word, as they were.
+    #[test]
+    fn a_named_struct_or_a_word_in_a_numbers_place_stays_a_vec() {
+        for fields in [
+            vec![("first", ud(0)), ("second", ud(3))],
+            vec![("0", ud(0)), ("1", TypeRef::Primitive(PrimitiveType::U32))],
+        ] {
+            let mut ir = pair(fields);
+            assert!(!TupleReturnPass.run(&mut ir).changed);
+            let func = &ir.functions[0];
+            assert!(matches!(
+                func.bindings.get(v(3)).unwrap().expr,
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { .. }))
+            ));
+            assert!(matches!(func.bindings.get(v(2)).unwrap().ty, IrType::Unknown(_)));
+        }
     }
 }

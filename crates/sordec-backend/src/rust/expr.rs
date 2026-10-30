@@ -806,6 +806,16 @@ fn operand_text(expr: &syn::Expr) -> String {
 
 /// `+N` for a non-zero memarg offset, empty for zero — the common case,
 /// where printing `+0` would be noise.
+/// A struct field as Rust names it: `.0` for a tuple struct's positional
+/// field — the spec records those as `"0"`, `"1"`, … — and the identifier
+/// otherwise.
+fn member(field: &str) -> syn::Member {
+    match field.parse::<u32>() {
+        Ok(k) if k.to_string() == field => syn::Member::Unnamed(syn::Index::from(k as usize)),
+        _ => syn::Member::Named(ty::ident(field)),
+    }
+}
+
 fn offset_suffix(offset: u32) -> String {
     if offset == 0 {
         String::new()
@@ -1178,7 +1188,7 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
         }
         Expr::Field { base, field } => {
             let base = ctx.value_ref(*base);
-            let field = ty::ident(field);
+            let field = member(field);
             parse_quote!(#base.#field)
         }
         // The construction side: `Name { field: value, .. }`. The struct is
@@ -1203,7 +1213,7 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             match name {
                 Some(name) => {
                     let path = ty::ident(name);
-                    let items: Vec<syn::FieldValue> = fields
+                    let values: Vec<(&String, syn::Expr)> = fields
                         .iter()
                         .map(|(field, value)| {
                             let declared_ty = declared
@@ -1212,15 +1222,30 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                             // A same-width word of the other sign is cast to
                             // the field's declared type, as for an argument.
                             let want = declared_ty.and_then(machine_word);
-                            let field = ty::ident(field);
                             let value = want
                                 .and_then(|w| sign_cast(ctx, *value, &w))
                                 .or_else(|| declared_ty.and_then(|t| bool_from_word(ctx, *value, t)))
                                 .unwrap_or_else(|| ctx.value_ref(*value));
-                            parse_quote!(#field: #value)
+                            (field, value)
                         })
                         .collect();
-                    parse_quote!(#path { #(#items),* })
+                    // A tuple struct is built the way it is declared:
+                    // `Name(a, b)`, every positional field in order.
+                    let positional = declared.is_some_and(|d| {
+                        ty::is_tuple_struct(&d.fields)
+                            && values.len() == d.fields.len()
+                            && values.iter().enumerate().all(|(k, (f, _))| f.parse::<usize>() == Ok(k))
+                    });
+                    if positional {
+                        let args = values.into_iter().map(|(_, v)| v);
+                        parse_quote!(#path(#(#args),*))
+                    } else {
+                        let items = values.into_iter().map(|(f, v)| -> syn::FieldValue {
+                            let f = member(f);
+                            parse_quote!(#f: #v)
+                        });
+                        parse_quote!(#path { #(#items),* })
+                    }
                 }
                 None => ctx.policy.unknown_expr("struct literal of an unnamed type"),
             }

@@ -262,6 +262,8 @@ pub const SYMBOL_ARGS_AFTER_TYPES: &str = "symbol-args-after-types";
 pub const VAL_DECODE_AFTER_OPTIONAL: &str = "val-decode-after-optional";
 /// [`OptionReturnPass`] re-run once the type pass has typed the arms.
 pub const OPTION_RETURN_AFTER_TYPES: &str = "option-return-after-types";
+/// [`TupleReturnPass`] re-run once the type pass has typed the components.
+pub const TUPLE_RETURN_AFTER_TYPES: &str = "tuple-return-after-types";
 /// Name of the declared-type recovery re-run inside the elision group,
 /// where a struct recovered from its key table first has fields to type.
 pub const SPEC_FROM_GUARDS_ON_FIELDS: &str = "spec-from-guards-on-fields";
@@ -873,6 +875,17 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
                 OptionReturnPass,
                 OPTION_RETURN_AFTER_TYPES,
                 &[metrics_catalog::MARSHALLING_OPTION_RETURNS],
+            )),
+            // And the returned vec whose components only the typing names:
+            // a struct an encode helper hands back is typed by the helper's
+            // own return, which is settled only now.
+            Box::new(pass::Rerun::new(
+                TupleReturnPass,
+                TUPLE_RETURN_AFTER_TYPES,
+                &[
+                    metrics_catalog::MARSHALLING_TUPLE_RETURNS_RECOVERED,
+                    metrics_catalog::MARSHALLING_VARIANT_RETURNS_RECOVERED,
+                ],
             )),
             // After the types settle, and outside the group: a stripped
             // module's key union is synthesized with untyped fields, and
