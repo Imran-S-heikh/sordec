@@ -553,3 +553,11 @@ all five sets. A soundness fix: the pass that turns an `Option` written into cal
 memory into a returned `Option` ignored bulk copies and fills when checking who
 reads the result, and looked for indirect calls only in a form the pipeline never
 produces. Neither gap fired on these sets.
+
+## 2026-10-30 — commit a14452d (four passes refuse a helper a raw indirect call may reach)
+
+Numbers unchanged (errors 25, holes 10,330); output byte-identical on all five sets.
+A soundness fix shared by four signature-changing passes: they checked for indirect
+calls only in a form the pipeline never produces. They now keep the signature of
+any helper the function table declares (table entries read with imports
+subtracted). No helper they rewrote on these sets is in a table.
