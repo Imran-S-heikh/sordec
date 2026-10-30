@@ -545,3 +545,11 @@ paths and converts through the SDK's helper is now `Ok(x)` or
 import_contract compile; three key-building helpers elsewhere print
 `symbol_short!(..)` for the name (same bits). Held-out mean 0.7851 → **0.7860**
 (modular_account's structure: the loop became the symbol); corpus bands pass.
+
+## 2026-10-30 — commit 17dee6f (optional-out: bulk memory operations and raw indirect calls count)
+
+Numbers unchanged from 8631f8a (errors 25, holes 10,330); output byte-identical on
+all five sets. A soundness fix: the pass that turns an `Option` written into caller
+memory into a returned `Option` ignored bulk copies and fills when checking who
+reads the result, and looked for indirect calls only in a form the pipeline never
+produces. Neither gap fired on these sets.
