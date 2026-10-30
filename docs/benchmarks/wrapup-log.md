@@ -417,3 +417,23 @@ against zero (`v % 2`). One correctness fix: a `>= 1 << 32` comparison on such a
 word was rewritten to `== 0`, an inverted condition; it is `!= 0`. No measured
 contract hit it. contracttrait_impl_partial 4 → 1, other_custom_types 10 → 8.
 Held-out mean 0.7851, unchanged.
+
+## 2026-10-30 — commit 2cc2b7b (phoenix-vesting round two)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 23/25 | 11 | 3,882 |
+| Stellar examples, multi-contract | 13 | 10/13 | 21 | 4,240 |
+| third-party | 2 | 1/2 | 11 | 765 |
+| SDK 26 test contracts | 39 | 31/39 | 23 | 1,419 |
+
+Errors 75 → 66, holes 10,424 → 10,391. A decoded result written into the frame
+and read back through another spelling of the same slot address is the result
+(three SDK 26 contracts lose 25 gaps); a 128-bit difference takes the sign of an
+operand already known to be 128-bit; a helper takes a struct argument only when
+every caller can build it — otherwise callers were handing it a frame address as
+the struct — so other_custom_types trades three errors for three honest gaps;
+and a struct field declared `Option<T>` filled from `Void` or an encode is
+`None`/`Some(x)`. phoenix-vesting 17 → 11. Scores unchanged: corpus bands pass,
+held-out mean 0.7851.
