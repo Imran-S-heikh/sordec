@@ -451,6 +451,11 @@ pub const MARSHALLING_UDT_DECLINED_NO_STRUCT: &str = "marshalling_udt_declined_n
 /// parameter declared with it, and not a field of a struct already
 /// recovered. This is the nested case when the outer struct was missed.
 pub const MARSHALLING_UDT_DECLINED_EVIDENCE: &str = "marshalling_udt_declined_evidence";
+/// Struct decodes (unpacks and helper calls) left in place because a read
+/// their slots may reach is not one whole field written on every path, or
+/// something else may read the slots before they are overwritten. The
+/// decode is kept and none of its reads is rewritten.
+pub const MARSHALLING_UDT_DECLINED_READS: &str = "marshalling_udt_declined_reads";
 /// Calls to a helper-shaped `#[contracttype]` struct decoder elided with
 /// their out-parameter reads.
 pub const MARSHALLING_UDT_HELPERS_COLLAPSED: &str = "marshalling_udt_helpers_collapsed";
