@@ -854,6 +854,27 @@ fn backward(
                         }
                     }
                 }
+                // And a full-width word, or a merge of nothing but such
+                // words, is the merge's value where that value *is* its
+                // `Val` ([`is_own_val`]): the arms are one variable, and an
+                // opaque word on one path is that variable's `Val` there.
+                // A number's word is its encoding, so a number takes none.
+                if let Some(merged) = base_of(types.get(&id)).filter(is_own_val) {
+                    for (_, arm) in incoming {
+                        if base_of(types.get(arm)).is_none() && opaque_words(func, *arm, MAX_OPAQUE_DEPTH) {
+                            changed |= improve(types, ev, *arm, IrType::Inferred(merged.clone()));
+                        }
+                    }
+                }
+            }
+            // `i64.eqz` tests a 64-bit word, so a word nothing has typed —
+            // read from memory at full width, or merged from such reads —
+            // is the integer it tests. Left untyped it is emitted as the
+            // `Val` an untyped value is named, and a `Val` has no `== 0`.
+            Expr::Unary { op: sordec_ir::UnaryOp::Eqz, value } => {
+                if base_of(types.get(value)).is_none() && opaque_words(func, *value, MAX_OPAQUE_DEPTH) {
+                    changed |= improve(types, ev, *value, IrType::Inferred(KnownType::I64));
+                }
             }
             // A struct literal's field holds the field's declared type: the
             // contract's own declaration says so, and the literal puts the
@@ -922,6 +943,22 @@ fn is_narrow_load(func: &HighFunction, value: ValueId) -> bool {
         func.bindings.get(value).map(|b| &b.expr),
         Some(Expr::Load { width, ty: IrType::Known(KnownType::I64), .. }) if width.bytes() < 8
     )
+}
+
+/// How many merges deep [`opaque_words`] looks.
+const MAX_OPAQUE_DEPTH: u32 = 3;
+
+/// Whether `value` is an opaque 64-bit word: a full-width read of memory,
+/// or a merge whose every arm is one (`depth` merges deep). Nothing about
+/// such a value says what it is but where it goes.
+fn opaque_words(func: &HighFunction, value: ValueId, depth: u32) -> bool {
+    match func.bindings.get(value).map(|b| &b.expr) {
+        Some(Expr::Load { width, ty: IrType::Known(KnownType::I64), .. }) => width.bytes() == 8,
+        Some(Expr::Phi { incoming }) if depth > 0 && !incoming.is_empty() => {
+            incoming.iter().all(|(_, arm)| opaque_words(func, *arm, depth - 1))
+        }
+        _ => false,
+    }
 }
 
 /// Whether `value` is an address in the shadow-stack frame: an offset from
@@ -3793,17 +3830,22 @@ mod tests {
         assert_eq!(ty_of(&ir, 0, 1), IrType::Known(vec_of(unknown())));
     }
 
+    /// `i64.load addr+offset`: eight bytes, typed as the opcode's word.
+    fn word(addr: ValueId, offset: u32) -> Expr {
+        Expr::Load { addr, offset, width: sordec_ir::MemWidth::W8, signed: None, ty: IrType::Known(KnownType::I64) }
+    }
+
     /// `v4 = vec_new([v2, v1])` typed `vec_ty` and returned: `v1` a word read
     /// out of the frame (`v0`), `v2` the decoded symbol `"Hello"`, `v3` an
     /// unrelated word `element` is swapped in for when `computed`.
     fn vec_of_symbol_and_word(vec_ty: KnownType, computed: bool) -> HighIr {
-        use crate::marshalling::test_support::{load, v};
+        use crate::marshalling::test_support::v;
         let element = if computed { v(3) } else { v(1) };
         let mut f = func_at(
             0,
             vec![
                 Expr::Phi { incoming: vec![] },
-                load(v(0), 16),
+                word(v(0), 16),
                 Expr::Literal(Literal::Symbol("Hello".into())),
                 Expr::Binary { op: BinaryOp::BitOr, lhs: v(1), rhs: v(1) },
                 Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
@@ -3844,6 +3886,91 @@ mod tests {
         let mut ir = vec_of_symbol_and_word(vec_of(IrType::Known(KnownType::Symbol)), true);
         TypeInferPass.run(&mut ir);
         assert_ne!(base_of(Some(&ty_of(&ir, 0, 3))), Some(KnownType::Symbol));
+    }
+
+    /// `v5 = phi(v3, v4)` returned, typed `merged`: `v3` a merge of two
+    /// words read from the frame (`v0`) — `v2` computed from one instead
+    /// when `computed` — and `v4` an argument typed `merged` too.
+    fn merge_of_words(merged: KnownType, computed: bool) -> HighIr {
+        use crate::marshalling::test_support::v;
+        let (b0, b1) = (BlockId::from_index(0), BlockId::from_index(1));
+        let second = if computed {
+            Expr::Binary { op: BinaryOp::BitOr, lhs: v(1), rhs: v(1) }
+        } else {
+            word(v(0), 8)
+        };
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                word(v(0), 0),
+                second,
+                Expr::Phi { incoming: vec![(b0, v(1)), (b1, v(2))] },
+                Expr::Phi { incoming: vec![] },
+                Expr::Phi { incoming: vec![(b0, v(3)), (b1, v(4))] },
+            ],
+            vec![v(0), v(4)],
+            vec![1, 2],
+            vec![vec![v(5)]],
+        );
+        f.bindings.get_mut(v(4)).unwrap().ty = IrType::Known(merged.clone());
+        f.bindings.get_mut(v(5)).unwrap().ty = IrType::Inferred(merged);
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn opaque_words_merged_into_a_contract_value_are_that_value() {
+        let ud = KnownType::UserDefined(TypeId::new(5));
+        let mut ir = merge_of_words(ud.clone(), false);
+        TypeInferPass.run(&mut ir);
+        for word in [3, 1, 2] {
+            assert_eq!(ty_of(&ir, 0, word), IrType::Inferred(ud.clone()), "v{word}");
+        }
+    }
+
+    #[test]
+    fn a_merge_with_a_computed_arm_or_of_a_number_types_no_word() {
+        // A computed arm: the inner merge is no opaque word.
+        let mut ir = merge_of_words(KnownType::UserDefined(TypeId::new(5)), true);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 3))), None);
+        // A number's word is its encoding, not the number.
+        let mut ir = merge_of_words(KnownType::U64, false);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 1))), None);
+    }
+
+    /// `v4 = eqz(v3)` returned, `v3` a merge of `first` and a word read
+    /// from the frame (`v0`).
+    fn eqz_of_merge(first: Expr) -> HighIr {
+        use crate::marshalling::test_support::v;
+        let (b0, b1) = (BlockId::from_index(0), BlockId::from_index(1));
+        let f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                first,
+                word(v(0), 8),
+                Expr::Phi { incoming: vec![(b0, v(1)), (b1, v(2))] },
+                Expr::Unary { op: UnaryOp::Eqz, value: v(3) },
+            ],
+            vec![v(0)],
+            vec![1, 2, 4],
+            vec![vec![v(4)]],
+        );
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn words_tested_against_zero_are_the_integer_tested() {
+        use crate::marshalling::test_support::v;
+        let mut ir = eqz_of_merge(word(v(0), 0));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 3), IrType::Inferred(KnownType::I64));
+        // An arm that is no word read from memory leaves the merge alone.
+        let mut ir = eqz_of_merge(Expr::Binary { op: BinaryOp::BitOr, lhs: v(2), rhs: v(2) });
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 3))), None);
     }
 
     /// `v3 = State { count: v0, owner: v1, memo: v2 }`, the struct declared
