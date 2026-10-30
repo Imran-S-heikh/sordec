@@ -100,6 +100,7 @@ pub use marshalling::{
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
     BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideInlineDecodePass, WideReturnPass,
+    EncodeByRefPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
@@ -256,6 +257,12 @@ pub const TUPLE_RETURN_AFTER_LOOPS: &str = "tuple-return-after-loops";
 pub const DEAD_FRAME_STORE_AFTER_EVENTS: &str = "dead-frame-store-after-events";
 /// [`FrameElisionPass`] re-run after the event and muxed-address folds.
 pub const FRAME_ELISION_AFTER_EVENTS: &str = "frame-elision-after-events";
+/// [`FrameForwardPass`] re-run on the reads a by-reference encode leaves.
+pub const FRAME_FORWARD_AFTER_BY_REF: &str = "frame-forward-after-by-ref";
+/// [`DeadFrameStorePass`] re-run on the slots those forwarded reads free.
+pub const DEAD_FRAME_STORE_AFTER_BY_REF: &str = "dead-frame-store-after-by-ref";
+/// [`FrameElisionPass`] re-run on the brackets those slots held.
+pub const FRAME_ELISION_AFTER_BY_REF: &str = "frame-elision-after-by-ref";
 /// [`SymbolArgsPass`] re-run on the positions the recovered elements prove.
 pub const SYMBOL_ARGS_AFTER_VEC: &str = "symbol-args-after-vec";
 /// [`SymbolArgsPass`] re-run on the positions the settled parameter types prove.
@@ -873,6 +880,21 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
                 FRAME_ELISION_AFTER_EVENTS,
                 &[],
             )),
+            // A number SDK 27 converts through a reference: the helper is
+            // handed the address and loads it, and its small form is an
+            // attempt the out-param pass turned into an `Option`. Only here
+            // is the helper nothing but that — its own frame bracket goes in
+            // the collection just above. Each call site then reads the value
+            // itself, so the typing below sees the number its callers use
+            // rather than the encode.
+            Box::new(EncodeByRefPass),
+            // The value it reads at a call site is often the one the caller
+            // stored into its frame just before the call: forwarded, the
+            // read is that value, and the slot and bracket it leaves are
+            // collected again.
+            Box::new(pass::Rerun::new(FrameForwardPass, FRAME_FORWARD_AFTER_BY_REF, &[])),
+            Box::new(pass::Rerun::new(DeadFrameStorePass, DEAD_FRAME_STORE_AFTER_BY_REF, &[])),
+            Box::new(pass::Rerun::new(FrameElisionPass, FRAME_ELISION_AFTER_BY_REF, &[])),
             // A `Result` written into the caller's frame and converted to
             // the entrypoint's `Val` by a helper: the writer returns the
             // `Result`, ahead of the typing that carries it to the return.
