@@ -98,6 +98,24 @@
 //! Gates: any other store into the same frame forgets every slot written
 //! back to it, and so does any call or other memory write handed a
 //! pointer into that frame — the callee may write anywhere through it.
+//!
+//! ## The word an `Option` hands back
+//!
+//! An `Option`-shaped decoder that tests a small word's tag hands back the
+//! `Val` itself — `if has_tag(v, U64Small) { Some(v) } else { None }` —
+//! and the caller unpacks it: `unwrap(h(v)) >> 8`. Spelled as a shift of a
+//! `Val`, that is no Rust at all; it is the word's decode, and it becomes
+//! one (`ValDecodeSmall`), typed as the tag's number.
+//!
+//! Why it is exact: `unwrap` reads the `Some`, present only on the path
+//! where the helper's tag test passed, and that `Some` is the tested value
+//! unchanged — so the shifted word carries that tag, and the shift is the
+//! tag's own unpack: `>> 8` unsigned for `U64Small`, signed for
+//! `I64Small`, `>> 32` likewise for `U32Val` and `I32Val`.
+//!
+//! Gates: a helper of the `Option` shape whose every `Some` holds the
+//! tested parameter itself (not a decode of it) and that tests exactly one
+//! tag, one of those four; the shift is that tag's, amount and sign.
 
 use std::collections::{HashMap, HashSet};
 
@@ -169,6 +187,10 @@ enum HelperShape {
         /// The `Some` bindings in the helper's own body, typed `Option<T>`
         /// too so the helper's return agrees with its call sites.
         some_arms: Vec<ValueId>,
+        /// Every `Some` holds the checked parameter itself, not a decode of
+        /// it: the caller's own unpack is then the decode ("The word an
+        /// `Option` hands back").
+        raw: bool,
     },
 }
 
@@ -388,6 +410,7 @@ fn classify_optional(func: &HighFunction) -> Option<DecodeHelper> {
         return None;
     }
     let mut some_arms = Vec::new();
+    let mut raw = true;
     for values in &returns {
         let [value] = values.as_slice() else {
             return None;
@@ -403,6 +426,7 @@ fn classify_optional(func: &HighFunction) -> Option<DecodeHelper> {
                     if !decodes_to(func, *p, val_param, TRACE_DEPTH) {
                         return None;
                     }
+                    raw &= resolve_use(func, *p) == val_param;
                     some_arms.push(id);
                 }
                 _ => return None,
@@ -448,7 +472,7 @@ fn classify_optional(func: &HighFunction) -> Option<DecodeHelper> {
         None => payload,
     };
     Some(DecodeHelper {
-        shape: HelperShape::Optional { payload, some_arms },
+        shape: HelperShape::Optional { payload, some_arms, raw },
         val_index: *val_index,
         arity: func.params.len(),
         tags,
@@ -853,7 +877,7 @@ fn plan(
     // An `Option`-shaped decoder's own `Some` arms, typed as its call sites
     // will be.
     if let Some(helper) = helpers.get(&func.id)
-        && let HelperShape::Optional { payload: Some(payload), some_arms } = &helper.shape
+        && let HelperShape::Optional { payload: Some(payload), some_arms, .. } = &helper.shape
     {
         let ty = IrType::Inferred(KnownType::Option(Box::new(IrType::Inferred(payload.clone()))));
         for arm in some_arms {
@@ -891,6 +915,7 @@ fn plan(
             }
         }
         elisions.extend(host_decodes(func));
+        elisions.extend(payload_decodes(func, helpers));
         for el in &elisions {
             metrics.increment(el.metric, 1);
         }
@@ -1037,6 +1062,7 @@ fn plan(
     }
     elisions.extend(inline_decodes(func, guaranteed));
     elisions.extend(host_decodes(func));
+    elisions.extend(payload_decodes(func, helpers));
     for el in &elisions {
         metrics.increment(el.metric, 1);
     }
@@ -1274,6 +1300,48 @@ fn host_decodes(func: &HighFunction) -> Vec<Elision> {
                 expr: Expr::Use(value),
                 ty: Some(IrType::Known(ty)),
                 note: "decode of a host result the SDK returns already typed: the result".to_string(),
+                metric: metrics::DECODE_COLLAPSED,
+            })
+        })
+        .collect()
+}
+
+/// The unpack of the word an `Option`-shaped decoder hands back ("The word
+/// an `Option` hands back"): `unwrap(h(v)) >> 8`, where `h` tests the one
+/// tag of a small word and hands back `v` itself, is that word's decode.
+fn payload_decodes(func: &HighFunction, helpers: &HashMap<FuncId, DecodeHelper>) -> Vec<Elision> {
+    sret::emission_order(func)
+        .into_iter()
+        .filter_map(|id| {
+            let Expr::Binary { op, lhs, rhs } = &func.bindings.get(id)?.expr else { return None };
+            let shift = trace_int(func, *rhs)?;
+            let Expr::Unwrap { value, index: 0, arity: 1 } = &func.bindings.get(resolve_use(func, *lhs))?.expr else {
+                return None;
+            };
+            let Expr::Call { target, args } = &func.bindings.get(resolve_use(func, *value))?.expr else {
+                return None;
+            };
+            let helper = helpers.get(target)?;
+            if !matches!(helper.shape, HelperShape::Optional { raw: true, .. }) || args.len() != helper.arity {
+                return None;
+            }
+            // The tag's own unpack, and only it: the body's shift, with the
+            // sign the type has.
+            let ty = match (helper.tags.as_slice(), op, shift) {
+                ([val_abi::TAG_U64_SMALL], BinaryOp::ShrU, 8) => KnownType::U64,
+                ([val_abi::TAG_I64_SMALL], BinaryOp::Shr, 8) => KnownType::I64,
+                ([val_abi::TAG_U32_VAL], BinaryOp::ShrU, 32) => KnownType::U32,
+                ([val_abi::TAG_I32_VAL], BinaryOp::Shr, 32) => KnownType::I32,
+                _ => return None,
+            };
+            Some(Elision {
+                id,
+                expr: Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value: *lhs })),
+                ty: Some(IrType::Known(ty)),
+                note: format!(
+                    "the unpack of a word an `Option`-shaped decoder handed back after testing its tag ({})",
+                    tag_list(&helper.tags)
+                ),
                 metric: metrics::DECODE_COLLAPSED,
             })
         })
@@ -1943,7 +2011,7 @@ pub(crate) mod tests {
         assert_eq!(helper.arity, 2);
         assert_eq!(helper.tags, vec![val_abi::TAG_ADDRESS_OBJECT]);
         assert!(
-            matches!(&helper.shape, HelperShape::Optional { payload: Some(KnownType::Address), some_arms } if some_arms == &vec![v(4)]),
+            matches!(&helper.shape, HelperShape::Optional { payload: Some(KnownType::Address), some_arms, .. } if some_arms == &vec![v(4)]),
             "{:?}",
             helper.shape
         );
@@ -1988,6 +2056,71 @@ pub(crate) mod tests {
             "{:?}",
             el.ty
         );
+    }
+
+    /// A caller unpacking the word a `U64Small` option helper hands back:
+    /// `v4 = unwrap(h(v0, v1)) >>u 8`; `op` and `shift` vary the unpack.
+    fn word_unpack_caller(op: BinaryOp, shift: i64) -> HighFunction {
+        let mut caller = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0 scratch
+                Expr::Phi { incoming: vec![] }, // v1 some Val
+                Expr::Call { target: FuncId::from_index(0), args: vec![v(0), v(1)] }, // v2
+                Expr::Unwrap { value: v(2), index: 0, arity: 1 },                      // v3
+                Expr::Literal(Literal::I64(shift)),                                    // v4
+                Expr::Binary { op, lhs: v(3), rhs: v(4) },                             // v5
+            ],
+            vec![v(0), v(1)],
+            vec![2, 3, 4, 5],
+        );
+        caller.id = FuncId::from_index(1);
+        caller
+    }
+
+    fn u64_option_helper() -> HighFunction {
+        let mut helper = address_option_helper();
+        helper.bindings.get_mut(v(2)).unwrap().expr = Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+            value: v(1),
+            tag: val_abi::TAG_U64_SMALL,
+            negated: true,
+        }));
+        helper
+    }
+
+    #[test]
+    fn the_unpack_of_a_word_an_option_helper_hands_back_is_its_decode() {
+        let helpers = HashMap::from([(FuncId::from_index(0), classify(&u64_option_helper()).unwrap())]);
+        let (elisions, _) = plan(&word_unpack_caller(BinaryOp::ShrU, 8), &helpers, &HashMap::new());
+        let el = elisions.iter().find(|e| e.id == v(5)).expect("the shift is the decode");
+        assert!(
+            matches!(&el.expr, Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })) if *value == v(3)),
+            "{:?}",
+            el.expr
+        );
+        assert_eq!(el.ty, Some(IrType::Known(KnownType::U64)));
+    }
+
+    #[test]
+    fn a_shift_that_is_not_the_tags_unpack_stays() {
+        let helpers = HashMap::from([(FuncId::from_index(0), classify(&u64_option_helper()).unwrap())]);
+        // Signed, or by another amount: not `U64Small`'s unpack.
+        for (op, shift) in [(BinaryOp::Shr, 8), (BinaryOp::ShrU, 32)] {
+            let (elisions, _) = plan(&word_unpack_caller(op, shift), &helpers, &HashMap::new());
+            assert!(elisions.iter().all(|e| e.id != v(5)), "{op:?} {shift}");
+        }
+        // A helper whose `Some` already holds a decode of the value: the
+        // caller's shift is not the word's unpack.
+        let mut decoded = u64_option_helper();
+        decoded.bindings.push(sordec_ir::Binding::new(
+            v(6),
+            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value: v(1) })),
+            sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+        ));
+        decoded.bindings.get_mut(v(4)).unwrap().expr = Expr::Optional { payload: Some(vec![v(6)]) };
+        let helpers = HashMap::from([(FuncId::from_index(0), classify(&decoded).unwrap())]);
+        let (elisions, _) = plan(&word_unpack_caller(BinaryOp::ShrU, 8), &helpers, &HashMap::new());
+        assert!(elisions.iter().all(|e| e.id != v(5)));
     }
 
     #[test]
