@@ -429,6 +429,9 @@ pub const INLINE_WRAPPER_CALLS: &str = "inline_wrapper_calls";
 pub const MARSHALLING_DEAD_FRAME_STORES: &str = "marshalling_dead_frame_stores";
 /// Branches on a constant condition replaced by the arm they take.
 pub const REFINE_CONST_BRANCHES_FOLDED: &str = "refine_const_branches_folded";
+/// Branches dropped because both ways reach the same exit through pure,
+/// total bindings.
+pub const REFINE_SAME_EXIT_BRANCHES: &str = "refine_same_exit_branches";
 /// Loops run from a constant start to their exit and replaced by the
 /// values they exit with.
 pub const REFINE_CONST_LOOPS_FOLDED: &str = "refine_const_loops_folded";
@@ -1045,6 +1048,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         INLINE_WRAPPER_CALLS,
         MARSHALLING_DEAD_FRAME_STORES,
         REFINE_CONST_BRANCHES_FOLDED,
+        REFINE_SAME_EXIT_BRANCHES,
         REFINE_CONST_LOOPS_FOLDED,
         MARSHALLING_UDT_DECODES_COLLAPSED,
         MARSHALLING_UDT_FIELDS_RECOVERED,

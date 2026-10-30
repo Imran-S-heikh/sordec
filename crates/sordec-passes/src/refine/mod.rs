@@ -44,6 +44,7 @@ mod overflow_guard;
 pub mod panic_recover;
 mod polarity;
 mod scope_fallthrough;
+mod same_exit;
 mod scope_if_else;
 mod select_return;
 mod switch_dedup;
@@ -69,6 +70,7 @@ pub use overflow_guard::OverflowGuardElisionPass;
 pub use panic_recover::PanicRecoverPass;
 pub use polarity::PolarityPass;
 pub use scope_fallthrough::ScopeFallthroughPass;
+pub use same_exit::SameExitPass;
 pub use scope_if_else::ScopeIfElsePass;
 pub use select_return::SelectReturnPass;
 
@@ -102,6 +104,8 @@ pub(crate) use overflow_guard::PASS_NAME as OVERFLOW_GUARD_PASS_NAME;
 pub(crate) use scope_fallthrough::PASS_NAME as SCOPE_FALLTHROUGH_PASS_NAME;
 #[cfg(test)]
 pub(crate) use scope_if_else::PASS_NAME as SCOPE_IF_ELSE_PASS_NAME;
+#[cfg(test)]
+pub(crate) use same_exit::PASS_NAME as SAME_EXIT_PASS_NAME;
 pub use switch_dedup::SwitchDedupPass;
 pub use trap_call::TrapCallInlinePass;
 pub use trivial_phi::TrivialPhiPass;
