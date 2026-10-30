@@ -601,6 +601,9 @@ pub const REFINE_WIDE_SELECTS: &str = "refine_wide_selects";
 pub const MARSHALLING_UDT_STRUCTS_SYNTHESIZED: &str = "marshalling_udt_structs_synthesized";
 /// Two-form scalar unpacks folded into the value they unpack.
 pub const MARSHALLING_SCALAR_DECODES: &str = "marshalling_scalar_decodes";
+/// Calls to a helper encoding the value behind a pointer, read at the
+/// call site as that value.
+pub const MARSHALLING_ENCODE_BY_REF_COLLAPSED: &str = "marshalling_encode_by_ref_collapsed";
 /// Argument vectors of fully-resolved cross-contract calls, retired.
 pub const MARSHALLING_CLIENT_ARG_VECS: &str = "marshalling_client_arg_vecs";
 /// Struct-field decodes folded into the field's declared type.
@@ -1083,6 +1086,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_FIELD_TYPES,
         MARSHALLING_CLIENT_ARG_VECS,
         MARSHALLING_SCALAR_DECODES,
+        MARSHALLING_ENCODE_BY_REF_COLLAPSED,
         MARSHALLING_UDT_STRUCTS_SYNTHESIZED,
         REFINE_WIDE_SELECTS,
         MARSHALLING_SPEC_PARAMS,
