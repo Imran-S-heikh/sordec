@@ -356,11 +356,21 @@ fn plan(func: &HighFunction, encoders: &EncoderTable, enums: &[EnumDef]) -> Vec<
                 continue;
             }
             // A path returning a value already of the declared type is the
-            // payload as it stands.
-            if matches!(
-                func.bindings.get(*encoded).map(|b| &b.ty),
-                Some(IrType::Known(k) | IrType::Inferred(k)) if *k == declared
-            ) {
+            // payload as it stands. Not a constant: what an entrypoint
+            // returns is a `Val`, so a constant there is the encoding's
+            // bits, typed `i64` only because the opcode was `i64.const`. One
+            // [`encoded_constant`] could not decode is no value of the
+            // declared type at all, and the return is left alone.
+            let raw_word = matches!(
+                func.bindings.get(resolve_use(func, *encoded)).map(|b| &b.expr),
+                Some(Expr::Literal(Literal::I64(_) | Literal::U64(_)))
+            );
+            if !raw_word
+                && matches!(
+                    func.bindings.get(*encoded).map(|b| &b.ty),
+                    Some(IrType::Known(k) | IrType::Inferred(k)) if *k == declared
+                )
+            {
                 continue;
             }
             // The encode outlined into a helper the entrypoints share: the
@@ -560,6 +570,11 @@ pub(super) fn encoded_constant(func: &HighFunction, value: ValueId, declared: &K
         }
         KnownType::Bool if bits == u64::from(crate::val_abi::TAG_FALSE) => Some(Literal::Bool(false)),
         KnownType::Bool if bits == u64::from(crate::val_abi::TAG_TRUE) => Some(Literal::Bool(true)),
+        // The 64-bit small forms keep the value in the 56-bit body: signed
+        // for an `i64` (an arithmetic shift restores the sign), unsigned
+        // for a `u64`.
+        KnownType::I64 if tag == crate::val_abi::TAG_I64_SMALL => Some(Literal::I64((bits as i64) >> 8)),
+        KnownType::U64 if tag == crate::val_abi::TAG_U64_SMALL => Some(Literal::U64(bits >> 8)),
         _ => None,
     }
 }
@@ -906,5 +921,27 @@ mod tests {
         assert!(!first.is_empty());
         apply_elisions(&mut func, PASS_NAME, first);
         assert!(plan(&func, &EncoderTable::default(), &[]).is_empty(), "idempotent: the encodes are gone");
+    }
+
+    /// A constant an entrypoint returns is the `Val`'s bits: `5i64` there is
+    /// `5 << 8 | I64Small`, and the value is `5`, not `1287`.
+    #[test]
+    fn a_returned_64_bit_small_constant_is_its_body() {
+        let small = |n: i64, tag: u8| ((n << 8) as u64) | u64::from(tag);
+        let f = crate::marshalling::test_support::func_with(
+            vec![
+                Expr::Literal(Literal::I64(small(5, crate::val_abi::TAG_I64_SMALL) as i64)),
+                Expr::Literal(Literal::I64(small(-3, crate::val_abi::TAG_I64_SMALL) as i64)),
+                Expr::Literal(Literal::I64(small(7, crate::val_abi::TAG_U64_SMALL) as i64)),
+            ],
+            vec![],
+            vec![0, 1, 2],
+        );
+        let v = crate::marshalling::test_support::v;
+        assert_eq!(encoded_constant(&f, v(0), &KnownType::I64), Some(Literal::I64(5)));
+        assert_eq!(encoded_constant(&f, v(1), &KnownType::I64), Some(Literal::I64(-3)));
+        assert_eq!(encoded_constant(&f, v(2), &KnownType::U64), Some(Literal::U64(7)));
+        // A word with another tag is no `i64`.
+        assert_eq!(encoded_constant(&f, v(2), &KnownType::I64), None);
     }
 }
