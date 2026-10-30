@@ -86,14 +86,14 @@ pub use arith::{I128BuiltinPass, WideFoldPass};
 pub use attribution::SdkAttributionPass;
 pub use recognizers::symbol_encoder::SymbolEncoderPass;
 pub use interproc::{
-    ConstReturnPass, SpecializePass, StructArgPass, SymbolArgsPass, WideParamPass,
+    ConstReturnPass, DeadParamPass, SpecializePass, StructArgPass, SymbolArgsPass, WideParamPass,
     WideReturnPromotePass,
     WrapperInlinePass,
 };
 pub use lift::{lift_with_waffle, LiftOutput};
 pub use lowering::{LiftToHigh, LoweringError, LoweringStep};
 pub use memory::{
-    ArgPromotionPass, SlotPromotionPass, SretReturnPass, StoreForwardPass, UnrollFillLoopsPass,
+    ArgPromotionPass, SlotPromotionPass, SretReturnPass, StoreForwardPass, TrapTailPass, UnrollFillLoopsPass,
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
@@ -146,6 +146,11 @@ use sordec_ir::{HighIr, LiftedIr};
 ///   fixpoint. Promotion depends on the pair *jointly*: it inserts a
 ///   parameter in every reachable block and neither cleanup alone removes
 ///   the surplus.
+/// - [`TrapTailPass`] precedes [`ArgPromotionPass`]: the panic-message
+///   formatting it removes hands the formatter a frame pointer, an escape
+///   neither of the ABI passes can take away, and once the call is gone
+///   the frame it kept is theirs (and [`SlotPromotionPass`]'s) to work on
+///   within the same iteration.
 /// - [`ArgPromotionPass`] and [`SretReturnPass`] both precede
 ///   [`SlotPromotionPass`] — LLVM's SROA-then-mem2reg order. Escape is
 ///   mem2reg's precondition, so the ABI changes have to happen before the
@@ -187,12 +192,16 @@ pub fn default_lifted_pipeline() -> Pipeline<LiftedIr> {
             // whole frame decline promotion, and the dead body it leaves is
             // the sweep's to collect on the next round.
             Box::new(UnrollFillLoopsPass),
+            // The panic-message formatting before a trap goes first: the
+            // frame pointer it hands the formatter is an escape nothing
+            // else here can remove, and the trap discards what it wrote.
+            Box::new(TrapTailPass),
             Box::new(ArgPromotionPass),
             Box::new(SretReturnPass),
             Box::new(StoreForwardPass),
             Box::new(SlotPromotionPass),
         ],
-        vec![0..11],
+        vec![0..12],
     )
 }
 
@@ -263,6 +272,12 @@ pub const FRAME_FORWARD_AFTER_BY_REF: &str = "frame-forward-after-by-ref";
 pub const DEAD_FRAME_STORE_AFTER_BY_REF: &str = "dead-frame-store-after-by-ref";
 /// [`FrameElisionPass`] re-run on the brackets those slots held.
 pub const FRAME_ELISION_AFTER_BY_REF: &str = "frame-elision-after-by-ref";
+/// [`FrameForwardPass`] re-run once unread parameters are gone.
+pub const FRAME_FORWARD_AFTER_DEAD_PARAMS: &str = "frame-forward-after-dead-params";
+/// [`DeadFrameStorePass`] re-run once unread parameters are gone.
+pub const DEAD_FRAME_STORE_AFTER_DEAD_PARAMS: &str = "dead-frame-store-after-dead-params";
+/// [`FrameElisionPass`] re-run once unread parameters are gone.
+pub const FRAME_ELISION_AFTER_DEAD_PARAMS: &str = "frame-elision-after-dead-params";
 /// [`SymbolArgsPass`] re-run on the positions the recovered elements prove.
 pub const SYMBOL_ARGS_AFTER_VEC: &str = "symbol-args-after-vec";
 /// [`SymbolArgsPass`] re-run on the positions the settled parameter types prove.
@@ -944,6 +959,15 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // And a read nothing converted takes the type every write under
             // its key stores.
             Box::new(StorageValueTypePass),
+            // A helper parameter nothing reads — above all the `&Env`
+            // pointer into the caller's frame — goes with its arguments,
+            // after every recognizer that matches a helper by its parameter
+            // list. A frame it was the last escape of is private again:
+            // forward its reads, drop its dead stores, take its bracket.
+            Box::new(DeadParamPass),
+            Box::new(pass::Rerun::new(FrameForwardPass, FRAME_FORWARD_AFTER_DEAD_PARAMS, &[])),
+            Box::new(pass::Rerun::new(DeadFrameStorePass, DEAD_FRAME_STORE_AFTER_DEAD_PARAMS, &[])),
+            Box::new(pass::Rerun::new(FrameElisionPass, FRAME_ELISION_AFTER_DEAD_PARAMS, &[])),
             // Last of all: a storage probe and read no `Option` fold claimed
             // are spelled as the `has` and `get(..).unwrap()` they are. After
             // the folds, which must have had every chance, and after the

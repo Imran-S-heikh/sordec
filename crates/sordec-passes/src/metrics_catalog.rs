@@ -638,6 +638,9 @@ pub const MARSHALLING_ENUM_DISCRIMINANTS: &str = "marshalling_enum_discriminants
 pub const MARSHALLING_ENUM_ENCODES: &str = "marshalling_enum_encodes";
 /// Helpers whose two-register wide parameter was promoted to the value.
 pub const INTERPROC_WIDE_PARAMS: &str = "interproc_wide_params";
+/// Helper parameters nothing read, dropped with their arguments — most of
+/// them the `&Env` pointer into a caller's frame.
+pub const INTERPROC_DEAD_PARAMS: &str = "interproc_dead_params";
 /// 128-bit sums and differences recovered from their limbs.
 pub const REFINE_WIDE_ARITH: &str = "refine_wide_arith";
 /// Half-merges given a merge of the whole value.
@@ -735,6 +738,10 @@ pub const MEMORY_LOADS_HOISTED: &str = "memory_loads_hoisted";
 /// the callee could write memory before one of their loads, so a load
 /// hoisted to the call site might read a different value.
 pub const MEMORY_ARGS_REFUSED_WRITE_FIRST: &str = "memory_args_refused_write_first";
+
+/// Calls and memory writes removed from just before a trap, where nothing
+/// can observe them: the panic-message formatting rustc emits.
+pub const MEMORY_TRAP_TAIL_REMOVED: &str = "memory_trap_tail_removed";
 
 /// Loads bound to a preceding store's value within one block, without any
 /// escape analysis. Distinct from `MEMORY_LOADS_FORWARDED`, which counts
@@ -1102,6 +1109,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         INTERPROC_CONST_RETURNS,
         INTERPROC_WIDE_RETURNS,
         INTERPROC_WIDE_PARAMS,
+        INTERPROC_DEAD_PARAMS,
         INTERPROC_STRUCT_ARGS,
         REFINE_WIDE_ZERO_TESTS,
         REFINE_WIDE_COMPARES,
@@ -1132,6 +1140,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MEMORY_ARGS_PROMOTED,
         MEMORY_LOADS_HOISTED,
         MEMORY_ARGS_REFUSED_WRITE_FIRST,
+        MEMORY_TRAP_TAIL_REMOVED,
         MEMORY_LOADS_FORWARDED_LOCALLY,
         MEMORY_FILL_LOOPS_UNROLLED,
         MEMORY_SRET_CONVERTED,

@@ -164,14 +164,20 @@ impl CallIndex {
             .map_or(&[], Vec::as_slice)
     }
 
-    /// Whether `func`'s direct call sites are all of its callers, so its
-    /// signature may change: no indirect call in the module, or one that
-    /// cannot reach `func` because no element segment declares it.
     /// Whether the module contains any indirect call at all.
     pub(crate) fn has_indirect_calls(&self) -> bool {
         self.has_indirect
     }
 
+    /// The local functions an indirect call can reach — those an element
+    /// segment declares — or `None` when the segments could not be read.
+    pub(crate) fn table_functions(&self) -> Option<&HashSet<FuncId>> {
+        self.table.as_ref()
+    }
+
+    /// Whether `func`'s direct call sites are all of its callers, so its
+    /// signature may change: no indirect call in the module, or one that
+    /// cannot reach `func` because no element segment declares it.
     pub(crate) fn caller_set_complete(&self, func: FuncId) -> bool {
         !self.has_indirect || self.table.as_ref().is_some_and(|t| !t.contains(&func))
     }
