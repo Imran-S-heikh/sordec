@@ -122,6 +122,8 @@ const M_ORDERED: &str = "val_packed_compare_ordered";
 const M_MASKED_VALUE: &str = "val_packed_compare_masked_value";
 /// Shape C — a `Bool` Val narrowed to a machine bool by `== 1`.
 const M_BOOL: &str = "val_packed_compare_bool";
+/// Shape H — `p >>u 32`, the payload taken out of its packed word.
+const M_SHIFT: &str = "val_packed_compare_shift";
 /// Shape F — `p + (k << 32)`, the packed form of `payload + k`.
 const M_ADD: &str = "val_packed_compare_add";
 /// Shape G — a mask with no tag bits, read only by a zero test.
@@ -343,6 +345,7 @@ fn try_oriented(
         BinaryOp::BitAnd => try_masked_value(func, cmp, value, const_id, bits)
             .or_else(|| try_masked_zero_test(func, uses, cmp, value, const_id, bits)),
         BinaryOp::Add => try_packed_add(func, uses, cmp, value, const_id, bits),
+        BinaryOp::ShrU if side == ConstSide::Rhs => try_payload_shift(func, cmp, value, bits),
         _ => None,
     }
 }
@@ -446,6 +449,33 @@ fn try_masked_value(
 /// spec declares `-> u32`: there the return already reads a word of the
 /// declared type as its payload. A reader wanting the word's bits would be
 /// broken by the retype.
+fn try_payload_shift(func: &HighFunction, shr: ValueId, value: ValueId, bits: u64) -> Option<Site> {
+    // Shape H — `p >>u 32`, which is the payload.
+    //
+    // Exact: a `U32Val` is `payload << 32 | tag`, the tag in the low 32
+    // bits; a logical shift right by exactly 32 drops the tag and leaves
+    // the payload, for every payload. Left as written, the shift reads the
+    // already-decoded value — `len >> 32`, which is `0` (or a shift-overflow
+    // panic) where the program had the length. rustc writes it when the SDK
+    // stores a length it holds as a `U32Val` back as a number. Gated on the
+    // unsigned shift (an arithmetic one sign-extends a payload of 2³¹ or
+    // more) and a count of exactly 32.
+    if bits != 32 || u32val_producer(func, value)? != KnownType::U32 {
+        return None;
+    }
+    Some(Site {
+        metric: M_SHIFT,
+        rewrites: vec![Rewrite {
+            id: shr,
+            expr: Expr::Use(value),
+            ty: Some(IrType::Known(KnownType::U32)),
+            source: ProvenanceSource::SdkPattern,
+            note: "val-packed-compare: `>>u 32` on a packed U32Val is its payload".to_string(),
+            metric: M_SHIFT,
+        }],
+    })
+}
+
 fn try_packed_add(
     func: &HighFunction,
     uses: &HighUseIndex,
@@ -1428,6 +1458,32 @@ mod tests {
 
     /// `>= 1 << 32` is `payload >= 1`, which is `!= 0` — not `== 0`, the
     /// spelling `< 1` normalizes to.
+    /// The SDK storing a length back as a number: `len_word >>u 32`.
+    #[test]
+    fn a_packed_length_shifted_down_by_32_is_the_length() {
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            bytes_len(v(0)),                                              // v1
+            Expr::Literal(Literal::I64(32)),                              // v2
+            Expr::Binary { op: BinaryOp::ShrU, lhs: v(1), rhs: v(2) },   // v3
+        ]);
+        assert_eq!(run(&mut func).get(M_SHIFT), Some(1));
+        assert!(matches!(func.bindings.get(v(3)).unwrap().expr, Expr::Use(p) if p == v(1)));
+    }
+
+    #[test]
+    fn a_signed_or_other_width_shift_of_a_packed_length_is_left_alone() {
+        for (op, count) in [(BinaryOp::Shr, 32), (BinaryOp::ShrU, 31)] {
+            let mut func = func_with(vec![
+                Expr::Phi { incoming: vec![] },
+                bytes_len(v(0)),
+                Expr::Literal(Literal::I64(count)),
+                Expr::Binary { op, lhs: v(1), rhs: v(2) },
+            ]);
+            assert_eq!(run(&mut func).get(M_SHIFT), None, "{op:?} by {count}");
+        }
+    }
+
     #[test]
     fn a_ge_one_boundary_normalizes_to_not_equal_zero() {
         let mut func = func_with(vec![
