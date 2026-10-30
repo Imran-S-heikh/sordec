@@ -429,6 +429,9 @@ pub const INLINE_WRAPPER_CALLS: &str = "inline_wrapper_calls";
 pub const MARSHALLING_DEAD_FRAME_STORES: &str = "marshalling_dead_frame_stores";
 /// Branches on a constant condition replaced by the arm they take.
 pub const REFINE_CONST_BRANCHES_FOLDED: &str = "refine_const_branches_folded";
+/// Loops run from a constant start to their exit and replaced by the
+/// values they exit with.
+pub const REFINE_CONST_LOOPS_FOLDED: &str = "refine_const_loops_folded";
 /// `#[contracttype]` struct unpacks recognised from their key table and
 /// elided, the map value typed as the struct.
 pub const MARSHALLING_UDT_DECODES_COLLAPSED: &str = "marshalling_udt_decodes_collapsed";
@@ -1017,6 +1020,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         INLINE_WRAPPER_CALLS,
         MARSHALLING_DEAD_FRAME_STORES,
         REFINE_CONST_BRANCHES_FOLDED,
+        REFINE_CONST_LOOPS_FOLDED,
         MARSHALLING_UDT_DECODES_COLLAPSED,
         MARSHALLING_UDT_FIELDS_RECOVERED,
         MARSHALLING_UDT_HELPERS_COLLAPSED,

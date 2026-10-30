@@ -109,7 +109,7 @@ pub use recognizers::{
     StoragePass, TtlPass, UnrecognizedScanPass, ValEncodingPass, ValPackedComparePass,
 };
 pub use refine::{
-    AndMergePass, ConstBranchFoldPass, ConstLoadPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
+    AndMergePass, ConstBranchFoldPass, ConstLoadPass, ConstLoopFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
     OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass, SelectReturnPass,
     SwitchDedupPass,
     TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WideArithPass, WideComparePass, WidePhiPass, WideSelectPass, WideZeroPass, WidthFoldPass,
@@ -250,6 +250,8 @@ const OPTION_DEFAULT_COUNTERS: &[&str] = &[
 pub const DEAD_FRAME_STORE_AFTER_VEC: &str = "dead-frame-store-after-vec";
 /// [`FrameElisionPass`] re-run after the `Vec` elements are recovered.
 pub const FRAME_ELISION_AFTER_VEC: &str = "frame-elision-after-vec";
+/// [`TupleReturnPass`] re-run after constant loops are folded.
+pub const TUPLE_RETURN_AFTER_LOOPS: &str = "tuple-return-after-loops";
 /// [`DeadFrameStorePass`] re-run after the event and muxed-address folds.
 pub const DEAD_FRAME_STORE_AFTER_EVENTS: &str = "dead-frame-store-after-events";
 /// [`FrameElisionPass`] re-run after the event and muxed-address folds.
@@ -793,6 +795,22 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
                 FrameElisionPass,
                 FRAME_ELISION_AFTER_VEC,
                 &[],
+            )),
+            // A loop that starts from constants and does nothing but compute,
+            // run to its exit: an inlined `Symbol::new` is the symbol it
+            // builds. Here, after the buffer collection: a vec's buffer
+            // stores sit inside such a loop, and only once they are retired
+            // does the loop do nothing but compute.
+            Box::new(ConstLoopFoldPass),
+            // And the returned vecs whose first element only that fold made a
+            // constant symbol.
+            Box::new(pass::Rerun::new(
+                TupleReturnPass,
+                TUPLE_RETURN_AFTER_LOOPS,
+                &[
+                    metrics_catalog::MARSHALLING_TUPLE_RETURNS_RECOVERED,
+                    metrics_catalog::MARSHALLING_VARIANT_RETURNS_RECOVERED,
+                ],
             )),
             // A packed symbol a helper stores straight into the vector it
             // builds, as an event helper does with the event's name. The
