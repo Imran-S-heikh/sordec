@@ -1049,7 +1049,9 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                         .and_then(|ty| unsuffixed_against(ctx, *v, ty))
                         .or_else(|| want.as_ref().and_then(|ty| val_coerced(ctx, *v, ty)))
                         .or_else(|| {
-                            want.as_ref().filter(|_| takes_val_bits(ctx, *target, i)).and_then(|ty| val_bits(ctx, *v, ty))
+                            want.as_ref().filter(|_| takes_val_bits(ctx, *target, i)).and_then(|ty| {
+                                val_bits(ctx, *v, ty).or_else(|| object_bits(ctx, *v, ty))
+                            })
                         })
                         .or_else(|| want.as_ref().and_then(|ty| bytes_widened(ctx, *v, ty)))
                         .or_else(|| want.as_ref().and_then(|ty| sign_cast(ctx, *v, ty)))
@@ -1310,6 +1312,51 @@ pub(crate) fn val_bits(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) ->
     }
     let x = ctx.value_ref(v);
     Some(if signed { parse_quote!((#x.get_payload() as i64)) } else { parse_quote!(#x.get_payload()) })
+}
+
+/// A host object handed to a helper parameter that works on its word: the
+/// object's `Val` bits.
+///
+/// The same move as [`val_bits`], one step earlier. A `U256`, a `Bytes`,
+/// an `Address` is one `Val` on the wire, and the helper receives exactly
+/// that word: `Fr::from(U256)` outlined, which tests the word's tag and
+/// compares its small payload. `to_val()` is the SDK handing out the word
+/// the object already is, and `get_payload` its bits — no conversion, so
+/// the helper sees what the wasm passed it. Only at a parameter whose own
+/// body tests the tag of it or unpacks it ([`takes_val_bits`]); a
+/// parameter typed as a number for any other reason is a disagreement, and
+/// stays one.
+fn object_bits(ctx: &FnCtx, v: sordec_common::ValueId, want: &IrType) -> Option<syn::Expr> {
+    let signed = match want {
+        IrType::Known(KnownType::I64) | IrType::Inferred(KnownType::I64) => true,
+        IrType::Known(KnownType::U64) | IrType::Inferred(KnownType::U64) => false,
+        _ => return None,
+    };
+    let object = |k: &KnownType| {
+        matches!(
+            k,
+            KnownType::Address
+                | KnownType::MuxedAddress
+                | KnownType::Symbol
+                | KnownType::String
+                | KnownType::Bytes
+                | KnownType::BytesN(_)
+                | KnownType::Vec(_)
+                | KnownType::Map(_, _)
+                | KnownType::U256
+                | KnownType::I256
+        )
+    };
+    let at = ctx.fold_target(v);
+    if !matches!(ctx.func.bindings.get(at).map(|b| &b.ty), Some(IrType::Known(k) | IrType::Inferred(k)) if object(k)) {
+        return None;
+    }
+    let x = ctx.value_ref(v);
+    Some(if signed {
+        parse_quote!((#x.to_val().get_payload() as i64))
+    } else {
+        parse_quote!(#x.to_val().get_payload())
+    })
 }
 
 /// Whether `v` prints as a `Val`: typed one, or a plain copy of one (a copy
