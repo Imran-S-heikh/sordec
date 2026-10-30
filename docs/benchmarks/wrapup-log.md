@@ -488,3 +488,22 @@ encodes; a returned merge typed by the declared number before a `0` arm's suffix
 a struct named by an `Option<S>` return; `Result<Option<T>, E>` returns as
 `Ok(Some(..))`/`Ok(None)`; an `Option` parameter returned where it was tested present.
 associated_type_chained compiles; udt 7 → 2. Only those two changed; scores as before.
+
+## 2026-10-30 — commit f3b6fc5 (a byte read back as a word is not the stored value)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 23/25 | 9 | 3,883 |
+| Stellar examples, multi-contract | 13 | 12/13 | 6 | 4,229 |
+| third-party | 2 | 1/2 | 11 | 765 |
+| SDK 26 test contracts | 39 | 35/39 | 7 | 1,404 |
+
+Errors 42 → 33. One correctness fix: a one- or two-byte frame load was bound to
+the value stored there even when it reads that value back into a wider word,
+losing the truncation — a wrong value. It is now forwarded only when the value
+provably reads back unchanged, and is otherwise a typed load (one more honest gap
+in each of privacy_pools and fuzzing). Also: a flag merged from `false` and a
+comparison is a `bool`, and the code after a scope nothing can leave is dropped.
+privacy_pools 13 → 6, fuzzing 6 → 4. Scores unchanged: corpus bands pass, held-out
+mean 0.7851.
