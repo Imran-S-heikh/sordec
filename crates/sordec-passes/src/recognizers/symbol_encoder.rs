@@ -53,6 +53,25 @@
 //! outside the alphabet would make the host reject the string, so that
 //! is where the pass declines.
 //!
+//! # A length the compiler baked into the helper
+//!
+//! When every call site passes the same length, the compiler propagates it
+//! into the helper and drops the parameter: the helper takes only the
+//! pointer, the loop runs to the constant, and the host fallback is handed
+//! the constant. Four-letter variant names (`VarA`, `VarB`, `VarC`) build
+//! exactly this. The call site then carries no length, so the length is
+//! read from the helper itself — from the fallback's own host call,
+//! `symbol_new_from_linear_memory(U32Val(ptr), U32Val(n))`, whose pointer
+//! is the helper's one parameter and whose length is a constant word read
+//! through its `U32Val` decode. That call builds the symbol from the same
+//! slice the fast path packs, so `n` is the string's length.
+//!
+//! Gates, beyond the constant set: the helper takes exactly one parameter;
+//! one such fallback names it, with one constant length (two disagreeing
+//! fallbacks decline); and the fast path's loop bound — an equality test
+//! against the literal `n` — is in the body as a second witness. Without
+//! all three the call site is left alone, as before.
+//!
 //! The result is self-checking in a way most recognizers are not: the
 //! folded strings have to be readable identifiers. On token-v23 they come
 //! out as `Balance`, `State`, `Admin`, `Allowance` — that contract's
@@ -63,7 +82,7 @@ use sordec_common::{
     Diagnostic, FuncId, IrId, LiftDiagnosticCode, Location, Provenance, ProvenanceSource, ValueId,
 };
 use sordec_ir::{
-    Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MemoryImage, SemanticOp,
+    BinaryOp, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MemoryImage, SemanticOp,
 };
 
 use crate::dataflow::trace_int;
@@ -111,11 +130,13 @@ impl Pass<HighIr> for SymbolEncoderPass {
 
         // Which functions are the encoder. Computed once: the scan is over
         // every binding of every function, and call sites are everywhere.
-        let encoders: Vec<FuncId> = ir
+        // Each with the length the compiler baked into it, when it takes
+        // only the pointer.
+        let encoders: Vec<(FuncId, Option<u32>)> = ir
             .functions
             .iter()
             .filter(|f| is_symbol_encoder(f))
-            .map(|f| f.id)
+            .map(|f| (f.id, baked_length(f)))
             .collect();
 
         if encoders.is_empty() {
@@ -132,16 +153,20 @@ impl Pass<HighIr> for SymbolEncoderPass {
                 let Expr::Call { target, args } = &binding.expr else {
                     continue;
                 };
-                if !encoders.contains(target) {
+                let Some(&(_, baked)) = encoders.iter().find(|(f, _)| f == target) else {
                     continue;
-                }
-                match resolve_call(func, &ir.memory, args) {
+                };
+                match resolve_call(func, &ir.memory, args, baked) {
                     Some(text) => folds.push(Fold {
                         func: func.id,
                         call: id,
                         projections: projections_of(func, id),
                         lm_pos: args[0],
-                        len: args[1],
+                        // `resolve_call` read the length from one or the other.
+                        len: match (args.get(1), baked) {
+                            (Some(len), _) => Ok(*len),
+                            (None, n) => Err(n.unwrap_or_default()),
+                        },
                         text,
                     }),
                     None => declined += 1,
@@ -152,6 +177,15 @@ impl Pass<HighIr> for SymbolEncoderPass {
         for fold in folds {
             let Some(func) = ir.function_mut(fold.func) else {
                 continue;
+            };
+            // A baked length has no operand at the call site; the folded op
+            // records it as a literal planted just before the call.
+            let len = match fold.len {
+                Ok(len) => len,
+                Err(n) => match plant_length(func, fold.call, n) {
+                    Some(len) => len,
+                    None => continue,
+                },
             };
 
             // The encoder returns `(status, value)`: the fast path cannot
@@ -184,7 +218,7 @@ impl Pass<HighIr> for SymbolEncoderPass {
                     // fine and every consumer downstream went blind.
                     _ => Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew {
                         lm_pos: fold.lm_pos,
-                        len: fold.len,
+                        len,
                         resolved: Some(fold.text.clone()),
                     })),
                 };
@@ -240,10 +274,80 @@ struct Fold {
     /// The `(binding, component index)` pairs reading this call's tuple.
     projections: Vec<(ValueId, u32)>,
     /// The call's rodata pointer and length, preserved so the folded
-    /// `SymbolNew` still records where its text came from.
+    /// `SymbolNew` still records where its text came from. A length the
+    /// helper baked in has no operand: `Err(n)`, planted at the fold.
     lm_pos: ValueId,
-    len: ValueId,
+    len: Result<ValueId, u32>,
     text: String,
+}
+
+/// Schedule the literal `n` just before `call`, for a folded `SymbolNew`
+/// whose length the helper baked in. `None` when the call is not scheduled.
+fn plant_length(func: &mut HighFunction, call: ValueId, n: u32) -> Option<ValueId> {
+    let block = crate::dataflow::block_containing(func, call)?;
+    let id = ValueId::from_index(func.bindings.len() as u32);
+    func.bindings.push(sordec_ir::Binding::new(
+        id,
+        IrType::Known(KnownType::U32),
+        Expr::Literal(Literal::U32(n)),
+        Provenance::new(
+            PASS_NAME,
+            ProvenanceSource::SdkPattern,
+            "the length the small-symbol encoder's host fallback is handed",
+        ),
+    ));
+    let block = func.blocks.get_mut(block)?;
+    let at = block.bindings.iter().position(|b| *b == call)?;
+    block.bindings.insert(at, id);
+    Some(id)
+}
+
+/// The string length the compiler baked into a one-parameter encoder: the
+/// constant its host fallback is handed beside that parameter, confirmed by
+/// the fast path's loop bound. `None` for an encoder that takes the length
+/// as an argument, or whose body does not say it in both places.
+fn baked_length(func: &HighFunction) -> Option<u32> {
+    let [ptr] = func.params.as_slice() else { return None };
+    let mut found: Option<u32> = None;
+    for (_, b) in func.bindings.iter() {
+        let Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { lm_pos, len, .. })) = &b.expr else {
+            continue;
+        };
+        if crate::marshalling::udt_decode::raw_address(func, *lm_pos) != *ptr {
+            continue;
+        }
+        let n = encoded_constant_u32(func, *len)?;
+        if found.is_some_and(|m| m != n) {
+            return None;
+        }
+        found = Some(n);
+    }
+    let n = found?;
+    let bound = func.bindings.iter().any(|(_, b)| match &b.expr {
+        Expr::Binary { op: BinaryOp::Eq | BinaryOp::Ne, lhs, rhs } => [lhs, rhs]
+            .iter()
+            .any(|x| matches!(literal_of(func, **x), Some(m) if m == i128::from(n))),
+        _ => false,
+    });
+    bound.then_some(n)
+}
+
+/// The `U32Val` payload of a constant word or of an encode of a constant —
+/// the word read through its decode, never as its raw bits.
+fn encoded_constant_u32(func: &HighFunction, value: ValueId) -> Option<u32> {
+    match &func.bindings.get(crate::dataflow::resolve_use(func, value))?.expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty: KnownType::U32, .. }))
+        | Expr::Literal(Literal::I64(_) | Literal::U64(_)) => crate::dataflow::trace_u32val(func, value),
+        _ => None,
+    }
+}
+
+/// The integer literal `value` names, through renames.
+fn literal_of(func: &HighFunction, value: ValueId) -> Option<i128> {
+    match &func.bindings.get(crate::dataflow::resolve_use(func, value))?.expr {
+        Expr::Literal(lit) => literal_int(lit),
+        _ => None,
+    }
 }
 
 /// Every binding that projects a component out of `call`.
@@ -306,12 +410,16 @@ pub(crate) fn is_symbol_encoder(func: &HighFunction) -> bool {
 /// not literal, when the pointer does not resolve in rodata, or when the
 /// bytes fall outside the symbol alphabet. The last case is the input the
 /// host rejects, so there is no symbol to fold to.
-fn resolve_call(func: &HighFunction, memory: &MemoryImage, args: &[ValueId]) -> Option<String> {
+fn resolve_call(func: &HighFunction, memory: &MemoryImage, args: &[ValueId], baked: Option<u32>) -> Option<String> {
     // `(env, pointer, length)` — the emitted signature threads `Env` first,
-    // but the IR call carries only the wasm arguments.
-    let [pos, len] = args else { return None };
-    let pos = u32::try_from(trace_int(func, *pos)?).ok()?;
-    let len = u32::try_from(trace_int(func, *len)?).ok()?;
+    // but the IR call carries only the wasm arguments. A helper with the
+    // length baked in takes the pointer alone.
+    let (pos, len) = match (args, baked) {
+        ([pos, len], None) => (*pos, u32::try_from(trace_int(func, *len)?).ok()?),
+        ([pos], Some(n)) => (*pos, n),
+        _ => return None,
+    };
+    let pos = u32::try_from(trace_int(func, pos)?).ok()?;
 
     if len == 0 || len > MAX_SYMBOL_LEN {
         return None;
@@ -546,6 +654,90 @@ mod tests {
         let r = SymbolEncoderPass.run(&mut m);
         assert!(!r.changed);
         assert_eq!(r.metrics.get(M_FOLDED), None);
+    }
+
+    /// An encoder the compiler specialised to one length: it takes the
+    /// pointer alone (v5), runs its loop to the constant (`eq v6, v7`), and
+    /// hands the host fallback `U32Val(v5)` and the constant word
+    /// `U32Val(len)`.
+    fn baked_encoder(fallback_len: u32, bound: i32) -> HighFunction {
+        let mut body = encoder_body();
+        let word = (i64::from(fallback_len) << 32) | 4;
+        body.extend([
+            Expr::Phi { incoming: vec![] },                                        // v5  ptr
+            Expr::Phi { incoming: vec![] },                                        // v6  i
+            Expr::Literal(Literal::I32(bound)),                                    // v7
+            Expr::Binary { op: BinaryOp::Eq, lhs: v(6), rhs: v(7) },               // v8
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v(5) })), // v9
+            Expr::Literal(Literal::I64(word)),                                     // v10
+            Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { lm_pos: v(9), len: v(10), resolved: None })), // v11
+        ]);
+        let mut f = function(0, body);
+        f.params = vec![v(5)];
+        f
+    }
+
+    /// A caller handing the baked encoder only the pointer.
+    fn pointer_only_caller(pos: i32) -> HighFunction {
+        let mut f = function(
+            1,
+            vec![
+                Expr::Literal(Literal::I32(pos)),
+                Expr::Call { target: FuncId::from_index(0), args: vec![v(0)] },
+                Expr::Project { value: v(1), index: 0 },
+                Expr::Project { value: v(1), index: 1 },
+            ],
+        );
+        f.blocks.iter_mut().next().unwrap().1.bindings = vec![v(0), v(1), v(2), v(3)];
+        f
+    }
+
+    #[test]
+    fn a_length_baked_into_the_encoder_is_read_from_its_fallback() {
+        // "Bala" — the first four bytes of the `Balance` segment.
+        let mut m = ir(vec![baked_encoder(4, 4), pointer_only_caller(1000)]);
+        let r = SymbolEncoderPass.run(&mut m);
+        assert!(r.changed);
+        let Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { resolved, len, .. })) = expr_at(&m, 1, 3) else {
+            panic!("expected a resolved SymbolNew, got {:?}", expr_at(&m, 1, 3));
+        };
+        assert_eq!(resolved.as_deref(), Some("Bala"));
+        // The planted length is the literal, scheduled before the call.
+        let func = m.function(FuncId::from_index(1)).unwrap();
+        assert!(matches!(func.bindings.get(*len).unwrap().expr, Expr::Literal(Literal::U32(4))));
+        let order = &func.blocks.iter().next().unwrap().1.bindings;
+        let at = |x: ValueId| order.iter().position(|b| *b == x).unwrap();
+        assert!(at(*len) < at(v(1)));
+    }
+
+    /// The loop bound is the second witness: a fallback length the fast
+    /// path does not also run to is not read.
+    #[test]
+    fn a_baked_length_without_the_loop_bound_is_declined() {
+        let mut m = ir(vec![baked_encoder(4, 5), pointer_only_caller(1000)]);
+        let r = SymbolEncoderPass.run(&mut m);
+        assert!(!r.changed);
+        assert!(matches!(expr_at(&m, 1, 1), Expr::Call { .. }));
+    }
+
+    /// A fallback built from something other than the parameter says
+    /// nothing about the parameter's length.
+    #[test]
+    fn a_fallback_not_on_the_parameter_is_not_a_length() {
+        let mut enc = baked_encoder(4, 4);
+        enc.params = vec![v(6)];
+        let mut m = ir(vec![enc, pointer_only_caller(1000)]);
+        assert!(!SymbolEncoderPass.run(&mut m).changed);
+    }
+
+    /// A pointer-only call to an encoder that takes its length is not
+    /// read either way.
+    #[test]
+    fn a_pointer_only_call_to_a_two_parameter_encoder_is_declined() {
+        let mut m = ir(vec![function(0, encoder_body()), pointer_only_caller(1000)]);
+        let r = SymbolEncoderPass.run(&mut m);
+        assert!(!r.changed);
+        assert_eq!(r.metrics.get(M_DECLINED), Some(1));
     }
 
     /// Passes may sit in a fixpoint group; a second run must find nothing
