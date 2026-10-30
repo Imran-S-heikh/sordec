@@ -661,3 +661,21 @@ gaps. Scores unchanged: corpus bands pass, held-out mean 0.7861.
 **Day total (2026-10-30):** errors 111 → 11; compiling 67 of 86 → 83 of 86
 contracts (corpus 7/7, Stellar 25/25, multi-contract 12/13, third-party 1/2,
 SDK 26 38/39); held-out mean 0.7850 → 0.7861.
+
+## 2026-10-30 — commit d4b7ee7 (unread helper parameters, and panic-message work before a trap, go)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,843 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 4,084 |
+| third-party | 2 | 1/2 | 8 | 661 |
+| SDK 26 test contracts | 39 | 38/39 | 2 | 1,385 |
+
+Holes 10,355 → 10,058 (summed); errors unchanged at 11. First of the gap-closing work:
+a helper parameter nothing reads is removed with its argument at every visible call
+site, and memory writes and host-free calls just before a trap are dropped (a trap
+throws away memory and rolls back host state). Stack frames kept only to build a panic
+message or pass an unused pointer go, with their loads, stores and bookkeeping
+(phoenix-vesting 688 → 565). Corpus: dex's panic helper loses an argument it never
+read. Corpus bands pass; held-out mean 0.7861 → 0.7862.
