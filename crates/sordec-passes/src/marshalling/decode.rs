@@ -81,7 +81,8 @@ use std::collections::{HashMap, HashSet};
 
 use sordec_common::{FuncId, ValueId};
 use sordec_ir::{
-    Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region, SemanticOp, ValObjectKind,
+    BinaryOp, BufOpKind, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region, SemanticOp,
+    ValObjectKind,
 };
 
 use super::sret::{self, SretShape};
@@ -317,6 +318,14 @@ fn classify_multi_value(func: &HighFunction) -> Option<DecodeHelper> {
 /// only, the helper touches no host state, and every tag it tests names
 /// one payload type. The parameters beside the `Val` (an `Env` pointer,
 /// scratch) are left alone: the call keeps them.
+///
+/// One host read is allowed: the length of the value being decoded, when
+/// every `Some` sits on the side of a test `len == N` where it holds. That
+/// is `BytesN::<N>::try_from_val(env, val).ok()` — the SDK converts to
+/// `Bytes` (the tag check) and then accepts exactly the length `N` — so
+/// the payload is a `BytesN<N>`, the one case where a bytes object's tag
+/// alone could not say which type it is. A length read for anything else
+/// is not this shape.
 fn classify_optional(func: &HighFunction) -> Option<DecodeHelper> {
     if func.signature.is_some() {
         return None;
@@ -338,7 +347,22 @@ fn classify_optional(func: &HighFunction) -> Option<DecodeHelper> {
         return None;
     };
     let val_param = func.params[*val_index];
-    if !touches_no_host_state(func, &[]) {
+    let lengths: Vec<ValueId> = sret::emission_order(func)
+        .into_iter()
+        .filter(|id| {
+            matches!(
+                func.bindings.get(*id).map(|b| &b.expr),
+                Some(Expr::Semantic(SemanticOp::Known(KnownOp::BufOp { kind: BufOpKind::BytesLen, args })))
+                    if args.len() == 1 && resolve_use(func, args[0]) == val_param
+            )
+        })
+        .collect();
+    let length = match lengths.as_slice() {
+        [] => None,
+        [one] => Some(*one),
+        _ => return None,
+    };
+    if !touches_no_host_state(func, &lengths) {
         return None;
     }
     let mut some_arms = Vec::new();
@@ -370,6 +394,13 @@ fn classify_optional(func: &HighFunction) -> Option<DecodeHelper> {
     if tags.is_empty() {
         return None;
     }
+    // The length gate, when there is a length read: only on a bytes object,
+    // and only when it guards every `Some`.
+    let fixed_length = match length {
+        None => None,
+        Some(len) if tags == [val_abi::TAG_BYTES_OBJECT] => Some(checked_length(func, len, &some_arms)?),
+        Some(_) => return None,
+    };
     let mut payload: Option<KnownType> = None;
     for tag in &tags {
         let named = val_abi::tag_payload_type(*tag)?;
@@ -389,15 +420,61 @@ fn classify_optional(func: &HighFunction) -> Option<DecodeHelper> {
     let host_object = payload.as_ref().is_some_and(|p| {
         matches!(p, KnownType::Address | KnownType::MuxedAddress | KnownType::Symbol | KnownType::String)
     });
+    let payload = match fixed_length {
+        Some(n) => Some(KnownType::BytesN(n)),
+        None if ambiguous || !host_object => None,
+        None => payload,
+    };
     Some(DecodeHelper {
-        shape: HelperShape::Optional {
-            payload: if ambiguous || !host_object { None } else { payload },
-            some_arms,
-        },
+        shape: HelperShape::Optional { payload, some_arms },
         val_index: *val_index,
         arity: func.params.len(),
         tags,
     })
+}
+
+/// The `N` a length gate fixes: a test of `len` against the constant `N`
+/// whose holding side — the `then` of `len == N`, the `else` of
+/// `len != N` — contains every one of `some_arms`.
+fn checked_length(func: &HighFunction, len: ValueId, some_arms: &[ValueId]) -> Option<u32> {
+    let mut found = None;
+    func.region.for_each_node(|node| {
+        let Region::If { cond, then_region, else_region } = node else {
+            return;
+        };
+        let Some(Expr::Binary { op: op @ (BinaryOp::Eq | BinaryOp::Ne), lhs, rhs }) =
+            func.bindings.get(resolve_use(func, *cond)).map(|b| &b.expr)
+        else {
+            return;
+        };
+        let (l, r) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
+        let constant = if l == len {
+            trace_int(func, r)
+        } else if r == len {
+            trace_int(func, l)
+        } else {
+            return;
+        };
+        let Some(n) = constant.and_then(|n| u32::try_from(n).ok()) else {
+            return;
+        };
+        let holds = if *op == BinaryOp::Eq { Some(&**then_region) } else { else_region.as_deref() };
+        let Some(holds) = holds else {
+            return;
+        };
+        let mut inside: HashSet<ValueId> = HashSet::new();
+        holds.for_each_node(|n| {
+            if let Region::Basic(block) = n
+                && let Some(b) = func.blocks.get(*block)
+            {
+                inside.extend(b.bindings.iter().copied());
+            }
+        });
+        if some_arms.iter().all(|a| inside.contains(a)) {
+            found = Some(n);
+        }
+    });
+    found
 }
 
 /// The shared decision: every arm is an `Ok` whose payload traces back to
@@ -1026,6 +1103,22 @@ fn optional_call(
     let Some(payload) = payload else {
         return Claimed::None;
     };
+    // A value the module has proved to be the payload already — a field of
+    // a recovered struct, which the struct's own derive checked against its
+    // declaration — passes every check the helper makes: the call is `Some`
+    // of it.
+    if matches!(func.bindings.get(actual).map(|b| &b.ty), Some(IrType::Known(k)) if *k == payload) {
+        return Claimed::Elided(Elision {
+            id,
+            expr: Expr::Optional { payload: Some(vec![actual]) },
+            ty: Some(option(payload)),
+            note: format!(
+                "decode of a value already proven to be the payload ({}): `Some` of it",
+                tag_list(&helper.tags)
+            ),
+            metric: metrics::DECODE_COLLAPSED,
+        });
+    }
     let ty = option(payload);
     if func.bindings.get(id).is_some_and(|b| b.ty == ty) {
         return Claimed::None;
@@ -1792,6 +1885,99 @@ pub(crate) mod tests {
         // And the helper's own `Some` arm agrees.
         let (own, _) = plan(&address_option_helper(), &helpers, &HashMap::new());
         assert!(own.iter().any(|e| e.id == v(4) && matches!(&e.ty, Some(IrType::Inferred(KnownType::Option(_))))));
+    }
+
+    /// `BytesN::<32>::try_from_val(env, v).ok()`: a negated bytes-object tag
+    /// check, then `bytes_len(v) != 32`, `Some(v)` only past both. Blocks:
+    /// bb0 the tag check, bb1 the length test, bb2 the `Some`. With
+    /// `some_on_failing_side` the `Some` sits under `len != 32` instead.
+    fn bytesn_option_helper(some_on_failing_side: bool) -> HighFunction {
+        use sordec_ir::{BufOpKind, HighBlock};
+        let mut func = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0 the Val
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                    value: v(0),
+                    tag: val_abi::TAG_BYTES_OBJECT,
+                    negated: true,
+                })), // v1
+                Expr::Optional { payload: None }, // v2
+                Expr::Semantic(SemanticOp::Known(KnownOp::BufOp { kind: BufOpKind::BytesLen, args: vec![v(0)] })), // v3
+                Expr::Literal(Literal::U32(32)),                                  // v4
+                Expr::Binary { op: BinaryOp::Ne, lhs: v(3), rhs: v(4) },          // v5
+                Expr::Optional { payload: None },                                 // v6
+                Expr::Optional { payload: Some(vec![v(0)]) },                     // v7
+                Expr::Phi {
+                    incoming: vec![
+                        (BlockId::from_index(0), v(2)),
+                        (BlockId::from_index(1), v(6)),
+                        (BlockId::from_index(2), v(7)),
+                    ],
+                }, // v8
+            ],
+            vec![v(0)],
+            vec![1, 2],
+        );
+        func.blocks.push(HighBlock { id: BlockId::from_index(1), bindings: vec![v(3), v(4), v(5), v(6)] });
+        func.blocks.push(HighBlock { id: BlockId::from_index(2), bindings: vec![v(7)] });
+        let some = Box::new(Region::Basic(BlockId::from_index(2)));
+        let empty = Box::new(Region::Sequence(vec![]));
+        let (then_region, else_region) = if some_on_failing_side { (some, Some(empty)) } else { (empty, Some(some)) };
+        func.region = Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::If {
+                cond: v(1),
+                then_region: Box::new(Region::Sequence(vec![])),
+                else_region: Some(Box::new(Region::Sequence(vec![
+                    Region::Basic(BlockId::from_index(1)),
+                    Region::If { cond: v(5), then_region, else_region },
+                ]))),
+            },
+            Region::Return { values: vec![v(8)] },
+        ]);
+        func
+    }
+
+    #[test]
+    fn a_length_checked_bytes_decoder_is_a_bytesn_decoder() {
+        let helper = classify(&bytesn_option_helper(false)).expect("an Option-shaped decoder");
+        assert!(
+            matches!(&helper.shape, HelperShape::Optional { payload: Some(KnownType::BytesN(32)), .. }),
+            "{:?}",
+            helper.shape
+        );
+    }
+
+    #[test]
+    fn a_some_the_length_test_does_not_guard_declines() {
+        assert!(classify(&bytesn_option_helper(true)).is_none());
+    }
+
+    #[test]
+    fn a_decode_of_a_value_already_proven_the_payload_is_some_of_it() {
+        // A helper decodes a value the module already proved is a `BytesN<32>`
+        // (a field of a recovered struct).
+        let mut caller = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                   // v0 the field
+                Expr::Call { target: FuncId::from_index(0), args: vec![v(0)] },   // v1
+            ],
+            vec![v(0)],
+            vec![1],
+        );
+        caller.id = FuncId::from_index(1);
+        caller.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(KnownType::BytesN(32));
+        let mut helpers = HashMap::new();
+        helpers.insert(FuncId::from_index(0), classify(&bytesn_option_helper(false)).unwrap());
+        let (elisions, _) = plan(&caller, &helpers, &HashMap::new());
+        let el = elisions.iter().find(|e| e.id == v(1)).expect("the call is rewritten");
+        assert!(matches!(&el.expr, Expr::Optional { payload: Some(p) } if p == &vec![v(0)]), "{:?}", el.expr);
+
+        // Merely inferred, it is not proven: the call stays.
+        caller.bindings.get_mut(v(0)).unwrap().ty = IrType::Inferred(KnownType::BytesN(32));
+        let (elisions, _) = plan(&caller, &helpers, &HashMap::new());
+        let el = elisions.iter().find(|e| e.id == v(1)).expect("the call is typed");
+        assert!(matches!(&el.expr, Expr::Call { .. }), "{:?}", el.expr);
     }
 
     #[test]

@@ -515,11 +515,26 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         // semantic vocabulary — see `sordec-score`'s T17 note), so this is
         // compile-gate and structure work: it is what lets a recovered
         // `message.len() == 0` read as the source line instead of a hole.
+        //
+        // A `Val` operand (a decoder's argument, read before it is typed)
+        // is converted first: `Bytes::try_from_val` fails exactly where the
+        // host's length call traps, on anything but a bytes object.
         KnownOp::BufOp {
             kind: BufOpKind::BytesLen,
             args,
         } => {
-            let bytes = ctx.value_ref(*args.first()?);
+            let operand = *args.first()?;
+            let bytes = ctx.value_ref(operand);
+            let is_val = ctx.func.bindings.get(ctx.fold_target(operand)).is_some_and(|b| {
+                matches!(b.ty, IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val))
+            });
+            if is_val {
+                return Some(parse_quote!(
+                    <soroban_sdk::Bytes as soroban_sdk::TryFromVal<soroban_sdk::Env, soroban_sdk::Val>>::try_from_val(#eb, &#bytes)
+                        .unwrap()
+                        .len()
+                ));
+            }
             Some(parse_quote!(#bytes.len()))
         }
 
