@@ -366,3 +366,19 @@ makes go. SDK 26 tuples compiles and reads `(arg.0, arg.1)`, as its source does;
 other_custom_types' `tuple` is fixed (12 → 10 errors); spec_shaking v1/v2 lose
 three gaps each. Held-out mean 0.7850 → 0.7851 (other_custom_types); corpus
 bands pass.
+
+## 2026-10-30 — commit ecb5938 (a rotation count is the u32 Rust's rotate takes)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 23/25 | 16 | 3,879 |
+| Stellar examples, multi-contract | 13 | 10/13 | 30 | 4,240 |
+| third-party | 2 | 1/2 | 17 | 776 |
+| SDK 26 test contracts | 39 | 31/39 | 26 | 1,444 |
+
+Errors 93 → 89. A rotation's count was printed with its `i32`/`i64` suffix, while
+Rust's `rotate_left`/`rotate_right` take a `u32`; it is now that `u32` (a literal)
+or cast (anything else), the same count modulo 32 or 64. Only privacy_pools
+changed (18 → 14 errors), in its four rotations; it is in no scored set, so
+scores are as for 2db10d1.
