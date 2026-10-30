@@ -2445,6 +2445,38 @@ mod tests {
         assert!(!body.contains("!= 0"), "{body}");
     }
 
+    /// A tuple struct is built and read the way it is declared:
+    /// `Pair(v1, v2)` and `v3.1`, never through the `_0`, `_1` names its
+    /// spec fields would otherwise become.
+    #[test]
+    fn a_tuple_struct_is_built_and_read_positionally() {
+        let mut reg = TypeRegistry::default();
+        let u32_field = |name: &str| sordec_ir::StructField {
+            name: name.to_string(),
+            ty: sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::U32),
+        };
+        reg.structs.push(sordec_ir::StructDef {
+            id: sordec_common::TypeId::new(7),
+            name: "Pair".to_string(),
+            fields: vec![u32_field("0"), u32_field("1")],
+        });
+        let word = || Expr::Load { addr: v(0), offset: 0, width: sordec_ir::MemWidth::W4, signed: None, ty: untyped() };
+        let exprs = vec![
+            (IrType::Known(KnownType::U32), word()),
+            (IrType::Known(KnownType::U32), word()),
+            (
+                IrType::Known(KnownType::UserDefined(sordec_common::TypeId::new(7))),
+                Expr::Struct { fields: vec![("0".to_string(), v(1)), ("1".to_string(), v(2))] },
+            ),
+            (IrType::Known(KnownType::U32), Expr::Field { base: v(3), field: "1".to_string() }),
+            (untyped(), store(4)),
+        ];
+        let body = emitted(exprs, vec![], &reg);
+        assert!(body.contains("Pair (v1 , v2)"), "{body}");
+        assert!(body.contains("v3 . 1"), "{body}");
+        assert!(!body.contains("_0") && !body.contains("_1"), "{body}");
+    }
+
     /// A variant carrying values prints them as its tuple: `Kind::A(v1)`;
     /// a unit one prints its path alone.
     #[test]

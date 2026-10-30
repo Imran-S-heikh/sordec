@@ -274,7 +274,10 @@ impl Pass<HighIr> for TypeInferPass {
                     round |= func_changed;
                     disagreements += func_disagreements;
                 }
-                let next = recompute_signatures(ir, &seed, &encoders);
+                // The first settling waits for call results to be typed
+                // before a parameter they are handed to agrees; the second
+                // lets the parameters whose wait never ended decide.
+                let next = recompute_signatures(ir, &seed, &encoders, !catalog);
                 if next != sigs {
                     sigs = next;
                     round = true;
@@ -585,11 +588,39 @@ fn backward_calls(
                 {
                     continue;
                 }
+                if copy_of_another_type(func, *arg, &ty, types) {
+                    continue;
+                }
                 changed |= improve_tracked(types, ev, *arg, ty);
             }
         }
     }
     changed
+}
+
+/// Whether `arg` is a copy of a value whose own type is not `slot`'s.
+///
+/// A parameter's slot is the join of what *every* caller passes, so where
+/// one caller hands over a copy of something else — a struct where the
+/// others pass vecs — the slot names the others' type, and pushing it onto
+/// the copy contradicts the copy's source. The copy then conflicts and
+/// loses its type for good, its caller never witnesses the struct, and the
+/// slot never learns the callers disagree (which, for values that cross
+/// only as a `Val`, is what makes it a `Val`). The copy is its source
+/// (forward), so the disagreement belongs to the slot, which the next
+/// round recomputes.
+///
+/// Only a source that can cross a call only as a `Val` (a host object, a
+/// contract type, a wide number): two numbers that disagree are settled by
+/// the sign and width rules, not here.
+fn copy_of_another_type(func: &HighFunction, arg: ValueId, slot: &IrType, types: &HashMap<ValueId, IrType>) -> bool {
+    if !matches!(func.bindings.get(arg).map(|b| &b.expr), Some(Expr::Use(_))) {
+        return false;
+    }
+    let (Some(source), Some(want)) = (base_of(types.get(&resolve_use(func, arg))), base_of(Some(slot))) else {
+        return false;
+    };
+    crosses_only_as_val(&source) && source != want && merge_partial(&source, &want).is_none()
 }
 
 /// Back-type **every** return site's components from the settled return
@@ -688,6 +719,14 @@ fn backward(
     for (id, binding) in func.bindings.iter() {
         if uses.is_unused(id) && expr_effects(&binding.expr).is_pure_total() {
             continue;
+        }
+        // The other direction: a vec settled as `Vec<T>` holds `T`s, so an
+        // element that is an untyped word read out of memory is a `T`
+        // ([`opaque_vec_elements`]).
+        if let Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { elements: Some(values), .. })) = &binding.expr {
+            for (v, ty) in opaque_vec_elements(func, types.get(&id), values, types) {
+                changed |= improve(types, ev, v, ty);
+            }
         }
         match &binding.expr {
             // Numeric arithmetic: both operands share the numeric type. A
@@ -846,6 +885,27 @@ fn backward(
                         }
                     }
                 }
+                // And a full-width word, or a merge of nothing but such
+                // words, is the merge's value where that value *is* its
+                // `Val` ([`is_own_val`]): the arms are one variable, and an
+                // opaque word on one path is that variable's `Val` there.
+                // A number's word is its encoding, so a number takes none.
+                if let Some(merged) = base_of(types.get(&id)).filter(is_own_val) {
+                    for (_, arm) in incoming {
+                        if base_of(types.get(arm)).is_none() && opaque_words(func, *arm, MAX_OPAQUE_DEPTH) {
+                            changed |= improve(types, ev, *arm, IrType::Inferred(merged.clone()));
+                        }
+                    }
+                }
+            }
+            // `i64.eqz` tests a 64-bit word, so a word nothing has typed —
+            // read from memory at full width, or merged from such reads —
+            // is the integer it tests. Left untyped it is emitted as the
+            // `Val` an untyped value is named, and a `Val` has no `== 0`.
+            Expr::Unary { op: sordec_ir::UnaryOp::Eqz, value } => {
+                if base_of(types.get(value)).is_none() && opaque_words(func, *value, MAX_OPAQUE_DEPTH) {
+                    changed |= improve(types, ev, *value, IrType::Inferred(KnownType::I64));
+                }
             }
             // A struct literal's field holds the field's declared type: the
             // contract's own declaration says so, and the literal puts the
@@ -914,6 +974,22 @@ fn is_narrow_load(func: &HighFunction, value: ValueId) -> bool {
         func.bindings.get(value).map(|b| &b.expr),
         Some(Expr::Load { width, ty: IrType::Known(KnownType::I64), .. }) if width.bytes() < 8
     )
+}
+
+/// How many merges deep [`opaque_words`] looks.
+const MAX_OPAQUE_DEPTH: u32 = 3;
+
+/// Whether `value` is an opaque 64-bit word: a full-width read of memory,
+/// or a merge whose every arm is one (`depth` merges deep). Nothing about
+/// such a value says what it is but where it goes.
+fn opaque_words(func: &HighFunction, value: ValueId, depth: u32) -> bool {
+    match func.bindings.get(value).map(|b| &b.expr) {
+        Some(Expr::Load { width, ty: IrType::Known(KnownType::I64), .. }) => width.bytes() == 8,
+        Some(Expr::Phi { incoming }) if depth > 0 && !incoming.is_empty() => {
+            incoming.iter().all(|(_, arm)| opaque_words(func, *arm, depth - 1))
+        }
+        _ => false,
+    }
 }
 
 /// Whether `value` is an address in the shadow-stack frame: an offset from
@@ -1113,6 +1189,63 @@ fn returns_receiver(kind: sordec_ir::VecOpKind) -> bool {
         kind,
         K::Put | K::Del | K::PushFront | K::PopFront | K::PushBack | K::PopBack | K::Insert | K::Append | K::Slice
     )
+}
+
+/// The elements of a vec typed `Vec<T>` that are untyped words read out of
+/// memory, each with the `T` it holds.
+///
+/// `vec![&e, a, b]` is `Vec::from_array(&e, [a, b])`, and an array has one
+/// element type: the vec's. So when the vec is settled as a `Vec<T>` —
+/// typically by the return it reaches, which the spec types — each element
+/// the SDK wrote into the buffer was a `T`. A Symbol beside a struct
+/// field read back out of the frame left the field untyped; emitted as the
+/// `Val` an untyped value is named, it made the vec a `Vec<Val>` and the
+/// function's `Vec<Symbol>` return did not compile.
+///
+/// # Why it is exact
+///
+/// The element is the word the host reads out of that slot of the buffer,
+/// which is the `Val` of the vec's element there — and a `T` whose `Val`
+/// is the word *is* that value, under the convention every typed value
+/// follows. Nothing else says what an opaque memory word is.
+///
+/// # Gates
+///
+/// - **The vec's type names its element**, at any certainty, and the name
+///   is not `Val`: a `Vec<Val>` says nothing an untyped element lacks.
+/// - **`T` is a type whose `Val` is the value itself**: a host object, a
+///   symbol or a contract type. A number's `Val` is its encoding — the
+///   payload shifted over a tag — so a word read out of a `Vec<u32>`'s slot
+///   is not the `u32`, and is left alone.
+/// - **The element is a full-width load nothing has typed.** A value with
+///   a type of its own keeps it; one computed by arithmetic is not an
+///   opaque word.
+fn opaque_vec_elements(
+    func: &HighFunction,
+    vec_ty: Option<&IrType>,
+    values: &[ValueId],
+    types: &HashMap<ValueId, IrType>,
+) -> Vec<(ValueId, IrType)> {
+    let Some(KnownType::Vec(element)) = base_of(vec_ty) else {
+        return Vec::new();
+    };
+    let Some(element) = base_of(Some(element.as_ref())) else {
+        return Vec::new();
+    };
+    if !is_own_val(&element) {
+        return Vec::new();
+    }
+    values
+        .iter()
+        .filter(|v| base_of(types.get(v)).is_none())
+        .filter(|v| {
+            matches!(
+                func.bindings.get(**v).map(|b| &b.expr),
+                Some(Expr::Load { width, .. }) if width.bytes() == 8
+            )
+        })
+        .map(|v| (*v, IrType::Inferred(element.clone())))
+        .collect()
 }
 
 /// Whether two of these values carry *different* recovered bases.
@@ -1667,6 +1800,15 @@ fn seed_signatures(ir: &HighIr) -> SigTable {
     table
 }
 
+/// Whether `v` is a call's result or one component of it, through copies.
+fn from_call(func: &HighFunction, v: ValueId) -> bool {
+    match func.bindings.get(resolve_use(func, v)).map(|b| &b.expr) {
+        Some(Expr::Call { .. }) => true,
+        Some(Expr::Project { value, .. }) => is_call(func, *value),
+        _ => false,
+    }
+}
+
 /// Whether `v` is the result of a call.
 fn is_call(func: &HighFunction, v: ValueId) -> bool {
     matches!(func.bindings.get(resolve_use(func, v)).map(|b| &b.expr), Some(Expr::Call { .. }))
@@ -1677,7 +1819,10 @@ fn is_call(func: &HighFunction, v: ValueId) -> bool {
 /// Returns are witnessed by the function's own return sites; parameters by
 /// every call site in the module that names it. Functions carrying a
 /// `contractspecv0` signature keep the seeded ABI types untouched.
-fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable) -> SigTable {
+///
+/// With `wait`, a parameter some caller hands an untyped call result stays
+/// unsettled until that result is typed (see the parameter loop).
+fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable, wait: bool) -> SigTable {
     let mut table = seed.clone();
     let used_as = result_uses(ir, &table);
 
@@ -1772,6 +1917,9 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable) -
     let mut val_only: HashSet<(FuncId, usize)> = HashSet::new();
     // Constant arguments, held back until the other callers have spoken.
     let mut constants: HashMap<(FuncId, usize), Vec<(i128, Slot)>> = HashMap::new();
+    // Positions some caller hands a call's result the callee's signature
+    // has not typed yet ([`from_call`]).
+    let mut pending: HashSet<(FuncId, usize)> = HashSet::new();
     for caller in &ir.functions {
         for (_, binding) in caller.bindings.iter() {
             let Expr::Call { target, args } = &binding.expr else {
@@ -1784,6 +1932,9 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable) -
                 let ty = caller.bindings.get(*arg).map(|b| &b.ty);
                 if base_of(ty).is_some_and(|k| crosses_only_as_val(&k)) {
                     val_only.insert((*target, index));
+                }
+                if base_of(ty).is_none() && from_call(caller, *arg) {
+                    pending.insert((*target, index));
                 }
                 // A constant votes last: its type is the wasm word it was
                 // loaded as, not a claim about the parameter.
@@ -1824,6 +1975,15 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable) -
         for (index, slot) in slots.iter_mut().enumerate() {
             if *slot == Slot::Conflict && val_only.contains(&(id, index)) {
                 *slot = Slot::Agreed(KnownType::Val);
+            }
+            // A caller still waiting on a call's result has not spoken, but
+            // it will: agreeing without it would plant the others' type on
+            // the parameter, which the `Val` it may yet force can never
+            // displace (`Val` adds nothing to a named type). So the slot
+            // waits, while `wait` holds; after that, what has not spoken
+            // never will, and the others decide.
+            if wait && matches!(slot, Slot::Agreed(_)) && pending.contains(&(id, index)) {
+                *slot = Slot::Bottom;
             }
         }
         if let Some(entry) = table.get_mut(&id) {
@@ -1885,6 +2045,15 @@ fn crosses_only_as_val(k: &KnownType) -> bool {
             | KnownType::I256
             | KnownType::U256
     )
+}
+
+/// Whether a value of this type *is* the `Val` it travels as: a host
+/// object, a symbol or a contract type. A word read where the host stored
+/// one is then that value. A number is not — its `Val` is an encoding, the
+/// payload shifted over a tag or an object holding it — so a raw word in a
+/// number's place is the encoding, never the number.
+pub(crate) fn is_own_val(k: &KnownType) -> bool {
+    crosses_only_as_val(k) && !matches!(k, KnownType::I128 | KnownType::U128 | KnownType::I256 | KnownType::U256)
 }
 
 /// What each helper's returned components are *used as*, joined over every
@@ -3717,6 +3886,184 @@ mod tests {
         let mut ir = vec_op_on(sordec_ir::VecOpKind::Del, IrType::Known(KnownType::Val));
         TypeInferPass.run(&mut ir);
         assert_eq!(ty_of(&ir, 0, 1), IrType::Known(vec_of(unknown())));
+    }
+
+    /// `i64.load addr+offset`: eight bytes, typed as the opcode's word.
+    fn word(addr: ValueId, offset: u32) -> Expr {
+        Expr::Load { addr, offset, width: sordec_ir::MemWidth::W8, signed: None, ty: IrType::Known(KnownType::I64) }
+    }
+
+    /// `v4 = vec_new([v2, v1])` typed `vec_ty` and returned: `v1` a word read
+    /// out of the frame (`v0`), `v2` the decoded symbol `"Hello"`, `v3` an
+    /// unrelated word `element` is swapped in for when `computed`.
+    fn vec_of_symbol_and_word(vec_ty: KnownType, computed: bool) -> HighIr {
+        use crate::marshalling::test_support::v;
+        let element = if computed { v(3) } else { v(1) };
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                word(v(0), 16),
+                Expr::Literal(Literal::Symbol("Hello".into())),
+                Expr::Binary { op: BinaryOp::BitOr, lhs: v(1), rhs: v(1) },
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                    vals_pos: v(0),
+                    len: v(0),
+                    elements: Some(vec![v(2), element]),
+                })),
+            ],
+            vec![v(0)],
+            vec![1, 2, 3, 4],
+            vec![vec![v(4)]],
+        );
+        f.bindings.get_mut(v(2)).unwrap().ty = IrType::Known(KnownType::Symbol);
+        f.bindings.get_mut(v(4)).unwrap().ty = IrType::Known(vec_ty);
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn a_word_read_into_a_vec_of_symbols_is_a_symbol() {
+        let symbols = vec_of(IrType::Known(KnownType::Symbol));
+        let mut ir = vec_of_symbol_and_word(symbols.clone(), false);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Inferred(KnownType::Symbol));
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 4))), Some(symbols));
+    }
+
+    #[test]
+    fn only_an_opaque_word_in_a_vec_of_objects_takes_the_element_type() {
+        // A `u32`'s slot holds its encoding, not the number.
+        let mut ir = vec_of_symbol_and_word(vec_of(IrType::Known(KnownType::U32)), false);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 1))), None);
+        // A `Vec<Val>` says nothing an untyped element lacks.
+        let mut ir = vec_of_symbol_and_word(vec_of(IrType::Known(KnownType::Val)), false);
+        TypeInferPass.run(&mut ir);
+        assert_ne!(base_of(Some(&ty_of(&ir, 0, 1))), Some(KnownType::Symbol));
+        // A value computed by arithmetic is not an opaque word.
+        let mut ir = vec_of_symbol_and_word(vec_of(IrType::Known(KnownType::Symbol)), true);
+        TypeInferPass.run(&mut ir);
+        assert_ne!(base_of(Some(&ty_of(&ir, 0, 3))), Some(KnownType::Symbol));
+    }
+
+    /// `v5 = phi(v3, v4)` returned, typed `merged`: `v3` a merge of two
+    /// words read from the frame (`v0`) — `v2` computed from one instead
+    /// when `computed` — and `v4` an argument typed `merged` too.
+    fn merge_of_words(merged: KnownType, computed: bool) -> HighIr {
+        use crate::marshalling::test_support::v;
+        let (b0, b1) = (BlockId::from_index(0), BlockId::from_index(1));
+        let second = if computed {
+            Expr::Binary { op: BinaryOp::BitOr, lhs: v(1), rhs: v(1) }
+        } else {
+            word(v(0), 8)
+        };
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                word(v(0), 0),
+                second,
+                Expr::Phi { incoming: vec![(b0, v(1)), (b1, v(2))] },
+                Expr::Phi { incoming: vec![] },
+                Expr::Phi { incoming: vec![(b0, v(3)), (b1, v(4))] },
+            ],
+            vec![v(0), v(4)],
+            vec![1, 2],
+            vec![vec![v(5)]],
+        );
+        f.bindings.get_mut(v(4)).unwrap().ty = IrType::Known(merged.clone());
+        f.bindings.get_mut(v(5)).unwrap().ty = IrType::Inferred(merged);
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn opaque_words_merged_into_a_contract_value_are_that_value() {
+        let ud = KnownType::UserDefined(TypeId::new(5));
+        let mut ir = merge_of_words(ud.clone(), false);
+        TypeInferPass.run(&mut ir);
+        for word in [3, 1, 2] {
+            assert_eq!(ty_of(&ir, 0, word), IrType::Inferred(ud.clone()), "v{word}");
+        }
+    }
+
+    #[test]
+    fn a_merge_with_a_computed_arm_or_of_a_number_types_no_word() {
+        // A computed arm: the inner merge is no opaque word.
+        let mut ir = merge_of_words(KnownType::UserDefined(TypeId::new(5)), true);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 3))), None);
+        // A number's word is its encoding, not the number.
+        let mut ir = merge_of_words(KnownType::U64, false);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 1))), None);
+    }
+
+    /// `v4 = eqz(v3)` returned, `v3` a merge of `first` and a word read
+    /// from the frame (`v0`).
+    fn eqz_of_merge(first: Expr) -> HighIr {
+        use crate::marshalling::test_support::v;
+        let (b0, b1) = (BlockId::from_index(0), BlockId::from_index(1));
+        let f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                first,
+                word(v(0), 8),
+                Expr::Phi { incoming: vec![(b0, v(1)), (b1, v(2))] },
+                Expr::Unary { op: UnaryOp::Eqz, value: v(3) },
+            ],
+            vec![v(0)],
+            vec![1, 2, 4],
+            vec![vec![v(4)]],
+        );
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn words_tested_against_zero_are_the_integer_tested() {
+        use crate::marshalling::test_support::v;
+        let mut ir = eqz_of_merge(word(v(0), 0));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 3), IrType::Inferred(KnownType::I64));
+        // An arm that is no word read from memory leaves the merge alone.
+        let mut ir = eqz_of_merge(Expr::Binary { op: BinaryOp::BitOr, lhs: v(2), rhs: v(2) });
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 3))), None);
+    }
+
+    /// Two callers of `f` (3): one passes a `Vec`, the other a copy (v0) of
+    /// a struct only a helper's return (`g`, 2) types — so the copy is
+    /// still untyped when `f`'s slot first names the `Vec`.
+    #[test]
+    fn a_copy_of_a_struct_keeps_its_type_and_makes_the_slot_a_val() {
+        use crate::marshalling::test_support::v;
+        let ud = KnownType::UserDefined(TypeId::new(5));
+        let mut vec_caller = func_at(
+            0,
+            vec![Expr::Phi { incoming: vec![] }, Expr::Call { target: FuncId::from_index(3), args: vec![v(0)] }],
+            vec![v(0)],
+            vec![1],
+            vec![],
+        );
+        vec_caller.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(vec_of(unknown()));
+        let copy_caller = func_at(
+            1,
+            vec![
+                Expr::Use(v(2)),
+                Expr::Call { target: FuncId::from_index(3), args: vec![v(0)] },
+                Expr::Call { target: FuncId::from_index(2), args: vec![] },
+            ],
+            vec![],
+            vec![2, 0, 1],
+            vec![],
+        );
+        let mut g = func_at(2, vec![Expr::Struct { fields: vec![] }], vec![], vec![0], vec![vec![v(0)]]);
+        g.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(ud.clone());
+        let f = func_at(3, vec![Expr::Phi { incoming: vec![] }], vec![v(0)], vec![], vec![]);
+        let mut ir = crate::marshalling::test_support::module(vec![vec_caller, copy_caller, g, f]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 1, 0))), Some(ud), "the copy is the struct");
+        assert_eq!(base_of(Some(&ty_of(&ir, 3, 0))), Some(KnownType::Val), "callers disagree on objects");
     }
 
     /// `v3 = State { count: v0, owner: v1, memo: v2 }`, the struct declared
