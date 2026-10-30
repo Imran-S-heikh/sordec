@@ -429,6 +429,9 @@ pub const INLINE_WRAPPER_CALLS: &str = "inline_wrapper_calls";
 pub const MARSHALLING_DEAD_FRAME_STORES: &str = "marshalling_dead_frame_stores";
 /// Branches on a constant condition replaced by the arm they take.
 pub const REFINE_CONST_BRANCHES_FOLDED: &str = "refine_const_branches_folded";
+/// Loops run from a constant start to their exit and replaced by the
+/// values they exit with.
+pub const REFINE_CONST_LOOPS_FOLDED: &str = "refine_const_loops_folded";
 /// `#[contracttype]` struct unpacks recognised from their key table and
 /// elided, the map value typed as the struct.
 pub const MARSHALLING_UDT_DECODES_COLLAPSED: &str = "marshalling_udt_decodes_collapsed";
@@ -472,6 +475,9 @@ pub const MARSHALLING_RESULT_OUT_SITES: &str = "marshalling_result_out_sites";
 pub const MARSHALLING_RESULT_OUT_SITES_REFUSED: &str = "marshalling_result_out_sites_refused";
 /// Those writers rewritten to return the `Result`, every call site with them.
 pub const MARSHALLING_RESULT_OUT_REWRITTEN: &str = "marshalling_result_out_rewritten";
+/// Converter calls rewritten to the `Result` an entrypoint built in its own
+/// frame, path by path.
+pub const MARSHALLING_RESULT_INLINE_REWRITTEN: &str = "marshalling_result_inline_rewritten";
 /// Helpers returning `(tag, value)` in two registers, the tag a different
 /// constant on different paths.
 pub const MARSHALLING_OPTIONAL_PAIR_HELPERS: &str = "marshalling_optional_pair_helpers";
@@ -1017,6 +1023,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         INLINE_WRAPPER_CALLS,
         MARSHALLING_DEAD_FRAME_STORES,
         REFINE_CONST_BRANCHES_FOLDED,
+        REFINE_CONST_LOOPS_FOLDED,
         MARSHALLING_UDT_DECODES_COLLAPSED,
         MARSHALLING_UDT_FIELDS_RECOVERED,
         MARSHALLING_UDT_HELPERS_COLLAPSED,
@@ -1029,6 +1036,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_RESULT_OUT_SITES,
         MARSHALLING_RESULT_OUT_SITES_REFUSED,
         MARSHALLING_RESULT_OUT_REWRITTEN,
+        MARSHALLING_RESULT_INLINE_REWRITTEN,
         MARSHALLING_OPTIONAL_PAIR_HELPERS,
         MARSHALLING_OPTIONAL_PAIR_SITES,
         MARSHALLING_OPTIONAL_PAIR_SITES_REFUSED,

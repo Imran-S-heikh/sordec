@@ -130,7 +130,7 @@ impl Pass<HighIr> for ConstLoadPass {
 /// Half-open `(start, end)` pairs. A `static mut` is written this way and
 /// read the same way, so these are exactly the bytes a fold must not
 /// claim are constant.
-fn written_constants(ir: &HighIr) -> Vec<(u32, u32)> {
+pub(super) fn written_constants(ir: &HighIr) -> Vec<(u32, u32)> {
     let mut ranges: BTreeSet<(u32, u32)> = BTreeSet::new();
     for func in &ir.functions {
         for (_, binding) in func.bindings.iter() {
@@ -168,12 +168,12 @@ fn const_address(
 }
 
 /// Whether `[at, at + len)` meets any written range.
-fn overlaps(written: &[(u32, u32)], at: u32, len: u32) -> bool {
+pub(super) fn overlaps(written: &[(u32, u32)], at: u32, len: u32) -> bool {
     let end = at.saturating_add(len);
     written.iter().any(|&(lo, hi)| at < hi && lo < end)
 }
 
-const fn width_bytes(width: MemWidth) -> u8 {
+pub(super) const fn width_bytes(width: MemWidth) -> u8 {
     match width {
         MemWidth::W1 => 1,
         MemWidth::W2 => 2,

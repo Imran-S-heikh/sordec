@@ -36,6 +36,7 @@
 mod and_merge;
 mod const_branch;
 mod const_load;
+mod const_loop;
 mod dispatch_link;
 mod guard_clause;
 mod loop_classify;
@@ -60,6 +61,7 @@ mod wide_zero;
 pub use and_merge::AndMergePass;
 pub use const_branch::ConstBranchFoldPass;
 pub use const_load::ConstLoadPass;
+pub use const_loop::ConstLoopFoldPass;
 pub use dispatch_link::DispatchLinkPass;
 pub use guard_clause::GuardClausePass;
 pub use loop_classify::LoopClassifyPass;
