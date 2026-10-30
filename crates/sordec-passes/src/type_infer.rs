@@ -93,6 +93,22 @@
 //! `Option<BytesN<32>>` typed only once its producer is — and the message
 //! handed to `ed25519_verify` would lose the width it carries.
 //!
+//! ### A searched vec
+//!
+//! The vec ops say less: `vec_len` and `vec_get` are also how a
+//! `#[contracttype]` enum's derive reads the `Val` it decodes, so their
+//! receiver may be an enum in the source, and the emitter converts a
+//! receiver nothing typed as a vec rather than naming it one. The two
+//! searches are different. `vec_first_index_of` and `vec_last_index_of`
+//! are called by `Vec<T>`'s own methods (`first_index_of`,
+//! `last_index_of`, `contains`) and by no other SDK code, so the value
+//! searched is a `Vec` in the source (`Known(Vec<?>)`, the element left
+//! open). Why it is exact: the host traps unless the receiver is a vec
+//! object, and nothing but a `Vec` method reaches that call. Gates: those
+//! two ops only, the receiver only (the item is a `Val` the host compares,
+//! whatever the source called it), and the catalog's own limit — an
+//! operand nothing has named, or named only `Val`.
+//!
 //! ## A vec op's result, and a merge of vecs
 //!
 //! A vec op that hands back its receiver changed — `push_back`, `del`,
@@ -204,7 +220,7 @@ use sordec_common::{FuncId, Provenance, ProvenanceSource, TypeId, ValueId};
 use sordec_ir::{
     BinaryOp, CompositeType, CryptoOpKind, Expr, FunctionSignature, HighFunction, HighIr, IrType, KnownOp,
     KnownType, Literal, PrimitiveType, Region, SemanticOp, StructDef, TypeRef, UnaryOp, ValObjectKind,
-    WasmOpcodeKind,
+    VecOpKind, WasmOpcodeKind,
 };
 
 use crate::dataflow::{resolve_use, HighUseIndex};
@@ -1548,6 +1564,11 @@ fn catalog_object_args(op: &KnownOp) -> Vec<(ValueId, KnownType)> {
     let (module, name, args) = match op {
         KnownOp::CryptoOp { kind, args } => ("c", crate::val_abi::crypto_kind_name(*kind), args),
         KnownOp::BufOp { kind, args } => ("b", crate::val_abi::buf_kind_name(*kind), args),
+        // Of the vec ops, only the two searches: the SDK calls them from
+        // `Vec<T>`'s own methods and nowhere else ("A searched vec").
+        KnownOp::VecOp { kind: kind @ (VecOpKind::FirstIndexOf | VecOpKind::LastIndexOf), args } => {
+            ("v", crate::val_abi::vec_kind_name(*kind), args)
+        }
         _ => return vec![],
     };
     let Some(call) = crate::host_calls::all().iter().find(|c| c.module == module && c.friendly_name == name) else {
@@ -3672,6 +3693,40 @@ mod tests {
         let mut ir = buf_on_params(BufOpKind::SerializeToBytes, 1, None);
         TypeInferPass.run(&mut ir);
         assert!(matches!(ty_of(&ir, 0, 0), IrType::Unknown(_)));
+    }
+
+    /// One function whose `v0..v(n-1)` are untyped parameters handed to
+    /// the vec op `kind`, which is `v(n)`.
+    fn vec_op_on_params(kind: VecOpKind, n: u32) -> HighIr {
+        let mut exprs: Vec<Expr> = (0..n).map(|_| Expr::Phi { incoming: vec![] }).collect();
+        exprs.push(Expr::Semantic(SemanticOp::Known(KnownOp::VecOp {
+            kind,
+            args: (0..n).map(ValueId::from_index).collect(),
+        })));
+        let f = func_at(0, exprs, (0..n).map(ValueId::from_index).collect(), vec![n], vec![]);
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn the_vec_a_search_reads_is_a_vec() {
+        for kind in [VecOpKind::FirstIndexOf, VecOpKind::LastIndexOf] {
+            let mut ir = vec_op_on_params(kind, 2);
+            TypeInferPass.run(&mut ir);
+            assert_eq!(ty_of(&ir, 0, 0), IrType::Known(vec_of(unknown())));
+            // The item is the `Val` the host compares: left alone.
+            assert!(matches!(ty_of(&ir, 0, 1), IrType::Unknown(_)));
+        }
+    }
+
+    #[test]
+    fn the_vec_a_length_or_get_reads_is_not_named_a_vec() {
+        // An enum's derive reads its `Val` with these, so the receiver may
+        // be an enum in the source.
+        for (kind, n) in [(VecOpKind::Len, 1), (VecOpKind::Get, 2)] {
+            let mut ir = vec_op_on_params(kind, n);
+            TypeInferPass.run(&mut ir);
+            assert!(!matches!(ty_of(&ir, 0, 0), IrType::Known(KnownType::Vec(_))));
+        }
     }
 
     fn vec_of(t: IrType) -> KnownType {
