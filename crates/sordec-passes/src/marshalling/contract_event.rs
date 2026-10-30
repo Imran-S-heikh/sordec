@@ -75,7 +75,14 @@
 //! rewrite. So does a helper call that built the topics, when the helper
 //! does nothing else, and a prefix symbol built only for them.
 //!
-//! A prefix too long to pack is read from its recovered
+//! A field the caller stored as a constant word has no typed value to
+//! name. The word is a `Val`'s bits — what the derive stores for a field
+//! is its encoding — so it is read back through its decode as the field's
+//! declared type and planted before the publish: a number, `bool` or short
+//! symbol in its small form, an integer enum's variant by the discriminant
+//! its `U32Val` carries, a 128-bit integer's small form as its two halves.
+//! A word of any other tag, or a type with no such reading, stops the
+//! rewrite. A prefix too long to pack is read from its recovered
 //! `Symbol::new(&e, "…")`.
 //!
 //! # The call sites
@@ -452,6 +459,52 @@ struct InlineSite {
     /// The data map and a topics vec built here, with the renames between
     /// them and the publish: read by nothing else, they go with it.
     spent: Vec<ValueId>,
+    /// Fields whose stored word is a constant: the field's index and the
+    /// value that word decodes to, planted just before the publish.
+    constants: Vec<(usize, Constant)>,
+}
+
+/// The value a constant word stored for a field decodes to, as the field's
+/// declared type.
+#[derive(Debug, Clone, PartialEq)]
+enum Constant {
+    /// A number, a `bool` or a short symbol.
+    Scalar(Literal, KnownType),
+    /// An integer enum's variant, by the discriminant its `U32Val` carries.
+    Variant(String, KnownType),
+    /// A 128-bit integer from its small form: low and high halves.
+    Wide(i64, i64, KnownType),
+}
+
+/// The constant `value` is, read through its decode as `declared`: the
+/// word is a `Val`'s bits — what the derive stores for a field is the
+/// field's encoding — so it is read back only as one of that type.
+fn constant_field(func: &HighFunction, value: ValueId, declared: &KnownType, enums: &[sordec_ir::EnumDef]) -> Option<Constant> {
+    if let Some(lit) = super::encode::encoded_constant(func, value, declared) {
+        return Some(Constant::Scalar(lit, declared.clone()));
+    }
+    if let Some(name) = super::encode::encoded_variant(func, value, declared, enums) {
+        return Some(Constant::Variant(name, declared.clone()));
+    }
+    let bits = match &func.bindings.get(resolve_use(func, value))?.expr {
+        Expr::Literal(Literal::I64(n)) => *n as u64,
+        Expr::Literal(Literal::U64(n)) => *n,
+        _ => return None,
+    };
+    let tag = (bits & 0xFF) as u8;
+    // The small forms keep the number in the 56-bit body: signed for an
+    // `i128` (an arithmetic shift restores the sign, which fills the high
+    // half), unsigned for a `u128`.
+    match declared {
+        KnownType::I128 if tag == crate::val_abi::TAG_I128_SMALL => {
+            let n = (bits as i64) >> 8;
+            Some(Constant::Wide(n, n >> 63, KnownType::I128))
+        }
+        KnownType::U128 if tag == crate::val_abi::TAG_U128_SMALL => {
+            Some(Constant::Wide((bits >> 8) as i64, 0, KnownType::U128))
+        }
+        _ => None,
+    }
 }
 
 fn inline_sites(ir: &HighIr, func: &HighFunction, events: &[EventDef]) -> Vec<InlineSite> {
@@ -467,6 +520,11 @@ fn inline_sites(ir: &HighIr, func: &HighFunction, events: &[EventDef]) -> Vec<In
             inline_site(ir, func, &uses, events, id, *topics, *data)
         })
         .collect()
+}
+
+/// The contract's integer enums, for a constant field's variant.
+fn enums_of(ir: &HighIr) -> &[sordec_ir::EnumDef] {
+    ir.soroban_facts.as_ref().map_or(&[], |f| f.types.enums.as_slice())
 }
 
 fn inline_site(
@@ -506,6 +564,7 @@ fn inline_site(
     let facts = facts_at(func, map, base);
     let mut topic_values = elements.get(event.prefix_topics.len()..)?.iter();
     let mut fields = Vec::with_capacity(event.params.len());
+    let mut constants = Vec::new();
     for param in &event.params {
         let value = match param.location {
             EventParamLocation::Topic => resolve_use(func, *topic_values.next()?),
@@ -522,9 +581,14 @@ fn inline_site(
         let as_param = func.params.iter().position(|p| *p == value).and_then(|i| {
             crate::type_infer::known_of_type_ref(&func.signature.as_ref()?.inputs.get(i)?.ty)
         });
-        if *ty != IrType::Known(declared.clone()) && as_param != Some(declared) {
-            trace(func, publish, &format!("{}: {value:?} is {ty:?}, not the declared type", param.name));
-            return None;
+        if *ty != IrType::Known(declared.clone()) && as_param.as_ref() != Some(&declared) {
+            match constant_field(func, value, &declared, enums_of(ir)) {
+                Some(c) => constants.push((fields.len(), c)),
+                None => {
+                    trace(func, publish, &format!("{}: {value:?} is {ty:?}, not the declared type", param.name));
+                    return None;
+                }
+            }
         }
         fields.push((param.name.clone(), Some(value)));
     }
@@ -560,7 +624,7 @@ fn inline_site(
             spent.push(v);
         }
     }
-    Some(InlineSite { publish, event: event.name.clone(), fields, spent })
+    Some(InlineSite { publish, event: event.name.clone(), fields, spent, constants })
 }
 
 /// Whether a helper's only effect is the vec it returns: every other
@@ -632,9 +696,45 @@ fn read_only_by(
     })
 }
 
+/// Schedule `expr` just before `at`; its id.
+fn plant_before(func: &mut HighFunction, at: ValueId, expr: Expr, ty: KnownType, note: &str) -> Option<ValueId> {
+    let block = block_containing(func, at)?;
+    let id = ValueId::from_index(func.bindings.len() as u32);
+    func.bindings.push(Binding::new(
+        id,
+        IrType::Known(ty),
+        expr,
+        Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note.to_string()),
+    ));
+    let block = func.blocks.get_mut(block)?;
+    let pos = block.bindings.iter().position(|b| *b == at)?;
+    block.bindings.insert(pos, id);
+    Some(id)
+}
+
+/// Plant a constant field's decoded value before the publish.
+fn plant_constant(func: &mut HighFunction, at: ValueId, c: Constant) -> Option<ValueId> {
+    let note = "a constant event field, its stored word read through its decode as the declared type";
+    match c {
+        Constant::Scalar(lit, ty) => plant_before(func, at, Expr::Literal(lit), ty, note),
+        Constant::Variant(name, ty) => plant_before(func, at, Expr::Variant { name, payload: Vec::new() }, ty, note),
+        Constant::Wide(lo, hi, ty) => {
+            let lo = plant_before(func, at, Expr::Literal(Literal::I64(lo)), KnownType::I64, note)?;
+            let hi = plant_before(func, at, Expr::Literal(Literal::I64(hi)), KnownType::I64, note)?;
+            plant_before(func, at, Expr::WideJoin { lo, hi }, ty, note)
+        }
+    }
+}
+
 /// Rewrite the publish as the event literal and drop what built its
 /// arguments.
-fn apply_inline(func: &mut HighFunction, site: InlineSite) {
+fn apply_inline(func: &mut HighFunction, mut site: InlineSite) {
+    for (index, c) in std::mem::take(&mut site.constants) {
+        let Some(id) = plant_constant(func, site.publish, c) else { return };
+        if let Some(field) = site.fields.get_mut(index) {
+            field.1 = Some(id);
+        }
+    }
     for id in &site.spent {
         if let Some(b) = func.bindings.get_mut(*id) {
             b.expr = Expr::Literal(Literal::Unit);
@@ -1256,6 +1356,36 @@ mod tests {
         let mut ir = inlined();
         ir.functions[0].bindings.get_mut(v(1)).unwrap().ty =
             IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence);
+        assert!(!ContractEventPass.run(&mut ir).changed);
+    }
+
+    /// `inlined()` with `world` declared a `u32` and stored as `word`.
+    fn with_constant(word: i64) -> HighIr {
+        let mut ir = inlined();
+        ir.soroban_facts.as_mut().unwrap().types.events[0].params[1].ty = TypeRef::Primitive(PrimitiveType::U32);
+        let f = &mut ir.functions[0];
+        f.bindings.get_mut(v(1)).unwrap().expr = Expr::Literal(Literal::I64(word));
+        f.bindings.get_mut(v(1)).unwrap().ty = IrType::Known(KnownType::I64);
+        ir
+    }
+
+    /// A constant stored for a `u32` field is a `U32Val`'s bits: the field
+    /// is the number it carries.
+    #[test]
+    fn a_constant_field_is_its_decoded_value() {
+        let mut ir = with_constant((7 << 32) | 4);
+        assert!(ContractEventPass.run(&mut ir).changed);
+        let Expr::Semantic(SemanticOp::Known(KnownOp::PublishContractEvent { fields, .. })) = expr(&ir, 10) else {
+            panic!("not rewritten: {:?}", expr(&ir, 10));
+        };
+        let world = fields[1].1.expect("a value");
+        assert!(matches!(ir.functions[0].bindings.get(world).unwrap().expr, Expr::Literal(Literal::U32(7))));
+    }
+
+    /// A word of another type's tag is not this field's encoding.
+    #[test]
+    fn a_constant_of_another_tag_leaves_the_publish() {
+        let mut ir = with_constant((7 << 32) | 5);
         assert!(!ContractEventPass.run(&mut ir).changed);
     }
 

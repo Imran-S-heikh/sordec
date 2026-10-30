@@ -732,7 +732,7 @@ pub(super) fn encoded_constant(func: &HighFunction, value: ValueId, declared: &K
 /// discriminant the `U32Val` word carries. `None` when `declared` is not
 /// such an enum, the word is not a `U32Val`, or no variant has that
 /// discriminant.
-fn encoded_variant(func: &HighFunction, value: ValueId, declared: &KnownType, enums: &[EnumDef]) -> Option<String> {
+pub(super) fn encoded_variant(func: &HighFunction, value: ValueId, declared: &KnownType, enums: &[EnumDef]) -> Option<String> {
     let KnownType::UserDefined(id) = declared else { return None };
     let def = enums.iter().find(|e| e.id == *id)?;
     let Literal::U32(n) = encoded_constant(func, value, &KnownType::U32)? else { return None };
