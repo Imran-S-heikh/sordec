@@ -44,9 +44,17 @@
 //!
 //! - Not exported (no spec signature).
 //! - One parameter used only as a store address: the out-pointer.
-//! - One store of the tag, after every arm has merged, of a phi whose
-//!   inputs are all constants. Each arm that assigns the phi is a path to
-//!   the result: the stores through the out-pointer on that path are its
+//! - The tag written in one of two ways:
+//!   - **Once, after the merge**: one store of a phi whose inputs are all
+//!     constants. Each arm that assigns the phi is a path to the result.
+//!   - **Once per arm**: no such store, and every path into the block
+//!     where the paths meet stores its own constant to one slot, exactly
+//!     once — the one slot every path stores a constant to. A path that
+//!     meets the others without writing it, or writes it twice, refuses
+//!     the helper. The rewrite builds the merge the first form already
+//!     has: each arm's `Option`, carried on its edge into that block.
+//!
+//!   Either way, the other stores through the out-pointer on a path are its
 //!   payload. Arms with a payload are *present*, arms without *absent*; one
 //!   tag constant each, and different.
 //! - Every present arm writes the same slots, and none of the values is a
@@ -56,6 +64,17 @@
 //!   would be pinned to whatever word its other arms happen to carry.
 //! - After the merge, nothing but the tag store, constant stores and the
 //!   shadow-stack epilogue.
+//!
+//! ## Why the tag written per arm is exact
+//!
+//! The argument is the same one, path by path. A path's stores through the
+//! out-pointer are all it leaves in the result — the merge block after it
+//! writes only constants, and nothing reads the out-pointer — so its one
+//! tag store and its payload stores *are* the result on that path, and its
+//! `Some(payload)` or `None` says the same. The new merge takes each
+//! path's `Option` on the edge that path enters by, which is what the tag
+//! phi of the first form does with its constants; every edge into the
+//! block is such a path, so no path reaches the return without one.
 //!
 //! # What makes a call site
 //!
@@ -113,6 +132,16 @@
 //!   has only the direct callers the census saw.
 //! - A raw `call_indirect` handed a pointer into the frame is a call whose
 //!   extent is unknown, like a recovered one: the site is refused.
+//!
+//! **The result is in the caller's own frame.** The out-pointer must point
+//! into the caller's shadow-stack frame (`global.get 0` less a constant).
+//! The census below counts what can read the result *inside* the caller;
+//! memory reached through the caller's own out-pointer, or any pointer it
+//! was handed or read, is also read by the caller's caller once it
+//! returns, which no census here sees. `privacy_pools`' `BytesN<32>`
+//! decoder hands its own out-pointer straight on to the length check, and
+//! that one site would have let the length check stop writing a result
+//! the decoder's callers read.
 //!
 //! **Nothing else sees the result's bytes.** Bulk memory operations
 //! (`memory.copy`, `memory.fill`, here an `Unknown` of kind `MemoryOp`
@@ -175,6 +204,7 @@ use sordec_ir::{
     WasmOpcodeKind,
 };
 
+use super::result_out::is_frame;
 use super::sret::emission_order;
 use crate::dataflow::{block_containing, canon_addr, resolve_use, trace_int, CallIndex};
 use crate::effects::expr_effects;
@@ -378,8 +408,8 @@ struct Helper {
     /// Slots written with the same constant whatever the path.
     consts: Vec<(Slot, Literal)>,
     arms: Vec<Arm>,
-    /// The merged tag, which becomes the returned `Option`.
-    tag_phi: ValueId,
+    /// Where the paths' tags meet, which becomes the returned `Option`.
+    merge: Merge,
     /// Everything that writes through the out-pointer or computes an
     /// address into it, retired by the rewrite.
     retired: Vec<ValueId>,
@@ -390,6 +420,16 @@ struct Helper {
     whole: Option<Vec<(String, Option<UnaryOp>)>>,
     /// The declared type of each of those fields, filled from the spec.
     part_types: Vec<Option<KnownType>>,
+}
+
+/// How a helper's paths hand their tag to the one return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Merge {
+    /// A phi of the arms' tag constants, stored once after they meet.
+    Phi(ValueId),
+    /// Each arm stores its own tag constant before the paths meet at this
+    /// block; the rewrite builds the merge.
+    PerArm(BlockId),
 }
 
 impl Helper {
@@ -428,7 +468,28 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
             return Err("two tag-shaped stores");
         }
     }
-    let (tag_store, out, out_param, tag_phi, tag_slot) = tag.ok_or(NOT_A_CANDIDATE)?;
+    // Without one, each arm may store its own constant tag: the out-pointer
+    // is then the one parameter anything is stored through, and the tag
+    // the one slot every arm stores a constant to (settled after the walk).
+    let (merged, out, out_param) = match tag {
+        Some((store, out, base, phi, slot)) => (Some((store, phi, slot)), out, base),
+        None => {
+            let mut through: Option<(usize, ValueId)> = None;
+            for &id in &order {
+                let Some(Expr::Store { addr, .. }) = func.bindings.get(id).map(|b| &b.expr) else {
+                    continue;
+                };
+                let base = canon_addr(func, *addr).0;
+                if let Some(i) = func.params.iter().position(|p| *p == base)
+                    && through.replace((i, base)).is_some_and(|(prev, _)| prev != i)
+                {
+                    return Err("stores through two parameters");
+                }
+            }
+            let (out, base) = through.ok_or(NOT_A_CANDIDATE)?;
+            (None, out, base)
+        }
+    };
     if escapes(func, &order, out_param) {
         return Err("the out-pointer is used other than as a store address");
     }
@@ -436,8 +497,8 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
     let mut walk = Walk {
         func,
         out_param,
-        tag_store,
-        tag_phi,
+        tag_store: merged.map(|(store, _, _)| store),
+        tag_phi: merged.map(|(_, phi, _)| phi),
         join: None,
         arms: Vec::new(),
         pending: HashMap::new(),
@@ -445,19 +506,27 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
         last: None,
     };
     walk.region(&func.region, Flow::Falls(Vec::new()))?;
-    let tail = walk.tail.ok_or("no merge after the arms")?;
-    let Some(Expr::Phi { incoming }) = func.bindings.get(tag_phi).map(|b| &b.expr) else {
-        return Err("the tag is not a phi");
+    let tail = walk.tail.take().ok_or("no merge after the arms")?;
+    let join = walk.join.ok_or("no merge after the arms")?;
+    let mut arms = std::mem::take(&mut walk.arms);
+    let (merge, tag_slot) = match merged {
+        Some((_, tag_phi, tag_slot)) => {
+            let Some(Expr::Phi { incoming }) = func.bindings.get(tag_phi).map(|b| &b.expr) else {
+                return Err("the tag is not a phi");
+            };
+            let mut preds: Vec<BlockId> = arms.iter().map(|a| a.pred).collect();
+            let mut inputs: Vec<BlockId> = incoming.iter().map(|(b, _)| *b).collect();
+            preds.sort_unstable();
+            inputs.sort_unstable();
+            if preds != inputs || preds.windows(2).any(|w| w[0] == w[1]) {
+                return Err("the merge's inputs do not match its arms");
+            }
+            (Merge::Phi(tag_phi), tag_slot)
+        }
+        None => (Merge::PerArm(join), per_arm_tags(func, join, &mut arms)?),
     };
-    let mut preds: Vec<BlockId> = walk.arms.iter().map(|a| a.pred).collect();
-    let mut inputs: Vec<BlockId> = incoming.iter().map(|(b, _)| *b).collect();
-    preds.sort_unstable();
-    inputs.sort_unstable();
-    if preds != inputs || preds.windows(2).any(|w| w[0] == w[1]) {
-        return Err("the merge's inputs do not match its arms");
-    }
 
-    let (present, absent): (Vec<&Arm>, Vec<&Arm>) = walk.arms.iter().partition(|a| !a.stores.is_empty());
+    let (present, absent): (Vec<&Arm>, Vec<&Arm>) = arms.iter().partition(|a| !a.stores.is_empty());
     let present_tag = single(present.iter().map(|a| a.tag)).ok_or("present arms disagree on the tag")?;
     let absent_tag = single(absent.iter().map(|a| a.tag)).ok_or("absent arms disagree on the tag")?;
     if present_tag == absent_tag {
@@ -512,7 +581,6 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
     }
 
     let whole = struct_parts(func, &present);
-    let arms = walk.arms;
     let retired = order
         .iter()
         .copied()
@@ -530,11 +598,52 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
         payload,
         consts: tail,
         arms,
-        tag_phi,
+        merge,
         retired,
         whole,
         part_types: Vec::new(),
     })
+}
+
+/// The tag slot of a helper whose arms each store their own tag, and each
+/// arm's tag, taken out of its stores: the one slot every arm stores a
+/// constant to, exactly once. Every edge into the merge must be an arm —
+/// a path that meets the others without writing the tag has no `Option`
+/// to hand back.
+fn per_arm_tags(func: &HighFunction, join: BlockId, arms: &mut [Arm]) -> Result<Slot, &'static str> {
+    let mut edges = 0usize;
+    func.region.for_each_node(|node| {
+        if let Region::Break { target, .. } | Region::Transfer { target, .. } = node {
+            edges += usize::from(*target == join);
+        }
+    });
+    if edges != arms.len() {
+        return Err("a path reaches the merge without setting the tag");
+    }
+    let constant = |store: &Store| trace_int(func, store.2).is_some();
+    let mut candidates: Option<Vec<Slot>> = None;
+    for arm in arms.iter() {
+        let mine: Vec<Slot> = arm.stores.iter().filter(|s| constant(s)).map(|s| s.1).collect();
+        candidates = Some(match candidates {
+            None => mine,
+            Some(prev) => prev.into_iter().filter(|s| mine.contains(s)).collect(),
+        });
+    }
+    let mut candidates = candidates.unwrap_or_default();
+    candidates.sort_unstable();
+    candidates.dedup();
+    let [slot] = candidates[..] else {
+        return Err(if candidates.is_empty() { "a path writes no tag" } else { "more than one slot could be the tag" });
+    };
+    for arm in arms.iter_mut() {
+        let at: Vec<usize> = (0..arm.stores.len()).filter(|&i| arm.stores[i].1 == slot).collect();
+        let [i] = at[..] else {
+            return Err("a path writes the tag twice");
+        };
+        let (_, _, value) = arm.stores.remove(i);
+        arm.tag = trace_int(func, value).ok_or("the tag is not a constant")?;
+    }
+    Ok(slot)
 }
 
 /// How many merges deep [`untyped_payload`] looks.
@@ -680,8 +789,10 @@ fn merge(a: Flow, b: Flow) -> Result<Flow, &'static str> {
 struct Walk<'f> {
     func: &'f HighFunction,
     out_param: ValueId,
-    tag_store: ValueId,
-    tag_phi: ValueId,
+    /// The one tag store after the merge, and the phi it stores; `None`
+    /// when each arm stores its own tag.
+    tag_store: Option<ValueId>,
+    tag_phi: Option<ValueId>,
     /// The block the tag phi belongs to, once an edge into it is seen.
     join: Option<BlockId>,
     arms: Vec<Arm>,
@@ -773,15 +884,25 @@ impl Walk<'_> {
                 Ok(flow)
             }
             Region::Break { target, transfer } | Region::Transfer { target, transfer } => {
-                if let Some(&(_, v)) = transfer.iter().find(|(phi, _)| *phi == self.tag_phi) {
+                // An arm's edge: one carrying the tag phi, or — when each
+                // arm stores its own tag — one leaving a path that wrote
+                // through the out-pointer. Its tag is settled after the walk.
+                let arm = match self.tag_phi {
+                    Some(phi) => transfer.iter().find(|(p, _)| *p == phi).map(|&(_, v)| Some(v)),
+                    None => (!path.is_empty()).then_some(None),
+                };
+                if let Some(carried) = arm {
                     if self.join.is_some_and(|j| j != *target) {
                         return Err("the tag merges in two places");
                     }
                     self.join = Some(*target);
-                    if transfer.len() != 1 {
+                    if transfer.len() != usize::from(carried.is_some()) {
                         return Err("the merge carries more than the tag");
                     }
-                    let tag = trace_int(self.func, v).ok_or("the tag is not a constant")?;
+                    let tag = match carried {
+                        Some(v) => trace_int(self.func, v).ok_or("the tag is not a constant")?,
+                        None => 0,
+                    };
                     let pred = self.last.ok_or("an edge into the merge from an unknown block")?;
                     self.arms.push(Arm { tag, stores: path, pred });
                     return Ok(Flow::Joined);
@@ -814,7 +935,7 @@ impl Walk<'_> {
         let mut consts = Vec::new();
         let mut tag_seen = false;
         for &id in &self.func.blocks.get(block).ok_or("a missing block")?.bindings {
-            if id == self.tag_store {
+            if Some(id) == self.tag_store {
                 tag_seen = true;
                 continue;
             }
@@ -829,7 +950,7 @@ impl Walk<'_> {
                 return Err("the merge does more than finish the result");
             }
         }
-        if !tag_seen {
+        if self.tag_store.is_some() && !tag_seen {
             return Err("the tag is stored outside the merge");
         }
         self.tail = Some(consts);
@@ -845,7 +966,7 @@ impl Walk<'_> {
         if base != self.out_param {
             return Ok(None);
         }
-        if id == self.tag_store {
+        if Some(id) == self.tag_store {
             return Err("the tag is stored before the merge");
         }
         let offset = off.checked_add(*offset).ok_or("an offset overflows")?;
@@ -938,23 +1059,42 @@ fn rewrite_helper(func: &mut HighFunction, helper: &Helper) {
         by_pred.insert(arm.pred, id);
     }
 
-    // The merged tag becomes the merged `Option`.
-    if let Some(binding) = func.bindings.get_mut(helper.tag_phi)
-        && let Expr::Phi { incoming } = &mut binding.expr
-    {
-        for (pred, value) in incoming.iter_mut() {
-            if let Some(option) = by_pred.get(pred) {
-                *value = *option;
+    let merged = match helper.merge {
+        // The merged tag becomes the merged `Option`.
+        Merge::Phi(tag_phi) => {
+            if let Some(binding) = func.bindings.get_mut(tag_phi)
+                && let Expr::Phi { incoming } = &mut binding.expr
+            {
+                for (pred, value) in incoming.iter_mut() {
+                    if let Some(option) = by_pred.get(pred) {
+                        *value = *option;
+                    }
+                }
+                binding.ty = untyped();
+                binding.add_provenance(Provenance::new(
+                    PASS_NAME,
+                    ProvenanceSource::SdkPattern,
+                    "the out-parameter's tag, merged as the `Option` it encoded",
+                ));
             }
+            retarget(&mut func.region, &mut None, tag_phi, &by_pred);
+            tag_phi
         }
-        binding.ty = untyped();
-        binding.add_provenance(Provenance::new(
-            PASS_NAME,
-            ProvenanceSource::SdkPattern,
-            "the out-parameter's tag, merged as the `Option` it encoded",
-        ));
-    }
-    retarget(&mut func.region, &mut None, helper.tag_phi, &by_pred);
+        // Each arm wrote its own tag: the `Option`s meet in a new merge,
+        // carried on each arm's edge into the block where the paths meet.
+        Merge::PerArm(join) => {
+            let mut incoming: Vec<(BlockId, ValueId)> = by_pred.iter().map(|(b, o)| (*b, *o)).collect();
+            incoming.sort_unstable();
+            let phi = push(
+                func,
+                Expr::Phi { incoming },
+                untyped(),
+                "the `Option` each path wrote through the out-parameter, merged where the paths meet",
+            );
+            attach(&mut func.region, &mut None, join, phi, &by_pred);
+            phi
+        }
+    };
 
     for &id in &helper.retired {
         rewrite(
@@ -965,9 +1105,9 @@ fn rewrite_helper(func: &mut HighFunction, helper: &Helper) {
             "out-parameter write, now the returned `Option`",
         );
     }
-    give_back(&mut func.region, helper.tag_phi);
+    give_back(&mut func.region, merged);
     for site in &mut func.returns {
-        *site = vec![helper.tag_phi];
+        *site = vec![merged];
     }
     if helper.out < func.params.len() {
         func.params.remove(helper.out);
@@ -1012,6 +1152,48 @@ fn retarget(region: &mut Region, last: &mut Option<BlockId>, tag_phi: ValueId, b
                 {
                     *value = *option;
                 }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Carry each arm's `Option` into `phi` on the arm's edge into `join`.
+fn attach(region: &mut Region, last: &mut Option<BlockId>, join: BlockId, phi: ValueId, by_pred: &HashMap<BlockId, ValueId>) {
+    match region {
+        Region::Basic(b) => *last = Some(*b),
+        Region::Sequence(items) => {
+            for item in items {
+                attach(item, last, join, phi, by_pred);
+            }
+        }
+        Region::Scope { body, .. } | Region::Loop { body, .. } => {
+            attach(body, last, join, phi, by_pred);
+            *last = None;
+        }
+        Region::If { then_region, else_region, .. } => {
+            let entry = *last;
+            attach(then_region, last, join, phi, by_pred);
+            *last = entry;
+            if let Some(e) = else_region {
+                attach(e, last, join, phi, by_pred);
+            }
+            *last = None;
+        }
+        Region::Switch { arms, default, .. } => {
+            let entry = *last;
+            attach(default, last, join, phi, by_pred);
+            for arm in arms {
+                *last = entry;
+                attach(&mut arm.body, last, join, phi, by_pred);
+            }
+            *last = None;
+        }
+        Region::Break { target, transfer } | Region::Transfer { target, transfer } => {
+            if *target == join
+                && let Some(option) = last.and_then(|b| by_pred.get(&b))
+            {
+                transfer.push((phi, *option));
             }
         }
         _ => {}
@@ -1445,6 +1627,13 @@ fn site(
 ) -> Result<SitePlan, &'static str> {
     let ptr = *args.get(helper.out).ok_or("the call has no out-pointer argument")?;
     let (base, at) = canon_addr(func, ptr);
+    // Only the caller's own frame is memory nothing reads once the caller
+    // returns. Through its own out-pointer, or any pointer it was handed,
+    // the helper writes memory the caller's caller reads afterwards, and
+    // the rewrite would stop writing it.
+    if !is_frame(func, base) {
+        return Err("the out-pointer is not into the caller's own frame");
+    }
     let tag = helper.tag.shifted(at).ok_or("an offset overflows")?;
     let payload: Vec<Slot> = helper.payload.iter().map(|(s, _)| s.shifted(at)).collect::<Option<_>>().ok_or("an offset overflows")?;
     let all: Vec<Slot> = helper.slots().map(|s| s.shifted(at)).collect::<Option<_>>().ok_or("an offset overflows")?;
@@ -2249,13 +2438,133 @@ mod tests {
         )
     }
 
+    /// `f` with its `v0` the shadow-stack frame rustc builds,
+    /// `global.get 0 - 32`. The two bindings it needs go at the end, so
+    /// every id a test names stays where it was.
+    fn framed(mut f: HighFunction) -> HighFunction {
+        let at = f.bindings.len() as u32;
+        for expr in [Expr::GlobalGet { index: 0 }, i32c(32)] {
+            let id = ValueId::from_index(f.bindings.len() as u32);
+            f.bindings.push(Binding::new(
+                id,
+                IrType::Unknown(UnknownReason::InsufficientEvidence),
+                expr,
+                Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+            ));
+        }
+        f.bindings.get_mut(v(0)).expect("the frame").expr =
+            Expr::Binary { op: BinaryOp::Sub, lhs: v(at), rhs: v(at + 1) };
+        f
+    }
+
+    /// func_1 with each arm storing its own tag, and no merge of tags:
+    /// `if t { store out <- 1 } else { store out+8 <- v; store out <- 0 }`.
+    /// `absent_tags` is how many tag stores the failing arm makes (0, 1 or
+    /// 2).
+    fn per_arm_helper(absent_tags: usize) -> HighFunction {
+        let exprs = vec![
+            Expr::Phi { incoming: vec![] },     // v0 out-pointer
+            Expr::Phi { incoming: vec![] },     // v1 the value
+            Expr::Literal(Literal::I64(1)),     // v2 absent tag
+            Expr::Literal(Literal::Bool(true)), // v3 the test
+            Expr::Literal(Literal::I64(0)),     // v4 present tag
+            store(0, 1, 8),                     // v5 the payload
+            store(0, 2, 0),                     // v6 the failing arm's tag
+            store(0, 4, 0),                     // v7 the other arm's tag
+            store(0, 2, 0),                     // v8 the failing arm's tag, again
+        ];
+        let absent = [vec![], vec![6], vec![6, 8]][absent_tags].clone();
+        let arm = |block: u32| {
+            Region::Sequence(vec![Region::Basic(bb(block)), Region::Transfer { target: bb(3), transfer: vec![] }])
+        };
+        func(
+            1,
+            exprs,
+            vec![0, 1],
+            vec![vec![2, 3, 4], absent, vec![5, 7], vec![]],
+            Region::Sequence(vec![
+                Region::Basic(bb(0)),
+                Region::If { cond: v(3), then_region: Box::new(arm(1)), else_region: Some(Box::new(arm(2))) },
+                Region::Basic(bb(3)),
+                Region::Return { values: vec![] },
+            ]),
+        )
+    }
+
+    #[test]
+    fn a_tag_stored_in_each_arm_is_classified() {
+        let h = classify(&per_arm_helper(1)).expect("each path writes one tag and its value");
+        assert_eq!(h.out, 0);
+        assert_eq!((h.present, h.absent), (0, 1));
+        assert_eq!(h.tag, Slot { offset: 0, bytes: 8 });
+        assert_eq!(h.payload.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [Slot { offset: 8, bytes: 8 }]);
+        assert_eq!(h.merge, Merge::PerArm(bb(3)));
+    }
+
+    #[test]
+    fn a_path_writing_no_tag_or_two_is_refused() {
+        assert_eq!(classify(&per_arm_helper(0)).err(), Some("a path reaches the merge without setting the tag"));
+        assert_eq!(classify(&per_arm_helper(2)).err(), Some("a path writes the tag twice"));
+    }
+
+    #[test]
+    fn a_tag_stored_in_each_arm_is_returned_as_one_merged_option() {
+        let mut ir = module(vec![framed(caller(false)), per_arm_helper(1)]);
+        assert!(OptionalOutParamPass.run(&mut ir).changed);
+        let h = &ir.functions[1];
+        assert_eq!(h.params, vec![v(1)], "the out-pointer is no longer a parameter");
+        let Region::Sequence(items) = &h.region else { panic!("a sequence") };
+        let Some(Region::Return { values }) = items.last() else { panic!("a return") };
+        let merged = values[0];
+        let Some(Expr::Phi { incoming }) = h.bindings.get(merged).map(|b| &b.expr) else {
+            panic!("the arms' `Option`s meet in a merge");
+        };
+        assert_eq!(incoming.iter().map(|(b, _)| *b).collect::<Vec<_>>(), [bb(1), bb(2)]);
+        let arms: Vec<&Expr> = incoming.iter().map(|(_, o)| &h.bindings.get(*o).unwrap().expr).collect();
+        assert!(
+            matches!(arms.as_slice(), [Expr::Optional { payload: None }, Expr::Optional { payload: Some(p) }] if p == &vec![v(1)]),
+            "the failing arm is None, the other Some(value)"
+        );
+        // Each arm's edge into the merge carries its `Option`.
+        let mut carried = Vec::new();
+        h.region.for_each_node(|n| {
+            if let Region::Transfer { transfer, .. } = n {
+                carried.extend(transfer.iter().copied());
+            }
+        });
+        assert_eq!(carried, incoming.iter().map(|(_, o)| (merged, *o)).collect::<Vec<_>>());
+        for store in [v(5), v(6), v(7)] {
+            assert!(matches!(h.bindings.get(store).unwrap().expr, Expr::Literal(Literal::Unit)), "the writes retire");
+        }
+        let c = &ir.functions[0];
+        assert!(matches!(c.bindings.get(v(5)).unwrap().expr, Expr::Unwrap { value, .. } if value == v(2)));
+    }
+
+    #[test]
+    fn a_result_written_through_the_callers_own_pointer_is_refused() {
+        // The caller hands on its own out-pointer, a parameter: its caller
+        // reads what the helper writes there after it returns.
+        let mut own = caller(false);
+        own.params = vec![v(0), v(1)];
+        let ir = module(vec![own, helper(false)]);
+        let helpers: HashMap<FuncId, Helper> =
+            ir.functions.iter().filter_map(|f| classify(f).ok().map(|h| (f.id, h))).collect();
+        let frames = Frames { ir: &ir, helpers: &helpers, extents: RefCell::new(HashMap::new()) };
+        let f = &ir.functions[0];
+        let Some(Expr::Call { args, .. }) = f.bindings.get(v(2)).map(|b| &b.expr) else { panic!("the call") };
+        let planned = site(&frames, f, &emission_order(f), v(2), args, &helpers[&FuncId::from_index(1)]);
+        assert_eq!(planned.err(), Some("the out-pointer is not into the caller's own frame"));
+    }
+
     fn site_of(caller: HighFunction) -> Result<(), &'static str> {
         plan_in(vec![caller, helper(false)]).map(|_| ())
     }
 
     /// The site at `functions[0]`'s `v2`, calling the helper func_1, as
     /// how many tag reads and value reads it rewrites.
-    fn plan_in(functions: Vec<HighFunction>) -> Result<(usize, usize), &'static str> {
+    fn plan_in(mut functions: Vec<HighFunction>) -> Result<(usize, usize), &'static str> {
+        let first = framed(functions.remove(0));
+        functions.insert(0, first);
         let ir = module(functions);
         let helpers: HashMap<FuncId, Helper> = ir
             .functions
@@ -2366,7 +2675,7 @@ mod tests {
         // Read in the entry block, used only on the arm the test proves it
         // present on: it can move there.
         assert_eq!(site_of(caller(true)), Ok(()));
-        let mut ir = module(vec![caller(true), helper(false)]);
+        let mut ir = module(vec![framed(caller(true)), helper(false)]);
         assert!(OptionalOutParamPass.run(&mut ir).changed);
         let c = &ir.functions[0];
         assert!(matches!(c.bindings.get(v(5)).unwrap().expr, Expr::Unwrap { value, .. } if value == v(2)));
@@ -2426,7 +2735,7 @@ mod tests {
 
     #[test]
     fn a_choice_between_the_value_and_a_fallback_on_the_tag_is_unwrap_or() {
-        let mut ir = module(vec![caller_choice(false), helper(false)]);
+        let mut ir = module(vec![framed(caller_choice(false)), helper(false)]);
         assert!(OptionalOutParamPass.run(&mut ir).changed);
         let c = &ir.functions[0];
         assert!(
@@ -2538,7 +2847,7 @@ mod tests {
 
     #[test]
     fn the_helper_returns_an_option_and_its_caller_asks_it() {
-        let mut ir = module(vec![caller(false), helper(false)]);
+        let mut ir = module(vec![framed(caller(false)), helper(false)]);
         let result = OptionalOutParamPass.run(&mut ir);
         assert!(result.changed, "every site qualifies, so the helper is rewritten");
 
@@ -2583,7 +2892,7 @@ mod tests {
         // for one caller.
         let mut early = caller_escaping();
         early.id = FuncId::from_index(2);
-        let mut ir = module(vec![caller(false), helper(false), early]);
+        let mut ir = module(vec![framed(caller(false)), helper(false), framed(early)]);
         assert!(!OptionalOutParamPass.run(&mut ir).changed);
         assert_eq!(ir.functions[1].params.len(), 2, "the helper keeps its out-pointer");
     }
@@ -2617,7 +2926,7 @@ mod tests {
         // fill's zeros, not the helper's bytes, and are left as they are.
         let fill = || caller_then(vec![i32c(16), i32c(0), bulk(0, 7, 6)]);
         assert_eq!(plan_in(vec![fill(), helper(false)]), Ok((0, 0)));
-        let mut ir = module(vec![fill(), helper(false)]);
+        let mut ir = module(vec![framed(fill()), helper(false)]);
         assert!(OptionalOutParamPass.run(&mut ir).changed);
         let c = &ir.functions[0];
         for read in [v(3), v(5)] {
@@ -2707,7 +3016,7 @@ mod tests {
             (1, Some(vec![1]), true),  // global 1 is local 0, the caller
         ];
         for (imports, table, rewritten) in cases {
-            let mut ir = module(vec![caller(false), helper(false), indirect()]);
+            let mut ir = module(vec![framed(caller(false)), helper(false), indirect()]);
             ir.facts.imports = vec![import.clone(); imports];
             ir.facts.table_functions = table.clone();
             assert_eq!(OptionalOutParamPass.run(&mut ir).changed, rewritten, "imports {imports}, table {table:?}");
