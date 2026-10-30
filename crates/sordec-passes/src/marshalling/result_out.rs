@@ -1031,7 +1031,7 @@ fn caller_of(ir: &HighIr, id: FuncId) -> Result<&HighFunction, &'static str> {
 
 /// Whether `base` is the function's own shadow-stack frame:
 /// `global.get - size`.
-fn is_frame(func: &HighFunction, base: ValueId) -> bool {
+pub(super) fn is_frame(func: &HighFunction, base: ValueId) -> bool {
     let Some(Expr::Binary { op: BinaryOp::Sub, lhs, rhs }) = func.bindings.get(base).map(|b| &b.expr) else {
         return false;
     };
@@ -1056,7 +1056,7 @@ fn followed_by_return(region: &Region, block: BlockId) -> bool {
 
 /// Whether `value` is read by nothing but returns (through renames), and
 /// every return of the function returns it.
-fn only_returned(func: &HighFunction, value: ValueId) -> bool {
+pub(super) fn only_returned(func: &HighFunction, value: ValueId) -> bool {
     let order = emission_order(func);
     let mut aliases: HashSet<ValueId> = HashSet::from([value]);
     let mut grew = true;
@@ -1104,7 +1104,7 @@ fn only_returned(func: &HighFunction, value: ValueId) -> bool {
 /// its own, or — for a helper — the one every caller returns its result
 /// as, up to `depth` calls. A helper climbed through comes to return the
 /// `Result` too, so its direct calls must be all of its callers.
-fn declared_result(ir: &HighIr, calls: &CallIndex, func: FuncId, depth: usize) -> Option<KnownType> {
+pub(super) fn declared_result(ir: &HighIr, calls: &CallIndex, func: FuncId, depth: usize) -> Option<KnownType> {
     let f = ir.function(func)?;
     if let Some(sig) = &f.signature {
         let [out] = sig.outputs.as_slice() else {
