@@ -45,8 +45,21 @@
 //! arm reading nothing of the call. Which tag means present is what those
 //! selects say, and every site must agree.
 //!
-//! A signature changes, so it is every call site or none, and nothing
-//! when the module has an indirect call.
+//! A signature changes, so it is every call site or none.
+//!
+//! # Gates
+//!
+//! Besides what makes a helper and a site, above:
+//!
+//! - **Every caller is a direct call.** An indirect call can reach any
+//!   function an element segment declares, and would still read two
+//!   registers where the helper now returns one `Option`. When the module
+//!   has one — recovered, or a raw `call_indirect` the pipeline left as it
+//!   found it — a helper the segments declare keeps its signature, and so
+//!   does every helper when the declared set could not be read
+//!   ([`CallIndex::caller_set_complete`]).
+//! - **The sites agree** on which tag holds the value, or the helper is
+//!   kept.
 
 use std::collections::{HashMap, HashSet};
 
@@ -58,7 +71,7 @@ use sordec_ir::{
 
 use super::encode::encoded_constant;
 use super::sret::emission_order;
-use crate::dataflow::{block_containing, dead_residue, resolve_use, trace_int};
+use crate::dataflow::{block_containing, dead_residue, resolve_use, trace_int, CallIndex};
 use crate::metrics_catalog::{
     MARSHALLING_OPTIONAL_PAIR_HELPERS as M_HELPERS, MARSHALLING_OPTIONAL_PAIR_REWRITTEN as M_REWRITTEN,
     MARSHALLING_OPTIONAL_PAIR_SITES as M_SITES, MARSHALLING_OPTIONAL_PAIR_SITES_REFUSED as M_SITES_REFUSED,
@@ -134,16 +147,18 @@ impl Pass<HighIr> for OptionalPairPass {
             }
         }
 
-        // The rewrite changes a signature, so it is every site or none. An
-        // indirect call anywhere means callers this pass cannot see.
-        let indirect = ir
-            .functions
-            .iter()
-            .any(|f| f.bindings.iter().any(|(_, b)| matches!(b.expr, Expr::IndirectCall { .. })));
-        if indirect {
-            return result;
-        }
+        // The rewrite changes a signature, so it is every site or none — and
+        // none for a helper an indirect call, recovered or raw, could reach:
+        // its callers are more than the census saw.
+        let calls = CallIndex::build(ir);
         let mut targets: Vec<FuncId> = plans.keys().copied().filter(|t| !refused.contains(t)).collect();
+        targets.retain(|t| {
+            let complete = calls.caller_set_complete(*t);
+            if !complete {
+                trace_id(*t, "kept: an indirect call may reach it");
+            }
+            complete
+        });
         targets.sort_unstable();
         for target in targets {
             let sites = &plans[&target];
@@ -1002,5 +1017,19 @@ mod tests {
             b.expr = Expr::Literal(Literal::I32(1));
         }
         assert_eq!(classify(&h), Err(NOT_A_CANDIDATE));
+    }
+
+    #[test]
+    fn a_helper_a_raw_indirect_call_may_reach_keeps_its_pair() {
+        crate::marshalling::test_support::check_indirect_gate(
+            || module(vec![caller(false), helper()]),
+            1,
+            |ir| {
+                let changed = OptionalPairPass.run(ir).changed;
+                let pair = returns(&ir.functions[1]).iter().all(|(_, r)| r.len() == 2);
+                assert_eq!(changed, !pair, "the helper returns its pair exactly when nothing changed");
+                changed
+            },
+        );
     }
 }

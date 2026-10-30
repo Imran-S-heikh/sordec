@@ -328,4 +328,67 @@ pub(crate) mod test_support {
             memory: MemoryImage::empty(),
         }
     }
+
+    /// A function, `func_{id}`, that makes one raw `call_indirect` — the
+    /// form the pipeline leaves every real one in.
+    pub(crate) fn raw_indirect_caller(id: u32) -> HighFunction {
+        let mut func = func_with(
+            vec![
+                Expr::Literal(sordec_ir::Literal::I32(0)),
+                Expr::Unknown {
+                    op_kind: sordec_ir::WasmOpcodeKind::CallIndirect,
+                    args: vec![v(0)],
+                    reason: UnknownReason::UnsupportedPattern,
+                },
+            ],
+            vec![],
+            vec![0, 1],
+        );
+        func.id = FuncId::from_index(id);
+        func
+    }
+
+    /// The indirect-call gate every signature-changing pass shares
+    /// ([`crate::dataflow::CallIndex::caller_set_complete`]), checked on
+    /// one pass: `build` makes a module the pass rewrites, `rewritten`
+    /// runs the pass and says whether `func_{helper}`'s signature changed.
+    /// Beside a raw `call_indirect`, the helper may change only when no
+    /// table can hold it — and element segments name functions in the
+    /// global index space, which counts function imports first.
+    pub(crate) fn check_indirect_gate(
+        build: impl Fn() -> HighIr,
+        helper: u32,
+        rewritten: impl Fn(&mut HighIr) -> bool,
+    ) {
+        let import = sordec_ir::Import {
+            index: 0,
+            module: "x".to_string(),
+            name: "_".to_string(),
+            kind: sordec_ir::ImportKind::Func(0),
+        };
+        let caller = build().functions.len() as u32;
+        // (a raw call_indirect, function imports, element-declared global
+        // indices, whether the helper may change)
+        let cases = [
+            (false, 0, Some(vec![helper]), true), // a table, but no call through it
+            (true, 0, None, false),               // the declared set is not known
+            (true, 0, Some(vec![helper]), false), // the table may hold the helper
+            (true, 0, Some(vec![caller]), true),  // it holds only another function
+            (true, 1, Some(vec![helper + 1]), false), // global helper+1 is the helper
+            (true, 1, Some(vec![helper]), true),  // global `helper` is the one before it
+        ];
+        for (indirect, imports, table, expected) in cases {
+            let mut ir = build();
+            if indirect {
+                ir.functions.push(raw_indirect_caller(caller));
+            }
+            ir.facts.imports = vec![import.clone(); imports];
+            ir.facts.table_functions = table.clone();
+            assert_eq!(
+                rewritten(&mut ir),
+                expected,
+                "call_indirect {indirect}, imports {imports}, table {table:?}"
+            );
+        }
+    }
 }
