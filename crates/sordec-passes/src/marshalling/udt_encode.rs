@@ -63,6 +63,31 @@
 //! the declaration picks among the candidates, it never overrides them —
 //! and two places naming different structs name none.
 //!
+//! # A field encoded by a helper
+//!
+//! A `u64` field's encode is a branch (small form or object), and rustc
+//! often outlines it into a helper the constructions share
+//! ([`super::encode_helper`]): the field then holds `func1(x).1`, not an
+//! encode this pass can see. When that helper returns, in that component
+//! and on every path, the encode of its parameter as the type the struct
+//! declares for the field, the component *is* `encode(x)`, and the field
+//! is `x` — the same strip as the inline case. It is done on literals
+//! already written: the helper is recognised only once its own frame
+//! bracket is gone, a round of the group after the construction was.
+//!
+//! Why it is exact: the helper encodes nothing but its argument and does
+//! nothing else (the recogniser's gates), so the slot holds exactly what
+//! the derive writes for a field of value `x`, and the re-emitted derive
+//! writes it again. The call is left in place; once the frame elision has
+//! dropped the slot stores nothing reads it, and the return-encode
+//! collapse's later run drops it as it drops every spent call to such a
+//! helper: it has no effect to keep.
+//!
+//! The gate, beyond the recogniser's own: **the helper's encode type is the
+//! field's declared type.** A `u64` encoder in a field declared anything
+//! else is not what the derive wrote for that field, and is left as the
+//! value it is.
+//!
 //! # The renames
 //!
 //! A construction is often reached through renames — the inliner's
@@ -79,11 +104,13 @@ use sordec_ir::{
     StructDef, TypeRef,
 };
 
+use super::encode_helper::EncoderTable;
 use super::udt_decode::{raw_address, read_keys, struct_for};
 use crate::dataflow::{canon_addr, facts_at, resolve_use};
 use crate::dataflow::trace_bytes::trace_u32val;
 use crate::metrics_catalog::MARSHALLING_UDT_ENCODES as M_ENCODES;
 use crate::pass::{Pass, PassResult};
+use crate::type_infer::known_of_type_ref;
 
 /// Pass name — also the provenance `pass` field for every rewrite.
 pub const PASS_NAME: &str = "marshalling-udt-encode";
@@ -107,6 +134,7 @@ impl Pass<HighIr> for UdtEncodePass {
             return result;
         }
         let memory = ir.memory.clone();
+        let encoders = EncoderTable::build(ir);
         for func in &mut ir.functions {
             // A literal recovered this round declares its fields' structs,
             // which may name an inner construction the next round can
@@ -128,6 +156,9 @@ impl Pass<HighIr> for UdtEncodePass {
                         result.changed = true;
                     }
                 }
+            }
+            if strip_helper_encodes(func, &structs, &encoders) > 0 {
+                result.changed = true;
             }
             for (at, whole) in rebuilds(func, &structs) {
                 if let Some(b) = func.bindings.get_mut(at) {
@@ -424,6 +455,44 @@ fn literal_at(
     Some(Literal { at: id, ty: IrType::Known(KnownType::UserDefined(def.id)), fields, plain, named_by_use })
 }
 
+/// Take each recovered literal's field from behind a helper that only
+/// encodes it as the field's declared type ("A field encoded by a
+/// helper"). Returns how many fields it took.
+///
+/// On literals already written, not inside [`literal_at`]: a helper is
+/// recognised only once its own frame bracket is gone, which is after the
+/// construction it serves was rewritten — the group's next round.
+fn strip_helper_encodes(func: &mut HighFunction, structs: &[StructDef], encoders: &EncoderTable) -> usize {
+    let mut found: Vec<(ValueId, usize, ValueId)> = Vec::new();
+    for (id, b) in func.bindings.iter() {
+        let Expr::Struct { fields } = &b.expr else { continue };
+        let (IrType::Known(KnownType::UserDefined(ty)) | IrType::Inferred(KnownType::UserDefined(ty))) = &b.ty else {
+            continue;
+        };
+        let Some(def) = structs.iter().find(|s| s.id == *ty) else { continue };
+        for (index, (name, value)) in fields.iter().enumerate() {
+            let declared = def.fields.iter().find(|f| f.name == *name).and_then(|f| known_of_type_ref(&f.ty));
+            if let Some((payload, encoded)) = encoders.encoded_by_call(func, *value)
+                && Some(&encoded) == declared.as_ref()
+            {
+                found.push((id, index, payload));
+            }
+        }
+    }
+    for &(id, index, payload) in &found {
+        let Some(b) = func.bindings.get_mut(id) else { continue };
+        let Expr::Struct { fields } = &mut b.expr else { continue };
+        let name = fields[index].0.clone();
+        fields[index].1 = payload;
+        b.add_provenance(Provenance::new(
+            PASS_NAME,
+            ProvenanceSource::SdkPattern,
+            format!("field `{name}` taken from behind a helper that only encodes it as the declared type"),
+        ));
+    }
+    found.len()
+}
+
 /// The value behind a field's `Val` encode. A field whose type is already
 /// a `Val` — an object handle — is stored as itself and comes back
 /// unchanged.
@@ -625,6 +694,72 @@ mod tests {
         let f = &m.functions[0];
         let Expr::Struct { fields } = &f.bindings.get(v(9)).unwrap().expr else { panic!() };
         assert!(matches!(f.bindings.get(fields[1].1).unwrap().expr, Expr::Literal(Literal::I32(7))));
+    }
+
+    /// `t = func1(last_incr); store fp+0 <- enc(count); store fp+8 <- t.1;
+    /// map_new(..)`, beside func1, the outlined `u64` encode:
+    /// `r = phi [obj_from_u64(x), val_encode<u64>(x)]; return (0, r)`.
+    /// `last_incr` declared as `field`.
+    fn helper_encoded(field: PrimitiveType) -> HighIr {
+        use sordec_common::{BlockId, FuncId, IrId};
+        use sordec_ir::{Region, ValObjectKind};
+        let construct = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0 frame base
+                Expr::Phi { incoming: vec![] }, // v1 count
+                Expr::Phi { incoming: vec![] }, // v2 last_incr
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v(1) })), // v3
+                Expr::Store { addr: v(0), value: v(3), offset: 0, width: MemWidth::W8 }, // v4
+                Expr::Call { target: FuncId::from_index(1), args: vec![v(2)] }, // v5
+                Expr::Project { value: v(5), index: 1 },                        // v6
+                Expr::Store { addr: v(0), value: v(6), offset: 8, width: MemWidth::W8 }, // v7
+                Expr::Literal(Literal::U32(2000)),                              // v8 keys
+                Expr::Literal(Literal::U32(2)),                                 // v9 len
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(8), vals_pos: v(0), len: v(9) })), // v10
+            ],
+            vec![v(0), v(1), v(2)],
+            vec![5, 6, 3, 4, 7, 8, 9, 10],
+        );
+        let mut helper = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0: x
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValObject { kind: ValObjectKind::ObjFromU64, args: vec![v(0)] })), // v1
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty: KnownType::U64, value: v(0) })), // v2
+                Expr::Phi { incoming: vec![(BlockId::from_index(0), v(1)), (BlockId::from_index(1), v(2))] }, // v3
+                Expr::Literal(Literal::I64(0)), // v4
+            ],
+            vec![v(0)],
+            vec![1, 2, 4],
+        );
+        helper.id = FuncId::from_index(1);
+        helper.region =
+            Region::Sequence(vec![Region::Basic(BlockId::from_index(0)), Region::Return { values: vec![v(4), v(3)] }]);
+        let mut m = ir(construct);
+        m.functions.push(helper);
+        m.soroban_facts.as_mut().unwrap().types.structs[0].fields[1].ty = TypeRef::Primitive(field);
+        m
+    }
+
+    /// A `u64` field whose slot holds the component of a helper that only
+    /// encodes its argument as a `u64` is that argument.
+    #[test]
+    fn a_field_encoded_by_a_helper_is_the_helper_s_argument() {
+        let mut m = helper_encoded(PrimitiveType::U64);
+        assert!(UdtEncodePass.run(&mut m).changed);
+        let b = m.functions[0].bindings.get(v(10)).unwrap();
+        let Expr::Struct { fields } = &b.expr else { panic!("{:?}", b.expr) };
+        assert_eq!(fields, &vec![("count".to_string(), v(1)), ("last_incr".to_string(), v(2))]);
+        assert!(b.provenance().iter().any(|p| p.note.contains("last_incr")), "the field taken from the helper is recorded");
+    }
+
+    /// The same helper in a field declared `u32` is not what the derive
+    /// writes for it: the field keeps the component it holds.
+    #[test]
+    fn a_helper_encoding_another_type_than_the_field_s_is_not_stripped() {
+        let mut m = helper_encoded(PrimitiveType::U32);
+        assert!(UdtEncodePass.run(&mut m).changed);
+        let Expr::Struct { fields } = &m.functions[0].bindings.get(v(10)).unwrap().expr else { panic!() };
+        assert_eq!(fields[1], ("last_incr".to_string(), v(6)));
     }
 
     #[test]
