@@ -624,3 +624,17 @@ an overflow panic where the program had the length. An unsigned shift right by
 exactly 32 of a packed `U32Val` is now its payload. udt stores its lengths again;
 phoenix-vesting's length arithmetic now reads as the lengths (and an underflow
 check folds into the `len - 1` that already makes it). Scored sets unchanged.
+
+## Correction (2026-10-30): running error totals
+
+The per-set tables in the rows above are right; the running totals in five of the
+rows' text (and in the matching merge commit messages) were added up wrongly from
+e41127f on. The correct totals, summed from each measurement's per-contract file:
+
+| Commit | Total errors as written | Correct total |
+|---|---:|---:|
+| e41127f | 28 | **27** |
+| 8631f8a | 25 | **24** |
+| 8af9004 | 22 | **21** |
+| 7f7e7c3 | 18 | **15** |
+| b946d64, 7b5c975 | 18 | **15** |
