@@ -27,6 +27,31 @@
 //! What the caller ends up holding is the read itself, known to be a
 //! `BytesN<N>`; it traps otherwise.
 //!
+//! ## Split in two, and handed the value's address
+//!
+//! `privacy_pools` builds the same conversion from two helpers: the first
+//! is handed the *address* of the value, loads it, tests its tag, and on a
+//! bytes object hands its own out-pointer and the value to the second,
+//! which is `helper` above without the tag check:
+//!
+//! ```text
+//! tag_half(out, env, p):                  caller:
+//!     v = load p                              store f+8 <- read
+//!     if has_tag(v, BytesObject) {            tag_half(f+16, env, f+8)
+//!         length_half(out, v)                 if load(f+16) == 1 { panic!() }
+//!     } else { store out+0 <- 1 }             key = load(f+24)
+//! ```
+//!
+//! Path by path the pair writes what `helper` writes: `1` where the tag
+//! fails, and past the tag, `1` or the value with `0` as the length
+//! decides. The region of `tag_half` is that one test and its two ways and
+//! nothing else, and it writes nothing but that `1`. The value it converts
+//! is the one the caller stored at exactly the eight bytes it loads, with
+//! nothing between the store and the call that may write them
+//! ([`crate::dataflow::facts_at`]'s kill discipline), so the read the fold
+//! types is the value converted. The length is accepted as the host's
+//! `U32Val` or unpacked from it, `(len >> 32) as u32`: the same number.
+//!
 //! # The rewrite
 //!
 //! The read is typed `BytesN<N>`, the call goes, the discriminant read is
@@ -46,7 +71,7 @@ use std::collections::HashMap;
 use sordec_common::{FuncId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
     BinaryOp, BufOpKind, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MemWidth,
-    Region, SemanticOp,
+    Region, SemanticOp, UnaryOp,
 };
 
 use super::sret::emission_order;
@@ -72,8 +97,14 @@ impl Pass<HighIr> for BytesNConvertPass {
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
-        let converters: HashMap<FuncId, u32> =
-            ir.functions.iter().filter_map(|h| Some((h.id, converter_width(h)?))).collect();
+        let mut converters: HashMap<FuncId, Converter> = ir
+            .functions
+            .iter()
+            .filter_map(|h| Some((h.id, Converter { width: converter_width(h, true)?, out: 0, value: 1, by_ref: None })))
+            .collect();
+        let lengths: HashMap<FuncId, u32> =
+            ir.functions.iter().filter_map(|h| Some((h.id, converter_width(h, false)?))).collect();
+        converters.extend(ir.functions.iter().filter_map(|h| Some((h.id, split_converter(h, &lengths)?))));
         if converters.is_empty() {
             return result;
         }
@@ -92,8 +123,23 @@ impl Pass<HighIr> for BytesNConvertPass {
     }
 }
 
-/// `N`, when `h` is exactly the outlined `BytesN<N>::try_from_val`.
-fn converter_width(h: &HighFunction) -> Option<u32> {
+/// An outlined `BytesN<N>::try_from_val`, and where its call takes what.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Converter {
+    width: u32,
+    /// The argument carrying the result's address.
+    out: usize,
+    /// The argument carrying the value — or, with `by_ref`, its address.
+    value: usize,
+    /// For a converter handed the value's address: the offset it reads the
+    /// 8-byte value at.
+    by_ref: Option<u32>,
+}
+
+/// `N`, when `h` is exactly the outlined `BytesN<N>::try_from_val` — or,
+/// without `with_tag`, its length half: the same shape with no tag check, which
+/// a split conversion calls once its own tag check has passed.
+fn converter_width(h: &HighFunction, with_tag: bool) -> Option<u32> {
     let [out, v] = h.params[..] else {
         return None;
     };
@@ -133,8 +179,10 @@ fn converter_width(h: &HighFunction) -> Option<u32> {
             }
         }
     }
-    let (tag_check, (len_check, n), payload_store, (_, disc)) =
-        (tag_check?, len_check?, payload_store?, disc_store?);
+    if with_tag != tag_check.is_some() {
+        return None;
+    }
+    let ((len_check, n), payload_store, (_, disc)) = (len_check?, payload_store?, disc_store?);
 
     // The discriminant is `0` only where the payload is stored, `1` on
     // every other path, and the store sits under both checks' passing arms.
@@ -148,13 +196,157 @@ fn converter_width(h: &HighFunction) -> Option<u32> {
             return None;
         }
     }
-    passes_both(&h.region, tag_check, len_check, ok_block).then_some(n)
+    match tag_check {
+        Some(tag_check) => passes_both(&h.region, tag_check, len_check, ok_block),
+        None => else_of(&h.region, len_check, ok_block),
+    }
+    .then_some(n)
 }
 
-/// Whether `value` is `bytes_len(v)`, through renames.
+/// The split form, handed the value's address:
+///
+/// ```text
+/// helper(out, env, p):
+///     v = load p
+///     if has_tag(v, BytesObject) { length_half(out, v) }
+///     else                       { store out+0 <- 1 }
+/// ```
+///
+/// `length_half` is the length check of [`converter_width`] without its tag
+/// check, so on every path the result is the one the whole conversion
+/// writes: `1` where the tag fails, and where it passes, `1` or the value
+/// with `0` as the length decides. The region is that one test and its two
+/// ways, nothing else.
+fn split_converter(h: &HighFunction, lengths: &HashMap<FuncId, u32>) -> Option<Converter> {
+    let order = emission_order(h);
+    let mut read = None;
+    let mut check = None;
+    let mut forward = None;
+    let mut fail = None;
+    for &id in &order {
+        match &h.bindings.get(id)?.expr {
+            Expr::Load { addr, offset, width: MemWidth::W8, .. } => {
+                let (base, at) = crate::dataflow::canon_addr(h, *addr);
+                let src = h.params.iter().position(|p| *p == base)?;
+                if read.replace((id, src, at.checked_add(*offset)?)).is_some() {
+                    return None;
+                }
+            }
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, tag, negated }))
+                if *tag == TAG_BYTES_OBJECT =>
+            {
+                if check.replace((id, resolve_use(h, *value), *negated)).is_some() {
+                    return None;
+                }
+            }
+            Expr::Call { target, args } => {
+                let n = *lengths.get(target)?;
+                if forward.replace((id, n, args.clone())).is_some() {
+                    return None;
+                }
+            }
+            Expr::Store { addr, value, offset: 0, width: MemWidth::W8 } if trace_int(h, *value) == Some(1) => {
+                if fail.replace((id, resolve_use(h, *addr))).is_some() {
+                    return None;
+                }
+            }
+            other => {
+                let fx = expr_effects(other);
+                if fx.writes_host || fx.writes_memory || fx.reads_memory || fx.writes_globals {
+                    return None;
+                }
+            }
+        }
+    }
+    let ((_, src, offset), (check, tested, negated), (call, n, args), (store, out_ptr)) =
+        (read?, check?, forward?, fail?);
+    let v = resolve_use(h, read?.0);
+    let out = h.params.iter().position(|p| *p == out_ptr)?;
+    // The length half is handed the out-pointer and the value, in its
+    // own order: out first.
+    let [to, value] = args[..] else { return None };
+    if tested != v || resolve_use(h, to) != out_ptr || resolve_use(h, value) != v || out == src {
+        return None;
+    }
+    // One test, its two ways, and nothing else in the region.
+    let mut ifs = 0usize;
+    let mut plain = true;
+    h.region.for_each_node(|node| match node {
+        Region::If { .. } => ifs += 1,
+        Region::Basic(_) | Region::Sequence(_) | Region::Return { .. } => {}
+        _ => plain = false,
+    });
+    if !plain || ifs != 1 {
+        return None;
+    }
+    let passes = |id: ValueId| side(&h.region, check, block_containing(h, id)?).map(|then| then != negated);
+    (passes(call)? && !passes(store)?).then_some(Converter { width: n, out, value: src, by_ref: Some(offset) })
+}
+
+/// Which way the test `cond` went for `block` to run: `true` inside the
+/// `then` of the `if` on it, `false` inside its `else` — or after it, in
+/// the sequence holding it, when the `then` never falls through.
+fn side(region: &Region, cond: ValueId, block: sordec_common::BlockId) -> Option<bool> {
+    let holds = |r: &Region| {
+        let mut hit = false;
+        r.for_each_node(|n| hit |= matches!(n, Region::Basic(x) if *x == block));
+        hit
+    };
+    let mut found = None;
+    region.for_each_node(|node| {
+        let Region::Sequence(items) = node else { return };
+        for (i, item) in items.iter().enumerate() {
+            let Region::If { cond: c, then_region, else_region } = item else { continue };
+            if *c != cond {
+                continue;
+            }
+            let after = leaves(then_region) && items[i + 1..].iter().any(holds);
+            if holds(then_region) {
+                found = Some(true);
+            } else if else_region.as_deref().is_some_and(holds) || after {
+                found = Some(false);
+            }
+        }
+    });
+    found
+}
+
+/// Whether control never falls out of the bottom of `region`.
+fn leaves(region: &Region) -> bool {
+    match region {
+        Region::Return { .. } | Region::Panic { .. } | Region::Unreachable => true,
+        Region::Sequence(items) => items.last().is_some_and(leaves),
+        _ => false,
+    }
+}
+
+/// Whether `ok` lies under the `else` of the branch on `cond`.
+fn else_of(region: &Region, cond: ValueId, ok: sordec_common::BlockId) -> bool {
+    let mut found = false;
+    region.for_each_node(|node| {
+        if let Region::If { cond: c, else_region: Some(e), .. } = node
+            && *c == cond
+        {
+            e.for_each_node(|n| found |= matches!(n, Region::Basic(x) if *x == ok));
+        }
+    });
+    found
+}
+
+/// Whether `value` is `bytes_len(v)`, through renames — or that length
+/// unpacked from its `U32Val`, `(len >> 32) as u32`, which is the same
+/// number.
 fn is_len_of(h: &HighFunction, value: ValueId, v: ValueId) -> bool {
+    let value = resolve_use(h, value);
+    let unpacked = match h.bindings.get(value).map(|b| &b.expr) {
+        Some(Expr::Unary { op: UnaryOp::Wrap32, value: shifted }) => match h.bindings.get(resolve_use(h, *shifted)).map(|b| &b.expr) {
+            Some(Expr::Binary { op: BinaryOp::ShrU, lhs, rhs }) if trace_int(h, *rhs) == Some(32) => Some(resolve_use(h, *lhs)),
+            _ => None,
+        },
+        _ => None,
+    };
     matches!(
-        h.bindings.get(resolve_use(h, value)).map(|b| &b.expr),
+        h.bindings.get(unpacked.unwrap_or(value)).map(|b| &b.expr),
         Some(Expr::Semantic(SemanticOp::Known(KnownOp::BufOp { kind: BufOpKind::BytesLen, args })))
             if args.first().is_some_and(|a| resolve_use(h, *a) == v)
     )
@@ -195,16 +387,25 @@ struct Site {
     payloads: Vec<ValueId>,
 }
 
-fn site(func: &HighFunction, call: ValueId, converters: &HashMap<FuncId, u32>) -> Option<Site> {
+fn site(func: &HighFunction, call: ValueId, converters: &HashMap<FuncId, Converter>) -> Option<Site> {
     let Expr::Call { target, args } = &func.bindings.get(call)?.expr else {
         return None;
     };
-    let width = *converters.get(target)?;
-    let [frame, value] = args[..] else {
-        return None;
-    };
+    let conv = *converters.get(target)?;
+    let width = conv.width;
+    let (frame, value) = (*args.get(conv.out)?, *args.get(conv.value)?);
     let (base, at) = address(func, frame, 0);
-    let read = resolve_use(func, value);
+    // Handed the value's address, the converter reads the eight bytes
+    // there: the value the caller stored at exactly those bytes, with
+    // nothing between that may write them.
+    let read = match conv.by_ref {
+        None => resolve_use(func, value),
+        Some(offset) => {
+            let (p, from) = crate::dataflow::canon_addr(func, value);
+            let x = crate::dataflow::facts_at(func, call, p).value_at(from.checked_add(offset)?, MemWidth::W8)?;
+            resolve_use(func, x)
+        }
+    };
     // A source whose typed spelling *is* the conversion: a storage read, or
     // an element of a vector already typed `Vec<BytesN<N>>` — whose `get`
     // runs this same `try_from_val` on the element.
@@ -430,7 +631,8 @@ mod tests {
 
     #[test]
     fn the_helper_is_recognised_with_its_width() {
-        assert_eq!(converter_width(&helper()), Some(32));
+        assert_eq!(converter_width(&helper(), true), Some(32));
+        assert_eq!(converter_width(&helper(), false), None, "it has a tag check");
     }
 
     /// The point: the payload read is the storage read, now a `BytesN<32>`,
@@ -450,6 +652,127 @@ mod tests {
     #[test]
     fn a_value_that_is_not_a_storage_read_is_left_alone() {
         let mut ir = module(vec![caller(Expr::Phi { incoming: vec![] }), helper()]);
+        assert!(!BytesNConvertPass.run(&mut ir).changed);
+    }
+
+    /// func_1 without its tag check, its length unpacked from the `U32Val`
+    /// as privacy_pools' is: `if (len(v) >> 32) as u32 != 32 { d = 1 } else
+    /// { store out+8 <- v; d = 0 }; store out <- d`.
+    fn length_half() -> HighFunction {
+        let exprs = vec![
+            Expr::Phi { incoming: vec![] }, // v0 out
+            Expr::Phi { incoming: vec![] }, // v1 v
+            Expr::Semantic(SemanticOp::Known(KnownOp::BufOp { kind: BufOpKind::BytesLen, args: vec![v(1)] })), // v2
+            Expr::Literal(Literal::I64(32)),                                        // v3
+            Expr::Binary { op: BinaryOp::ShrU, lhs: v(2), rhs: v(3) },             // v4
+            Expr::Unary { op: UnaryOp::Wrap32, value: v(4) },                       // v5
+            Expr::Literal(Literal::I32(32)),                                        // v6
+            Expr::Binary { op: BinaryOp::Ne, lhs: v(5), rhs: v(6) },               // v7
+            Expr::Store { addr: v(0), value: v(1), offset: 8, width: MemWidth::W8 }, // v8
+            Expr::Literal(Literal::I64(1)),                                         // v9
+            Expr::Literal(Literal::I64(0)),                                         // v10
+            Expr::Phi { incoming: vec![(bb(0), v(9)), (bb(1), v(10))] },            // v11 d
+            Expr::Store { addr: v(0), value: v(11), offset: 0, width: MemWidth::W8 }, // v12
+        ];
+        let to_d = |src: u32| Region::Transfer { target: bb(2), transfer: vec![(v(11), v(src))] };
+        let region = Region::Sequence(vec![
+            Region::Basic(bb(0)),
+            Region::If {
+                cond: v(7),
+                then_region: Box::new(to_d(9)),
+                else_region: Some(Box::new(Region::Sequence(vec![Region::Basic(bb(1)), to_d(10)]))),
+            },
+            Region::Basic(bb(2)),
+            Region::Return { values: vec![] },
+        ]);
+        build(2, exprs, vec![vec![2, 3, 4, 5, 6, 7, 9], vec![8, 10], vec![12]], region, vec![0, 1])
+    }
+
+    /// func_3, the tag half handed the value's address: `v = load p; if
+    /// has_tag(v, Bytes) { func_2(out, v); return } store out <- 1`.
+    /// `fail` is the constant the failing path stores.
+    fn tag_half(fail: i64) -> HighFunction {
+        let exprs = vec![
+            Expr::Phi { incoming: vec![] }, // v0 out
+            Expr::Phi { incoming: vec![] }, // v1 env
+            Expr::Phi { incoming: vec![] }, // v2 p
+            Expr::Load { addr: v(2), offset: 0, width: MemWidth::W8, signed: None, ty: IrType::Unknown(UnknownReason::InsufficientEvidence) }, // v3
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value: v(3), tag: TAG_BYTES_OBJECT, negated: false })), // v4
+            Expr::Call { target: FuncId::from_index(2), args: vec![v(0), v(3)] },   // v5
+            Expr::Literal(Literal::I64(fail)),                                      // v6
+            Expr::Store { addr: v(0), value: v(6), offset: 0, width: MemWidth::W8 }, // v7
+        ];
+        let region = Region::Sequence(vec![
+            Region::Basic(bb(0)),
+            Region::If {
+                cond: v(4),
+                then_region: Box::new(Region::Sequence(vec![Region::Basic(bb(1)), Region::Return { values: vec![] }])),
+                else_region: None,
+            },
+            Region::Basic(bb(2)),
+            Region::Return { values: vec![] },
+        ]);
+        build(3, exprs, vec![vec![3, 4], vec![5], vec![6, 7]], region, vec![0, 1, 2])
+    }
+
+    /// A caller storing a storage read at `fp+8` and converting it through
+    /// its address: `func_3(fp+16, env, fp+8)`, then reading the result.
+    fn by_ref_caller() -> HighFunction {
+        let exprs = vec![
+            Expr::Phi { incoming: vec![] },    // v0 frame
+            storage_read(),                    // v1
+            Expr::Store { addr: v(0), value: v(1), offset: 8, width: MemWidth::W8 }, // v2
+            Expr::Literal(Literal::I32(16)),   // v3
+            Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(3) }, // v4 fp+16
+            Expr::Literal(Literal::I32(8)),    // v5
+            Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(5) }, // v6 fp+8
+            Expr::Phi { incoming: vec![] },    // v7 env
+            Expr::Call { target: FuncId::from_index(3), args: vec![v(4), v(7), v(6)] }, // v8
+            Expr::Load { addr: v(0), offset: 16, width: MemWidth::W8, signed: None, ty: IrType::Unknown(UnknownReason::InsufficientEvidence) }, // v9
+            Expr::Load { addr: v(0), offset: 24, width: MemWidth::W8, signed: None, ty: IrType::Unknown(UnknownReason::InsufficientEvidence) }, // v10
+        ];
+        build(0, exprs, vec![vec![1, 2, 3, 4, 5, 6, 8, 9, 10]], Region::Basic(bb(0)), vec![])
+    }
+
+    #[test]
+    fn a_conversion_split_in_two_and_handed_the_address_is_recognised() {
+        assert_eq!(converter_width(&length_half(), false), Some(32));
+        assert_eq!(converter_width(&length_half(), true), None, "no tag check of its own");
+        let lengths = HashMap::from([(FuncId::from_index(2), 32)]);
+        assert_eq!(
+            split_converter(&tag_half(1), &lengths),
+            Some(Converter { width: 32, out: 0, value: 2, by_ref: Some(0) })
+        );
+        // The failing path must write the error the whole conversion does.
+        assert_eq!(split_converter(&tag_half(0), &lengths), None);
+        assert_eq!(split_converter(&tag_half(1), &HashMap::new()), None, "its call must be the length half");
+    }
+
+    #[test]
+    fn a_storage_read_converted_through_its_address_is_the_typed_read() {
+        let mut ir = module(vec![by_ref_caller(), helper(), length_half(), tag_half(1)]);
+        assert!(BytesNConvertPass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        assert!(matches!(f.bindings.get(v(10)).map(|b| &b.expr), Some(Expr::Use(x)) if *x == v(1)));
+        assert!(matches!(f.bindings.get(v(9)).map(|b| &b.expr), Some(Expr::Literal(Literal::I64(0)))));
+        assert!(matches!(f.bindings.get(v(8)).map(|b| &b.expr), Some(Expr::Literal(Literal::Unit))));
+        assert_eq!(f.bindings.get(v(1)).map(|b| b.ty.clone()), Some(IrType::Known(KnownType::BytesN(32))));
+    }
+
+    #[test]
+    fn a_write_between_the_store_and_the_call_keeps_the_conversion() {
+        // A call between them may write the bytes the converter reads.
+        let mut f = by_ref_caller();
+        f.bindings.push(Binding::new(
+            v(11),
+            IrType::Unknown(UnknownReason::InsufficientEvidence),
+            Expr::Call { target: FuncId::from_index(9), args: vec![] },
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        let entry = &mut f.blocks.get_mut(bb(0)).unwrap().bindings;
+        let at = entry.iter().position(|b| *b == v(8)).unwrap();
+        entry.insert(at, v(11));
+        let mut ir = module(vec![f, helper(), length_half(), tag_half(1)]);
         assert!(!BytesNConvertPass.run(&mut ir).changed);
     }
 }
