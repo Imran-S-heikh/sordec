@@ -638,3 +638,26 @@ e41127f on. The correct totals, summed from each measurement's per-contract file
 | 8af9004 | 22 | **21** |
 | 7f7e7c3 | 18 | **15** |
 | b946d64, 7b5c975 | 18 | **15** |
+
+## 2026-10-30 — commit 5eafc51 (a counter typed by what it counts to; unwrap_or through caller memory)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,879 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 4,214 |
+| third-party | 2 | 1/2 | 8 | 784 |
+| SDK 26 test contracts | 39 | **38/39** | 2 | 1,393 |
+
+Errors 15 → 11 (summed from the per-contract file). A number literal no longer
+types a value whose type is still coming from a guest call, and a loop counter
+compared with a `u64` is that `u64`; on top of it, an `Option` a helper writes into
+caller memory read as `select(value, 0, tag)` is `unwrap_or(0)`, and a value read
+above its test is `unwrap()` under it. phoenix-vesting 11 → 8. **Correctness fix:**
+bn254's U256 helper had been rewritten to return an `Option<i64>`, a wrong type; a
+payload merged with an untyped arm is now refused, so bn254 compiles with 13 honest
+gaps. Scores unchanged: corpus bands pass, held-out mean 0.7861.
+
+**Day total (2026-10-30):** errors 111 → 11; compiling 67 of 86 → 83 of 86
+contracts (corpus 7/7, Stellar 25/25, multi-contract 12/13, third-party 1/2,
+SDK 26 38/39); held-out mean 0.7850 → 0.7861.
