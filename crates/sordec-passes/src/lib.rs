@@ -264,6 +264,9 @@ pub const FRAME_ELISION_AFTER_VEC: &str = "frame-elision-after-vec";
 pub const TUPLE_RETURN_AFTER_LOOPS: &str = "tuple-return-after-loops";
 /// [`DeadFrameStorePass`] re-run after the event and muxed-address folds.
 pub const DEAD_FRAME_STORE_AFTER_EVENTS: &str = "dead-frame-store-after-events";
+/// [`SymbolEncoderPass`] re-run once frames are elided, for the wrappers
+/// around the encoder that only then read as forwarding.
+pub const SYMBOL_ENCODER_AFTER_ELISION: &str = "symbol-encoder-after-elision";
 /// [`FrameElisionPass`] re-run after the event and muxed-address folds.
 pub const FRAME_ELISION_AFTER_EVENTS: &str = "frame-elision-after-events";
 /// [`FrameForwardPass`] re-run on the reads a by-reference encode leaves.
@@ -878,6 +881,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // Ahead of the muxed collapse: an event's `to_muxed.id()` is the
             // other reader of the dispatch that collapse removes, and it goes
             // with the publish it feeds.
+            // A helper that only forwards to the symbol encoder reads as one
+            // only once its frame bracket is gone; an inlined event's prefix
+            // is often built through one.
+            Box::new(pass::Rerun::new(SymbolEncoderPass, SYMBOL_ENCODER_AFTER_ELISION, &[])),
             Box::new(ContractEventPass),
             Box::new(MuxedAddressPass),
             // A `Result` an entrypoint builds in its own frame and hands a

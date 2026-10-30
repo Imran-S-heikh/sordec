@@ -72,7 +72,11 @@
 //! type by the contract's own metadata (`Known`, never inferred). The map,
 //! and a topics vec built in the caller, are then read by nothing but the
 //! publish, and go with it; a construction read anywhere else stops the
-//! rewrite.
+//! rewrite. So does a helper call that built the topics, when the helper
+//! does nothing else, and a prefix symbol built only for them.
+//!
+//! A prefix too long to pack is read from its recovered
+//! `Symbol::new(&e, "…")`.
 //!
 //! # The call sites
 //!
@@ -428,6 +432,9 @@ fn symbol_constant(h: &HighFunction, value: ValueId) -> Option<String> {
         Expr::Literal(Literal::Symbol(s)) => Some(s.clone()),
         Expr::Literal(Literal::I64(bits)) => decode_small_symbol(*bits as u64),
         Expr::Literal(Literal::U64(bits)) => decode_small_symbol(*bits),
+        // `Symbol::new(&e, "…")` with its text recovered: a prefix too long
+        // to pack into a word.
+        Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { resolved: Some(s), .. })) => Some(s.clone()),
         _ => None,
     }
 }
@@ -528,7 +535,44 @@ fn inline_site(
         trace(func, publish, "the data map or the topics vec is read elsewhere");
         return None;
     }
+    // A helper that does nothing but build the topics vec: its call, read
+    // only by the publish, goes too (and the helper with its last caller).
+    if let Some(call) = builder
+        && let Some(Expr::Call { target, .. }) = func.bindings.get(call).map(|b| &b.expr)
+        && ir.function(*target).is_some_and(only_builds_a_vec)
+    {
+        let mut more = Vec::new();
+        if read_only_by(func, uses, call, publish, &mut more) {
+            spent.extend(more);
+        }
+    }
+    // A prefix symbol built for the topics alone goes with them.
+    for value in elements.iter().take(event.prefix_topics.len()) {
+        let v = resolve_use(func, *value);
+        let built = matches!(
+            func.bindings.get(v).map(|b| &b.expr),
+            Some(Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { resolved: Some(_), .. })))
+        );
+        let sites = uses.uses_of(v);
+        let only_spent = !sites.is_empty()
+            && sites.iter().all(|s| matches!(s, crate::dataflow::HighUseSite::Binding { user } if spent.contains(user)));
+        if built && only_spent {
+            spent.push(v);
+        }
+    }
     Some(InlineSite { publish, event: event.name.clone(), fields, spent })
+}
+
+/// Whether a helper's only effect is the vec it returns: every other
+/// binding it runs is pure and total.
+fn only_builds_a_vec(h: &HighFunction) -> bool {
+    h.blocks.iter().all(|(_, block)| {
+        block.bindings.iter().all(|id| match h.bindings.get(*id).map(|b| &b.expr) {
+            Some(Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { elements: Some(_), .. }))) => true,
+            Some(other) => expr_effects(other).is_pure_total(),
+            None => false,
+        })
+    })
 }
 
 /// Why an inlined publish was left, printed when `SORDEC_EVENT_TRACE` is

@@ -72,6 +72,24 @@
 //! against the literal `n` — is in the body as a second witness. Without
 //! all three the call site is left alone, as before.
 //!
+//! # The encoder behind a one-call wrapper
+//!
+//! `Symbol::new(&env, "used_event_simple")` often reaches the encoder
+//! through a helper of its own, `func3(ptr, len)`, which hands its two
+//! parameters to the encoder unchanged and returns the encoder's symbol
+//! component. Its call sites carry the literals; the encoder's own call
+//! site, inside the wrapper, carries only parameters, so nothing folded.
+//! A call of such a wrapper with a literal `(pointer, length)` is folded
+//! to the same `Symbol::new(&env, "…")`.
+//!
+//! Why it is exact: the wrapper computes nothing else — every other
+//! binding in it is pure and total, it has no branch, and each of its
+//! returns hands back that one component — so the call's value is the
+//! encoder's for that slice, which is the symbol (the argument above).
+//! The gates are those conditions, the encoder taking the length as an
+//! argument (not baked in), and the call site's literals passing the same
+//! alphabet check as a direct call's.
+//!
 //! The result is self-checking in a way most recognizers are not: the
 //! folded strings have to be readable identifiers. On token-v23 they come
 //! out as `Balance`, `State`, `Admin`, `Allowance` — that contract's
@@ -142,17 +160,32 @@ impl Pass<HighIr> for SymbolEncoderPass {
         if encoders.is_empty() {
             return result;
         }
+        // Helpers that only forward to an encoder taking its length.
+        let wrappers: Vec<FuncId> = ir
+            .functions
+            .iter()
+            .filter(|f| forwarding_wrapper(f, &encoders))
+            .map(|f| f.id)
+            .collect();
 
         // Collect first, rewrite second: resolving a call site reads the
         // caller's bindings, which cannot be borrowed while it is mutated.
         let mut folds: Vec<Fold> = Vec::new();
         let mut declined = 0_i64;
 
+        let mut wrapped: Vec<(FuncId, ValueId, ValueId, ValueId, String)> = Vec::new();
         for func in &ir.functions {
             for (id, binding) in func.bindings.iter() {
                 let Expr::Call { target, args } = &binding.expr else {
                     continue;
                 };
+                if wrappers.contains(target)
+                    && let [pos, len] = args.as_slice()
+                    && let Some(text) = resolve_call(func, &ir.memory, args, None)
+                {
+                    wrapped.push((func.id, id, *pos, *len, text));
+                    continue;
+                }
                 let Some(&(_, baked)) = encoders.iter().find(|(f, _)| f == target) else {
                     continue;
                 };
@@ -260,11 +293,88 @@ impl Pass<HighIr> for SymbolEncoderPass {
             result.changed = true;
         }
 
+        for (func, call, lm_pos, len, text) in wrapped {
+            let Some(func) = ir.function_mut(func) else { continue };
+            let Some(binding) = func.bindings.get_mut(call) else { continue };
+            binding.ty = IrType::Known(KnownType::Symbol);
+            binding.expr = Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew {
+                lm_pos,
+                len,
+                resolved: Some(text.clone()),
+            }));
+            binding.add_provenance(Provenance::new(
+                PASS_NAME,
+                ProvenanceSource::SdkPattern,
+                format!("a helper that only forwards to the small-symbol encoder, constant-folded: {text:?}"),
+            ));
+            result.metrics.increment(M_FOLDED, 1);
+            result.changed = true;
+        }
+
         if declined > 0 {
             result.metrics.increment(M_DECLINED, declined);
         }
         result
     }
+}
+
+/// Whether `func` is a wrapper "The encoder behind a one-call wrapper"
+/// names: two parameters handed in order to an encoder that takes its
+/// length, the encoder's symbol component returned on every path, and
+/// nothing else but pure, total bindings and straight-line control flow.
+fn forwarding_wrapper(func: &HighFunction, encoders: &[(FuncId, Option<u32>)]) -> bool {
+    let [p0, p1] = func.params.as_slice() else { return false };
+    if func.signature.is_some() {
+        return false;
+    }
+    let mut straight = true;
+    func.region.for_each_node(|r| {
+        straight &= !matches!(
+            r,
+            sordec_ir::Region::If { .. }
+                | sordec_ir::Region::Loop { .. }
+                | sordec_ir::Region::Switch { .. }
+                | sordec_ir::Region::Unstructured { .. }
+                | sordec_ir::Region::Panic { .. }
+                | sordec_ir::Region::Unreachable
+        );
+    });
+    if !straight {
+        return false;
+    }
+    let resolve = |v: ValueId| crate::dataflow::resolve_use(func, v);
+    let mut call: Option<ValueId> = None;
+    for (_, block) in func.blocks.iter() {
+        for &id in &block.bindings {
+            let Some(b) = func.bindings.get(id) else { return false };
+            match &b.expr {
+                Expr::Call { target, args } => {
+                    let forwards = encoders.iter().any(|(f, baked)| f == target && baked.is_none())
+                        && matches!(args.as_slice(), [a, b] if resolve(*a) == *p0 && resolve(*b) == *p1);
+                    if !forwards || call.replace(id).is_some() {
+                        return false;
+                    }
+                }
+                other => {
+                    if !crate::effects::expr_effects(other).is_pure_total() {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    let Some(call) = call else { return false };
+    let mut returns = 0;
+    let symbol = |v: ValueId| {
+        matches!(func.bindings.get(resolve(v)).map(|b| &b.expr), Some(Expr::Project { value, index: 1 }) if resolve(*value) == call)
+    };
+    for site in &func.returns {
+        match site.as_slice() {
+            [x] if symbol(*x) => returns += 1,
+            _ => return false,
+        }
+    }
+    returns > 0
 }
 
 /// One call site ready to fold.
@@ -548,6 +658,62 @@ mod tests {
             .get(v(value))
             .unwrap()
             .expr
+    }
+
+    /// `fn func1(ptr, len) -> Val { encoder(ptr, len).1 }`, with `extra`
+    /// scheduled beside the call.
+    fn wrapper(extra: Option<Expr>) -> HighFunction {
+        let mut exprs = vec![
+            Expr::Phi { incoming: vec![] },
+            Expr::Phi { incoming: vec![] },
+            Expr::Call { target: FuncId::from_index(0), args: vec![v(0), v(1)] },
+            Expr::Project { value: v(2), index: 1 },
+        ];
+        let mut scheduled = vec![v(2), v(3)];
+        if let Some(e) = extra {
+            exprs.push(e);
+            scheduled.push(v(4));
+        }
+        let mut f = function(1, exprs);
+        f.params = vec![v(0), v(1)];
+        f.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings = scheduled;
+        f.region = Region::Basic(BlockId::from_index(0));
+        f.returns = vec![vec![v(3)]];
+        f
+    }
+
+    fn wrapper_caller() -> HighFunction {
+        function(
+            2,
+            vec![
+                Expr::Literal(Literal::I32(1000)),
+                Expr::Literal(Literal::I32(7)),
+                Expr::Call { target: FuncId::from_index(1), args: vec![v(0), v(1)] },
+            ],
+        )
+    }
+
+    /// A helper that only forwards to the encoder is the encoder at its
+    /// call site.
+    #[test]
+    fn a_forwarding_wrapper_folds_at_its_literal_call_site() {
+        let mut m = ir(vec![function(0, encoder_body()), wrapper(None), wrapper_caller()]);
+        assert!(SymbolEncoderPass.run(&mut m).changed);
+        match expr_at(&m, 2, 2) {
+            Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { resolved, .. })) => {
+                assert_eq!(resolved.as_deref(), Some("Balance"));
+            }
+            other => panic!("expected a resolved SymbolNew, got {other:?}"),
+        }
+    }
+
+    /// A wrapper that also writes memory does more than forward.
+    #[test]
+    fn a_wrapper_with_an_effect_is_left_alone() {
+        let store = Expr::Store { addr: v(0), value: v(3), offset: 0, width: sordec_ir::MemWidth::W8 };
+        let mut m = ir(vec![function(0, encoder_body()), wrapper(Some(store)), wrapper_caller()]);
+        SymbolEncoderPass.run(&mut m);
+        assert!(matches!(expr_at(&m, 2, 2), Expr::Call { .. }));
     }
 
     #[test]
