@@ -63,6 +63,30 @@
 //! the decode ([`crate::val_abi::decode_small_symbol`]) is strict — a word
 //! with another tag, a body too wide, or a gap between characters is no
 //! short symbol, and is left as it is.
+//!
+//! ## A width dispatch whose result nothing reads
+//!
+//! A value re-encoded for a consumer that has since been rewritten to take
+//! the value itself — a returned vec read back as the tuple it carries,
+//! whose component is named behind its encode — leaves the dispatch
+//! behind with nothing reading the merge:
+//!
+//! ```text
+//! if wide(x) { m = obj_from_i64(x) } else { m = val_encode<i64>(x) }
+//! …                                       ← nothing reads `m`
+//! ```
+//!
+//! Both arms are pure and total, and what they produce is read by nothing,
+//! so the branch decides nothing anyone observes. Its blocks are spliced
+//! into the parent sequence, the merge's transfers dropped; the backend's
+//! dead-`let` cleanup then takes the unread encodes. Gates: both arms are
+//! straight-line blocks falling through into the block that follows the
+//! branch, every binding in them is pure and total, every merge they feed
+//! is read by no binding, return or region, and the two values each merge
+//! receives are the two encodings of one value — the shape the encode
+//! leaves, and nothing wider.
+
+use std::collections::HashSet;
 
 use sordec_common::ValueId;
 use sordec_ir::{
@@ -72,7 +96,7 @@ use sordec_ir::{
 
 use super::encode_helper::{elide_spent_calls, encoder_calls, EncoderTable};
 use super::{apply_elisions, metrics, Elision};
-use crate::dataflow::resolve_use;
+use crate::dataflow::{resolve_use, HighUseIndex};
 use crate::pass::{Pass, PassResult};
 use crate::type_infer::known_of_type_ref;
 
@@ -112,8 +136,9 @@ impl Pass<HighIr> for ValEncodeCollapsePass {
             // that no longer decides anything. Fold it here, while the
             // evidence that the arms agree is local.
             let mut folded = 0;
+            let unread = unread_merges(func);
             let region = std::mem::replace(&mut func.region, Region::Unreachable);
-            func.region = fold_dead_branches(func, region, &mut folded);
+            func.region = fold_dead_branches(func, region, &unread, &mut folded);
             if folded > 0 {
                 result.changed = true;
                 result
@@ -159,15 +184,22 @@ impl Pass<HighIr> for ValEncodeCollapsePass {
 /// `is_pure_total` is the right bar here, unlike in [`super::decode`]: a
 /// trapping binding moved across a branch changes whether the contract
 /// traps.
-fn fold_dead_branches(func: &HighFunction, region: Region, folded: &mut i64) -> Region {
+fn fold_dead_branches(func: &HighFunction, region: Region, unread: &HashSet<ValueId>, folded: &mut i64) -> Region {
     match region {
         Region::Sequence(items) => {
             let items: Vec<Region> = items
                 .into_iter()
-                .map(|item| fold_dead_branches(func, item, folded))
+                .map(|item| fold_dead_branches(func, item, unread, folded))
                 .collect();
             let mut kept: Vec<Region> = Vec::with_capacity(items.len());
             for (index, item) in items.iter().enumerate() {
+                // A width dispatch whose merge nothing reads: both arms'
+                // blocks run in its place, with nothing to transfer.
+                if let Some(blocks) = unread_dispatch(func, item, items.get(index + 1), unread) {
+                    *folded += 1;
+                    kept.extend(blocks);
+                    continue;
+                }
                 let taken = match item {
                     Region::If {
                         else_region: None,
@@ -200,11 +232,11 @@ fn fold_dead_branches(func: &HighFunction, region: Region, folded: &mut i64) -> 
         }
         Region::Scope { out, body } => Region::Scope {
             out,
-            body: Box::new(fold_dead_branches(func, *body, folded)),
+            body: Box::new(fold_dead_branches(func, *body, unread, folded)),
         },
         Region::Loop { header, body, kind } => Region::Loop {
             header,
-            body: Box::new(fold_dead_branches(func, *body, folded)),
+            body: Box::new(fold_dead_branches(func, *body, unread, folded)),
             kind,
         },
         Region::Switch {
@@ -217,11 +249,11 @@ fn fold_dead_branches(func: &HighFunction, region: Region, folded: &mut i64) -> 
             arms: arms
                 .into_iter()
                 .map(|mut arm| {
-                    arm.body = fold_dead_branches(func, arm.body, folded);
+                    arm.body = fold_dead_branches(func, arm.body, unread, folded);
                     arm
                 })
                 .collect(),
-            default: Box::new(fold_dead_branches(func, *default, folded)),
+            default: Box::new(fold_dead_branches(func, *default, unread, folded)),
             dispatch,
         },
         Region::If {
@@ -230,8 +262,8 @@ fn fold_dead_branches(func: &HighFunction, region: Region, folded: &mut i64) -> 
             else_region,
         } => Region::If {
             cond,
-            then_region: Box::new(fold_dead_branches(func, *then_region, folded)),
-            else_region: else_region.map(|e| Box::new(fold_dead_branches(func, *e, folded))),
+            then_region: Box::new(fold_dead_branches(func, *then_region, unread, folded)),
+            else_region: else_region.map(|e| Box::new(fold_dead_branches(func, *e, unread, folded))),
         },
         leaf @ (Region::Basic(_)
         | Region::Break { .. }
@@ -241,6 +273,109 @@ fn fold_dead_branches(func: &HighFunction, region: Region, folded: &mut i64) -> 
         | Region::Unreachable
         | Region::Panic { .. }
         | Region::Unstructured { .. }) => leaf,
+    }
+}
+
+/// Every phi of `func` that nothing reads: no binding — scheduled, merged
+/// or residue — no return and no region names it. Counting residue too is
+/// the conservative side: a reader that never runs only keeps a branch.
+fn unread_merges(func: &HighFunction) -> HashSet<ValueId> {
+    let uses = HighUseIndex::build(func);
+    func.bindings
+        .iter()
+        .filter(|(id, b)| matches!(b.expr, Expr::Phi { .. }) && uses.uses_of(*id).is_empty())
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// The basic blocks of `item` when it is a width dispatch whose merge
+/// nothing reads (see the module docs): `if c { m = enc1(x) } else { m =
+/// enc2(x) }`, both arms falling through into `next`, both pure and total.
+fn unread_dispatch(
+    func: &HighFunction,
+    item: &Region,
+    next: Option<&Region>,
+    unread: &HashSet<ValueId>,
+) -> Option<Vec<Region>> {
+    let Region::If { then_region, else_region: Some(else_region), .. } = item else {
+        return None;
+    };
+    let mut then_arm = falls_into(then_region)?;
+    let mut else_arm = falls_into(else_region)?;
+    if then_arm.target != else_arm.target || next.and_then(leading_block) != Some(then_arm.target) {
+        return None;
+    }
+    then_arm.moves.sort_unstable();
+    else_arm.moves.sort_unstable();
+    if then_arm.moves.is_empty() || then_arm.moves.len() != else_arm.moves.len() {
+        return None;
+    }
+    for (&(dest, a), &(other, b)) in then_arm.moves.iter().zip(&else_arm.moves) {
+        if dest != other || !unread.contains(&dest) {
+            return None;
+        }
+        match (encoded_operand(func, a), encoded_operand(func, b)) {
+            (Some(x), Some(y)) if x == y => {}
+            _ => return None,
+        }
+    }
+    if !side_effect_free(func, &[then_region.as_ref().clone(), else_region.as_ref().clone()]) {
+        return None;
+    }
+    Some(then_arm.blocks.into_iter().chain(else_arm.blocks).collect())
+}
+
+/// A straight-line arm of a branch: its basic blocks, then one transfer
+/// into the block it falls through to.
+struct FallingArm {
+    blocks: Vec<Region>,
+    target: sordec_common::BlockId,
+    moves: sordec_ir::PhiTransfer,
+}
+
+/// `arm` as a [`FallingArm`], when it is one.
+fn falls_into(arm: &Region) -> Option<FallingArm> {
+    let flat = flatten(std::slice::from_ref(arm));
+    let (last, rest) = flat.split_last()?;
+    let Region::Transfer { target, transfer } = last else {
+        return None;
+    };
+    if !rest.iter().all(|r| matches!(r, Region::Basic(_))) {
+        return None;
+    }
+    Some(FallingArm {
+        blocks: rest.iter().map(|r| (*r).clone()).collect(),
+        target: *target,
+        moves: transfer.clone(),
+    })
+}
+
+/// The block a region starts with, when it starts with one.
+fn leading_block(region: &Region) -> Option<sordec_common::BlockId> {
+    match region {
+        Region::Basic(b) => Some(*b),
+        Region::Sequence(items) => items.first().and_then(leading_block),
+        _ => None,
+    }
+}
+
+/// The value `v` is an encoding of: the small form, or the object form of
+/// a scalar that has both.
+fn encoded_operand(func: &HighFunction, v: ValueId) -> Option<ValueId> {
+    match &func.bindings.get(resolve_use(func, v))?.expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { value, .. })) => Some(resolve_use(func, *value)),
+        Expr::Semantic(SemanticOp::Known(KnownOp::ValObject {
+            kind:
+                ValObjectKind::ObjFromU64
+                | ValObjectKind::ObjFromI64
+                | ValObjectKind::TimepointObjFromU64
+                | ValObjectKind::DurationObjFromU64,
+            args,
+        })) => match args.as_slice() {
+            [one] => Some(resolve_use(func, *one)),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -991,5 +1126,78 @@ mod tests {
         assert_eq!(encoded_constant(&f, v(2), &KnownType::U64), Some(Literal::U64(7)));
         // A word with another tag is no `i64`.
         assert_eq!(encoded_constant(&f, v(2), &KnownType::I64), None);
+    }
+
+    /// `x` (v0) re-encoded both ways into the merge `m` (v3), on the
+    /// condition v4; `returned` is what the function hands back.
+    ///
+    /// ```text
+    /// bb0: v4 = cond
+    /// if v4 { bb1: v1 = obj_from_u64(x); m = v1 } else { bb2: v2 = val_encode(x); m = v2 }
+    /// bb3: return returned
+    /// ```
+    fn dispatch(returned: ValueId) -> HighFunction {
+        let (b1, b2, b3) = (BlockId::from_index(1), BlockId::from_index(2), BlockId::from_index(3));
+        let mut func = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                          // v0 — x
+                obj_from_u64(v(0)),                                      // v1
+                encode_small(v(0), KnownType::U64),                      // v2
+                Expr::Phi { incoming: vec![(b1, v(1)), (b2, v(2))] },    // v3 — m
+                Expr::Literal(Literal::Bool(true)),                      // v4
+            ],
+            vec![v(0)],
+            vec![4],
+        );
+        for (id, scheduled) in [(b1, vec![v(1)]), (b2, vec![v(2)]), (b3, vec![])] {
+            func.blocks.push(sordec_ir::HighBlock { id, bindings: scheduled });
+        }
+        func.region = Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::If {
+                cond: v(4),
+                then_region: Box::new(Region::Sequence(vec![
+                    Region::Basic(b1),
+                    Region::Transfer { target: b3, transfer: vec![(v(3), v(1))] },
+                ])),
+                else_region: Some(Box::new(Region::Sequence(vec![
+                    Region::Basic(b2),
+                    Region::Transfer { target: b3, transfer: vec![(v(3), v(2))] },
+                ]))),
+            },
+            Region::Basic(b3),
+            Region::Return { values: vec![returned] },
+        ]);
+        func.returns = vec![vec![returned]];
+        func
+    }
+
+    fn fold(func: &HighFunction) -> (Region, i64) {
+        let mut folded = 0;
+        let region = fold_dead_branches(func, func.region.clone(), &unread_merges(func), &mut folded);
+        (region, folded)
+    }
+
+    #[test]
+    fn a_width_dispatch_nothing_reads_runs_its_blocks_in_place() {
+        let func = dispatch(v(0));
+        let (region, folded) = fold(&func);
+        assert_eq!(folded, 1);
+        let mut ifs = 0;
+        let mut blocks = Vec::new();
+        region.for_each_node(|n| match n {
+            Region::If { .. } => ifs += 1,
+            Region::Basic(b) => blocks.push(b.index()),
+            _ => {}
+        });
+        assert_eq!(ifs, 0);
+        assert_eq!(blocks, vec![0, 1, 2, 3], "every block stays in the tree");
+    }
+
+    #[test]
+    fn a_width_dispatch_whose_merge_is_read_stays() {
+        let func = dispatch(v(3));
+        let (_, folded) = fold(&func);
+        assert_eq!(folded, 0);
     }
 }
