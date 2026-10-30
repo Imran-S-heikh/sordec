@@ -74,8 +74,9 @@
 //!   declare. When the module has one — recovered, or a raw `call_indirect`
 //!   the pipeline left as it found it — a helper they declare keeps its
 //!   signature, and so does every helper when the declared set could not
-//!   be read. This is the caller-set rule `memory::calls` gives `sret`; a
-//!   helper outside the set has only the direct callers the census saw.
+//!   be read. This is [`CallIndex::caller_set_complete`], the rule
+//!   `memory::calls` gives `sret` one layer down; a helper outside the set
+//!   has only the direct callers the census saw.
 //! - A raw `call_indirect` handed a pointer into the frame is a call whose
 //!   extent is unknown, like a recovered one: the site is refused.
 //!
@@ -108,7 +109,7 @@ use std::collections::{HashMap, HashSet};
 
 use sordec_common::{BlockId, FuncId, IrId, Provenance, ProvenanceSource, UnknownReason, ValueId};
 use sordec_ir::{
-    BinaryOp, Binding, Expr, HighFunction, HighIr, ImportKind, IrType, KnownType, Literal, Region, UnaryOp,
+    BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownType, Literal, Region, UnaryOp,
     WasmOpcodeKind,
 };
 
@@ -218,17 +219,14 @@ impl Pass<HighIr> for OptionalOutParamPass {
         // The rewrite changes a signature, so it is every site or none — and
         // none for a helper an indirect call, recovered or raw, could reach:
         // its callers are more than the census saw.
-        let indirect = CallIndex::build(ir).has_indirect_calls();
-        let table = table_functions(ir);
-        let reachable = |t: FuncId| indirect && table.as_ref().is_none_or(|set| set.contains(&t));
+        let calls = CallIndex::build(ir);
         let mut targets: Vec<FuncId> = plans.keys().copied().filter(|t| !refused.contains(t)).collect();
         targets.retain(|t| {
-            if reachable(*t)
-                && let Some(f) = ir.functions.iter().find(|f| f.id == *t)
-            {
+            let complete = calls.caller_set_complete(*t);
+            if !complete && let Some(f) = ir.functions.iter().find(|f| f.id == *t) {
                 trace(f, "kept: an indirect call may reach it");
             }
-            !reachable(*t)
+            complete
         });
         targets.sort_unstable();
         for target in targets {
@@ -269,17 +267,6 @@ fn trace(func: &HighFunction, what: &str) {
     if std::env::var_os("SORDEC_OPTION_TRACE").is_some() {
         eprintln!("optional-out: func_{}: {what}", func.id.index());
     }
-}
-
-/// The local functions a table can ever hold — every function an element
-/// segment declares, shifted out of the global index space that counts
-/// imports — or `None` when that set could not be read.
-fn table_functions(ir: &HighIr) -> Option<HashSet<FuncId>> {
-    let imported = ir.facts.imports.iter().filter(|i| matches!(i.kind, ImportKind::Func(_))).count() as u32;
-    ir.facts
-        .table_functions
-        .as_ref()
-        .map(|set| set.iter().filter_map(|i| i.checked_sub(imported)).map(FuncId::from_index).collect())
 }
 
 // ---------------------------------------------------------------------

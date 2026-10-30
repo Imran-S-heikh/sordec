@@ -73,8 +73,12 @@
 //!   callers hands it such a parameter untouched — the wrapper the compiler
 //!   outlines around an entrypoint's body keeps the host's validation.
 //!   [`guaranteed_params`] is that reading, module-wide; it needs the
-//!   helper's callers to all be visible (not exported, not held by the
-//!   function table when the module calls through one) and to agree.
+//!   helper's callers to all be visible and to agree. Not visible: an
+//!   exported helper's, and — when the module makes an indirect call,
+//!   recovered or a raw `call_indirect` — a helper's that an element
+//!   segment declares, or any helper's when the declared set could not be
+//!   read. Segments name functions counting the imports first, so their
+//!   entries are shifted down by the import count before they are compared.
 //!   Nothing else carries the guarantee.
 //!
 //! ## A result written back, then read back
@@ -105,7 +109,7 @@ use sordec_ir::{
 
 use super::sret::{self, SretShape};
 use super::{apply_elisions, metrics, Elision};
-use crate::dataflow::{canon_addr, resolve_use, trace_int};
+use crate::dataflow::{canon_addr, resolve_use, trace_int, CallIndex};
 use crate::effects::expr_effects;
 use crate::pass::{Pass, PassMetrics, PassResult};
 use crate::type_infer::known_of_type_ref;
@@ -1309,25 +1313,18 @@ type Guaranteed = HashMap<(FuncId, usize), KnownType>;
 /// as it would in the entrypoint.
 ///
 /// Only a helper whose callers are all visible: one with an ABI signature
-/// is called by the host, and one the function table holds may be called
-/// through it, so neither has a caller set the scan can close. A helper
-/// that calls itself is skipped: its guarantee would rest on itself. A
-/// decode helper is skipped too: its parameter is the raw `Val` it decodes,
-/// which is what the collapse at its call sites retires. The map is a
-/// fixed point, so a wrapper of a wrapper is covered too.
+/// is called by the host, and one a table may hold may be called through
+/// it ([`CallIndex::caller_set_complete`]: beside any indirect call,
+/// recovered or raw, every function an element segment declares, or every
+/// function when that set could not be read), so neither has a caller set
+/// the scan can close. A helper that calls itself is skipped: its
+/// guarantee would rest on itself. A decode helper is skipped too: its
+/// parameter is the raw `Val` it decodes, which is what the collapse at its
+/// call sites retires. The map is a fixed point, so a wrapper of a wrapper
+/// is covered too.
 fn guaranteed_params(ir: &HighIr, helpers: &HashMap<FuncId, DecodeHelper>) -> Guaranteed {
-    let has_indirect = ir
-        .functions
-        .iter()
-        .any(|f| f.bindings.iter().any(|(_, b)| matches!(b.expr, Expr::IndirectCall { .. })));
-    let table: Option<HashSet<FuncId>> = ir
-        .facts
-        .table_functions
-        .as_ref()
-        .map(|t| t.iter().map(|i| FuncId::new(*i)).collect());
-    let complete = |f: &HighFunction| {
-        f.signature.is_none() && (!has_indirect || table.as_ref().is_some_and(|t| !t.contains(&f.id)))
-    };
+    let calls = CallIndex::build(ir);
+    let complete = |f: &HighFunction| f.signature.is_none() && calls.caller_set_complete(f.id);
     let mut sites: HashMap<FuncId, Vec<(FuncId, Vec<ValueId>)>> = HashMap::new();
     for caller in &ir.functions {
         for (_, binding) in caller.bindings.iter() {
@@ -1889,6 +1886,27 @@ pub(crate) mod tests {
         ]);
         ir.facts.table_functions = None;
         assert!(guaranteed_params(&ir, &helpers()).is_empty());
+    }
+
+    #[test]
+    fn a_wrapper_a_raw_indirect_call_may_reach_carries_no_guarantee() {
+        // The wrapper is func_2; the table's entries count the imports.
+        crate::marshalling::test_support::check_indirect_gate(
+            || {
+                module(vec![
+                    u64_decode_helper(),
+                    caller(PrimitiveType::U64),
+                    wrapper(),
+                    entry_calling(FuncId::from_index(2), PrimitiveType::U64),
+                ])
+            },
+            2,
+            |ir| {
+                let guaranteed = guaranteed_params(ir, &helpers()).len();
+                assert!(guaranteed == 0 || guaranteed == 2, "both of the wrapper's parameters, or neither");
+                guaranteed == 2
+            },
+        );
     }
 
     /// `Address::try_from_val(env, v).ok()` as `optional_out` leaves it:

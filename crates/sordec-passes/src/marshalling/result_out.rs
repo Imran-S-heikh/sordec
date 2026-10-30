@@ -113,8 +113,17 @@
 //!   return of that function returns it, and so on up the callers to an
 //!   entrypoint whose spec declares `Result<bool, E>` with `E` the
 //!   `#[contracterror]` enum naming the error constant.
-//! - **Every call site** of the writer qualifies (its signature changes),
-//!   and the module has no indirect call.
+//! - **Every call site** of the writer qualifies (its signature changes).
+//! - **Every caller is a direct call**, for the writer and for each helper
+//!   on the chain, whose signatures change: the writer loses its
+//!   out-parameter and returns the `Result`, and each helper comes to
+//!   return it too. An indirect call can reach any function an element
+//!   segment declares. When the module has one — recovered, or a raw
+//!   `call_indirect` the pipeline left as it found it — a writer the
+//!   segments declare keeps its signature, a chain through a helper they
+//!   declare is not followed, and when the declared set could not be read
+//!   neither is anything ([`CallIndex::caller_set_complete`]). The
+//!   converter keeps its signature, so a table may hold it.
 
 use std::collections::{HashMap, HashSet};
 
@@ -126,7 +135,7 @@ use sordec_ir::{
 
 use super::optional_out::{escapes, eval, give_back};
 use super::sret::emission_order;
-use crate::dataflow::{block_containing, canon_addr, resolve_use, trace_int};
+use crate::dataflow::{block_containing, canon_addr, resolve_use, trace_int, CallIndex};
 use crate::effects::expr_effects;
 use crate::metrics_catalog::{
     MARSHALLING_RESULT_OUT_REWRITTEN as M_REWRITTEN, MARSHALLING_RESULT_OUT_SITES as M_SITES,
@@ -158,13 +167,7 @@ impl Pass<HighIr> for ResultOutParamPass {
         if reg.errors.is_empty() {
             return result;
         }
-        let indirect = ir
-            .functions
-            .iter()
-            .any(|f| f.bindings.iter().any(|(_, b)| matches!(b.expr, Expr::IndirectCall { .. })));
-        if indirect {
-            return result;
-        }
+        let calls = CallIndex::build(ir);
         let writers: HashMap<FuncId, Writer> = ir
             .functions
             .iter()
@@ -198,7 +201,7 @@ impl Pass<HighIr> for ResultOutParamPass {
                 let Some(writer) = writers.get(target) else {
                     continue;
                 };
-                match plan_site(ir, &reg, caller, id, *target, writer, &converters) {
+                match plan_site(ir, &calls, &reg, caller, id, writer, &converters) {
                     Ok(plan) => {
                         trace(caller, &format!("site v{} -> func_{} ok", id.index(), target.index()));
                         result.metrics.increment(M_SITES, 1);
@@ -213,7 +216,17 @@ impl Pass<HighIr> for ResultOutParamPass {
             }
         }
 
+        // The writer's signature changes, so it is every site or none — and
+        // none for a writer an indirect call, recovered or raw, could reach:
+        // its callers are more than the census saw.
         let mut targets: Vec<FuncId> = plans.keys().copied().filter(|t| !refused.contains(t)).collect();
+        targets.retain(|t| {
+            let complete = calls.caller_set_complete(*t);
+            if !complete {
+                trace_id(*t, "kept: an indirect call may reach it");
+            }
+            complete
+        });
         targets.sort_unstable();
         for target in targets {
             let sites = &plans[&target];
@@ -880,19 +893,20 @@ struct SitePlan {
 
 fn plan_site(
     ir: &HighIr,
+    calls: &CallIndex,
     reg: &TypeRegistry,
     caller: &HighFunction,
     call: ValueId,
-    target: FuncId,
     writer: &Writer,
     converters: &HashMap<FuncId, Converter>,
 ) -> Result<SitePlan, &'static str> {
+    let Some(Expr::Call { target, args }) = caller.bindings.get(call).map(|b| &b.expr) else {
+        return Err("not a call");
+    };
+    let target = *target;
     if caller.id == target {
         return Err("the writer calls itself");
     }
-    let Some(Expr::Call { args, .. }) = caller.bindings.get(call).map(|b| &b.expr) else {
-        return Err("not a call");
-    };
     let (base, at) = canon_addr(caller, *args.get(writer.out).ok_or("no out-pointer argument")?);
     if !is_frame(caller, base) {
         return Err("the result is not in the caller's own frame");
@@ -943,7 +957,8 @@ fn plan_site(
     if !only_returned(caller, convert) {
         return Err("the converted value is used other than returned");
     }
-    let ty = declared_result(ir, caller.id, CHAIN_DEPTH).ok_or("no entrypoint declares the result")?;
+    let ty = declared_result(ir, calls, caller.id, CHAIN_DEPTH)
+        .ok_or("no entrypoint declares the result through direct calls alone")?;
     let KnownType::Result(ok, err) = &ty else {
         return Err("no entrypoint declares the result");
     };
@@ -1087,8 +1102,9 @@ fn only_returned(func: &HighFunction, value: ValueId) -> bool {
 
 /// The `Result` an entrypoint's spec declares for what `func` returns:
 /// its own, or — for a helper — the one every caller returns its result
-/// as, up to `depth` calls.
-fn declared_result(ir: &HighIr, func: FuncId, depth: usize) -> Option<KnownType> {
+/// as, up to `depth` calls. A helper climbed through comes to return the
+/// `Result` too, so its direct calls must be all of its callers.
+fn declared_result(ir: &HighIr, calls: &CallIndex, func: FuncId, depth: usize) -> Option<KnownType> {
     let f = ir.function(func)?;
     if let Some(sig) = &f.signature {
         let [out] = sig.outputs.as_slice() else {
@@ -1097,7 +1113,7 @@ fn declared_result(ir: &HighIr, func: FuncId, depth: usize) -> Option<KnownType>
         let ty = crate::type_infer::known_of_type_ref(out)?;
         return matches!(ty, KnownType::Result(..)).then_some(ty);
     }
-    if depth == 0 || f.name.is_some() {
+    if depth == 0 || f.name.is_some() || !calls.caller_set_complete(func) {
         return None;
     }
     let mut found: Option<KnownType> = None;
@@ -1112,7 +1128,7 @@ fn declared_result(ir: &HighIr, func: FuncId, depth: usize) -> Option<KnownType>
             if g.id == func || !only_returned(g, id) {
                 return None;
             }
-            let ty = declared_result(ir, g.id, depth - 1)?;
+            let ty = declared_result(ir, calls, g.id, depth - 1)?;
             if found.as_ref().is_some_and(|t| *t != ty) {
                 return None;
             }
@@ -1591,5 +1607,29 @@ mod tests {
         c.region = Region::Sequence(vec![Region::Basic(bb(0)), Region::Return { values: vec![v(11)] }]);
         c.returns = vec![vec![v(11)]];
         unchanged(ir(vec![writer(1, true), bool_helper(), converter(), c, entry(PrimitiveType::Bool)]));
+    }
+
+    /// Whether the pass gave the writer, func_0, its new signature — and
+    /// with it the site, func_3, its `Result`.
+    fn rewrites(ir: &mut HighIr) -> bool {
+        let changed = ResultOutParamPass.run(ir).changed;
+        let params = ir.function(FuncId::from_index(0)).unwrap().params.len();
+        assert_eq!(params, if changed { 1 } else { 2 }, "the writer loses its out-pointer exactly when it changes");
+        let c = ir.function(FuncId::from_index(3)).unwrap();
+        assert_eq!(matches!(c.bindings.get(v(10)).unwrap().expr, Expr::Use(_)), changed);
+        changed
+    }
+
+    #[test]
+    fn a_writer_a_raw_indirect_call_may_reach_keeps_its_out_parameter() {
+        crate::marshalling::test_support::check_indirect_gate(standard, 0, rewrites);
+    }
+
+    #[test]
+    fn a_chain_through_a_helper_a_raw_indirect_call_may_reach_is_not_followed() {
+        // func_3, the writer's caller, comes to return the `Result`. The
+        // case that shifts global 3 onto local 2 puts the converter in the
+        // table instead, which keeps its signature: the rewrite goes ahead.
+        crate::marshalling::test_support::check_indirect_gate(standard, 3, rewrites);
     }
 }

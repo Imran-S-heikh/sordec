@@ -27,11 +27,12 @@
 //!   is host-invocable with arbitrary arguments, so its internal
 //!   callers are not the complete caller set.
 //! - **Indirect-call kill-switch**: `call_indirect` lowers to
-//!   `Expr::Unknown { op_kind: CallIndirect }` and the element section
-//!   is not modeled, so table-called functions have invisible callers.
-//!   If the module contains *any* indirect call, parameter resolution
-//!   is disabled module-wide. (Precise element-segment capture is a
-//!   documented follow-up.)
+//!   `Expr::Unknown { op_kind: CallIndirect }`, so table-called
+//!   functions have invisible callers. If the module contains *any*
+//!   indirect call, parameter resolution is disabled module-wide. The
+//!   element segments say which functions a table can hold
+//!   ([`CallIndex::caller_set_complete`]); narrowing this switch to
+//!   those is a follow-up.
 //! - **A parameter whose entry block has predecessors** (entry used as
 //!   a branch target) → `None`: meeting only the back-edge values would
 //!   ignore the caller-supplied initial value.
@@ -50,7 +51,9 @@
 use std::collections::{HashMap, HashSet};
 
 use sordec_common::{FuncId, IrId, ValueId};
-use sordec_ir::{Expr, HighFunction, HighIr, KnownOp, KnownType, Literal, SemanticOp, WasmOpcodeKind};
+use sordec_ir::{
+    Expr, HighFunction, HighIr, ImportKind, KnownOp, KnownType, Literal, SemanticOp, WasmOpcodeKind,
+};
 
 use super::high::resolve_use;
 use crate::val_abi::{decode_small_symbol, decode_u32val};
@@ -81,7 +84,15 @@ pub struct CallSite {
 /// `Expr::Semantic`, never `Expr::Call`. Indirect calls are not
 /// resolvable to targets at all; their presence anywhere in the module
 /// is surfaced via [`has_indirect_calls`](Self::has_indirect_calls) so
-/// consumers can disable caller-set-dependent reasoning.
+/// consumers can disable caller-set-dependent reasoning, and which
+/// functions they could reach via
+/// [`caller_set_complete`](Self::caller_set_complete), so a consumer can
+/// disable it for those alone.
+///
+/// An indirect call counts in both of its forms: recovered
+/// (`Expr::IndirectCall`), and the raw `call_indirect` the pipeline leaves
+/// as `Expr::Unknown { op_kind: CallIndirect }` — the only form real
+/// modules hold today.
 #[derive(Debug, Clone)]
 pub struct CallIndex {
     /// `callers[i]` = call sites targeting `FuncId(i)`. Dense because
@@ -90,6 +101,9 @@ pub struct CallIndex {
     /// Whether any binding in the module is an unlowered
     /// `call_indirect` (or an `Expr::IndirectCall`).
     has_indirect: bool,
+    /// The local functions an element segment declares — the only ones a
+    /// table can ever hold — or `None` when that set could not be read.
+    table: Option<HashSet<FuncId>>,
 }
 
 impl CallIndex {
@@ -120,9 +134,25 @@ impl CallIndex {
                 }
             }
         }
+        // Element segments name functions in WASM's global index space,
+        // which counts the function imports first; a `FuncId` does not.
+        let imported = ir
+            .facts
+            .imports
+            .iter()
+            .filter(|i| matches!(i.kind, ImportKind::Func(_)))
+            .count() as u32;
+        let table = ir.facts.table_functions.as_ref().map(|funcs| {
+            funcs
+                .iter()
+                .filter_map(|i| i.checked_sub(imported))
+                .map(FuncId::from_index)
+                .collect()
+        });
         Self {
             callers,
             has_indirect,
+            table,
         }
     }
 
@@ -149,6 +179,21 @@ impl CallIndex {
     #[must_use]
     pub fn has_indirect_calls(&self) -> bool {
         self.has_indirect
+    }
+
+    /// Whether `func`'s direct call sites are all of its callers inside
+    /// the module, so a pass may change its signature or reason from what
+    /// they pass it: the module has no indirect call, or has one but no
+    /// element segment declares `func`, so no table can hold it. When the
+    /// declared set could not be read, no function's set is complete
+    /// beside an indirect call.
+    ///
+    /// Callers outside the module are not this index's concern: an
+    /// exported function's signature is the contract's, and each consumer
+    /// refuses those on its own terms.
+    #[must_use]
+    pub fn caller_set_complete(&self, func: FuncId) -> bool {
+        !self.has_indirect || self.table.as_ref().is_some_and(|t| !t.contains(&func))
     }
 }
 
@@ -1113,6 +1158,50 @@ mod tests {
         };
         let ir = module(vec![func(0, None, 0, vec![indirect])]);
         assert!(CallIndex::build(&ir).has_indirect_calls());
+    }
+
+    #[test]
+    fn caller_sets_are_complete_outside_the_table() {
+        let raw = Expr::Unknown {
+            op_kind: WasmOpcodeKind::CallIndirect,
+            args: vec![],
+            reason: UnknownReason::UnsupportedPattern,
+        };
+        let recovered = Expr::IndirectCall {
+            table: 0,
+            sig: 0,
+            callee: v(0),
+            args: vec![],
+        };
+        let import = sordec_ir::Import {
+            index: 0,
+            module: "x".to_string(),
+            name: "_".to_string(),
+            kind: sordec_ir::ImportKind::Func(0),
+        };
+        // (indirect call, function imports, element-declared global
+        // indices, whether func_0's and func_1's sets are complete)
+        let cases = [
+            (None, 0, None, [true, true]),             // no indirect call
+            (Some(raw.clone()), 0, None, [false, false]), // the table is unknown
+            (Some(raw.clone()), 0, Some(vec![1]), [true, false]),
+            (Some(recovered), 0, Some(vec![1]), [true, false]),
+            (Some(raw.clone()), 1, Some(vec![1]), [false, true]), // global 1 is local 0
+            (Some(raw), 1, Some(vec![0]), [true, true]),          // global 0 is the import
+        ];
+        for (indirect, imports, table, complete) in cases {
+            let body = indirect.clone().map_or_else(|| vec![i64c(0)], |e| vec![i64c(0), e]);
+            let mut ir = module(vec![func(0, None, 0, vec![i64c(1)]), func(1, None, 0, body)]);
+            ir.facts.imports = vec![import.clone(); imports];
+            ir.facts.table_functions = table.clone();
+            let idx = CallIndex::build(&ir);
+            assert_eq!(
+                [idx.caller_set_complete(f(0)), idx.caller_set_complete(f(1))],
+                complete,
+                "indirect {}, imports {imports}, table {table:?}",
+                indirect.is_some()
+            );
+        }
     }
 
     // --- return-value resolution (callee → caller) ---

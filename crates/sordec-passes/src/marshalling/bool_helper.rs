@@ -47,15 +47,20 @@
 //! - **Every call only tests it.** In every function, each live read of a
 //!   call's result is a branch condition, an `eqz`, or an `extend_u32` that
 //!   only an entrypoint declared `-> bool` returns. A signature changes, so
-//!   it is every call site or none — and nothing at all when the module has
-//!   an indirect call, whose callers cannot be seen.
+//!   it is every call site or none.
+//! - **Every call is one the census sees.** An indirect call can reach any
+//!   function an element segment declares, and reads its result as it
+//!   likes. When the module has one — recovered, or a raw `call_indirect`
+//!   the pipeline left as it found it — a helper the segments declare keeps
+//!   its `i32`, and so does every helper when the declared set could not be
+//!   read ([`CallIndex::caller_set_complete`]).
 
 use std::collections::HashSet;
 
 use sordec_common::{FuncId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{BinaryOp, Expr, HighFunction, HighIr, IrType, KnownType, Literal, Region, UnaryOp};
 
-use crate::dataflow::resolve_use;
+use crate::dataflow::{resolve_use, CallIndex};
 use crate::metrics_catalog::MARSHALLING_BOOL_HELPERS as M_HELPERS;
 use crate::pass::{Pass, PassResult};
 use crate::type_infer::known_of_type_ref;
@@ -74,17 +79,14 @@ impl Pass<HighIr> for BoolHelperPass {
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
-        if ir
-            .functions
-            .iter()
-            .any(|f| f.bindings.iter().any(|(_, b)| matches!(b.expr, Expr::IndirectCall { .. })))
-        {
-            return result;
-        }
+        // The return type changes, so the calls the census sees must be all
+        // of them: a helper an indirect call could reach keeps its `i32`.
+        let calls = CallIndex::build(ir);
         let plans: Vec<(usize, Plan)> = ir
             .functions
             .iter()
             .enumerate()
+            .filter(|(_, f)| calls.caller_set_complete(f.id))
             .filter_map(|(at, f)| plan(f).map(|p| (at, p)))
             .filter(|(at, _)| every_call_tests(ir, ir.functions[*at].id))
             .collect();
@@ -457,5 +459,19 @@ mod tests {
         let helper = &mut ir.functions[0];
         helper.bindings.get_mut(v(0)).unwrap().expr = Expr::Phi { incoming: vec![(BlockId::from_index(0), v(1))] };
         assert!(!BoolHelperPass.run(&mut ir).changed);
+    }
+
+    #[test]
+    fn a_helper_a_raw_indirect_call_may_reach_keeps_its_word() {
+        crate::marshalling::test_support::check_indirect_gate(
+            || shape(PrimitiveType::Bool),
+            0,
+            |ir| {
+                let changed = BoolHelperPass.run(ir).changed;
+                let typed = ir.functions[1].bindings.get(v(1)).unwrap().ty == IrType::Inferred(KnownType::Bool);
+                assert_eq!(changed, typed, "the call is typed `bool` exactly when the helper is");
+                changed
+            },
+        );
     }
 }
