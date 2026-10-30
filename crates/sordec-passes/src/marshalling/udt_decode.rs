@@ -41,6 +41,16 @@
 //! parameter declared with the type, or a field of a struct already
 //! recovered this way.
 //!
+//! **Field names several structs share.** `{ val }` is a common shape, and
+//! a key table matching three structs says only "one of these". The
+//! value's own declaration says which: an entrypoint parameter declared
+//! with the type, a value an earlier decode or the tuple-parameter pass
+//! typed from the spec (a field of a recovered struct, a tuple element),
+//! or a helper parameter every caller hands a value proven to be that
+//! struct. That is the same evidence the decode needs anyway, so the
+//! choice adds no claim: the declaration picks among the structs the
+//! table matches, and the table must still match it field for field.
+//!
 //! Rewriting a read and removing the decode are two more claims, and each
 //! has its own argument.
 //!
@@ -87,7 +97,8 @@
 //! # Gates
 //!
 //! - The key table reads out of rodata as identifiers, and exactly one
-//!   declared struct has those field names.
+//!   declared struct has those field names — or several do, and the
+//!   value's declaration names one of them.
 //! - The decoded value is proven to be that struct (see above).
 //! - A helper is `(out, val)`, `val` typed as the struct, touches no host
 //!   state, uses `out` only as a store address, and stores each slot from
@@ -461,12 +472,17 @@ fn plan<'a>(
                     trace(func, "key table not readable");
                     continue;
                 };
-                let Some(def) = struct_for(structs, &keys) else {
+                let map = resolve_use(func, map);
+                // Field names several structs share say only "one of
+                // these"; the value's own declaration says which.
+                let Some(def) =
+                    struct_for(structs, &keys).or_else(|| declared_struct(func, map, structs, &keys, param_types))
+                else {
                     declines.push(metrics::UDT_DECLINED_NO_STRUCT);
-                    trace(func, "no struct has exactly these keys");
+                    trace(func, &format!("no struct has exactly these keys {keys:?}, and {map:?} declares none of them"));
                     continue;
                 };
-                let map = resolve_use(func, map);
+
                 let Some(evidence) = value_evidence(func, map, def.id, param_types) else {
                     declines.push(metrics::UDT_DECLINED_EVIDENCE);
                     trace(func, "map value not proven to be the struct");
@@ -798,6 +814,38 @@ pub(crate) fn struct_for<'a>(structs: &'a [StructDef], keys: &[String]) -> Optio
         return None;
     }
     Some(first)
+}
+
+/// The struct `map`'s own declaration names, when its field names are
+/// exactly `keys`: the type an earlier decode or the tuple-parameter
+/// pass put on its binding from the contract spec, an entrypoint
+/// parameter's declared type, or — for a helper parameter — the struct
+/// every caller agrees it is handed.
+///
+/// This is how a key table several structs share (`{ val }` is a common
+/// shape) is told apart: the spec says what the value is, and the table
+/// must still match that struct field for field. The declaration picks
+/// among the candidates; it never overrides the keys.
+fn declared_struct<'a>(
+    func: &HighFunction,
+    map: ValueId,
+    structs: &'a [StructDef],
+    keys: &[String],
+    param_types: &HashMap<(FuncId, usize), Option<TypeId>>,
+) -> Option<&'a StructDef> {
+    let id = udt_of(func, map).or_else(|| {
+        let index = func.params.iter().position(|p| *p == map)?;
+        match param_types.get(&(func.id, index)) {
+            Some(Some(t)) if func.signature.is_none() => Some(*t),
+            _ => None,
+        }
+    })?;
+    let def = structs.iter().find(|s| s.id == id)?;
+    let mut want: Vec<&str> = keys.iter().map(String::as_str).collect();
+    want.sort_unstable();
+    let mut have: Vec<&str> = def.fields.iter().map(|f| f.name.as_str()).collect();
+    have.sort_unstable();
+    (have == want).then_some(def)
 }
 
 /// Why the map value may be read as the struct: a host operation's result
@@ -2253,6 +2301,60 @@ mod tests {
         assert!(UdtDecodePass.run(&mut m).changed);
         assert!(matches!(expr_at(&m, 5), Expr::Literal(Literal::Unit)));
         assert!(matches!(expr_at(&m, 9), Expr::Load { .. }), "the tag byte the callee wrote is its own");
+    }
+
+    // -----------------------------------------------------------------
+    // A key table several structs share, named by the value's declaration
+    // -----------------------------------------------------------------
+
+    /// `Balance` plus `Wallet`, a second struct with the same field names
+    /// (its `amount` a `u64`, so the two can be told apart).
+    fn with_twin(m: &mut HighIr) {
+        let structs = &mut m.soroban_facts.as_mut().unwrap().types.structs;
+        let mut twin = structs[0].clone();
+        twin.id = TypeId::new(8);
+        twin.name = "Wallet".to_string();
+        twin.fields[0].ty = TypeRef::Primitive(PrimitiveType::U64);
+        structs.push(twin);
+    }
+
+    /// The map is already typed `Wallet` by its declaration (a recovered
+    /// field, a tuple element): the shared table is `Wallet`'s.
+    #[test]
+    fn a_shared_key_table_is_named_by_the_values_declared_type() {
+        let mut f = decoder();
+        f.bindings.get_mut(v(2)).unwrap().expr = Expr::Phi { incoming: vec![] };
+        f.bindings.get_mut(v(2)).unwrap().ty = IrType::Known(KnownType::UserDefined(TypeId::new(8)));
+        let mut m = ir(f);
+        with_twin(&mut m);
+        assert!(UdtDecodePass.run(&mut m).changed);
+        assert!(matches!(expr_at(&m, 6), Expr::Field { base, field } if *base == v(2) && field == "amount"));
+        assert!(matches!(m.functions[0].bindings.get(v(6)).unwrap().ty, IrType::Known(KnownType::U64)));
+        assert!(matches!(expr_at(&m, 5), Expr::Literal(Literal::Unit)));
+    }
+
+    /// A storage read says nothing about which of the two it is.
+    #[test]
+    fn a_shared_key_table_with_no_declaration_declines() {
+        let mut m = ir(decoder());
+        with_twin(&mut m);
+        UdtDecodePass.run(&mut m);
+        untouched(&m, 0, 5, &[6, 7]);
+    }
+
+    /// A declaration whose fields are not exactly the keys names nothing.
+    #[test]
+    fn a_declared_type_with_other_fields_declines() {
+        let mut f = decoder();
+        f.bindings.get_mut(v(2)).unwrap().expr = Expr::Phi { incoming: vec![] };
+        f.bindings.get_mut(v(2)).unwrap().ty = IrType::Known(KnownType::UserDefined(TypeId::new(8)));
+        let mut m = ir(f);
+        with_twin(&mut m);
+        m.soroban_facts.as_mut().unwrap().types.structs[1].fields[1].name = "owner".to_string();
+        // Only `Balance` has these keys now, and the value is declared a
+        // `Wallet`: the evidence gate refuses the mismatch.
+        UdtDecodePass.run(&mut m);
+        untouched(&m, 0, 5, &[6, 7]);
     }
 
     /// A function with the given blocks (binding ids per block) and region.
