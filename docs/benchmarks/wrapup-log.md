@@ -399,3 +399,21 @@ so rustc could not infer it; the host catalog's argument kinds now type it
 already typed it `Val`. Both groth16 verifiers 8 → 4, privacy_pools 14 → 13,
 merkle-voting one gap typed (still compiles). The single-crate Stellar set is
 unchanged, so the held-out mean stays 0.7851.
+
+## 2026-10-30 — commit 537e767 (a u32 argument's packed word)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 23/25 | 14 | 3,879 |
+| Stellar examples, multi-contract | 13 | 10/13 | 21 | 4,240 |
+| third-party | 2 | 1/2 | 17 | 776 |
+| SDK 26 test contracts | 39 | 31/39 | 23 | 1,444 |
+
+Errors 80 → 75. rustc does some arithmetic on a `u32` argument's packed word
+(`value << 32 | tag`) instead of the value; three more of those shapes are read at
+the value: `v + 1`'s overflow check, `word + (1 << 32)` (`v + 1`), and a mask tested
+against zero (`v % 2`). One correctness fix: a `>= 1 << 32` comparison on such a
+word was rewritten to `== 0`, an inverted condition; it is `!= 0`. No measured
+contract hit it. contracttrait_impl_partial 4 → 1, other_custom_types 10 → 8.
+Held-out mean 0.7851, unchanged.
