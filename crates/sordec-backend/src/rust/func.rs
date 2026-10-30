@@ -226,10 +226,15 @@ mod tests {
     /// The caller (func 0) hands its `Val` parameter to func 1, whose `i64`
     /// parameter its own body tag-checks when `checked`.
     fn val_into_helper(checked: bool) -> String {
+        arg_into_helper(IrType::Inferred(KnownType::Val), checked)
+    }
+
+    /// The same, with the caller's parameter typed `arg`.
+    fn arg_into_helper(arg: IrType, checked: bool) -> String {
         let prov = || Provenance::new("test", ProvenanceSource::DataFlow, "test");
         let b0 = BlockId::from_index(0);
         let mut caller_bindings: Arena<ValueId, Binding> = Arena::new();
-        caller_bindings.push(Binding::new(ValueId::new(0), IrType::Inferred(KnownType::Val), Expr::Phi { incoming: vec![] }, prov()));
+        caller_bindings.push(Binding::new(ValueId::new(0), arg, Expr::Phi { incoming: vec![] }, prov()));
         caller_bindings.push(Binding::new(
             ValueId::new(1),
             IrType::Known(KnownType::Unit),
@@ -308,6 +313,20 @@ mod tests {
     #[test]
     fn a_val_handed_to_a_plain_number_parameter_is_not_converted() {
         let out = val_into_helper(false);
+        assert!(!out.contains("get_payload"), "{out}");
+    }
+
+    /// A `U256` is one `Val` on the wire: handed to a helper that tests
+    /// the word's tag, it is that word.
+    #[test]
+    fn a_host_object_handed_to_a_parameter_its_helper_tag_checks_is_its_bits() {
+        let out = arg_into_helper(IrType::Known(KnownType::U256), true);
+        assert!(out.contains("arg0 . to_val () . get_payload () as i64"), "{out}");
+    }
+
+    #[test]
+    fn a_host_object_handed_to_a_plain_number_parameter_is_not_converted() {
+        let out = arg_into_helper(IrType::Known(KnownType::U256), false);
         assert!(!out.contains("get_payload"), "{out}");
     }
 

@@ -1813,6 +1813,38 @@ mod tests {
         assert!(out.contains("(v1asi32)") && !out.contains("get_payload"), "{out}");
     }
 
+    /// `addr.require_auth_for_args(v)`, `v` a vec typed `Vec<element>`.
+    fn auth_for_args(element: IrType) -> String {
+        emitted(
+            vec![
+                (IrType::Known(KnownType::Address), Expr::Use(v(0))),
+                (
+                    IrType::Inferred(KnownType::Vec(Box::new(element))),
+                    known(KnownOp::VecNew { vals_pos: v(0), len: v(0), elements: Some(vec![]) }),
+                ),
+                (IrType::Known(KnownType::Unit), known(KnownOp::RequireAuthForArgs { address: v(1), args: vec![v(2)] })),
+            ],
+            vec![],
+            &TypeRegistry::default(),
+        )
+    }
+
+    /// The host takes a `Vec<Val>`: a vec of `i32`s is handed over as the
+    /// same object viewed as one.
+    #[test]
+    fn a_typed_vec_of_auth_args_is_viewed_as_vals() {
+        let out = packed(&auth_for_args(IrType::Known(KnownType::I32)));
+        assert!(out.contains("require_auth_for_args(v2.to_vals())"), "{out}");
+    }
+
+    #[test]
+    fn a_vec_of_vals_or_of_nothing_named_is_passed_as_it_is() {
+        for element in [IrType::Known(KnownType::Val), untyped()] {
+            let out = packed(&auth_for_args(element));
+            assert!(out.contains("require_auth_for_args(v2)"), "{out}");
+        }
+    }
+
     /// The text with its spaces removed, so a check does not depend on
     /// token spacing.
     fn packed(s: &str) -> String {

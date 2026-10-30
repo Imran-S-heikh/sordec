@@ -291,9 +291,18 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             let a = ctx.value_ref(*address);
             Some(parse_quote!(#a.require_auth()))
         }
+        // The host takes the arguments as a `Vec<Val>`. A vec of typed
+        // elements — `vec![&e, 1i32, 2i32]` — is the same host object, and
+        // `to_vals` is the SDK's view of it as one: no conversion, no copy.
         KnownOp::RequireAuthForArgs { address, args } => {
             let a = ctx.value_ref(*address);
-            let args: Vec<syn::Expr> = args.iter().map(|v| ctx.value_ref(*v)).collect();
+            let args: Vec<syn::Expr> = args
+                .iter()
+                .map(|v| {
+                    let x = ctx.value_ref(*v);
+                    if vec_of_named(ctx, *v) { parse_quote!(#x.to_vals()) } else { x }
+                })
+                .collect();
             Some(parse_quote!(#a.require_auth_for_args(#(#args),*)))
         }
         // No recovered type spells `Vec<InvokerContractAuthEntry>`: what
@@ -793,6 +802,17 @@ fn variant_fields(ctx: &FnCtx, ek: &EnumKey) -> Option<Vec<sordec_ir::TypeRef>> 
         .iter()
         .find(|c| c.name == ek.variant)?;
     Some(case.fields.clone())
+}
+
+/// Whether `v` prints as a vec of some named element type other than
+/// `Val`: one that is not yet the `Vec<Val>` a host argument takes.
+fn vec_of_named(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
+    let at = ctx.fold_target(v);
+    matches!(
+        ctx.func.bindings.get(at).map(|b| &b.ty),
+        Some(IrType::Known(KnownType::Vec(inner)) | IrType::Inferred(KnownType::Vec(inner)))
+            if matches!(inner.as_ref(), IrType::Known(k) | IrType::Inferred(k) if *k != KnownType::Val)
+    )
 }
 
 /// A vec's elements, with the conversion a mixed one needs.

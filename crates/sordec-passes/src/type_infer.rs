@@ -118,10 +118,20 @@
 //! `Val` — a slot read back, a helper's `Val` result. A value with a type
 //! of its own keeps it: a `BytesN<32>` in a `Bytes` field is a widening the
 //! source wrote, not a mistyping.
+//!
+//! ## An integer enum's decoded discriminant
+//!
+//! A `#[contracttype]` enum with integer discriminants crosses the ABI as
+//! the `U32Val` of its discriminant, so a small decode of a value typed as
+//! one is that discriminant: a `u32` (`Inferred`). The decode is often
+//! still a hole — the guest range-checks and unpacks the word before
+//! matching on it — and without a type the hole's `let` falls back to `()`,
+//! which no cast or mask accepts. Only an enum the contract declares with
+//! integer discriminants: a payload union or a struct is no small `Val`.
 
 use std::collections::{HashMap, HashSet};
 
-use sordec_common::{FuncId, Provenance, ProvenanceSource, ValueId};
+use sordec_common::{FuncId, Provenance, ProvenanceSource, TypeId, ValueId};
 use sordec_ir::{
     BinaryOp, CompositeType, CryptoOpKind, Expr, FunctionSignature, HighFunction, HighIr, IrType, KnownOp,
     KnownType, Literal, PrimitiveType, SemanticOp, StructDef, TypeRef, UnaryOp, ValObjectKind,
@@ -167,6 +177,11 @@ impl Pass<HighIr> for TypeInferPass {
         let mut disagreements: u64 = 0;
         let structs: Vec<StructDef> =
             ir.soroban_facts.as_ref().map(|f| f.types.structs.clone()).unwrap_or_default();
+        let int_enums: HashSet<TypeId> = ir
+            .soroban_facts
+            .as_ref()
+            .map(|f| f.types.enums.iter().map(|e| e.id).collect())
+            .unwrap_or_default();
         // Settled twice: first on everything but the host catalog's object
         // kinds, then with them, so that weakest of named statements only
         // speaks where nothing else has (see "What the host catalog fixes").
@@ -182,7 +197,7 @@ impl Pass<HighIr> for TypeInferPass {
                 disagreements = 0;
                 for func in &mut ir.functions {
                     let (func_changed, func_disagreements) =
-                        infer_function(func, &sigs, catalog, &structs, awaiting_callers);
+                        infer_function(func, &sigs, catalog, &structs, &int_enums, awaiting_callers);
                     round |= func_changed;
                     disagreements += func_disagreements;
                 }
@@ -223,12 +238,14 @@ impl Pass<HighIr> for TypeInferPass {
 /// incumbent. Works on a `ValueId -> IrType` snapshot and writes the
 /// improvements back with `TypePropagation` provenance. `catalog` lets the
 /// host catalog's operand kinds speak ([`crypto_object_args`]); `structs`
-/// are the contract's declared structs, whose literals type their fields.
+/// are the contract's declared structs, whose literals type their fields;
+/// `int_enums` its enums with integer discriminants.
 fn infer_function(
     func: &mut HighFunction,
     sigs: &SigTable,
     catalog: bool,
     structs: &[StructDef],
+    int_enums: &HashSet<TypeId>,
     awaiting_callers: bool,
 ) -> (bool, u64) {
     let mut types: HashMap<ValueId, IrType> =
@@ -250,6 +267,9 @@ fn infer_function(
                     .filter(|c| !ok_arms_of(types.get(&id), c)),
                 Expr::Binary { op, lhs, rhs } => {
                     offset_of_known(func, *op, *lhs, *rhs, &types).or_else(|| infer_expr(&binding.expr, &types))
+                }
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })) => {
+                    discriminant_of(*value, &types, int_enums).or_else(|| infer_expr(&binding.expr, &types))
                 }
                 other => infer_expr(other, &types),
             };
@@ -732,6 +752,15 @@ fn offset_of_known(
     match (literal(lhs), literal(rhs)) {
         (false, true) => proven(lhs),
         (true, false) => proven(rhs),
+        _ => None,
+    }
+}
+
+/// The `u32` a small decode of an integer enum yields: its discriminant.
+/// See "An integer enum's decoded discriminant" in the module doc.
+fn discriminant_of(value: ValueId, types: &HashMap<ValueId, IrType>, int_enums: &HashSet<TypeId>) -> Option<IrType> {
+    match base_of(types.get(&value))? {
+        KnownType::UserDefined(id) if int_enums.contains(&id) => Some(IrType::Inferred(KnownType::U32)),
         _ => None,
     }
 }
@@ -2104,7 +2133,7 @@ mod tests {
     /// Run only the intra-procedural half: no inter-procedural evidence, so
     /// a single function can be tested without building a module around it.
     fn infer_isolated(func: &mut HighFunction) -> bool {
-        infer_function(func, &SigTable::new(), true, &[], false).0
+        infer_function(func, &SigTable::new(), true, &[], &HashSet::new(), false).0
     }
 
     // ---- lattice ----
@@ -2367,6 +2396,41 @@ mod tests {
             Some(IrType::Inferred(KnownType::I64)),
             "nothing else typed: the constant is the evidence"
         );
+    }
+
+    /// `d = val_decode(flag)`, `flag` a parameter typed as the declared
+    /// type 5.
+    fn decoded_flag() -> HighFunction {
+        use crate::marshalling::test_support::{func_with, v};
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                              // v0 flag
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value: v(0) })), // v1
+            ],
+            vec![v(0)],
+            vec![1],
+        );
+        f.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(KnownType::UserDefined(TypeId::new(5)));
+        f
+    }
+
+    /// An integer enum crosses as the `U32Val` of its discriminant, so its
+    /// small decode is a `u32`.
+    #[test]
+    fn a_decoded_integer_enum_is_its_u32_discriminant() {
+        use crate::marshalling::test_support::v;
+        let mut f = decoded_flag();
+        infer_function(&mut f, &SigTable::new(), true, &[], &HashSet::from([TypeId::new(5)]), false);
+        assert_eq!(f.bindings.get(v(1)).unwrap().ty, IrType::Inferred(KnownType::U32));
+    }
+
+    /// A declared type that is no integer enum says nothing of the decode.
+    #[test]
+    fn a_decode_of_another_declared_type_is_left_untyped() {
+        use crate::marshalling::test_support::v;
+        let mut f = decoded_flag();
+        infer_isolated(&mut f);
+        assert!(matches!(f.bindings.get(v(1)).unwrap().ty, IrType::Unknown(_)));
     }
 
     /// `r = phi [a + b, load8_u p]`, the sum typed `i64`, the byte untyped;

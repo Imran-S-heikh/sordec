@@ -42,9 +42,41 @@
 //! All or nothing per constructor: a `Vec` with three of its four elements
 //! recovered is not a `Vec` anybody can read, and half-filling the slot
 //! would let the emitter print a shorter vector than the contract builds.
+//!
+//! ## An element stored as a constant word
+//!
+//! `(1, 2).into_val(&e)` builds its vec from two constants the compiler
+//! has already encoded, so what sits in each slot is the word
+//! `1 << 32 | I32Val`, not the number one. Named as the literal it was
+//! loaded as, it would print as `4294967301i64` — a vec of `i64`s, whose
+//! elements encode to different words than the ones the contract stored.
+//!
+//! Such an element is read back through its decode instead: a fresh
+//! binding holding the value the word encodes, typed by its tag, scheduled
+//! just before the constructor and standing in the element's place. The
+//! store it came from is untouched; it is the dead-store collection's.
+//!
+//! ### Why it is exact
+//!
+//! Every slot the host reads is a `Val`: that is what
+//! `vec_new_from_linear_memory` takes. A constant word in one is therefore
+//! a `Val`'s bits, and the value it decodes to encodes back to exactly
+//! those bits — a `u32` or `i32` sits in the high half over its tag, a
+//! `bool` is its own tag, a short symbol is its characters packed over its
+//! tag. So the vec holds the same words either way.
+//!
+//! ### Gates
+//!
+//! - **A raw 64-bit constant**, typed as nothing narrower than the word it
+//!   was loaded as ([`super::encode::encoded_constant`]'s reading).
+//! - **A tag that names one of those types**, with the bits that type
+//!   leaves zero zero, and a symbol that is a strict short-symbol packing.
+//!   Any other word is left as it is.
 
-use sordec_common::{Provenance, ProvenanceSource};
-use sordec_ir::{Expr, HighIr, KnownOp, MemWidth, SemanticOp};
+use sordec_common::{IrId as _, Provenance, ProvenanceSource, ValueId};
+use sordec_ir::{Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MemWidth, SemanticOp};
+
+use super::encode::encoded_constant;
 
 use crate::dataflow::frame_facts::facts_before;
 use crate::dataflow::{block_containing, canon_addr, trace_u32val};
@@ -116,6 +148,7 @@ impl Pass<HighIr> for VecElementsPass {
                 }
             }
             for (id, values) in found {
+                let values = decode_words(func, id, values);
                 let Some(binding) = func.bindings.get_mut(id) else {
                     continue;
                 };
@@ -137,6 +170,59 @@ impl Pass<HighIr> for VecElementsPass {
         }
         result
     }
+}
+
+/// The elements with each constant word replaced by the value it encodes,
+/// as a fresh binding scheduled just before the constructor `at`. See the
+/// module doc.
+fn decode_words(func: &mut HighFunction, at: ValueId, values: Vec<ValueId>) -> Vec<ValueId> {
+    values
+        .into_iter()
+        .map(|element| match decoded_word(func, element) {
+            Some((lit, ty)) => schedule_before(func, at, lit, ty).unwrap_or(element),
+            None => element,
+        })
+        .collect()
+}
+
+/// The value a constant word in a `Val` slot encodes, and its type, when
+/// its tag names a `u32`, an `i32`, a `bool` or a short symbol.
+fn decoded_word(func: &HighFunction, element: ValueId) -> Option<(Literal, KnownType)> {
+    let b = func.bindings.get(crate::dataflow::resolve_use(func, element))?;
+    let raw = matches!(b.expr, Expr::Literal(Literal::I64(_) | Literal::U64(_)))
+        && matches!(
+            &b.ty,
+            IrType::Unknown(_)
+                | IrType::Known(KnownType::I64 | KnownType::U64)
+                | IrType::Inferred(KnownType::I64 | KnownType::U64)
+        );
+    if !raw {
+        return None;
+    }
+    // The tag picks at most one of these.
+    [KnownType::U32, KnownType::I32, KnownType::Bool, KnownType::Symbol]
+        .into_iter()
+        .find_map(|ty| encoded_constant(func, element, &ty).map(|lit| (lit, ty)))
+}
+
+/// A fresh binding of `lit`, scheduled just before `at` in its block.
+fn schedule_before(func: &mut HighFunction, at: ValueId, lit: Literal, ty: KnownType) -> Option<ValueId> {
+    let block = block_containing(func, at)?;
+    let fresh = ValueId::from_index(func.bindings.len() as u32);
+    func.bindings.push(sordec_ir::Binding::new(
+        fresh,
+        IrType::Known(ty),
+        Expr::Literal(lit),
+        Provenance::new(
+            PASS_NAME,
+            ProvenanceSource::SdkPattern,
+            "a vec element stored as its encoded constant, decoded",
+        ),
+    ));
+    let bindings = &mut func.blocks.get_mut(block)?.bindings;
+    let pos = bindings.iter().position(|v| *v == at)?;
+    bindings.insert(pos, fresh);
+    Some(fresh)
 }
 
 /// The element values behind one constructor, or `None` when the gate
@@ -203,6 +289,72 @@ mod tests {
             Some(&[v(1), v(2)][..]),
             "offset 0 then offset 8"
         );
+    }
+
+    /// `(1, 2).into_val(&e)`: two constant `I32Val` words and one that is
+    /// no small value of a decodable type (an `I64Small`).
+    fn constant_words() -> HighIr {
+        module(vec![func_with(
+            vec![
+                Expr::Literal(Literal::I32(0)),               // v0 base
+                Expr::Literal(Literal::I64((1 << 32) | 5)),   // v1 I32Val(1)
+                Expr::Literal(Literal::I64((2 << 32) | 5)),   // v2 I32Val(2)
+                Expr::Literal(Literal::I64((9 << 8) | 7)),    // v3 I64Small(9)
+                store(v(0), v(1), 0),                         // v4
+                store(v(0), v(2), 8),                         // v5
+                store(v(0), v(3), 16),                        // v6
+                Expr::Literal(Literal::I32(3)),               // v7 count
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                    vals_pos: v(0),
+                    len: v(7),
+                    elements: None,
+                })),                                          // v8
+            ],
+            vec![],
+            (0..9).collect(),
+        )])
+    }
+
+    /// A constant word in a slot is read through its decode: the value it
+    /// encodes, typed by its tag, scheduled before the constructor. A word
+    /// of another tag stays the word.
+    #[test]
+    fn a_constant_word_element_is_the_value_it_encodes() {
+        let mut ir = constant_words();
+        assert!(VecElementsPass.run(&mut ir).changed);
+        let func = ir.functions.first().expect("one function");
+        let Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { elements: Some(elements), .. })) =
+            &func.bindings.get(v(8)).expect("the constructor").expr
+        else {
+            panic!("elements recovered");
+        };
+        assert_eq!(elements.len(), 3);
+        for (element, want) in elements.iter().zip([1, 2]) {
+            let b = func.bindings.get(*element).expect("fresh binding");
+            assert!(matches!(b.expr, Expr::Literal(Literal::I32(n)) if n == want), "{:?}", b.expr);
+            assert_eq!(b.ty, IrType::Known(KnownType::I32));
+            let block = func.blocks.iter().next().expect("one block").1;
+            let at = |x: ValueId| block.bindings.iter().position(|y| *y == x);
+            assert!(at(*element) < at(v(8)), "scheduled before the constructor");
+        }
+        assert_eq!(elements[2], v(3), "an I64Small word is left as it is");
+    }
+
+    /// A short symbol packed in a slot is the symbol.
+    #[test]
+    fn a_short_symbol_word_element_is_the_symbol() {
+        let mut ir = constant_words();
+        // "hello" over the SymbolSmall tag.
+        ir.functions[0].bindings.get_mut(v(1)).unwrap().expr = Expr::Literal(Literal::I64(196_144_296_974));
+        VecElementsPass.run(&mut ir);
+        let func = ir.functions.first().expect("one function");
+        let Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { elements: Some(elements), .. })) =
+            &func.bindings.get(v(8)).expect("the constructor").expr
+        else {
+            panic!("elements recovered");
+        };
+        let first = func.bindings.get(elements[0]).expect("fresh binding");
+        assert!(matches!(&first.expr, Expr::Literal(Literal::Symbol(s)) if s == "hello"));
     }
 
     /// All or nothing: a buffer with a gap in it yields no elements at all,
