@@ -58,6 +58,21 @@
 //! bytes — is [`crate::dataflow::frame_facts`]'s, answered under the same
 //! kill discipline as every other forwarded slot.
 //!
+//! # An element's tag byte
+//!
+//! An element the body never uses keeps only its conversion's check, and
+//! for a type carried by one tag that check reads one byte:
+//! `if load8(fp+8k) != 4 { trap }` for a `u32`. The frame forwarder takes
+//! only whole-slot reads, so the byte is matched here: where the planted
+//! store of `arg.k` reaches the read (on every path, nothing between may
+//! write the slot — [`crate::dataflow::facts_at`]), the byte is the low
+//! byte of `arg.k`'s encoding, its tag. When every use of it is
+//! `byte != tag` with `tag` the one tag the element's declared type is
+//! carried by, and every use of that comparison is a guard
+//! `if c { trap }` with no else arm, the test is the element conversion's
+//! check, which the regenerated wrapper makes: the guard is relocated as
+//! the element's own tag guard is, and the read goes with it.
+//!
 //! # Gates
 //!
 //! - **An entrypoint parameter declared a tuple.** Only an entrypoint has
@@ -111,9 +126,69 @@ impl Pass<HighIr> for TupleParamPass {
                     result.changed = true;
                 }
             }
+            if relocate_tag_bytes(func) {
+                result.changed = true;
+            }
         }
         result
     }
+}
+
+/// The element tag-byte checks ("An element's tag byte"), relocated:
+/// their guards stripped and their reads made nothing. Whether anything
+/// changed.
+fn relocate_tag_bytes(func: &mut HighFunction) -> bool {
+    if func.signature.is_none() {
+        return false;
+    }
+    let uses = crate::dataflow::HighUseIndex::build(func);
+    let traps = super::udt_decode::trap_guards(func);
+    let mut guards: std::collections::HashMap<ValueId, String> = std::collections::HashMap::new();
+    let mut reads: Vec<(ValueId, String)> = Vec::new();
+    for (_, block) in func.blocks.iter() {
+        for &id in &block.bindings {
+            let Some(Expr::Load { addr, offset, width: MemWidth::W1, .. }) = func.bindings.get(id).map(|b| &b.expr)
+            else {
+                continue;
+            };
+            let (base, at) = crate::dataflow::canon_addr(func, *addr);
+            let Some(at) = at.checked_add(*offset) else { continue };
+            let Some(stored) = crate::dataflow::facts_at(func, id, base).value_at(at, MemWidth::W8) else {
+                continue;
+            };
+            let Some(ty) = element_type(func, stored) else { continue };
+            let Some(tag) = super::udt_decode::sole_tag(&ty) else { continue };
+            let Some(conds) = super::udt_decode::derived_tag_check(func, &uses, &traps, id, tag) else {
+                continue;
+            };
+            let what = crate::val_abi::tag_name(tag).unwrap_or("its tag");
+            for cond in conds {
+                guards.insert(
+                    cond,
+                    format!(
+                        "a tuple parameter's element is checked to be a {what}: `#[contractimpl]` regenerates \
+                         the conversion in the dispatch wrapper"
+                    ),
+                );
+            }
+            reads.push((id, format!("the tag byte of a tuple parameter's element, read only by its {what} check")));
+        }
+    }
+    if reads.is_empty() {
+        return false;
+    }
+    let empty = super::guard::empty_blocks(func);
+    let region = std::mem::replace(&mut func.region, sordec_ir::Region::Unreachable);
+    let mut stripped = 0_i64;
+    func.region = super::guard::strip(region, &guards, &empty, &mut stripped);
+    for (id, note) in reads {
+        if let Some(b) = func.bindings.get_mut(id) {
+            b.expr = Expr::Literal(Literal::Unit);
+            b.ty = IrType::Known(KnownType::Unit);
+            b.add_provenance(Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note));
+        }
+    }
+    true
 }
 
 /// The type `contractspecv0` declares for element `k` of a tuple
@@ -352,6 +427,70 @@ mod tests {
             assert_eq!(func.bindings.get(*element).unwrap().ty, IrType::Known(ty.clone()));
             assert_eq!(element_type(func, load), Some(ty));
         }
+    }
+
+    /// `unpacked` with element 0 (`u32`) read only for its tag byte, under
+    /// `if byte != tag { trap }`.
+    fn tag_checked(tag: i64) -> HighIr {
+        let mut ir = unpacked(Expr::Literal(Literal::I32(2)), vec![PrimitiveType::U32, PrimitiveType::I64]);
+        let func = &mut ir.functions[0];
+        func.bindings.get_mut(v(6)).unwrap().expr = Expr::Load {
+            addr: v(1),
+            offset: 0,
+            width: MemWidth::W1,
+            signed: Some(false),
+            ty: IrType::Unknown(UnknownReason::InsufficientEvidence),
+        };
+        let mut push = |e: Expr| {
+            let id = ValueId::from_index(func.bindings.len() as u32);
+            func.bindings.push(Binding::new(
+                id,
+                IrType::Unknown(UnknownReason::InsufficientEvidence),
+                e,
+                Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+            ));
+            id
+        };
+        let c = push(Expr::Literal(Literal::I64(tag)));
+        let ne = push(Expr::Binary { op: sordec_ir::BinaryOp::Ne, lhs: v(6), rhs: c });
+        let block = func.blocks.iter_mut().next().unwrap();
+        block.1.bindings.extend([c, ne]);
+        let b0 = block.0;
+        func.region = sordec_ir::Region::Sequence(vec![
+            sordec_ir::Region::Basic(b0),
+            sordec_ir::Region::If {
+                cond: ne,
+                then_region: Box::new(sordec_ir::Region::Unreachable),
+                else_region: None,
+            },
+        ]);
+        ir
+    }
+
+    fn has_guard(ir: &HighIr) -> bool {
+        let mut found = false;
+        ir.functions[0].region.for_each_node(|r| found |= matches!(r, sordec_ir::Region::If { .. }));
+        found
+    }
+
+    /// Element 0 is a `u32`, carried only by a `U32Val` (4): the byte test
+    /// is its conversion's check, relocated with the guard.
+    #[test]
+    fn an_elements_tag_byte_check_is_relocated() {
+        let mut ir = tag_checked(4);
+        assert!(TupleParamPass.run(&mut ir).changed);
+        assert!(matches!(expr(&ir, v(6)), Expr::Literal(Literal::Unit)));
+        assert!(!has_guard(&ir));
+    }
+
+    /// A test against a tag the element's type is not carried by is not
+    /// its conversion's check.
+    #[test]
+    fn a_tag_byte_test_against_another_tag_stays() {
+        let mut ir = tag_checked(5);
+        TupleParamPass.run(&mut ir);
+        assert!(matches!(expr(&ir, v(6)), Expr::Load { .. }));
+        assert!(has_guard(&ir));
     }
 
     #[test]

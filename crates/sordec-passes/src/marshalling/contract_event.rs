@@ -41,6 +41,60 @@
 //! The struct's layout is rustc's choice (it reorders fields), so it is
 //! read off the helper rather than computed.
 //!
+//! # Written out inline
+//!
+//! When rustc inlines the generated publish into the caller there is no
+//! helper and no struct: the caller builds the topics vec and the data map
+//! itself and calls the host.
+//!
+//! ```text
+//! topics = vec[symbol("auth"), addr]
+//! store fp+16 <- world
+//! data   = map_new_from_linear_memory(&KEYS, fp+16, 1)   ← KEYS = ["world"]
+//! publish_event(topics, data)          →  AuthEvent { hello: addr, world }.publish(&e)
+//! ```
+//!
+//! The event is named by both halves: its prefix symbols lead the topics
+//! (as for a helper), and its data map's key table, read out of rodata, is
+//! exactly the names of its `#[topic]`-less fields. A `Map`-format event
+//! encodes its data as just that map, so a key table naming exactly those
+//! fields and a topics vec opening with exactly that prefix is that
+//! event's publish; when two declared events fit, nothing is rewritten.
+//! Each topic field is the topics element at its position, each data
+//! field the word stored in its key's slot, read through its `Val` encode.
+//!
+//! Why it is exact: the re-emitted `#[contractevent]` derive builds the
+//! same two values from the literal — the prefix and the topic fields'
+//! encodings as the topics vec, the data fields' encodings keyed by name
+//! as the map — and publishes them, so the host receives the same words.
+//! That holds only if each field value encodes to the word that was
+//! stored, so every value must already be typed as the field's declared
+//! type by the contract's own metadata (`Known`, never inferred). The map,
+//! and a topics vec built in the caller, are then read by nothing but the
+//! publish, and go with it; a construction read anywhere else stops the
+//! rewrite. So does a helper call that built the topics, when the helper
+//! does nothing else, and a prefix symbol built only for them.
+//!
+//! A field the caller stored as a constant word has no typed value to
+//! name. The word is a `Val`'s bits — what the derive stores for a field
+//! is its encoding — so it is read back through its decode as the field's
+//! declared type and planted before the publish: a number, `bool` or short
+//! symbol in its small form, an integer enum's variant by the discriminant
+//! its `U32Val` carries, a 128-bit integer's small form as its two halves.
+//! A word of any other tag, or a type with no such reading, stops the
+//! rewrite. A prefix too long to pack is read from its recovered
+//! `Symbol::new(&e, "…")`.
+//!
+//! A field declared a `#[contracttype]` struct may hold that struct's
+//! derived encode still unread — a map built from a key table that
+//! several structs share (`{ inner }`, `{ val }`), which the struct pass
+//! leaves for want of a name. The event's declaration names it, and the
+//! named struct's own declaration names each struct field inside it, the
+//! naming by destination the struct pass already does for a return or a
+//! recovered literal's field; each table must still fit the struct it is
+//! named as field for field, and every level must be readable, or nothing
+//! is rewritten. The literals are written with the publish.
+//!
 //! # The call sites
 //!
 //! Each field's value is what the caller stored at its offset. An `i128`
@@ -110,6 +164,29 @@ impl Pass<HighIr> for ContractEventPass {
         };
         if events.is_empty() {
             return result;
+        }
+        // The publishes rustc inlined, planned while the whole module can
+        // still be read (a topics vec may come from a helper).
+        let inline: Vec<(usize, Vec<InlineSite>)> = ir
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (i, inline_sites(ir, f, &events)))
+            .filter(|(_, sites)| !sites.is_empty())
+            .collect();
+        let structs: Vec<sordec_ir::StructDef> =
+            ir.soroban_facts.as_ref().map(|f| f.types.structs.clone()).unwrap_or_default();
+        for (i, sites) in inline {
+            let memory = &ir.memory;
+            let Some(func) = ir.functions.get_mut(i) else { continue };
+            for site in sites {
+                for (at, id) in &site.rebuilds {
+                    super::udt_encode::rebuild_as(func, memory, &structs, *at, *id);
+                }
+                apply_inline(func, site);
+                result.metrics.increment(M_RECOVERED, 1);
+                result.changed = true;
+            }
         }
         let layouts: HashMap<FuncId, Layout> = ir
             .functions
@@ -378,7 +455,372 @@ fn symbol_constant(h: &HighFunction, value: ValueId) -> Option<String> {
         Expr::Literal(Literal::Symbol(s)) => Some(s.clone()),
         Expr::Literal(Literal::I64(bits)) => decode_small_symbol(*bits as u64),
         Expr::Literal(Literal::U64(bits)) => decode_small_symbol(*bits),
+        // `Symbol::new(&e, "…")` with its text recovered: a prefix too long
+        // to pack into a word.
+        Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { resolved: Some(s), .. })) => Some(s.clone()),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------
+// The publish written out inline
+// ---------------------------------------------------------------------
+
+/// One inlined publish to rewrite.
+struct InlineSite {
+    publish: ValueId,
+    event: String,
+    /// Every field in declaration order, with its value.
+    fields: Vec<(String, Option<ValueId>)>,
+    /// The data map and a topics vec built here, with the renames between
+    /// them and the publish: read by nothing else, they go with it.
+    spent: Vec<ValueId>,
+    /// Fields whose stored word is a constant: the field's index and the
+    /// value that word decodes to, planted just before the publish.
+    constants: Vec<(usize, Constant)>,
+    /// Struct encodes among the field values, with the struct the event's
+    /// declaration names for each, outermost first.
+    rebuilds: Vec<(ValueId, sordec_common::TypeId)>,
+}
+
+/// The value a constant word stored for a field decodes to, as the field's
+/// declared type.
+#[derive(Debug, Clone, PartialEq)]
+enum Constant {
+    /// A number, a `bool` or a short symbol.
+    Scalar(Literal, KnownType),
+    /// An integer enum's variant, by the discriminant its `U32Val` carries.
+    Variant(String, KnownType),
+    /// A 128-bit integer from its small form: low and high halves.
+    Wide(i64, i64, KnownType),
+}
+
+/// The constant `value` is, read through its decode as `declared`: the
+/// word is a `Val`'s bits — what the derive stores for a field is the
+/// field's encoding — so it is read back only as one of that type.
+fn constant_field(func: &HighFunction, value: ValueId, declared: &KnownType, enums: &[sordec_ir::EnumDef]) -> Option<Constant> {
+    if let Some(lit) = super::encode::encoded_constant(func, value, declared) {
+        return Some(Constant::Scalar(lit, declared.clone()));
+    }
+    if let Some(name) = super::encode::encoded_variant(func, value, declared, enums) {
+        return Some(Constant::Variant(name, declared.clone()));
+    }
+    let bits = match &func.bindings.get(resolve_use(func, value))?.expr {
+        Expr::Literal(Literal::I64(n)) => *n as u64,
+        Expr::Literal(Literal::U64(n)) => *n,
+        _ => return None,
+    };
+    let tag = (bits & 0xFF) as u8;
+    // The small forms keep the number in the 56-bit body: signed for an
+    // `i128` (an arithmetic shift restores the sign, which fills the high
+    // half), unsigned for a `u128`.
+    match declared {
+        KnownType::I128 if tag == crate::val_abi::TAG_I128_SMALL => {
+            let n = (bits as i64) >> 8;
+            Some(Constant::Wide(n, n >> 63, KnownType::I128))
+        }
+        KnownType::U128 if tag == crate::val_abi::TAG_U128_SMALL => {
+            Some(Constant::Wide((bits >> 8) as i64, 0, KnownType::U128))
+        }
+        _ => None,
+    }
+}
+
+fn inline_sites(ir: &HighIr, func: &HighFunction, events: &[EventDef]) -> Vec<InlineSite> {
+    let uses = crate::dataflow::HighUseIndex::build(func);
+    emission_order(func)
+        .into_iter()
+        .filter_map(|id| {
+            let Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics, data })) =
+                &func.bindings.get(id)?.expr
+            else {
+                return None;
+            };
+            inline_site(ir, func, &uses, events, id, *topics, *data)
+        })
+        .collect()
+}
+
+/// The contract's integer enums, for a constant field's variant.
+fn enums_of(ir: &HighIr) -> &[sordec_ir::EnumDef] {
+    ir.soroban_facts.as_ref().map_or(&[], |f| f.types.enums.as_slice())
+}
+
+fn inline_site(
+    ir: &HighIr,
+    func: &HighFunction,
+    uses: &crate::dataflow::HighUseIndex,
+    events: &[EventDef],
+    publish: ValueId,
+    topics: ValueId,
+    data: ValueId,
+) -> Option<InlineSite> {
+    use crate::dataflow::{canon_addr, facts_at, trace_u32val};
+    // The data: a map built from the frame, keyed by a rodata table.
+    let map = resolve_use(func, data);
+    let Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos, vals_pos, len })) =
+        &func.bindings.get(map)?.expr
+    else {
+        return None;
+    };
+    let len = trace_u32val(func, *len)?;
+    let keys = super::udt_decode::read_keys(&ir.memory, trace_u32val(func, *keys_pos)?, len)?;
+    let Some((elements, builder)) = topic_elements(ir, func, topics) else {
+        trace(func, publish, &format!("data keys {keys:?}, topics not a vec of known elements"));
+        return None;
+    };
+    // Exactly one declared event has this prefix and these data fields.
+    let mut hits = events.iter().filter(|e| inline_fits(func, e, &keys, &elements));
+    let Some(event) = hits.next() else {
+        trace(func, publish, &format!("data keys {keys:?}: no event has that prefix and those fields"));
+        return None;
+    };
+    if hits.next().is_some() {
+        trace(func, publish, "two events fit");
+        return None;
+    }
+    let (base, start) = canon_addr(func, super::udt_decode::raw_address(func, *vals_pos));
+    let facts = facts_at(func, map, base);
+    let mut topic_values = elements.get(event.prefix_topics.len()..)?.iter();
+    let mut fields = Vec::with_capacity(event.params.len());
+    let mut constants = Vec::new();
+    let mut rebuilds = Vec::new();
+    for param in &event.params {
+        let value = match param.location {
+            EventParamLocation::Topic => resolve_use(func, *topic_values.next()?),
+            EventParamLocation::Data => {
+                let index = u32::try_from(keys.iter().position(|k| *k == param.name)?).ok()?;
+                let slot = facts.value_at(start.checked_add(index.checked_mul(8)?)?, MemWidth::W8)?;
+                super::udt_encode::encoded_value(func, slot)
+            }
+        };
+        let declared = crate::type_infer::known_of_type_ref(&param.ty)?;
+        let ty = &func.bindings.get(value)?.ty;
+        // Typed by the metadata: on its binding, or as one of this
+        // entrypoint's parameters, which the spec declares.
+        let as_param = func.params.iter().position(|p| *p == value).and_then(|i| {
+            crate::type_infer::known_of_type_ref(&func.signature.as_ref()?.inputs.get(i)?.ty)
+        });
+        if *ty != IrType::Known(declared.clone()) && as_param.as_ref() != Some(&declared) {
+            if let Some(c) = constant_field(func, value, &declared, enums_of(ir)) {
+                constants.push((fields.len(), c));
+            } else if !matches!(declared, KnownType::UserDefined(id) if struct_constructions(ir, func, value, id, &mut rebuilds))
+            {
+                trace(func, publish, &format!("{}: {value:?} is {ty:?}, not the declared type", param.name));
+                return None;
+            }
+        }
+        fields.push((param.name.clone(), Some(value)));
+    }
+    let mut spent = Vec::new();
+    if !read_only_by(func, uses, map, publish, &mut spent)
+        || (builder.is_none() && !read_only_by(func, uses, resolve_use(func, topics), publish, &mut spent))
+    {
+        trace(func, publish, "the data map or the topics vec is read elsewhere");
+        return None;
+    }
+    // A helper that does nothing but build the topics vec: its call, read
+    // only by the publish, goes too (and the helper with its last caller).
+    if let Some(call) = builder
+        && let Some(Expr::Call { target, .. }) = func.bindings.get(call).map(|b| &b.expr)
+        && ir.function(*target).is_some_and(only_builds_a_vec)
+    {
+        let mut more = Vec::new();
+        if read_only_by(func, uses, call, publish, &mut more) {
+            spent.extend(more);
+        }
+    }
+    // A prefix symbol built for the topics alone goes with them.
+    for value in elements.iter().take(event.prefix_topics.len()) {
+        let v = resolve_use(func, *value);
+        let built = matches!(
+            func.bindings.get(v).map(|b| &b.expr),
+            Some(Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { resolved: Some(_), .. })))
+        );
+        let sites = uses.uses_of(v);
+        let only_spent = !sites.is_empty()
+            && sites.iter().all(|s| matches!(s, crate::dataflow::HighUseSite::Binding { user } if spent.contains(user)));
+        if built && only_spent {
+            spent.push(v);
+        }
+    }
+    Some(InlineSite { publish, event: event.name.clone(), fields, spent, constants, rebuilds })
+}
+
+/// Whether the map built at `at` is struct `id`'s derived encode, and so
+/// is every field of it that is itself a struct's map; each such
+/// construction, outermost first, into `out`.
+///
+/// The key table alone may fit several structs; here the event's
+/// declaration names the field's struct, and the outer struct's
+/// declaration each inner one — the same naming by destination
+/// `udt_encode` does for a return or a recovered literal's field, and the
+/// table must still fit the named struct field for field.
+fn struct_constructions(
+    ir: &HighIr,
+    func: &HighFunction,
+    at: ValueId,
+    id: sordec_common::TypeId,
+    out: &mut Vec<(ValueId, sordec_common::TypeId)>,
+) -> bool {
+    let at = resolve_use(func, at);
+    let Some(structs) = ir.soroban_facts.as_ref().map(|f| f.types.structs.as_slice()) else { return false };
+    let Some(def) = structs.iter().find(|s| s.id == id) else { return false };
+    let Some(fields) = super::udt_encode::literal_fields(func, &ir.memory, structs, at, id) else { return false };
+    out.push((at, id));
+    for (name, value) in fields {
+        let v = resolve_use(func, value);
+        let is_map = matches!(
+            func.bindings.get(v).map(|b| &b.expr),
+            Some(Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { .. })))
+        );
+        if !is_map {
+            continue;
+        }
+        let Some(TypeRef::UserDefined(inner)) = def.fields.iter().find(|f| f.name == name).map(|f| &f.ty) else {
+            return false;
+        };
+        if !struct_constructions(ir, func, v, *inner, out) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether a helper's only effect is the vec it returns: every other
+/// binding it runs is pure and total.
+fn only_builds_a_vec(h: &HighFunction) -> bool {
+    h.blocks.iter().all(|(_, block)| {
+        block.bindings.iter().all(|id| match h.bindings.get(*id).map(|b| &b.expr) {
+            Some(Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { elements: Some(_), .. }))) => true,
+            Some(other) => expr_effects(other).is_pure_total(),
+            None => false,
+        })
+    })
+}
+
+/// Why an inlined publish was left, printed when `SORDEC_EVENT_TRACE` is
+/// set.
+#[allow(clippy::print_stderr)]
+fn trace(func: &HighFunction, publish: ValueId, why: &str) {
+    if std::env::var_os("SORDEC_EVENT_TRACE").is_some() {
+        eprintln!("contract-event: func_{} {publish:?}: {why}", func.id.index());
+    }
+}
+
+/// Whether `event` is the one an inlined publish of a map keyed `keys`
+/// with topics `elements` names: a `Map`-format event whose prefix leads
+/// the topics, followed by one element per `#[topic]` field, and whose
+/// other fields are exactly the keys.
+fn inline_fits(func: &HighFunction, event: &EventDef, keys: &[String], elements: &[ValueId]) -> bool {
+    if !event.data_format.eq_ignore_ascii_case("map") {
+        return false;
+    }
+    let topics = event.params.iter().filter(|p| p.location == EventParamLocation::Topic).count();
+    if elements.len() != event.prefix_topics.len() + topics {
+        return false;
+    }
+    let prefix_ok = elements
+        .iter()
+        .zip(&event.prefix_topics)
+        .all(|(v, want)| symbol_constant(func, *v).as_deref() == Some(want.as_str()));
+    let mut want: Vec<&str> = keys.iter().map(String::as_str).collect();
+    want.sort_unstable();
+    let mut have: Vec<&str> = event
+        .params
+        .iter()
+        .filter(|p| p.location == EventParamLocation::Data)
+        .map(|p| p.name.as_str())
+        .collect();
+    have.sort_unstable();
+    prefix_ok && want == have
+}
+
+/// Whether `value` is read by nothing but `publish`, directly or through
+/// renames; collects it and those renames into `spent`.
+fn read_only_by(
+    func: &HighFunction,
+    uses: &crate::dataflow::HighUseIndex,
+    value: ValueId,
+    publish: ValueId,
+    spent: &mut Vec<ValueId>,
+) -> bool {
+    use crate::dataflow::HighUseSite;
+    spent.push(value);
+    uses.uses_of(value).iter().all(|site| match site {
+        HighUseSite::Binding { user } if *user == publish => true,
+        HighUseSite::Binding { user } if matches!(func.bindings.get(*user).map(|b| &b.expr), Some(Expr::Use(_))) => {
+            read_only_by(func, uses, *user, publish, spent)
+        }
+        _ => false,
+    })
+}
+
+/// Schedule `expr` just before `at`; its id.
+fn plant_before(func: &mut HighFunction, at: ValueId, expr: Expr, ty: KnownType, note: &str) -> Option<ValueId> {
+    let block = block_containing(func, at)?;
+    let id = ValueId::from_index(func.bindings.len() as u32);
+    func.bindings.push(Binding::new(
+        id,
+        IrType::Known(ty),
+        expr,
+        Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note.to_string()),
+    ));
+    let block = func.blocks.get_mut(block)?;
+    let pos = block.bindings.iter().position(|b| *b == at)?;
+    block.bindings.insert(pos, id);
+    Some(id)
+}
+
+/// Plant a constant field's decoded value before the publish.
+fn plant_constant(func: &mut HighFunction, at: ValueId, c: Constant) -> Option<ValueId> {
+    let note = "a constant event field, its stored word read through its decode as the declared type";
+    match c {
+        Constant::Scalar(lit, ty) => plant_before(func, at, Expr::Literal(lit), ty, note),
+        Constant::Variant(name, ty) => plant_before(func, at, Expr::Variant { name, payload: Vec::new() }, ty, note),
+        Constant::Wide(lo, hi, ty) => {
+            let lo = plant_before(func, at, Expr::Literal(Literal::I64(lo)), KnownType::I64, note)?;
+            let hi = plant_before(func, at, Expr::Literal(Literal::I64(hi)), KnownType::I64, note)?;
+            plant_before(func, at, Expr::WideJoin { lo, hi }, ty, note)
+        }
+    }
+}
+
+/// Rewrite the publish as the event literal and drop what built its
+/// arguments.
+fn apply_inline(func: &mut HighFunction, mut site: InlineSite) {
+    for (index, c) in std::mem::take(&mut site.constants) {
+        let Some(id) = plant_constant(func, site.publish, c) else { return };
+        if let Some(field) = site.fields.get_mut(index) {
+            field.1 = Some(id);
+        }
+    }
+    for id in &site.spent {
+        if let Some(b) = func.bindings.get_mut(*id) {
+            b.expr = Expr::Literal(Literal::Unit);
+            b.ty = IrType::Known(KnownType::Unit);
+            b.add_provenance(Provenance::new(
+                PASS_NAME,
+                ProvenanceSource::SdkPattern,
+                format!("built only for the inlined `{}` publish, which the derive regenerates", site.event),
+            ));
+        }
+    }
+    if let Some(b) = func.bindings.get_mut(site.publish) {
+        b.expr = Expr::Semantic(SemanticOp::Known(KnownOp::PublishContractEvent {
+            event: site.event.clone(),
+            fields: site.fields,
+        }));
+        b.ty = IrType::Known(KnownType::Unit);
+        b.add_provenance(Provenance::new(
+            PASS_NAME,
+            ProvenanceSource::SdkPattern,
+            format!(
+                "`{} {{ … }}.publish(&e)`, inlined: its prefix leads the topics and its data fields \
+                 are the data map's key table",
+                site.event
+            ),
+        ));
     }
 }
 
@@ -878,6 +1320,250 @@ mod tests {
         let result = ContractEventPass.run(&mut ir);
         assert_eq!(result.metrics.get(M_RECOVERED), None);
         assert_eq!(result.metrics.get(M_SITE_DECLINED), Some(1));
+    }
+
+    // -----------------------------------------------------------------
+    // Written out inline
+    // -----------------------------------------------------------------
+
+    /// `#[contractevent] struct Auth { #[topic] a: Address, world: Symbol }`.
+    fn map_event() -> EventDef {
+        EventDef {
+            id: TypeId::from_index(1),
+            name: "Auth".into(),
+            prefix_topics: vec!["auth".into()],
+            params: vec![
+                EventParam {
+                    name: "a".into(),
+                    ty: TypeRef::Primitive(PrimitiveType::Address),
+                    location: EventParamLocation::Topic,
+                },
+                EventParam {
+                    name: "world".into(),
+                    ty: TypeRef::Primitive(PrimitiveType::Symbol),
+                    location: EventParamLocation::Data,
+                },
+            ],
+            data_format: "map".into(),
+        }
+    }
+
+    /// The publish inlined into its caller: topics `vec[auth, a]`, `world`
+    /// stored at the frame and the data map built from it by the key table
+    /// at 2000.
+    fn inlined() -> HighIr {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                  // v0 a
+                Expr::Phi { incoming: vec![] },                  // v1 world
+                Expr::Literal(Literal::I32(1024)),               // v2 the frame
+                Expr::Literal(Literal::Symbol("auth".into())),   // v3
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                    vals_pos: v(2),
+                    len: v(2),
+                    elements: Some(vec![v(3), v(0)]),
+                })), // v4 topics
+                store(1, 0),                                     // v5
+                Expr::Literal(Literal::U32(2000)),               // v6 keys
+                Expr::Literal(Literal::U32(1)),                  // v7 len
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(6), vals_pos: v(2), len: v(7) })), // v8
+                Expr::Use(v(8)),                                 // v9 a rename
+                Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics: v(4), data: v(9) })), // v10
+            ],
+            vec![v(0), v(1)],
+            (2..11).collect(),
+        );
+        f.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(KnownType::Address);
+        f.bindings.get_mut(v(1)).unwrap().ty = IrType::Known(KnownType::Symbol);
+        let mut ir = module(vec![f]);
+        let mut table = Vec::new();
+        table.extend_from_slice(&2100u32.to_le_bytes());
+        table.extend_from_slice(&5u32.to_le_bytes());
+        ir.memory = sordec_ir::MemoryImage::from_segments(vec![
+            sordec_ir::DataSegment { offset: 2000, bytes: table },
+            sordec_ir::DataSegment { offset: 2100, bytes: b"world".to_vec() },
+        ]);
+        let mut facts = SorobanFacts::default();
+        facts.types.events.push(map_event());
+        ir.soroban_facts = Some(facts);
+        ir
+    }
+
+    fn expr(ir: &HighIr, id: u32) -> &Expr {
+        &ir.functions[0].bindings.get(v(id)).expect("binding").expr
+    }
+
+    /// The prefix leads the topics and the key table names the data field:
+    /// the literal, published, with what built its arguments gone.
+    #[test]
+    fn an_inlined_publish_becomes_the_event_published() {
+        let mut ir = inlined();
+        assert!(ContractEventPass.run(&mut ir).changed);
+        let Expr::Semantic(SemanticOp::Known(KnownOp::PublishContractEvent { event, fields })) = expr(&ir, 10) else {
+            panic!("not rewritten: {:?}", expr(&ir, 10));
+        };
+        assert_eq!(event, "Auth");
+        assert_eq!(fields, &vec![("a".to_string(), Some(v(0))), ("world".to_string(), Some(v(1)))]);
+        for spent in [4, 8, 9] {
+            assert!(matches!(expr(&ir, spent), Expr::Literal(Literal::Unit)), "v{spent}");
+        }
+    }
+
+    /// A value the metadata does not type as the field is not known to
+    /// encode to the word that was stored.
+    #[test]
+    fn an_untyped_field_value_leaves_the_publish() {
+        let mut ir = inlined();
+        ir.functions[0].bindings.get_mut(v(1)).unwrap().ty =
+            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence);
+        assert!(!ContractEventPass.run(&mut ir).changed);
+    }
+
+    /// `inlined()` with `world` declared a `u32` and stored as `word`.
+    fn with_constant(word: i64) -> HighIr {
+        let mut ir = inlined();
+        ir.soroban_facts.as_mut().unwrap().types.events[0].params[1].ty = TypeRef::Primitive(PrimitiveType::U32);
+        let f = &mut ir.functions[0];
+        f.bindings.get_mut(v(1)).unwrap().expr = Expr::Literal(Literal::I64(word));
+        f.bindings.get_mut(v(1)).unwrap().ty = IrType::Known(KnownType::I64);
+        ir
+    }
+
+    /// A constant stored for a `u32` field is a `U32Val`'s bits: the field
+    /// is the number it carries.
+    #[test]
+    fn a_constant_field_is_its_decoded_value() {
+        let mut ir = with_constant((7 << 32) | 4);
+        assert!(ContractEventPass.run(&mut ir).changed);
+        let Expr::Semantic(SemanticOp::Known(KnownOp::PublishContractEvent { fields, .. })) = expr(&ir, 10) else {
+            panic!("not rewritten: {:?}", expr(&ir, 10));
+        };
+        let world = fields[1].1.expect("a value");
+        assert!(matches!(ir.functions[0].bindings.get(world).unwrap().expr, Expr::Literal(Literal::U32(7))));
+    }
+
+    /// A word of another type's tag is not this field's encoding.
+    #[test]
+    fn a_constant_of_another_tag_leaves_the_publish() {
+        let mut ir = with_constant((7 << 32) | 5);
+        assert!(!ContractEventPass.run(&mut ir).changed);
+    }
+
+    /// `Nest { #[topic] a: Address, payload: Inner }` published inline, its
+    /// payload a struct encode whose key table `Inner` shares with `Twin`.
+    fn nested() -> HighIr {
+        use sordec_ir::{StructDef, StructField};
+        let st = |addr: u32, value: u32, offset: u32| Expr::Store { addr: v(addr), value: v(value), offset, width: MemWidth::W8 };
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                  // v0 a
+                Expr::Phi { incoming: vec![] },                  // v1 the frame
+                Expr::Literal(Literal::Symbol("nest".into())),   // v2
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                    vals_pos: v(1),
+                    len: v(1),
+                    elements: Some(vec![v(2), v(0)]),
+                })), // v3 topics
+                Expr::Literal(Literal::I64((42 << 32) | 4)),     // v4 U32Val(42)
+                st(1, 4, 16),                                    // v5 the inner slot
+                Expr::Literal(Literal::U32(2008)),               // v6 inner keys
+                Expr::Literal(Literal::U32(1)),                  // v7 len
+                Expr::Literal(Literal::I32(16)),                 // v8
+                Expr::Binary { op: sordec_ir::BinaryOp::Add, lhs: v(1), rhs: v(8) }, // v9
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(6), vals_pos: v(9), len: v(7) })), // v10
+                st(1, 10, 0),                                    // v11 the data slot
+                Expr::Literal(Literal::U32(2000)),               // v12 data keys
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(12), vals_pos: v(1), len: v(7) })), // v13
+                Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics: v(3), data: v(13) })), // v14
+            ],
+            vec![v(0)],
+            (1..15).collect(),
+        );
+        f.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(KnownType::Address);
+        let mut ir = module(vec![f]);
+        let mut table = Vec::new();
+        for (ptr, n) in [(2100u32, 7u32), (2110, 3)] {
+            table.extend_from_slice(&ptr.to_le_bytes());
+            table.extend_from_slice(&n.to_le_bytes());
+        }
+        ir.memory = sordec_ir::MemoryImage::from_segments(vec![
+            sordec_ir::DataSegment { offset: 2000, bytes: table },
+            sordec_ir::DataSegment { offset: 2100, bytes: b"payload".to_vec() },
+            sordec_ir::DataSegment { offset: 2110, bytes: b"val".to_vec() },
+        ]);
+        let one = |id: u32, name: &str| StructDef {
+            id: TypeId::from_index(id),
+            name: name.into(),
+            fields: vec![StructField { name: "val".into(), ty: TypeRef::Primitive(PrimitiveType::U32) }],
+        };
+        let mut facts = SorobanFacts::default();
+        facts.types.structs = vec![one(10, "Inner"), one(11, "Twin")];
+        facts.types.events.push(EventDef {
+            id: TypeId::from_index(12),
+            name: "Nest".into(),
+            prefix_topics: vec!["nest".into()],
+            params: vec![
+                EventParam {
+                    name: "a".into(),
+                    ty: TypeRef::Primitive(PrimitiveType::Address),
+                    location: EventParamLocation::Topic,
+                },
+                EventParam {
+                    name: "payload".into(),
+                    ty: TypeRef::UserDefined(TypeId::from_index(10)),
+                    location: EventParamLocation::Data,
+                },
+            ],
+            data_format: "map".into(),
+        });
+        ir.soroban_facts = Some(facts);
+        ir
+    }
+
+    /// The event declares the payload an `Inner`: the shared table is
+    /// `Inner`'s, its literal written with the publish.
+    #[test]
+    fn a_struct_field_is_named_by_the_events_declaration() {
+        let mut ir = nested();
+        assert!(ContractEventPass.run(&mut ir).changed);
+        assert!(matches!(expr(&ir, 14), Expr::Semantic(SemanticOp::Known(KnownOp::PublishContractEvent { .. }))));
+        assert!(matches!(expr(&ir, 10), Expr::Struct { .. }));
+        assert_eq!(
+            ir.functions[0].bindings.get(v(10)).unwrap().ty,
+            IrType::Known(KnownType::UserDefined(TypeId::from_index(10)))
+        );
+    }
+
+    /// A field declared as neither struct is not named by guessing.
+    #[test]
+    fn a_struct_field_whose_table_fits_no_declared_field_type_leaves_the_publish() {
+        let mut ir = nested();
+        ir.soroban_facts.as_mut().unwrap().types.structs[0].fields[0].name = "other".into();
+        assert!(!ContractEventPass.run(&mut ir).changed);
+    }
+
+    /// A key table naming other fields is another map.
+    #[test]
+    fn a_key_table_naming_other_fields_leaves_the_publish() {
+        let mut ir = inlined();
+        ir.soroban_facts.as_mut().unwrap().types.events[0].params[1].name = "other".into();
+        assert!(!ContractEventPass.run(&mut ir).changed);
+    }
+
+    /// The map read anywhere else cannot go with the publish.
+    #[test]
+    fn a_data_map_read_elsewhere_leaves_the_publish() {
+        let mut ir = inlined();
+        let f = &mut ir.functions[0];
+        let id = ValueId::from_index(f.bindings.len() as u32);
+        f.bindings.push(Binding::new(
+            id,
+            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            store(8, 64),
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        f.blocks.iter_mut().next().unwrap().1.bindings.push(id);
+        assert!(!ContractEventPass.run(&mut ir).changed);
     }
 
     /// The helper must name the event: a prefix symbol that is not the

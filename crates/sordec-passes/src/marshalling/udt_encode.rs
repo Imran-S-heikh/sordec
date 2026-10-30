@@ -214,6 +214,21 @@ pub(super) fn encodes(
         .is_some_and(|l| l.ty == IrType::Known(KnownType::UserDefined(id)))
 }
 
+/// The field values of struct `id`'s literal at `at`, when [`encodes`]
+/// holds: what [`rebuild_as`] would write, read without writing it.
+pub(super) fn literal_fields(
+    func: &HighFunction,
+    memory: &sordec_ir::MemoryImage,
+    structs: &[StructDef],
+    at: ValueId,
+    id: TypeId,
+) -> Option<Vec<(String, ValueId)>> {
+    let declared = HashMap::from([(at, id)]);
+    literal_at(func, memory, structs, &declared, at)
+        .filter(|l| l.ty == IrType::Known(KnownType::UserDefined(id)))
+        .map(|l| l.fields)
+}
+
 /// Rewrite the map construction at `at` to struct `id`'s literal, when
 /// [`encodes`] holds.
 pub(super) fn rebuild_as(
