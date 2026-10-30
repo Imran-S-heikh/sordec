@@ -462,6 +462,15 @@ pub const MARSHALLING_UDT_DECLINED_READS: &str = "marshalling_udt_declined_reads
 /// Calls to a helper-shaped `#[contracttype]` struct decoder elided with
 /// their out-parameter reads.
 pub const MARSHALLING_UDT_HELPERS_COLLAPSED: &str = "marshalling_udt_helpers_collapsed";
+/// Calls to a `#[contracttype]` enum's derived decode into caller memory
+/// taken apart: the caller's switch on the tag became a `match` on the
+/// value, and the call, its tag and payload reads went.
+pub const MARSHALLING_ENUM_MATCH_SITES: &str = "marshalling_enum_match_sites";
+/// Variant payloads those `match` arms bind.
+pub const MARSHALLING_ENUM_MATCH_PAYLOADS: &str = "marshalling_enum_match_payloads";
+/// Calls to a recognised enum decode left in place: a read of its bytes is
+/// not one of the shapes the rewrite explains (see `enum_match`).
+pub const MARSHALLING_ENUM_MATCH_REFUSED: &str = "marshalling_enum_match_refused";
 /// Proven `Option` probes with a trapping None branch collapsed to
 /// `.unwrap()` on the storage read.
 pub const MARSHALLING_OPTIONS_UNWRAPPED: &str = "marshalling_options_unwrapped";
@@ -1053,6 +1062,9 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_UDT_DECODES_COLLAPSED,
         MARSHALLING_UDT_FIELDS_RECOVERED,
         MARSHALLING_UDT_HELPERS_COLLAPSED,
+        MARSHALLING_ENUM_MATCH_SITES,
+        MARSHALLING_ENUM_MATCH_PAYLOADS,
+        MARSHALLING_ENUM_MATCH_REFUSED,
         MARSHALLING_OPTIONS_UNWRAPPED,
         MARSHALLING_OPTION_HELPERS_COLLAPSED,
         MARSHALLING_OPTIONAL_OUT_HELPERS,

@@ -128,6 +128,35 @@ pub enum Expr {
         payload: Vec<ValueId>,
     },
 
+    /// Payload component `index` of variant `variant` of the enum value
+    /// `value` — the name a `match` arm's pattern binds: `p` in
+    /// `E::X(p) => ..`.
+    ///
+    /// Rust has no expression for "the payload of `v`'s variant `X`"
+    /// outside a pattern, so this value is legal only where the pattern
+    /// binds it: scheduled at the start of the first block of an arm of a
+    /// [`Region::Switch`](crate::Region::Switch) whose `index` and
+    /// `dispatch` are both `value` (a switch on the variant of `value`),
+    /// in the arm whose one case is `variant`'s position among the enum's
+    /// declared cases. The emitter prints that switch as
+    /// `match value { E::X(p0, ..) => .. }` and this binding as the
+    /// pattern's `p<index>`. Passes that do not know it treat it as an
+    /// opaque, pure value.
+    ///
+    /// The first step of a general pattern match: this is the binding a
+    /// pattern introduces, and the switch on `value` is a `match` without
+    /// nested patterns.
+    VariantPayload {
+        /// The enum value whose variant the enclosing switch selects.
+        value: ValueId,
+        /// Variant name as declared.
+        // JUSTIFY: variant names come from the contract's own spec.
+        variant: String,
+        /// Zero-based payload component: `0` for `X(p)`, `1` for the
+        /// second of `X(a, b)`.
+        index: u32,
+    },
+
     /// Direct call to a local function (not a host call).
     Call {
         /// Target function in the same module.
@@ -352,6 +381,7 @@ impl Expr {
                     f(value);
                 }
             }
+            Expr::VariantPayload { value, variant: _, index: _ } => f(*value),
             Expr::IndirectCall {
                 table: _,
                 sig: _,
@@ -432,6 +462,7 @@ impl Expr {
                     f(value);
                 }
             }
+            Expr::VariantPayload { value, variant: _, index: _ } => f(value),
             Expr::Unary { op: _, value } => f(value),
             Expr::Binary { op: _, lhs, rhs } => {
                 f(lhs);

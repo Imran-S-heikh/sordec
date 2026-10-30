@@ -68,6 +68,10 @@ pub(crate) struct FnCtx<'a> {
     /// the read its present arm binds. Neither is a statement of its own —
     /// the probe is the `if let`, and the read is its pattern.
     if_lets: HashMap<ValueId, ValueId>,
+    /// Payload bindings a `match` arm's pattern binds (see
+    /// [`variant_patterns`]): `p` in `E::X(p) => ..`. Each is the pattern,
+    /// not a statement of its own.
+    pattern_bound: HashSet<ValueId>,
 }
 
 /// Emit the body of `func` as a `syn::Block`.
@@ -143,6 +147,7 @@ impl<'a> FnCtx<'a> {
         let fold = Fold::build(func);
         let escaping = escaping_values(func, &fold);
         let if_lets = if_let_reads(func);
+        let pattern_bound = variant_patterns(func, reg);
         let mut ctx = Self {
             high,
             func,
@@ -155,6 +160,7 @@ impl<'a> FnCtx<'a> {
             escaping,
             fold,
             if_lets,
+            pattern_bound,
         };
         ctx.liveness = ctx.settle_liveness();
         // The escape set was taken before liveness settled. A value whose
@@ -707,6 +713,14 @@ impl<'a> FnCtx<'a> {
                 index,
                 arms,
                 default,
+                dispatch: Some(d),
+            } if d == index && variant_union(self.func, self.reg, *index).is_some() => {
+                out.push(self.variant_match(*index, arms, default));
+            }
+            Region::Switch {
+                index,
+                arms,
+                default,
                 ..
             } => {
                 // W2 matches the raw integer selector; the dispatch-table
@@ -767,6 +781,9 @@ impl<'a> FnCtx<'a> {
                 continue;
             }
             if self.if_lets.contains_key(&vid) || self.if_lets.values().any(|r| *r == vid) {
+                continue;
+            }
+            if self.pattern_bound.contains(&vid) {
                 continue;
             }
             let value = expr::binding_expr(self, binding);
@@ -960,6 +977,76 @@ impl<'a> FnCtx<'a> {
                         if self.fold.reads(*base) == Some(vid) && def.fields.iter().any(|f| f.name == *field)
                 )
             })
+    }
+
+    /// A switch on an enum value's variant as the `match` it is:
+    /// `match v { E::X(p) => { .. } E::Y => { .. } _ => { .. } }`.
+    ///
+    /// Each case is a variant's position among the enum's declared cases
+    /// (see `Region::Switch::dispatch`); an arm's payload bindings are its
+    /// pattern's names, `_` where the arm binds none or nothing reads it.
+    /// An arm of several cases matches them all, ignoring their payloads.
+    /// The default arm is the variants no arm names: written as that
+    /// variant when there is exactly one, `_` otherwise.
+    fn variant_match(&self, index: ValueId, arms: &[sordec_ir::SwitchArm], default: &Region) -> syn::Stmt {
+        let union = variant_union(self.func, self.reg, index).expect("checked by the caller");
+        let owner = crate::rust::ty::ident(&union.name);
+        let pattern = |case: usize, binders: &HashMap<u32, ValueId>| -> syn::Pat {
+            let Some(variant) = union.cases.get(case) else {
+                return parse_quote!(_);
+            };
+            let name = crate::rust::ty::ident(&variant.name);
+            if variant.fields.is_empty() {
+                return parse_quote!(#owner::#name);
+            }
+            let parts: Vec<syn::Pat> = (0..variant.fields.len())
+                .map(|k| match binders.get(&(k as u32)) {
+                    Some(v) if !self.liveness.is_unused(*v) => {
+                        let id = self.value_ident(*v);
+                        parse_quote!(#id)
+                    }
+                    _ => parse_quote!(_),
+                })
+                .collect();
+            parse_quote!(#owner::#name(#(#parts),*))
+        };
+        let scrutinee = self.value_ref(index);
+        let mut named: HashSet<usize> = HashSet::new();
+        let mut match_arms: Vec<syn::Arm> = Vec::new();
+        for arm in arms {
+            let binders: HashMap<u32, ValueId> = if arm.cases.len() == 1 {
+                arm_payloads(self.func, &arm.body, index)
+                    .into_iter()
+                    .filter(|v| self.pattern_bound.contains(v))
+                    .filter_map(|v| match &self.func.bindings.get(v)?.expr {
+                        Expr::VariantPayload { index: k, .. } => Some((*k, v)),
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                HashMap::new()
+            };
+            let pats: Vec<syn::Pat> = arm
+                .cases
+                .iter()
+                .map(|&c| {
+                    named.insert(c as usize);
+                    pattern(c as usize, &binders)
+                })
+                .collect();
+            let body_block = self.region_block(&arm.body);
+            match_arms.push(parse_quote!(#(#pats)|* => #body_block));
+        }
+        let rest: Vec<usize> = (0..union.cases.len()).filter(|c| !named.contains(c)).collect();
+        let default_block = self.region_block(default);
+        match rest.as_slice() {
+            [only] => {
+                let pat = pattern(*only, &HashMap::new());
+                match_arms.push(parse_quote!(#pat => #default_block));
+            }
+            _ => match_arms.push(parse_quote!(_ => #default_block)),
+        }
+        parse_quote!(match #scrutinee { #(#match_arms)* })
     }
 
     /// `Some(v) = …get::<K, T>(&k)`, the head of an `if let` — the pattern
@@ -1434,6 +1521,71 @@ fn if_let_reads(func: &HighFunction) -> HashMap<ValueId, ValueId> {
         .collect()
 }
 
+/// The declared enum with payloads a switch selects the variant of, when
+/// `index` is a value typed as one.
+fn variant_union<'r>(func: &HighFunction, reg: &'r TypeRegistry, index: ValueId) -> Option<&'r sordec_ir::UnionDef> {
+    let (IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id))) =
+        &func.bindings.get(index)?.ty
+    else {
+        return None;
+    };
+    reg.unions.iter().find(|u| u.id == *id)
+}
+
+/// The [`Expr::VariantPayload`] bindings of `value` an arm opens with: the
+/// leading bindings of its first block.
+fn arm_payloads(func: &HighFunction, body: &Region, value: ValueId) -> Vec<ValueId> {
+    let first = match body {
+        Region::Basic(b) => Some(*b),
+        Region::Sequence(items) => match items.first() {
+            Some(Region::Basic(b)) => Some(*b),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(block) = first.and_then(|b| func.blocks.get(b)) else {
+        return Vec::new();
+    };
+    block
+        .bindings
+        .iter()
+        .copied()
+        .take_while(|v| {
+            matches!(func.bindings.get(*v).map(|b| &b.expr), Some(Expr::VariantPayload { value: x, .. }) if *x == value)
+        })
+        .collect()
+}
+
+/// The payload bindings a `match` arm's pattern binds: those an arm of one
+/// case opens with, of that case's variant, at a component the variant
+/// declares, on a switch [`FnCtx::variant_match`] prints as a `match`. Any
+/// other has no pattern to stand in and prints as the hole it is.
+fn variant_patterns(func: &HighFunction, reg: &TypeRegistry) -> HashSet<ValueId> {
+    let mut bound = HashSet::new();
+    func.region.for_each_node(|node| {
+        let Region::Switch { index, arms, dispatch: Some(d), .. } = node else { return };
+        if d != index {
+            return;
+        }
+        let Some(union) = variant_union(func, reg, *index) else { return };
+        for arm in arms {
+            let [case] = arm.cases.as_slice() else { continue };
+            let Some(variant) = union.cases.get(*case as usize) else { continue };
+            let mut seen: HashSet<u32> = HashSet::new();
+            for v in arm_payloads(func, &arm.body, *index) {
+                if let Some(Expr::VariantPayload { variant: name, index: k, .. }) = func.bindings.get(v).map(|b| &b.expr)
+                    && *name == variant.name
+                    && (*k as usize) < variant.fields.len()
+                    && seen.insert(*k)
+                {
+                    bound.insert(v);
+                }
+            }
+        }
+    });
+    bound
+}
+
 /// Root lexical scope: the function body block itself.
 const ROOT_SCOPE: usize = 0;
 
@@ -1698,6 +1850,93 @@ mod tests {
 
     /// `DataKey::Temp(<payload>)` read by a `has`, the variant declaring a
     /// field of `declared` and the payload being `wrap32(arg)`.
+    /// `enum E { A, B(S) }`, `struct S { x: i64 }`, and a switch on `v0`'s
+    /// variant whose `B` arm opens with its payload and reads `S.x`.
+    #[test]
+    fn a_switch_on_an_enum_values_variant_prints_as_a_match_binding_the_payload() {
+        use sordec_common::{Arena, FuncId, Provenance, ProvenanceSource, TypeId};
+        use sordec_ir::{HighBlock, MemoryImage, StructDef, StructField, SwitchArm, TypeRef, UnionCase, UnionDef, WasmFacts};
+        use quote::ToTokens;
+
+        let mut reg = TypeRegistry::default();
+        reg.unions.push(UnionDef {
+            id: TypeId::new(0),
+            name: "E".into(),
+            cases: vec![
+                UnionCase { name: "A".into(), fields: vec![] },
+                UnionCase { name: "B".into(), fields: vec![TypeRef::UserDefined(TypeId::new(1))] },
+            ],
+            exported: true,
+        });
+        reg.structs.push(StructDef {
+            id: TypeId::new(1),
+            name: "S".into(),
+            fields: vec![StructField { name: "x".into(), ty: TypeRef::Primitive(sordec_ir::PrimitiveType::I64) }],
+        });
+        let exprs = vec![
+            (IrType::Known(KnownType::UserDefined(TypeId::new(0))), Expr::Phi { incoming: vec![] }),
+            (
+                IrType::Known(KnownType::UserDefined(TypeId::new(1))),
+                Expr::VariantPayload { value: v(0), variant: "B".into(), index: 0 },
+            ),
+            (IrType::Known(KnownType::I64), Expr::Field { base: v(1), field: "x".into() }),
+            i64_lit(0),
+        ];
+        let mut bindings: Arena<ValueId, Binding> = Arena::new();
+        for (ty, expr) in exprs {
+            let id = v(bindings.len() as u32);
+            bindings.push(Binding::new(id, ty, expr, Provenance::new("test", ProvenanceSource::DataFlow, "test")));
+        }
+        let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
+        for (i, b) in [vec![], vec![v(1), v(2)], vec![v(3)]].into_iter().enumerate() {
+            blocks.push(HighBlock { id: BlockId::from_index(i as u32), bindings: b });
+        }
+        let region = Region::Switch {
+            index: v(0),
+            arms: vec![SwitchArm {
+                cases: vec![1],
+                body: Region::Sequence(vec![Region::Basic(BlockId::from_index(1)), ret(2)]),
+            }],
+            default: Box::new(Region::Sequence(vec![Region::Basic(BlockId::from_index(2)), ret(3)])),
+            dispatch: Some(v(0)),
+        };
+        let func = HighFunction {
+            id: FuncId::from_index(0),
+            name: None,
+            signature: None,
+            aliases: Vec::new(),
+            blocks,
+            bindings,
+            region: Region::Sequence(vec![Region::Basic(BlockId::from_index(0)), region]),
+            params: vec![v(0)],
+            returns: vec![vec![v(2)], vec![v(3)]],
+        };
+        let high = HighIr {
+            facts: WasmFacts {
+                imports: vec![],
+                exports: vec![],
+                function_type_indices: vec![],
+                function_bodies: vec![],
+                function_fingerprints: vec![],
+                table_functions: None,
+                custom_sections: vec![],
+            },
+            soroban_facts: None,
+            functions: vec![func],
+            memory: MemoryImage::empty(),
+        };
+        let policy = crate::rust::hole::StrictNoGuess;
+        let body = emit_body(&high, &high.functions[0], &reg, &policy).to_token_stream().to_string();
+        let arg = body.split("match ").nth(1).and_then(|r| r.split_whitespace().next()).unwrap_or_default().to_string();
+        assert!(body.contains(&format!("match {arg} {{ E :: B (v1) =>")), "{body}");
+        assert!(body.contains("v1 . x"), "{body}");
+        // The one variant no arm names is the default's.
+        assert!(body.contains("E :: A =>"), "{body}");
+        // The payload is the pattern's, never a statement of its own.
+        assert!(!body.contains("todo !"), "{body}");
+        assert!(!body.contains("let v1"), "{body}");
+    }
+
     fn key_with_payload(declared: sordec_ir::PrimitiveType) -> String {
         use sordec_ir::{EnumKey, KnownTier, StorageTier};
         let mut reg = TypeRegistry::default();

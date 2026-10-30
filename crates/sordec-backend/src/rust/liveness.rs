@@ -220,6 +220,7 @@ fn is_effectful(expr: &Expr) -> bool {
         | Expr::Struct { .. }
         | Expr::Select { .. }
         | Expr::Variant { .. }
+        | Expr::VariantPayload { .. }
         | Expr::Optional { .. }
         | Expr::Tuple { .. }
         | Expr::IsSome { .. }

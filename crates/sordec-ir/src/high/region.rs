@@ -122,6 +122,14 @@ pub enum Region {
         /// recovered enum, the binding carrying the
         /// `KnownOp::SymbolDispatch` table that names the arms.
         /// `None` for a plain integer switch.
+        ///
+        /// Or `index` itself, when the switch selects on the variant of an
+        /// enum value: `index` is then that value, typed as a declared
+        /// `#[contracttype]` enum with payloads, and each case is a
+        /// variant's position among the enum's declared cases. An arm may
+        /// open with [`Expr::VariantPayload`](crate::Expr::VariantPayload)
+        /// bindings of its variant, which the emitter binds in the arm's
+        /// pattern: `match v { E::X(p) => .. }`.
         dispatch: Option<ValueId>,
     },
 

@@ -764,6 +764,9 @@ fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Resu
             let items: Vec<String> = payload.iter().map(|v| ctx.operand(*v)).collect();
             write!(out, "::{name}({})", items.join(", "))
         }
+        Expr::VariantPayload { value, variant, index } => {
+            write!(out, "payload {index} of {} as ::{variant}", ctx.operand(*value))
+        }
         Expr::Select { cond, if_true, if_false } => write!(
             out,
             "if {} {{ {} }} else {{ {} }}",
