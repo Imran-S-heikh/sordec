@@ -696,3 +696,24 @@ a branch whose two ways both fall through or return the same values, with only p
 code between, is dropped. Entrypoints that only hand their argument back now read as
 returning it (other_custom_types, the three contracttrait builds). Corpus byte-identical;
 corpus bands pass; held-out mean 0.7862 → 0.7865.
+
+## 2026-10-30 — commit 2cb5f6b (struct conversions through memory, and events published as their literal)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,823 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 4,084 |
+| third-party | 2 | 1/2 | 8 | 661 |
+| SDK 26 test contracts | 39 | 38/39 | 2 | 1,006 |
+
+Holes 10,020 → 9,659 (summed); errors unchanged at 11; corpus byte-identical. A struct
+decoded through the frame is named by the value's declared type when several structs
+share its key table; a field's own tag check, an `Option` parameter's payload and a tuple
+element's tag-byte check go with their conversions; an inlined `#[contractevent]`
+publish is the event literal, fields typed by the declaration (spec_shaking v1/v2
+197 → 50 and 200 → 41 gaps, their events printed as in the source). Corpus bands pass;
+held-out mean 0.7865.
+
+**Gap work so far:** 10,355 → 9,659 gaps (−696) since the start of the gap phase, with no
+new errors and the corpus output unchanged apart from one unused argument.
