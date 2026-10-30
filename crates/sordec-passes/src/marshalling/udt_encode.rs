@@ -53,7 +53,10 @@
 //! says only "one of these". Where the value goes can say which:
 //!
 //! - **an entrypoint's return**, which the spec declares as one of them —
-//!   bare, or as a `Result`'s `Ok` (a map is never an error's encoding);
+//!   bare, as a `Result`'s `Ok` (a map is never an error's encoding), or
+//!   as an `Option`'s `Some` (a map is never `Void`, `None`'s encoding) —
+//!   the returned value itself or, through the merges before the return,
+//!   any of their arms: on its path, an arm is the value returned;
 //! - **a field of a recovered struct literal**, which the outer struct's
 //!   declaration gives one of them.
 //!
@@ -227,26 +230,53 @@ pub(super) fn rebuild_as(
     }
 }
 
+/// The values a return hands back: the returned value, or, through the
+/// merges before it, each of their arms.
+fn returned_arms(func: &HighFunction, value: ValueId) -> Vec<ValueId> {
+    let mut out = Vec::new();
+    let mut work = vec![resolve_use(func, value)];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(v) = work.pop() {
+        if !seen.insert(v) {
+            continue;
+        }
+        match func.bindings.get(v).map(|b| &b.expr) {
+            Some(Expr::Phi { incoming }) if !incoming.is_empty() => {
+                work.extend(incoming.iter().map(|(_, a)| resolve_use(func, *a)));
+            }
+            _ => out.push(v),
+        }
+    }
+    out
+}
+
 /// The struct each value is declared to be where it goes: what an
-/// entrypoint returns, where the spec names a struct (bare, or as a
-/// `Result`'s `Ok`), and what fills a recovered literal's field that the
-/// declaration gives a struct type. A value two places name differently
-/// is named by neither.
+/// entrypoint returns, where the spec names a struct (bare, as a
+/// `Result`'s `Ok` or as an `Option`'s `Some`, directly or through the
+/// merges before the return), and what fills a recovered literal's field
+/// that the declaration gives a struct type. A value two places name
+/// differently is named by neither.
 fn declared_structs(func: &HighFunction, structs: &[StructDef]) -> HashMap<ValueId, TypeId> {
     let is_struct = |id: &TypeId| structs.iter().any(|s| s.id == *id);
     let mut found: Vec<(ValueId, TypeId)> = Vec::new();
-    let returned = match func.signature.as_ref().map(|s| s.outputs.as_slice()) {
-        Some([TypeRef::UserDefined(id)]) => Some(*id),
-        Some([TypeRef::Composite(CompositeType::Result(ok, _))]) => match ok.as_ref() {
+    // A struct, bare or as an `Option`'s `Some`.
+    let named = |t: &TypeRef| match t {
+        TypeRef::UserDefined(id) => Some(*id),
+        TypeRef::Composite(CompositeType::Option(inner)) => match inner.as_ref() {
             TypeRef::UserDefined(id) => Some(*id),
             _ => None,
         },
         _ => None,
     };
+    let returned = match func.signature.as_ref().map(|s| s.outputs.as_slice()) {
+        Some([TypeRef::Composite(CompositeType::Result(ok, _))]) => named(ok),
+        Some([one]) => named(one),
+        _ => None,
+    };
     if let Some(id) = returned.filter(is_struct) {
         for site in &func.returns {
             if let [value] = site.as_slice() {
-                found.push((resolve_use(func, *value), id));
+                found.extend(returned_arms(func, *value).into_iter().map(|arm| (arm, id)));
             }
         }
     }
@@ -875,6 +905,36 @@ mod tests {
         let mut m = returned_as(ok);
         assert!(UdtEncodePass.run(&mut m).changed);
         assert_eq!(named(&m, 9), Some(TypeId::new(8)));
+    }
+
+    /// `Option<Twin>` returned through a merge of the rename and `Void`: a
+    /// map is never `None`'s encoding, so on its path it is the `Some`.
+    #[test]
+    fn an_option_return_names_its_struct_through_a_merge() {
+        let option = TypeRef::Composite(CompositeType::Option(Box::new(TypeRef::UserDefined(TypeId::new(8)))));
+        let mut m = returned_as(option);
+        let f = &mut m.functions[0];
+        let void = f.bindings.push(sordec_ir::Binding::new(
+            ValueId::from_index(11),
+            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            Expr::Literal(Literal::I64(2)),
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        let merge = f.bindings.push(sordec_ir::Binding::new(
+            ValueId::from_index(12),
+            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            Expr::Phi {
+                incoming: vec![(sordec_common::BlockId::new(0), v(10)), (sordec_common::BlockId::new(1), void)],
+            },
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        f.returns = vec![vec![merge]];
+        assert!(UdtEncodePass.run(&mut m).changed);
+        assert_eq!(named(&m, 9), Some(TypeId::new(8)));
+        // The same merge from an entrypoint declaring a struct the keys do
+        // not fit names nothing.
+        let mut m = returned_as(TypeRef::Composite(CompositeType::Option(Box::new(TypeRef::UserDefined(TypeId::new(9))))));
+        assert!(!UdtEncodePass.run(&mut m).changed);
     }
 
     /// No destination, or one declaring a struct the keys do not fit:
