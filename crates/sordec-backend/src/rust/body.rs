@@ -2014,6 +2014,27 @@ mod tests {
         }
     }
 
+    /// `i + (i < n)` and `i * flag`, with `i: u32`: the test is the `0` or
+    /// `1` the wasm added, in `i`'s type. Two integers stay as they were.
+    #[test]
+    fn a_test_beside_an_integer_is_cast_to_its_type() {
+        let out = emitted(
+            vec![
+                (IrType::Known(KnownType::U32), Expr::Phi { incoming: vec![] }), // v1 i
+                (IrType::Known(KnownType::U32), Expr::Phi { incoming: vec![] }), // v2 n
+                (IrType::Inferred(KnownType::Bool), Expr::Binary { op: BinaryOp::LtU, lhs: v(1), rhs: v(2) }), // v3
+                (IrType::Known(KnownType::U32), Expr::Binary { op: BinaryOp::Add, lhs: v(1), rhs: v(3) }), // v4
+                (untyped(), store(4)),
+                (IrType::Known(KnownType::U32), Expr::Binary { op: BinaryOp::Add, lhs: v(1), rhs: v(2) }), // v6
+                (untyped(), store(6)),
+            ],
+            vec![],
+            &TypeRegistry::default(),
+        );
+        assert!(out.contains("(v3 as u32)"), "{out}");
+        assert!(out.contains("v1 + v2"), "{out}");
+    }
+
     #[test]
     fn a_small_flag_on_an_unsigned_word_takes_the_words_type() {
         let out = masked_with(KnownType::U32, 1);

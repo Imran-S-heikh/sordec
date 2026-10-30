@@ -117,6 +117,9 @@ fn enum_ordering(
 /// Arithmetic on two `bool`s: each is the `i32` `0` or `1` a wasm
 /// comparison yields. `(a > b) - (a < b)` is how rustc lowers `Ord::cmp`
 /// to `-1`/`0`/`1`, and Rust has no `bool - bool`.
+///
+/// A `bool` beside an integer is that `0` or `1` in the integer's type:
+/// `i + (i < n)` is how rustc steps an inclusive range without a branch.
 fn bools_as_ints(
     ctx: &FnCtx,
     op: BinaryOp,
@@ -126,8 +129,25 @@ fn bools_as_ints(
     if !matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) {
         return None;
     }
-    if !bool_like(ctx, ctx.fold_target(lhs), 0) || !bool_like(ctx, ctx.fold_target(rhs), 0) {
-        return None;
+    let (lb, rb) = (bool_like(ctx, ctx.fold_target(lhs), 0), bool_like(ctx, ctx.fold_target(rhs), 0));
+    let int = |v: sordec_common::ValueId| match ctx.func.bindings.get(ctx.fold_target(v)).map(|b| &b.ty) {
+        Some(
+            ty @ (IrType::Known(KnownType::I32 | KnownType::U32 | KnownType::I64 | KnownType::U64)
+            | IrType::Inferred(KnownType::I32 | KnownType::U32 | KnownType::I64 | KnownType::U64)),
+        ) => Some(ty.clone()),
+        _ => None,
+    };
+    match (lb, rb) {
+        (true, true) => {}
+        (true, false) => {
+            let l = bool_to_int(ctx, lhs, &int(rhs)?)?;
+            return Some(binary_expr(op, l, ctx.value_ref(rhs)));
+        }
+        (false, true) => {
+            let r = bool_to_int(ctx, rhs, &int(lhs)?)?;
+            return Some(binary_expr(op, ctx.value_ref(lhs), r));
+        }
+        (false, false) => return None,
     }
     let (l, r) = (ctx.value_ref(lhs), ctx.value_ref(rhs));
     Some(match op {
