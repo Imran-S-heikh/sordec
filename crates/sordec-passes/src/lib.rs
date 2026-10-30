@@ -111,7 +111,7 @@ pub use recognizers::{
 };
 pub use refine::{
     AndMergePass, ConstBranchFoldPass, ConstLoadPass, ConstLoopFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
-    OverflowGuardElisionPass, PolarityPass, ScopeFallthroughPass, ScopeIfElsePass, SelectReturnPass,
+    OverflowGuardElisionPass, PolarityPass, SameExitPass, ScopeFallthroughPass, ScopeIfElsePass, SelectReturnPass,
     SwitchDedupPass,
     TrapCallInlinePass, TrapInlinePass, TrivialPhiPass, WideArithPass, WideComparePass, WidePhiPass, WideSelectPass, WideZeroPass, WidthFoldPass,
 };
@@ -492,6 +492,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // gate first, and switching it on without one measured +14
             // `cargo check` errors across the corpus. See its module docs.
             Box::new(ArgGuardElisionPass),
+            // The guard elision moves the second half of a two-form tag
+            // test into the regenerated wrapper; the first half is then a
+            // branch whose two ways return the same value. Right after it,
+            // so the passes below see the straight line.
+            Box::new(SameExitPass),
             // Straight-line SDK wrappers pasted into their callers, with
             // every recognized fact attached. Before the key-construction
             // elision because a wrapped `Storage::has` is the call that
@@ -984,7 +989,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 33..86],
+        vec![1..7, 33..87],
     )
 }
 
@@ -1044,6 +1049,7 @@ mod tests {
                 PANIC_RECOVER_AFTER_RECOVERY,
                 refine::OVERFLOW_GUARD_PASS_NAME,
                 marshalling::guard::PASS_NAME,
+                refine::SAME_EXIT_PASS_NAME,
                 interproc::const_return::PASS_NAME,
                 interproc::wide_promote::PASS_NAME,
                 interproc::wide_param::PASS_NAME,

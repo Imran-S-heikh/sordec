@@ -111,7 +111,7 @@ impl Pass<HighIr> for WideInlineDecodePass {
 
 /// Which encoding of the value a path has established.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Form {
+pub(super) enum Form {
     Small,
     Object,
 }
@@ -174,7 +174,7 @@ fn plans(func: &HighFunction) -> Vec<Plan> {
             let Some(occurrences) = block_of.get(id).and_then(|b| arms.get(b)) else {
                 return false;
             };
-            !occurrences.is_empty() && occurrences.iter().all(|conds| form_on(func, conds, val, ty) == Some(form))
+            !occurrences.is_empty() && occurrences.iter().all(|conds| form_on(func, conds, val, ty.tags()) == Some(form))
         };
         if !limbs.iter().all(proven) {
             continue;
@@ -229,7 +229,7 @@ fn limb_read(func: &HighFunction, id: ValueId, expr: &Expr) -> Option<(ValueId, 
 /// holds there too. Nothing enters a sequence part-way: a `break` leaves
 /// to the end of an enclosing scope, which lies outside the sequence that
 /// holds it, and a transfer falls through to what follows.
-fn arm_conditions(region: &Region) -> HashMap<BlockId, Vec<Vec<(ValueId, bool)>>> {
+pub(super) fn arm_conditions(region: &Region) -> HashMap<BlockId, Vec<Vec<(ValueId, bool)>>> {
     fn walk(r: &Region, stack: &mut Vec<(ValueId, bool)>, out: &mut HashMap<BlockId, Vec<Vec<(ValueId, bool)>>>) {
         match r {
             Region::Basic(b) => out.entry(*b).or_default().push(stack.clone()),
@@ -291,12 +291,17 @@ fn never_falls_through(r: &Region) -> bool {
     }
 }
 
-/// The form of `val` the conditions establish: a tag test on it that holds
+/// The form of `val` the conditions establish, for a type whose two
+/// encodings carry the tags `(small, object)`: a tag test on it that holds
 /// names its form, one that fails names the other (the value is proven to
 /// be one of the two). `None` when no condition tests `val`, or when two
 /// disagree.
-fn form_on(func: &HighFunction, conds: &[(ValueId, bool)], val: ValueId, ty: KnownType128) -> Option<Form> {
-    let (small, object) = ty.tags();
+pub(super) fn form_on(
+    func: &HighFunction,
+    conds: &[(ValueId, bool)],
+    val: ValueId,
+    (small, object): (u8, u8),
+) -> Option<Form> {
     let mut form = None;
     for (cond, then) in conds {
         let Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, tag, negated }))) =

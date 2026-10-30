@@ -58,13 +58,45 @@
 //! - **Piece extractors are excluded.** `ObjToI128Lo64` and its
 //!   siblings take *half* a value; [`super::wide_codec`] owns those, and
 //!   treating one as the whole would silently truncate.
+//!
+//! # An entrypoint parameter
+//!
+//! The same unpack reaches us on a parameter: `fn test_u64(v: u64) -> u64`
+//! that hands `v` straight back arrives as the branch above on the raw
+//! argument, because rustc inlined the dispatch wrapper's conversion into
+//! the export. The reconstruction declares `v: u64`, so `#[contractimpl]`
+//! regenerates that conversion, and in the body `v` is already the number
+//! — which is what each unpack computes.
+//!
+//! Why it is exact: the regenerated wrapper converts the argument before
+//! the body runs and traps on any tag that is neither of the type's two
+//! (the trap [`super::guard`] relocates there), so in the body the raw
+//! argument is in one of the two forms, and both unpacks of it yield the
+//! number `v` names. Each unpack is renamed only where the arm it sits in
+//! has established the form it reads — the small decode where a tag test
+//! on the parameter has shown the small form or ruled out the object form,
+//! the extractor where one has shown the object form. A small decode of a
+//! handle would be the handle's bits, and an extractor of a small value
+//! would trap, so neither is renamed outside its arm.
+//!
+//! Gates: a function with a declared signature (an entrypoint — only it
+//! gets a regenerated wrapper); the parameter declared one of the four
+//! two-encoding scalars, and the extractor that type's; every place the
+//! unpack is scheduled has its form established by the conditions around
+//! it, read as [`super::wide_inline`] reads them; a function with a
+//! goto-style fragment is skipped whole.
 
-use sordec_common::{Provenance, ProvenanceSource, ValueId};
+use std::collections::HashMap;
+
+use sordec_common::{BlockId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
-    Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, SemanticOp, ValObjectKind,
+    Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Region, SemanticOp, ValObjectKind,
 };
 
+use super::wide_inline::{arm_conditions, form_on, Form};
 use crate::dataflow::resolve_use;
+use crate::type_infer::known_of_type_ref;
+use crate::val_abi;
 use crate::metrics_catalog::MARSHALLING_SCALAR_DECODES as M_DECODES;
 use crate::pass::{Pass, PassResult};
 
@@ -83,22 +115,19 @@ impl Pass<HighIr> for ScalarDecodePass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
         for func in &mut ir.functions {
-            let folds: Vec<(ValueId, ValueId, KnownType)> = func
+            let declared = Declared::of(func);
+            let folds: Vec<(ValueId, ValueId, KnownType, &'static str)> = func
                 .bindings
                 .iter()
-                .filter_map(|(id, b)| unpacks(func, &b.expr).map(|(s, t)| (id, s, t)))
+                .filter_map(|(id, b)| unpacks(func, id, &b.expr, &declared).map(|(s, t, n)| (id, s, t, n)))
                 .collect();
-            for (id, subject, ty) in folds {
+            for (id, subject, ty, note) in folds {
                 let Some(binding) = func.bindings.get_mut(id) else {
                     continue;
                 };
                 binding.expr = Expr::Use(subject);
                 binding.ty = IrType::Known(ty);
-                binding.add_provenance(Provenance::new(
-                    PASS_NAME,
-                    ProvenanceSource::SdkPattern,
-                    "one encoding of a value already proven to be this scalar: the value",
-                ));
+                binding.add_provenance(Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note));
                 result.metrics.increment(M_DECODES, 1);
                 result.changed = true;
             }
@@ -107,9 +136,20 @@ impl Pass<HighIr> for ScalarDecodePass {
     }
 }
 
+/// Provenance of a fold on a proven host result or tuple element.
+const NOTE_PROVEN: &str = "one encoding of a value already proven to be this scalar: the value";
+/// Provenance of a fold on a declared entrypoint parameter.
+const NOTE_DECLARED: &str = "one encoding of a parameter contractspecv0 declares as this scalar, in the arm \
+     its tag test establishes: the parameter the regenerated wrapper converts";
+
 /// The subject and type an expression unpacks, when it unpacks one whose
-/// type is already proven.
-fn unpacks(func: &HighFunction, expr: &Expr) -> Option<(ValueId, KnownType)> {
+/// type is already proven, with the provenance note saying how.
+fn unpacks(
+    func: &HighFunction,
+    id: ValueId,
+    expr: &Expr,
+    declared: &Declared,
+) -> Option<(ValueId, KnownType, &'static str)> {
     let subject = match expr {
         Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })) => *value,
         Expr::Semantic(SemanticOp::Known(KnownOp::ValObject { kind, args })) => {
@@ -120,17 +160,87 @@ fn unpacks(func: &HighFunction, expr: &Expr) -> Option<(ValueId, KnownType)> {
             // proven type implies.
             let whole = whole_value_extraction(*kind)?;
             let subject = resolve_use(func, *value);
-            return (proven(func, subject)? == whole).then_some((subject, whole));
+            if proven(func, subject).is_some_and(|t| t == whole) {
+                return Some((subject, whole, NOTE_PROVEN));
+            }
+            let declared_ty = declared.at(func, id, subject, Form::Object)?;
+            return (declared_ty == whole).then_some((subject, whole, NOTE_DECLARED));
         }
         _ => return None,
     };
     let subject = resolve_use(func, subject);
-    let ty = proven(func, subject)?;
-    // A small decode is a shift, so it reads whatever the subject is; it
-    // is the *proof* that the subject is a scalar that makes naming the
-    // subject in its place right. Types with only one encoding are
-    // `typed_read`'s.
-    two_encodings(&ty).then_some((subject, ty))
+    if let Some(ty) = proven(func, subject) {
+        // A small decode is a shift, so it reads whatever the subject is; it
+        // is the *proof* that the subject is a scalar that makes naming the
+        // subject in its place right. Types with only one encoding are
+        // `typed_read`'s.
+        return two_encodings(&ty).then_some((subject, ty, NOTE_PROVEN));
+    }
+    let ty = declared.at(func, id, subject, Form::Small)?;
+    Some((subject, ty, NOTE_DECLARED))
+}
+
+/// An entrypoint's parameters declared at a two-encoding scalar, and the
+/// branch conditions around every block of its body.
+#[derive(Default)]
+struct Declared {
+    types: HashMap<ValueId, KnownType>,
+    block_of: HashMap<ValueId, BlockId>,
+    arms: HashMap<BlockId, Vec<Vec<(ValueId, bool)>>>,
+}
+
+impl Declared {
+    fn of(func: &HighFunction) -> Self {
+        let Some(sig) = func.signature.as_ref() else {
+            return Self::default();
+        };
+        let types: HashMap<ValueId, KnownType> = func
+            .params
+            .iter()
+            .zip(&sig.inputs)
+            .filter_map(|(p, input)| known_of_type_ref(&input.ty).map(|t| (*p, t)))
+            .filter(|(_, t)| two_encodings(t))
+            .collect();
+        // A goto-style fragment can enter anywhere, so no position in it
+        // says which branch was taken to get there.
+        let mut unstructured = false;
+        func.region.for_each_node(|n| unstructured |= matches!(n, Region::Unstructured { .. }));
+        if types.is_empty() || unstructured {
+            return Self::default();
+        }
+        let block_of = func
+            .blocks
+            .iter()
+            .flat_map(|(b, block)| block.bindings.iter().map(move |v| (*v, b)))
+            .collect();
+        Self {
+            types,
+            block_of,
+            arms: arm_conditions(&func.region),
+        }
+    }
+
+    /// The type `subject` is declared at, when it is such a parameter and
+    /// every place `read` is scheduled has established the `form` it reads.
+    fn at(&self, func: &HighFunction, read: ValueId, subject: ValueId, form: Form) -> Option<KnownType> {
+        let ty = self.types.get(&subject)?;
+        let tags = scalar_tags(ty)?;
+        let occurrences = self.arms.get(self.block_of.get(&read)?)?;
+        let established = !occurrences.is_empty()
+            && occurrences.iter().all(|conds| form_on(func, conds, subject, tags) == Some(form));
+        established.then(|| ty.clone())
+    }
+}
+
+/// The small and object tags of a two-encoding scalar.
+fn scalar_tags(ty: &KnownType) -> Option<(u8, u8)> {
+    Some(match ty {
+        KnownType::U64 => (val_abi::TAG_U64_SMALL, val_abi::TAG_U64_OBJECT),
+        KnownType::I64 => (val_abi::TAG_I64_SMALL, val_abi::TAG_I64_OBJECT),
+        KnownType::Timepoint => (val_abi::TAG_TIMEPOINT_SMALL, val_abi::TAG_TIMEPOINT_OBJECT),
+        KnownType::Duration => (val_abi::TAG_DURATION_SMALL, val_abi::TAG_DURATION_OBJECT),
+        _ => return None,
+    })
 }
 
 /// The type an object extractor pulls out whole, or `None` for the piece
@@ -277,6 +387,83 @@ mod tests {
     #[test]
     fn an_element_of_another_type_keeps_its_unpack() {
         let mut m = element_shape(0);
+        assert!(!ScalarDecodePass.run(&mut m).changed);
+    }
+
+    /// An entrypoint `f(p: u64)` whose body is the inlined conversion:
+    /// `if has_tag(p, U64Object) { obj_to_u64(p) } else { val_decode(p) }`.
+    /// With `split` false, both unpacks sit in one block after the test
+    /// instead, where no arm has established a form.
+    fn declared_shape(split: bool) -> HighIr {
+        use sordec_common::{BlockId, IrId};
+        use sordec_ir::{FunctionParam, FunctionSignature, HighBlock, PrimitiveType, TypeRef};
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0 — the parameter
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                    value: v(0),
+                    tag: val_abi::TAG_U64_OBJECT,
+                    negated: false,
+                })), // v1
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValObject {
+                    kind: ValObjectKind::ObjToU64,
+                    args: vec![v(0)],
+                })), // v2
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value: v(0) })), // v3
+            ],
+            vec![v(0)],
+            vec![1],
+        );
+        let b = BlockId::from_index;
+        if split {
+            f.blocks.push(HighBlock { id: b(1), bindings: vec![v(2)] });
+            f.blocks.push(HighBlock { id: b(2), bindings: vec![v(3)] });
+            f.region = Region::Sequence(vec![
+                Region::Basic(b(0)),
+                Region::If {
+                    cond: v(1),
+                    then_region: Box::new(Region::Basic(b(1))),
+                    else_region: Some(Box::new(Region::Basic(b(2)))),
+                },
+            ]);
+        } else {
+            f.blocks.push(HighBlock { id: b(1), bindings: vec![v(2), v(3)] });
+            f.region = Region::Sequence(vec![Region::Basic(b(0)), Region::Basic(b(1))]);
+        }
+        f.signature = Some(FunctionSignature {
+            name: "f".to_string(),
+            inputs: vec![FunctionParam {
+                name: "p".to_string(),
+                ty: TypeRef::Primitive(PrimitiveType::U64),
+            }],
+            outputs: vec![],
+        });
+        module(vec![f])
+    }
+
+    #[test]
+    fn each_arm_of_a_declared_parameters_conversion_is_the_parameter() {
+        let mut m = declared_shape(true);
+        assert!(ScalarDecodePass.run(&mut m).changed);
+        assert!(folded(&m, v(2)), "the object unpack, in the object arm");
+        assert!(folded(&m, v(3)), "the small decode, in the other arm");
+        assert!(matches!(m.functions[0].bindings.get(v(3)).map(|b| &b.ty), Some(IrType::Known(KnownType::U64))));
+    }
+
+    /// Outside the arms nothing says which form the word is in: a small
+    /// decode of a handle is the handle's bits, not the number.
+    #[test]
+    fn an_unpack_outside_its_arm_is_left_alone() {
+        let mut m = declared_shape(false);
+        assert!(!ScalarDecodePass.run(&mut m).changed);
+    }
+
+    /// A helper has no regenerated wrapper, so its parameter carries no
+    /// declared type to name.
+    #[test]
+    fn a_parameter_without_a_declaration_keeps_its_unpacks() {
+        let mut m = declared_shape(true);
+        m.functions[0].signature = None;
         assert!(!ScalarDecodePass.run(&mut m).changed);
     }
 
