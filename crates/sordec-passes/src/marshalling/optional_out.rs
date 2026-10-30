@@ -51,7 +51,9 @@
 //!   tag constant each, and different.
 //! - Every present arm writes the same slots, and none of the values is a
 //!   raw memory read: inside an `Option` its type would be pinned to a
-//!   storage width the caller did not use.
+//!   storage width the caller did not use. Nor a merge with such a read,
+//!   or with an unrecognised host call's result, among its arms: its type
+//!   would be pinned to whatever word its other arms happen to carry.
 //! - After the merge, nothing but the tag store, constant stores and the
 //!   shadow-stack epilogue.
 //!
@@ -436,14 +438,13 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
     // takes whatever its use needs; inside an `Option` it is pinned to a
     // storage width (`i32` where the field is a `u32`, `Val` where it is a
     // limb), and the caller stops compiling. Left as it is until the
-    // memory it comes from is recovered.
-    let raw = |v: ValueId| {
-        matches!(
-            func.bindings.get(resolve_use(func, v)).map(|b| &b.expr),
-            Some(Expr::Load { .. } | Expr::Unknown { .. })
-        )
-    };
-    if present.iter().flat_map(|a| &a.stores).any(|(_, _, v)| raw(*v)) {
+    // memory it comes from is recovered. So is a merge with such a value
+    // among its arms, or with an unrecognised host call's result: the
+    // merge then has only its other arms' words to be typed by. `bls`'s
+    // field reduction merges its `U256` parameter, typed `i64` by its tag
+    // tests, with an unrecognised `u256_rem_euclid`, and became an
+    // `Option<i64>` returned where the spec says `U256`.
+    if present.iter().flat_map(|a| &a.stores).any(|(_, _, v)| untyped_payload(func, *v, MERGE_DEPTH)) {
         return Err("a value read raw out of memory");
     }
     if tail.iter().any(|(s, _)| payload.iter().any(|(p, _)| p.overlaps(*s)) || s.overlaps(tag_slot)) {
@@ -474,6 +475,25 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
         whole,
         part_types: Vec::new(),
     })
+}
+
+/// How many merges deep [`untyped_payload`] looks.
+const MERGE_DEPTH: u32 = 3;
+
+/// Whether `value` has no type of its own to hand a caller: a raw read of
+/// memory, an unrecovered operation, or, inside a merge `depth` merges
+/// deep, an unrecognised host call's result.
+fn untyped_payload(func: &HighFunction, value: ValueId, depth: u32) -> bool {
+    match func.bindings.get(resolve_use(func, value)).map(|b| &b.expr) {
+        Some(Expr::Load { .. } | Expr::Unknown { .. }) => true,
+        Some(Expr::Phi { incoming }) if depth > 0 => incoming.iter().any(|(_, v)| {
+            matches!(
+                func.bindings.get(resolve_use(func, *v)).map(|b| &b.expr),
+                Some(Expr::Semantic(sordec_ir::SemanticOp::Unknown { .. }))
+            ) || untyped_payload(func, *v, depth - 1)
+        }),
+        _ => false,
+    }
 }
 
 /// A field of a struct value, or one half of a wide one: `(value, field,
@@ -1826,6 +1846,36 @@ mod tests {
         assert_eq!((h.present, h.absent), (0, 1));
         assert_eq!(h.tag, Slot { offset: 0, bytes: 8 });
         assert_eq!(h.payload.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [Slot { offset: 8, bytes: 8 }]);
+    }
+
+    #[test]
+    fn a_payload_merging_an_unrecognised_host_result_is_not_a_helper() {
+        // The present arm stores `phi [host:i:u256_rem_euclid(x), x]`: the
+        // merge has only `x`'s word to be typed by.
+        let with_payload = |arms: [u32; 2]| {
+            let mut f = helper(false);
+            for expr in [
+                Expr::Semantic(sordec_ir::SemanticOp::Unknown {
+                    host_module: "i".to_string(),
+                    host_fn: "u256_rem_euclid".to_string(),
+                    args: vec![v(1)],
+                    reason: UnknownReason::UnsupportedPattern,
+                }), // v9
+                Expr::Phi { incoming: vec![(bb(0), v(arms[0])), (bb(0), v(arms[1]))] }, // v10
+            ] {
+                let id = ValueId::from_index(f.bindings.len() as u32);
+                f.bindings.push(Binding::new(
+                    id,
+                    IrType::Unknown(UnknownReason::InsufficientEvidence),
+                    expr,
+                    Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+                ));
+            }
+            f.bindings.get_mut(v(5)).unwrap().expr = store(0, 10, 8);
+            f
+        };
+        assert_eq!(classify(&with_payload([9, 1])).err(), Some("a value read raw out of memory"));
+        assert!(classify(&with_payload([1, 1])).is_ok(), "a merge of the value with itself still is one");
     }
 
     #[test]
