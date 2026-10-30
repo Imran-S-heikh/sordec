@@ -25,7 +25,11 @@
 //!
 //! # Gates
 //!
-//! - **The spec declares a tuple**, bare or as a `Result`'s `Ok`.
+//! - **The spec declares a tuple**, bare or as a `Result`'s `Ok` — and
+//!   either as an `Option`'s `Some`. A vec is never `Void`, `None`'s
+//!   encoding, so a vec returned as an `Option` is the `Some`'s payload;
+//!   it becomes that payload here, and [`super::option_return`] then
+//!   writes the `Some` around it.
 //! - **The vec reaches a return** through renames and merges only.
 //! - **Nothing else reads it**, nor any rename on the way: a vec that is
 //!   also stored or passed somewhere is used as a vec there. A binding no
@@ -57,8 +61,15 @@
 //!   never its literal number: `4294967300` in an `i64` position is a
 //!   `U32Val`, not an `i64`, so a word that decodes to nothing declared
 //!   declines the vec.
+//! - **A component a helper encoded.** A `u64`'s encode is a branch rustc
+//!   outlines into a helper ([`super::encode_helper`]), so `(input, input)`
+//!   reaches the vec as `func0(input).1` twice. When that helper returns,
+//!   in that component and on every path, the encode of its parameter as
+//!   exactly the declared type, the component is the argument. The call,
+//!   left with nothing reading it, is dropped: the helper does nothing
+//!   else.
 //!
-//! Both are exact for the reason the tuple is: the spec says the vec is the
+//! All are exact for the reason the tuple is: the spec says the vec is the
 //! tuple's encoding, so its element at each position is the encoding of the
 //! declared component, and each of these readings is that encoding's
 //! inverse.
@@ -68,7 +79,8 @@
 //! A `#[contracttype]` enum's variant travels as a vec too: the variant's
 //! name as a symbol, then each value it carries, encoded. `UsedReturnEnum::
 //! A(1)` returned is `vec![Symbol("A"), 1 << 32 | U32Val]`. Where the spec
-//! declares the entrypoint returns the enum, a returned vec whose first
+//! declares the entrypoint returns the enum (in any of the positions the
+//! gates above allow a tuple), a returned vec whose first
 //! element is a constant symbol naming one of its variants, with exactly
 //! as many elements after it as that variant carries values, is that
 //! variant: [`Expr::Variant`] with the rest read as the tuple's components
@@ -91,6 +103,7 @@ use sordec_ir::{
 };
 
 use super::encode::encoded_constant;
+use super::encode_helper::{elide_spent_calls, encoder_calls, EncoderTable};
 use super::udt_encode::{encoded_value, encodes, rebuild_as};
 use crate::dataflow::high_uses::{HighUseIndex, HighUseSite};
 use crate::dataflow::resolve_use;
@@ -123,6 +136,7 @@ impl Pass<HighIr> for TupleReturnPass {
             .as_ref()
             .map(|f| (f.types.structs.clone(), f.types.unions.clone()))
             .unwrap_or_default();
+        let encoders = EncoderTable::build(ir);
         let memory = &ir.memory;
         for func in &mut ir.functions {
             let Some(declared) = declared(func, &unions) else {
@@ -133,14 +147,14 @@ impl Pass<HighIr> for TupleReturnPass {
                 Declared::Variant(_) => (M_VARIANT_RECOVERED, M_VARIANT_DECLINED),
             };
             let uses = HighUseIndex::build(func);
+            let mut any = false;
             for leaf in returned_vecs(func) {
                 let planned = match declared {
                     Declared::Tuple(ref slots) => {
-                        plan(func, memory, &structs, &uses, &leaf, slots).map(|c| (None, c))
+                        plan(func, memory, &structs, &encoders, &uses, &leaf, slots).map(|c| (None, c))
                     }
-                    Declared::Variant(def) => {
-                        plan_variant(func, memory, &structs, &uses, &leaf, def).map(|(name, c)| (Some(name), c))
-                    }
+                    Declared::Variant(def) => plan_variant(func, memory, &structs, &encoders, &uses, &leaf, def)
+                        .map(|(name, c)| (Some(name), c)),
                 };
                 let Some((variant, components)) = planned else {
                     result.metrics.increment(declined, 1);
@@ -175,6 +189,13 @@ impl Pass<HighIr> for TupleReturnPass {
                 }
                 result.metrics.increment(recovered, 1);
                 result.changed = true;
+                any = true;
+            }
+            // A helper call whose encoded component became the value it
+            // encodes has nothing left reading it, and does nothing else.
+            if any {
+                let calls = encoder_calls(func, &encoders);
+                elide_spent_calls(func, &encoders, &calls, PASS_NAME);
             }
         }
         result
@@ -190,12 +211,18 @@ enum Declared<'a> {
 }
 
 /// What the function's spec says it returns, bare or as a `Result`'s `Ok`,
-/// when that travels as a vec: a tuple, or an enum with variants.
+/// and either of those as an `Option`'s `Some`, when that travels as a
+/// vec: a tuple, or an enum with variants.
 fn declared<'a>(func: &HighFunction, unions: &'a [UnionDef]) -> Option<Declared<'a>> {
     let ty = match func.signature.as_ref()?.outputs.as_slice() {
         [TypeRef::Composite(CompositeType::Result(ok, _))] => ok.as_ref(),
         [one] => one,
         _ => return None,
+    };
+    // A vec is never `Void`, so a returned one is the `Some`'s payload.
+    let ty = match ty {
+        TypeRef::Composite(CompositeType::Option(inner)) => inner.as_ref(),
+        other => other,
     };
     match known_of_type_ref(ty)? {
         KnownType::Tuple(slots) if !slots.is_empty() => Some(Declared::Tuple(slots)),
@@ -319,6 +346,7 @@ fn plan(
     func: &HighFunction,
     memory: &sordec_ir::MemoryImage,
     structs: &[StructDef],
+    encoders: &EncoderTable,
     uses: &HighUseIndex,
     leaf: &Leaf,
     slots: &[IrType],
@@ -327,7 +355,7 @@ fn plan(
     if elements.len() != slots.len() {
         return None;
     }
-    components(func, memory, structs, elements, slots)
+    components(func, memory, structs, encoders, elements, slots)
 }
 
 /// The variant the vec is, and the values it carries, or `None` when a
@@ -336,6 +364,7 @@ fn plan_variant(
     func: &HighFunction,
     memory: &sordec_ir::MemoryImage,
     structs: &[StructDef],
+    encoders: &EncoderTable,
     uses: &HighUseIndex,
     leaf: &Leaf,
     def: &UnionDef,
@@ -351,7 +380,7 @@ fn plan_variant(
         .iter()
         .map(|t| known_of_type_ref(t).map(IrType::Known))
         .collect::<Option<Vec<_>>>()?;
-    Some((name, components(func, memory, structs, rest, &slots)?))
+    Some((name, components(func, memory, structs, encoders, rest, &slots)?))
 }
 
 /// The text of a constant symbol: one the host builds from a string the
@@ -394,6 +423,7 @@ fn components(
     func: &HighFunction,
     memory: &sordec_ir::MemoryImage,
     structs: &[StructDef],
+    encoders: &EncoderTable,
     elements: &[ValueId],
     slots: &[IrType],
 ) -> Option<Vec<Component>> {
@@ -402,6 +432,13 @@ fn components(
         .zip(slots)
         .map(|(&element, slot)| {
             let want = base(slot)?;
+            // Behind a helper that only encodes, as exactly this type: the
+            // component is what the helper was handed.
+            if let Some((payload, encoded)) = encoders.encoded_by_call(func, element)
+                && encoded == want
+            {
+                return Some(Component::Value(payload));
+            }
             let item = encoded_value(func, element);
             // A 64-bit constant stored as the element itself, typed only as
             // the word its literal is, is the `Val` — tag and all — so only
@@ -661,6 +698,11 @@ mod tests {
     /// `enum UsedReturnEnum { A(u32), B(i64) }` (5), declared as the return;
     /// the returned vec is `[symbol, words..]`, through a rename.
     fn variant(symbol: Expr, words: &[i64]) -> HighIr {
+        variant_as(symbol, words, TypeRef::UserDefined(TypeId::new(5)))
+    }
+
+    /// `variant`, from an entrypoint declared to return `output`.
+    fn variant_as(symbol: Expr, words: &[i64], output: TypeRef) -> HighIr {
         use sordec_ir::{SorobanFacts, TypeRegistry, UnionCase};
         let mut exprs = vec![symbol]; // v0
         exprs.extend(words.iter().map(|w| Expr::Literal(Literal::I64(*w)))); // v1..
@@ -678,7 +720,7 @@ mod tests {
         func.signature = Some(FunctionSignature {
             name: "ret".to_string(),
             inputs: vec![],
-            outputs: vec![TypeRef::UserDefined(TypeId::new(5))],
+            outputs: vec![output],
         });
         func.returns = vec![vec![v(n + 1)]];
         let mut m = module(vec![func]);
@@ -746,5 +788,101 @@ mod tests {
             let mut ir = variant(symbol, &words);
             assert!(!TupleReturnPass.run(&mut ir).changed, "{words:?}");
         }
+    }
+
+    /// `Option<UsedReturnEnum>`, bare or as a `Result`'s `Ok`: a vec is
+    /// never `Void`, so the returned one is the `Some`'s variant.
+    #[test]
+    fn a_vec_returned_as_an_option_is_the_some_s_variant() {
+        let option = TypeRef::Composite(CompositeType::Option(Box::new(TypeRef::UserDefined(TypeId::new(5)))));
+        let result = TypeRef::Composite(CompositeType::Result(
+            Box::new(option.clone()),
+            Box::new(TypeRef::Primitive(PrimitiveType::Error)),
+        ));
+        for output in [option, result] {
+            let mut ir = variant_as(symbol_new("A"), &[(1 << 32) | 4], output);
+            assert!(TupleReturnPass.run(&mut ir).changed);
+            let b = ir.functions[0].bindings.get(v(2)).unwrap();
+            assert!(matches!(&b.expr, Expr::Variant { name, .. } if name == "A"));
+            assert_eq!(b.ty, IrType::Known(KnownType::UserDefined(TypeId::new(5))));
+        }
+        // An `Option` of something no vec encodes declines.
+        let mut ir = variant_as(
+            symbol_new("A"),
+            &[(1 << 32) | 4],
+            TypeRef::Composite(CompositeType::Option(Box::new(TypeRef::Primitive(PrimitiveType::U32)))),
+        );
+        assert!(!TupleReturnPass.run(&mut ir).changed);
+    }
+
+    /// func 0 encodes its argument as a `u64`, small form or object, and
+    /// returns `(0, r)`. func 1, declared `-> (first, u64)`, returns
+    /// `vec![func0(x).1, func0(x).1]`.
+    fn outlined(first: PrimitiveType) -> HighIr {
+        use sordec_common::{BlockId, FuncId, IrId};
+        use sordec_ir::{Region, ValObjectKind};
+        let b0 = BlockId::from_index(0);
+        let mut helper = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0: x
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValObject { kind: ValObjectKind::ObjFromU64, args: vec![v(0)] })),
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty: KnownType::U64, value: v(0) })),
+                Expr::Phi { incoming: vec![(b0, v(1)), (BlockId::from_index(1), v(2))] }, // v3
+                Expr::Literal(Literal::I64(0)),                                           // v4
+            ],
+            vec![v(0)],
+            vec![1, 2, 4],
+        );
+        helper.region = Region::Sequence(vec![Region::Basic(b0), Region::Return { values: vec![v(4), v(3)] }]);
+        let mut entry = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                  // v0: x
+                Expr::Call { target: FuncId::from_index(0), args: vec![v(0)] },  // v1
+                Expr::Project { value: v(1), index: 1 },                         // v2
+                Expr::Call { target: FuncId::from_index(0), args: vec![v(0)] },  // v3
+                Expr::Project { value: v(3), index: 1 },                         // v4
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                    vals_pos: v(0),
+                    len: v(0),
+                    elements: Some(vec![v(2), v(4)]),
+                })), // v5
+            ],
+            vec![v(0)],
+            vec![1, 2, 3, 4, 5],
+        );
+        entry.id = FuncId::from_index(1);
+        entry.region = Region::Sequence(vec![Region::Basic(b0), Region::Return { values: vec![v(5)] }]);
+        entry.returns = vec![vec![v(5)]];
+        entry.signature = Some(FunctionSignature {
+            name: "tuple".to_string(),
+            inputs: vec![],
+            outputs: vec![TypeRef::Composite(CompositeType::Tuple(vec![
+                TypeRef::Primitive(first),
+                TypeRef::Primitive(PrimitiveType::U64),
+            ]))],
+        });
+        module(vec![helper, entry])
+    }
+
+    #[test]
+    fn a_component_a_helper_encoded_is_its_argument() {
+        let mut ir = outlined(PrimitiveType::U64);
+        assert!(TupleReturnPass.run(&mut ir).changed);
+        let f = &ir.functions[1];
+        assert!(matches!(&f.bindings.get(v(5)).unwrap().expr, Expr::Tuple { items } if items == &[v(0), v(0)]));
+        // The calls, read by nothing now, are gone: the helper does nothing else.
+        for call in [v(1), v(3)] {
+            assert!(matches!(f.bindings.get(call).unwrap().expr, Expr::Literal(Literal::Unit)), "{call:?}");
+        }
+    }
+
+    #[test]
+    fn a_helper_encoding_another_type_declines() {
+        // The first component is declared `u32`; the helper encodes a `u64`.
+        let mut ir = outlined(PrimitiveType::U32);
+        assert!(!TupleReturnPass.run(&mut ir).changed);
+        let f = &ir.functions[1];
+        assert!(matches!(f.bindings.get(v(5)).unwrap().expr, Expr::Semantic(_)));
+        assert!(matches!(f.bindings.get(v(1)).unwrap().expr, Expr::Call { .. }));
     }
 }

@@ -56,8 +56,38 @@
 //! arm is the `Void` word or an encode of a value as exactly `T` (an
 //! outlined encode helper's component, or a small encode); at least one
 //! arm is an encode; no two arms hand over the same value.
+//!
+//! # A parameter's payload, returned where it is present
+//!
+//! `match input { Some(v) => Ok(v), None => Err(e) }` hands the parameter's
+//! own word to the return on the `Some` path: the SDK encodes `Some(v)` as
+//! `v`'s `Val`, so nothing is unwrapped on wasm.
+//!
+//! ```text
+//! if !input.is_some() { r = e }            if !input.is_some() { r = e }
+//! else { r = input }               →       else { p = input.unwrap(); r = p }
+//! return r                                 return r
+//! ```
+//!
+//! Left alone, the merge typed `Result<Vec<u64>, Error>` is handed an
+//! `Option<Vec<u64>>`. The edge now carries the payload, which the emitter
+//! wraps in `Ok(..)` as it wraps any `Ok` payload.
+//!
+//! Why it is exact: on that edge the path has tested the parameter present,
+//! so its word is the encoding of the payload, and the spec says the host
+//! reads the returned word as `T` (or a `Result`'s `Ok` of `T`): the same
+//! word either way. The `unwrap()` is placed in a block that runs only
+//! where the test holds, so it never traps.
+//!
+//! Gates: an entrypoint whose one output is `T` or `Result<T, E>`; the
+//! parameter is declared `Option<T>` with the same `T`, not a type that can
+//! itself encode to `Void`; the edge's block is reached only through the
+//! branch of an `is_some()` test of that parameter that holds (through
+//! `!`); the merges on the way are read by nothing but the return and each
+//! other; every such edge is found in the region tree, or none is
+//! rewritten.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sordec_common::{BlockId, IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
@@ -104,6 +134,10 @@ impl Pass<HighIr> for OptionParamPass {
             for (id, ty) in nones {
                 rewrite(func, id, Expr::Optional { payload: None }, ty, "`Void` returned as an `Option` is `None`");
             }
+            // After the tests above: they are what proves a path present.
+            let payloads = payload_edges(func);
+            let count = count + payloads.len();
+            apply_payloads(func, payloads);
             if count > 0 {
                 result.metrics.increment(M_OPTION, count as i64);
                 result.changed = true;
@@ -255,6 +289,186 @@ fn option_fields(func: &HighFunction, structs: &[StructDef], encoders: &EncoderT
         }
     }
     out
+}
+
+/// An edge into a returned merge that hands over an `Option` parameter
+/// where the path proves it present ("A parameter's payload, returned
+/// where it is present").
+struct PayloadEdge {
+    merge: ValueId,
+    pred: BlockId,
+    /// The value the edge hands over now: the parameter, or a rename.
+    arm: ValueId,
+    param: ValueId,
+    payload: KnownType,
+}
+
+/// Every such edge, or none when one the plan names is not in the region.
+fn payload_edges(func: &HighFunction) -> Vec<PayloadEdge> {
+    let Some(sig) = &func.signature else { return Vec::new() };
+    let [out] = sig.outputs.as_slice() else { return Vec::new() };
+    let known = |t: &IrType| match t {
+        IrType::Known(k) | IrType::Inferred(k) => Some(k.clone()),
+        IrType::Unknown(_) => None,
+    };
+    let declared = match known_of_type_ref(out) {
+        Some(KnownType::Result(ok, _)) => known(&ok),
+        other => other,
+    };
+    let Some(declared) = declared else { return Vec::new() };
+    // `Option<T>` parameters with the declared `T`, which cannot be `Void`.
+    let params: Vec<ValueId> = func
+        .params
+        .iter()
+        .zip(&sig.inputs)
+        .filter(|(_, input)| {
+            matches!(known_of_type_ref(&input.ty), Some(KnownType::Option(inner))
+                if known(&inner).is_some_and(|t| t == declared
+                    && !matches!(t, KnownType::Val | KnownType::Unit | KnownType::Option(_))))
+        })
+        .map(|(p, _)| *p)
+        .collect();
+    if params.is_empty() {
+        return Vec::new();
+    }
+    // The merges the return reads, through merges.
+    let mut merges: Vec<ValueId> = Vec::new();
+    let mut work: Vec<ValueId> = Vec::new();
+    func.region.for_each_node(|node| {
+        if let Region::Return { values } = node
+            && let [one] = values.as_slice()
+        {
+            work.push(resolve_use(func, *one));
+        }
+    });
+    while let Some(m) = work.pop() {
+        let Some(Expr::Phi { incoming }) = func.bindings.get(m).map(|b| &b.expr) else { continue };
+        if incoming.is_empty() || merges.contains(&m) {
+            continue;
+        }
+        merges.push(m);
+        work.extend(incoming.iter().map(|(_, a)| resolve_use(func, *a)));
+    }
+    let chain: HashSet<ValueId> = merges.iter().copied().collect();
+    if merges.iter().any(|m| !super::option_return::read_only_by(func, *m, &chain)) {
+        return Vec::new();
+    }
+    let present = present_at(func, &params);
+    let mut edges = Vec::new();
+    for &merge in &merges {
+        let Some(Expr::Phi { incoming }) = func.bindings.get(merge).map(|b| &b.expr) else { continue };
+        for &(pred, arm) in incoming {
+            let param = resolve_use(func, arm);
+            if present.get(&pred).is_some_and(|ps| ps.contains(&param)) {
+                edges.push(PayloadEdge { merge, pred, arm, param, payload: declared.clone() });
+            }
+        }
+    }
+    // Every edge must be found where it is carried.
+    let expected: HashMap<(ValueId, BlockId), ValueId> = edges.iter().map(|e| ((e.merge, e.pred), e.arm)).collect();
+    let mut found = 0;
+    let mut probe = func.region.clone();
+    super::option_return::retarget(&mut probe, &mut None, &expected, &HashMap::new(), &mut found);
+    if found < edges.len() {
+        return Vec::new();
+    }
+    edges
+}
+
+/// The parameters each scheduled block runs only where present: the
+/// block sits in the branch of an `is_some()` test of it that holds.
+fn present_at(func: &HighFunction, params: &[ValueId]) -> HashMap<BlockId, Vec<ValueId>> {
+    fn walk(
+        func: &HighFunction,
+        region: &Region,
+        facts: &mut Vec<(ValueId, bool)>,
+        params: &[ValueId],
+        out: &mut HashMap<BlockId, Vec<ValueId>>,
+    ) {
+        match region {
+            Region::Basic(b) => {
+                let held: Vec<ValueId> = params
+                    .iter()
+                    .copied()
+                    .filter(|p| facts.iter().any(|(c, holds)| proves_present(func, *c, *holds, *p, 0)))
+                    .collect();
+                out.insert(*b, held);
+            }
+            Region::Sequence(items) => items.iter().for_each(|r| walk(func, r, facts, params, out)),
+            Region::Scope { body, .. } | Region::Loop { body, .. } => walk(func, body, facts, params, out),
+            Region::If { cond, then_region, else_region } => {
+                facts.push((*cond, true));
+                walk(func, then_region, facts, params, out);
+                facts.pop();
+                if let Some(e) = else_region {
+                    facts.push((*cond, false));
+                    walk(func, e, facts, params, out);
+                    facts.pop();
+                }
+            }
+            Region::Switch { arms, default, .. } => {
+                walk(func, default, facts, params, out);
+                for arm in arms {
+                    walk(func, &arm.body, facts, params, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = HashMap::new();
+    walk(func, &func.region, &mut Vec::new(), params, &mut out);
+    out
+}
+
+/// Whether `cond` evaluating to `holds` proves `param` present: it is
+/// `param.is_some()`, or the negation of something that proves it the
+/// other way round.
+fn proves_present(func: &HighFunction, cond: ValueId, holds: bool, param: ValueId, depth: u32) -> bool {
+    if depth > 4 {
+        return false;
+    }
+    match func.bindings.get(resolve_use(func, cond)).map(|b| &b.expr) {
+        Some(Expr::IsSome { value }) => holds && resolve_use(func, *value) == param,
+        Some(Expr::Unary { op: UnaryOp::Not, value }) => proves_present(func, *value, !holds, param, depth + 1),
+        _ => false,
+    }
+}
+
+/// Each edge hands over `param.unwrap()`, built at the end of the block it
+/// leaves.
+fn apply_payloads(func: &mut HighFunction, edges: Vec<PayloadEdge>) {
+    if edges.is_empty() {
+        return;
+    }
+    let mut built: HashMap<(ValueId, BlockId), ValueId> = HashMap::new();
+    let mut expected: HashMap<(ValueId, BlockId), ValueId> = HashMap::new();
+    for e in &edges {
+        let id = ValueId::from_index(func.bindings.len() as u32);
+        func.bindings.push(Binding::new(
+            id,
+            IrType::Inferred(e.payload.clone()),
+            Expr::Unwrap { value: e.param, index: 0, arity: 1 },
+            Provenance::new(
+                PASS_NAME,
+                ProvenanceSource::SdkPattern,
+                "an `Option` parameter handed to the return where it is tested present is its payload: the SDK encodes `Some(v)` as `v`'s `Val`",
+            ),
+        ));
+        if let Some(block) = func.blocks.get_mut(e.pred) {
+            block.bindings.push(id);
+        }
+        if let Some(Binding { expr: Expr::Phi { incoming }, .. }) = func.bindings.get_mut(e.merge) {
+            for (p, v) in incoming.iter_mut() {
+                if *p == e.pred && *v == e.arm {
+                    *v = id;
+                }
+            }
+        }
+        built.insert((e.merge, e.pred), id);
+        expected.insert((e.merge, e.pred), e.arm);
+    }
+    let mut found = 0;
+    super::option_return::retarget(&mut func.region, &mut None, &expected, &built, &mut found);
 }
 
 /// The value `arm` encodes as exactly `payload`: an outlined encode
@@ -520,5 +734,84 @@ mod tests {
         sig.inputs[0].ty = TypeRef::Primitive(PrimitiveType::U32);
         sig.outputs[0] = TypeRef::Primitive(PrimitiveType::U32);
         assert!(!OptionParamPass.run(&mut ir).changed);
+    }
+
+    /// `if !input.is_some() { r = err } else { r = input }; return r`,
+    /// `input: Option<u64>`, declared `-> Result<u64, Error>`. With
+    /// `swapped`, the parameter is handed over on the `None` side instead.
+    fn payload_shape(swapped: bool) -> HighIr {
+        use sordec_ir::HighBlock;
+        let (b0, b1, out) = (BlockId::from_index(0), BlockId::from_index(1), BlockId::from_index(2));
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                            // v0: input
+                Expr::IsSome { value: v(0) },                              // v1
+                Expr::Unary { op: UnaryOp::Not, value: v(1) },             // v2
+                Expr::Literal(Literal::I64((1 << 32) | 3)),                // v3: an error
+                Expr::Phi { incoming: vec![(b0, v(3)), (b1, v(0))] },     // v4: r
+            ],
+            vec![v(0)],
+            vec![1, 2, 3],
+        );
+        f.blocks.push(HighBlock { id: b1, bindings: vec![] });
+        let to_r = |value: ValueId| Region::Transfer { target: out, transfer: vec![(v(4), value)] };
+        let (then_value, else_value) = if swapped { (v(0), v(3)) } else { (v(3), v(0)) };
+        if swapped {
+            f.bindings.get_mut(v(4)).unwrap().expr = Expr::Phi { incoming: vec![(b0, v(0)), (b1, v(3))] };
+        }
+        f.region = Region::Sequence(vec![
+            Region::Scope {
+                out,
+                body: Box::new(Region::Sequence(vec![
+                    Region::Basic(b0),
+                    Region::If {
+                        cond: v(2),
+                        then_region: Box::new(to_r(then_value)),
+                        else_region: Some(Box::new(Region::Sequence(vec![Region::Basic(b1), to_r(else_value)]))),
+                    },
+                ])),
+            },
+            Region::Return { values: vec![v(4)] },
+        ]);
+        f.signature = Some(FunctionSignature {
+            name: "double_wrapped".into(),
+            inputs: vec![FunctionParam {
+                name: "input".into(),
+                ty: TypeRef::Composite(CompositeType::Option(Box::new(TypeRef::Primitive(PrimitiveType::U64)))),
+            }],
+            outputs: vec![TypeRef::Composite(CompositeType::Result(
+                Box::new(TypeRef::Primitive(PrimitiveType::U64)),
+                Box::new(TypeRef::Primitive(PrimitiveType::Error)),
+            ))],
+        });
+        module(vec![f])
+    }
+
+    #[test]
+    fn a_parameter_handed_over_where_present_is_its_payload() {
+        let mut ir = payload_shape(false);
+        assert!(OptionParamPass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        let Expr::Phi { incoming } = &f.bindings.get(v(4)).unwrap().expr else { unreachable!() };
+        let (pred, payload) = incoming[1];
+        assert!(matches!(f.bindings.get(payload).unwrap().expr, Expr::Unwrap { value, index: 0, arity: 1 } if value == v(0)));
+        assert!(f.blocks.get(pred).unwrap().bindings.contains(&payload), "built in the block the edge leaves");
+        let mut carried = false;
+        f.region.for_each_node(|n| {
+            if let Region::Transfer { transfer, .. } = n {
+                carried |= transfer.contains(&(v(4), payload));
+            }
+        });
+        assert!(carried);
+        assert_eq!(incoming[0].1, v(3), "the error arm is left to the Result");
+        assert!(!OptionParamPass.run(&mut ir).changed, "idempotent");
+    }
+
+    #[test]
+    fn a_parameter_handed_over_where_absent_is_left_alone() {
+        let mut ir = payload_shape(true);
+        assert!(!OptionParamPass.run(&mut ir).changed);
+        let Expr::Phi { incoming } = &ir.functions[0].bindings.get(v(4)).unwrap().expr else { unreachable!() };
+        assert_eq!(incoming[0].1, v(0));
     }
 }

@@ -175,6 +175,28 @@
 //! collapse does not see through, whose callers use the encode as the
 //! number — typed as the number, the hole that stands for the encode
 //! happens to compile. That gap is the collapse's, and is left to it.
+//!
+//! ## A returned merge is the declared number
+//!
+//! `let mut sum = 0; for v in input { sum += v } Ok(sum)` returns a loop
+//! merge. The return encode collapses onto it ([`crate::marshalling`]),
+//! leaving a copy typed `u64` by the spec (`Known`). Left to the rounds,
+//! the merge's constant arm — `0i64`, the opcode's word — votes before the
+//! back edge says anything, the merge comes out `i64`, and the sum and the
+//! decoded element it adds follow it: `u64 + i64` in the reconstruction.
+//!
+//! So before the rounds, a merge such a copy reads is that number
+//! (`Known`). Why it is exact: the copy is the merge, the same value, and
+//! the spec says the value returned is that number; a merge has no
+//! operation of its own whose type this could contradict. Its arms keep
+//! theirs — the emitter fits a constant to the merge and casts an arm of
+//! the other sign on its edge, as it does for any merge.
+//!
+//! Gates: an entrypoint (a spec signature); the copy is `Known` as one of
+//! the scalars whose encode packs the value itself (`u64`, `i64`, `u32`,
+//! `i32`), so no widening a collapse folded is read back as the merge's
+//! type; the source is a merge with arms (not a parameter) that nothing
+//! has typed yet.
 
 use std::collections::{HashMap, HashSet};
 
@@ -310,6 +332,7 @@ fn infer_function(
     let mut ev = Evidence { encoded: encoded_values(func, encoders), ..Evidence::default() };
 
     seed_abi(func, &mut types, &mut ev);
+    seed_returned_merges(func, &mut types, &mut ev);
     seed_params(func, sigs, &mut types, &mut ev);
     seed_encoder_params(func, encoders, &mut types, &mut ev);
 
@@ -572,6 +595,29 @@ fn backward_returns(
 /// Back-type each returned value from the signature's return type. The
 /// value that flows out of a function *is* its return type by ABI, so this
 /// is `Inferred` on the (possibly computed) value.
+/// A merge a return encode collapsed onto is the number the spec declares
+/// (`Known`), before any arm votes ("A returned merge is the declared
+/// number").
+fn seed_returned_merges(func: &HighFunction, types: &mut HashMap<ValueId, IrType>, ev: &mut Evidence) {
+    if func.signature.is_none() {
+        return;
+    }
+    for (_, b) in func.bindings.iter() {
+        let Expr::Use(source) = &b.expr else { continue };
+        let IrType::Known(k @ (KnownType::U32 | KnownType::I32 | KnownType::U64 | KnownType::I64)) = &b.ty else {
+            continue;
+        };
+        let merge = matches!(
+            func.bindings.get(*source).map(|s| &s.expr),
+            Some(Expr::Phi { incoming }) if !incoming.is_empty()
+        );
+        let untyped = matches!(types.get(source), None | Some(IrType::Unknown(_)));
+        if merge && untyped {
+            improve(types, ev, *source, IrType::Known(k.clone()));
+        }
+    }
+}
+
 fn seed_returns(
     func: &HighFunction,
     sig: &FunctionSignature,
@@ -2544,6 +2590,54 @@ mod tests {
             Some(IrType::Inferred(KnownType::I64)),
             "nothing else typed: the constant is the evidence"
         );
+    }
+
+    /// `sum = phi [0i64, sum + x]`, returned through a copy typed `copy`:
+    /// what the return encode leaves of `Ok(sum)`.
+    fn returned_sum(copy: KnownType, entrypoint: bool) -> HighFunction {
+        use crate::marshalling::test_support::{func_with, v};
+        let (b0, b1) = (BlockId::from_index(0), BlockId::from_index(1));
+        let mut f = func_with(
+            vec![
+                Expr::Literal(Literal::I64(0)),                                      // v0
+                Expr::Phi { incoming: vec![] },                                      // v1 x
+                Expr::Phi { incoming: vec![(b0, v(0)), (b1, v(3))] },               // v2 sum
+                Expr::Binary { op: BinaryOp::Add, lhs: v(1), rhs: v(2) },          // v3
+                Expr::Use(v(2)),                                                     // v4
+            ],
+            vec![],
+            vec![0, 3, 4],
+        );
+        f.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(KnownType::I64);
+        f.bindings.get_mut(v(4)).unwrap().ty = IrType::Known(copy);
+        if entrypoint {
+            f.signature = Some(FunctionSignature { name: "wrapped".into(), inputs: vec![], outputs: vec![] });
+        }
+        f
+    }
+
+    /// The copy the spec typed names the merge before its constant arm
+    /// votes, and the sum it is stepped by follows.
+    #[test]
+    fn a_returned_merge_is_the_declared_number() {
+        use crate::marshalling::test_support::v;
+        let mut f = returned_sum(KnownType::U64, true);
+        infer_isolated(&mut f);
+        assert_eq!(f.bindings.get(v(2)).unwrap().ty, IrType::Known(KnownType::U64));
+        assert_eq!(f.bindings.get(v(3)).unwrap().ty, IrType::Inferred(KnownType::U64));
+        assert_eq!(f.bindings.get(v(0)).unwrap().ty, IrType::Known(KnownType::I64), "the constant keeps its word");
+    }
+
+    /// No spec, or a copy typed wider than a packed scalar: the merge is
+    /// left to the rounds.
+    #[test]
+    fn a_merge_without_the_spec_s_number_is_left_to_the_rounds() {
+        use crate::marshalling::test_support::v;
+        for (copy, entrypoint) in [(KnownType::U64, false), (KnownType::U128, true)] {
+            let mut f = returned_sum(copy.clone(), entrypoint);
+            infer_isolated(&mut f);
+            assert_ne!(f.bindings.get(v(2)).unwrap().ty, IrType::Known(copy), "{entrypoint}");
+        }
     }
 
     /// `d = val_decode(flag)`, `flag` a parameter typed as the declared

@@ -15,7 +15,9 @@
 //!
 //! 1. **Registry gate.** `contractspecv0` declares at least one
 //!    `#[contracterror]` enum. Without it (stripped builds) nothing is
-//!    named — the same None-is-honest discipline as [`enum_key`].
+//!    named — the same None-is-honest discipline as [`enum_key`]. The one
+//!    exception is below: an entrypoint the spec declares
+//!    `-> Result<T, Error>` names its returned errors itself.
 //! 2. **ABI decode.** The constant is a small `Error` `Val` of
 //!    `ScErrorType::Contract` (host error types are not user variants):
 //!    [`val_abi::decode_contract_error`].
@@ -47,6 +49,14 @@
 //! refuses. `E` a declared error enum: its variant with that code, when it
 //! has one. `E` the SDK's own `Error`: `Error::from_contract_error(code)`.
 //! The emitter then wraps the arm as `Err(..)`, as it does any error.
+//!
+//! That last case needs no declared enum, so gate 1 does not apply to it:
+//! a contract that declares none and returns `Result<T, Error>` still
+//! hands back `Err(Error::from_contract_error(code))` as a constant
+//! `Error` `Val`. Exact for the same reason: the spec names the `Result`
+//! and its `E`, the constant's tag is `Error`'s and no `Ok` type encodes
+//! to that tag, and the spelled error is the same bits. Gate 2 and the
+//! only-returned flow still hold.
 //!
 //! Unlike [`enum_key`], the discriminant here is *witnessed* (it is the
 //! literal's own bits, not a declaration-order inference), so a match is
@@ -86,20 +96,22 @@ impl Pass<HighIr> for ErrorConstPass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
 
-        // Gate 1: no declared error enums (stripped builds, or a contract
-        // with none) → nothing can be named. Stay silent and honest.
-        let has_errors = ir
-            .soroban_facts
-            .as_ref()
-            .is_some_and(|f| !f.types.errors.is_empty());
-        if !has_errors {
+        let Some(facts) = ir.soroban_facts.as_ref() else {
             return result;
-        }
-        let types = &ir.soroban_facts.as_ref().expect("gated above").types;
+        };
+        let types = &facts.types;
+        // Gate 1: no declared error enums (stripped builds, or a contract
+        // with none) → nothing can be named, except by an entrypoint whose
+        // spec returns the SDK's own `Error` ("A returned error the
+        // declared `Result` names"). Stay silent and honest otherwise.
+        let has_errors = !types.errors.is_empty();
 
         // Phase A — read-only scan: plan the rewrites per function.
         let mut planned: HashMap<FuncId, Vec<Rewrite>> = HashMap::new();
         for func in &ir.functions {
+            if !has_errors && !matches!(returned_error_type(func), Some(DeclaredError::Sdk)) {
+                continue;
+            }
             for (id, binding) in func.bindings.iter() {
                 if is_recognized(&binding.expr) {
                     continue; // already a semantic op (idempotency)
@@ -530,6 +542,28 @@ mod tests {
         let mut ir = module(vec![Expr::Literal(Literal::I64(contract_error_val(1)))], &[]);
         let result = ErrorConstPass.run(&mut ir);
         assert!(!result.changed);
+        assert!(matches!(op_at(&ir, 0), Expr::Literal(Literal::I64(_))));
+    }
+
+    #[test]
+    fn without_declared_errors_a_returned_sdk_error_is_still_named() {
+        // No enum declared, but the spec returns `Result<u64, Error>`: the
+        // returned constant is that `Result`'s `Err`.
+        let mut ir = returned_error(sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::Error));
+        ir.soroban_facts.as_mut().unwrap().types.errors.clear();
+        assert!(ErrorConstPass.run(&mut ir).changed);
+        assert!(matches!(
+            op_at(&ir, 0),
+            Expr::Semantic(SemanticOp::Known(KnownOp::MakeError { code: 1, resolved: None }))
+        ));
+    }
+
+    #[test]
+    fn without_declared_errors_an_enum_e_names_nothing() {
+        // `E` a user enum the registry does not hold: nothing names it.
+        let mut ir = returned_error(sordec_ir::TypeRef::UserDefined(sordec_common::TypeId::from_index(1)));
+        ir.soroban_facts.as_mut().unwrap().types.errors.clear();
+        assert!(!ErrorConstPass.run(&mut ir).changed);
         assert!(matches!(op_at(&ir, 0), Expr::Literal(Literal::I64(_))));
     }
 
