@@ -65,6 +65,38 @@
 //! another call refuses the site: the rewrite stops writing that memory,
 //! and a callee reading it would see something else.
 //!
+//! A value read need not sit under its test in two shapes the compiler
+//! makes of `get(&k).unwrap_or(0)`:
+//!
+//! - **A choice on the tag.** `n = select(load(fp+8), 0, load(fp+0))`
+//!   picks the value when the tag says present and a fallback otherwise:
+//!   that is `r.unwrap_or(0)`, and the read goes with it.
+//! - **A read hoisted above its test.** `n = load(fp+8); if tag != 1 {
+//!   .. } else { loop while i != n { .. } }` reads the value early and
+//!   uses it only on the arm the test proves it present on. The read
+//!   becomes `r.unwrap()` and moves to the start of that arm.
+//!
+//! ## Why it is exact
+//!
+//! The choice yields the value exactly when the tag is the present one,
+//! and the fallback otherwise; `unwrap_or` yields the same, and the
+//! fallback reads nothing of the call. The moved read is a pure function
+//! of the call's result, so moving it changes no value; at its new place
+//! the test has proved the value present, so it never traps; and every use
+//! of it is in that arm, after the place it moves to.
+//!
+//! ## Its gates
+//!
+//! - The payload is one value, not the parts of a struct.
+//! - A choice: every use of the read is a `select` whose condition the
+//!   tag decides — one way for the present tag, the other for the absent
+//!   one — taking the read on the present side; the other arm reads
+//!   neither the call nor its slots.
+//! - A hoisted read: no merge reads it, and every use, in a block or in
+//!   the region, is inside the present arm of an `if` on the tag that
+//!   follows the read in a sequence holding both (with nothing but scopes
+//!   between); the arm starts with a block.
+//!
 //! # Gates
 //!
 //! The refusals that keep the two facts the rewrite rests on true.
@@ -94,8 +126,14 @@
 //!   address; reading it as one can only refuse more.
 //! - A copy or fill whose destination overlaps the result writes it: a
 //!   write a later read can see, like a store.
-//! - Inside a callee handed the frame, any bulk operation on that pointer
-//!   makes what the callee touches unknown, so the site is refused.
+//! - Inside a callee handed the frame, a bulk operation on that pointer
+//!   counts the same way, relative to the pointer: its destination is
+//!   written and its second operand read, for its constant length. One
+//!   whose length is not a constant, or whose operand derived from the
+//!   pointer does not resolve to it plus a constant, makes what the callee
+//!   touches unknown, and the site is refused. This is the premise the
+//!   callee's loads and stores are counted under: only addresses built
+//!   from the pointer reach the frame.
 //!
 //! **A read sees all of one write.** A read's nearest write before it,
 //! when that is a store or a bulk operation, must write every byte the
@@ -105,6 +143,28 @@
 //! helper, reusing the slot), the read is taken to see that call's bytes:
 //! what a call writes is known only as a range it may write, so this one
 //! premise is not checked byte for byte.
+//!
+//! # What can read the result
+//!
+//! Only code that can run after the call, while the result's bytes are
+//! still the helper's, can see them: the census of other calls and bulk
+//! memory operations handed the frame (see *Gates*) is limited to that.
+//!
+//! - **What runs after** is read off the region tree: the rest of the
+//!   call's block, the later items of each enclosing sequence control can
+//!   still fall into, and the whole body of each enclosing loop it can go
+//!   round ([`runs_after`]). More than can run, never less.
+//! - **Written over on the straight line.** Once stores that every path
+//!   falling on from the call runs have covered all of the result, nothing
+//!   after them sees the helper's bytes. Counted only until paths merge at
+//!   a scope's end or go round a loop, where the call may run again.
+//! - **Written over before a reader.** A call that reads the result's
+//!   range is allowed when its last write before it, on every path, is a
+//!   store or a bulk copy covering the whole result: it reads that write.
+//!
+//! Why it is exact: memory a read cannot reach, or bytes written over
+//! before it, are bytes whose content it never sees, so the rewrite no
+//! longer writing them changes nothing it computes.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -1065,6 +1125,41 @@ fn rewrite_site(func: &mut HighFunction, plan: &SitePlan, helper: &Helper) {
     for (load, lit) in &plan.consts {
         rewrite(func, *load, Expr::Literal(lit.clone()), None, "a slot the helper always wrote this constant to");
     }
+    // A choice between the value and a fallback, made on the tag, is the
+    // value or the fallback: `unwrap_or`. The read it chose goes with it.
+    for &(select, load, fallback) in &plan.picks {
+        rewrite(
+            func,
+            select,
+            Expr::UnwrapOr { value: plan.call, default: fallback },
+            Some(untyped()),
+            "the value, or the fallback where the call returned none",
+        );
+        rewrite(
+            func,
+            load,
+            Expr::Literal(Literal::Unit),
+            Some(IrType::Known(KnownType::Unit)),
+            "the out-parameter's value, now read through `unwrap_or`",
+        );
+    }
+    // A value read above its test moves to the start of the arm that test
+    // proves it present on, where all its uses are.
+    for &(load, block) in &plan.sinks {
+        if let Some(from) = block_containing(func, load).and_then(|b| func.blocks.get_mut(b)) {
+            from.bindings.retain(|b| *b != load);
+        }
+        if let Some(to) = func.blocks.get_mut(block) {
+            to.bindings.insert(0, load);
+        }
+        if let Some(binding) = func.bindings.get_mut(load) {
+            binding.add_provenance(Provenance::new(
+                PASS_NAME,
+                ProvenanceSource::SdkPattern,
+                "moved from above the test to the arm where the value is proven present",
+            ));
+        }
+    }
 }
 
 /// Whether `value` is read only as the condition of an `if`.
@@ -1286,6 +1381,23 @@ impl Frames<'_> {
                     let (_, o) = canon_addr(func, *addr);
                     extent.writes = Some(cover(extent.writes, Slot { offset: o.checked_add(*offset)?, bytes: width.bytes() }));
                 }
+                // A bulk copy or fill on the pointer, counted as for the
+                // caller; an address operand that does not resolve to the
+                // pointer plus a constant is not located, so nothing is told.
+                Expr::Unknown { op_kind: WasmOpcodeKind::MemoryOp, args, .. }
+                    if args.iter().any(|a| is_address(*a)) =>
+                {
+                    if args.iter().any(|a| is_address(*a) && canon_addr(func, *a).0 != param) {
+                        return None;
+                    }
+                    for (slot, write) in bulk_touches(func, args, param)? {
+                        if write {
+                            extent.writes = Some(cover(extent.writes, slot));
+                        } else {
+                            extent.reads = Some(cover(extent.reads, slot));
+                        }
+                    }
+                }
                 Expr::Call { target, args } => {
                     for (j, arg) in args.iter().enumerate() {
                         if !is_address(*arg) {
@@ -1365,8 +1477,13 @@ fn site(
             }
         }
     }
+    // Only what can run after the call, before the result's bytes are all
+    // written over, can read what it wrote. A call that cannot — in an
+    // earlier loop the call's own loop never returns to, or past the
+    // stores that overwrite the result — sees other bytes.
+    let after = runs_after(func, call, base, range);
     for &id in order {
-        if id == call {
+        if id == call || after.as_ref().is_some_and(|a| !a.contains(&id)) {
             continue;
         }
         // A bulk copy or fill is counted like a call: what it reads and
@@ -1383,7 +1500,12 @@ fn site(
                 "the frame is handed to a call that may read anything"
             });
         };
-        if touched.iter().any(|(slot, write_only)| !write_only && slot.overlaps(range)) {
+        // A reader whose last write before it, on every path, covered
+        // the whole result reads that write's bytes instead.
+        if touched.iter().any(|(slot, write_only)| !write_only && slot.overlaps(range))
+            && !matches!(nearest_writer(frames, func, id, base, range), Ok(Some(w))
+                if w != call && definite_write(func, w, base).is_some_and(|s| holds(s, range)))
+        {
             trace(func, &format!("  call v{} may read the result", id.index()));
             return Err(if bulk { "a bulk copy may read the result" } else { "another call may read the result" });
         }
@@ -1429,12 +1551,28 @@ fn site(
             return Err("a read that is not one of the result's slots");
         }
     }
-    for &(load, _) in &payload_loads {
-        if !guarded(func, load, &tag_loads, helper) {
-            return Err("a value read not proven present");
+    let mut values = Vec::new();
+    let mut picks = Vec::new();
+    let mut sinks = Vec::new();
+    for &(load, index) in &payload_loads {
+        if guarded(func, load, &tag_loads, helper) {
+            values.push((load, index));
+            continue;
         }
+        // The rest need the value as one component, not parts of a struct.
+        let single = helper.payload.len() == 1 && helper.whole.is_none();
+        if single && let Some(found) = choices(func, load, call, &tag_loads, &payload_loads, helper) {
+            picks.extend(found);
+            continue;
+        }
+        if single && let Some(block) = sink_target(func, load, &tag_loads, helper) {
+            values.push((load, index));
+            sinks.push((load, block));
+            continue;
+        }
+        return Err("a value read not proven present");
     }
-    Ok(SitePlan { call, tags: tag_loads, values: payload_loads, consts: const_loads })
+    Ok(SitePlan { call, tags: tag_loads, values, consts: const_loads, picks, sinks })
 }
 
 /// What a qualifying call site reads of the result, for the rewrite.
@@ -1446,6 +1584,338 @@ struct SitePlan {
     values: Vec<(ValueId, usize)>,
     /// Reads of a slot the helper always writes the same constant to.
     consts: Vec<(ValueId, Literal)>,
+    /// Choices between the value and a fallback made on the tag, each with
+    /// the value read it chose and the fallback: `unwrap_or`.
+    picks: Vec<(ValueId, ValueId, ValueId)>,
+    /// Value reads placed above their test, each with the block that
+    /// starts the arm the test proves the value present on: the read moves
+    /// there.
+    sinks: Vec<(ValueId, BlockId)>,
+}
+
+/// The arms and condition of a `select`, recovered or not:
+/// `(if_true, if_false, cond)`.
+fn select_parts(func: &HighFunction, id: ValueId) -> Option<(ValueId, ValueId, ValueId)> {
+    match &func.bindings.get(id)?.expr {
+        Expr::Unknown { op_kind: WasmOpcodeKind::Select, args, .. } if args.len() == 3 => Some((args[0], args[1], args[2])),
+        Expr::Select { cond, if_true, if_false } => Some((*if_true, *if_false, *cond)),
+        _ => None,
+    }
+}
+
+/// Every binding the region tree schedules, by block, and how many times the
+/// region itself reads each value.
+fn uses_of(func: &HighFunction, value: ValueId) -> (Vec<(BlockId, ValueId)>, usize) {
+    let mut users = Vec::new();
+    func.region.for_each_node(|node| {
+        if let Region::Basic(b) = node
+            && let Some(block) = func.blocks.get(*b)
+        {
+            for &id in &block.bindings {
+                let mut reads = false;
+                if let Some(binding) = func.bindings.get(id) {
+                    binding.expr.for_each_value_use(|u| reads |= u == value);
+                }
+                if reads {
+                    users.push((*b, id));
+                }
+            }
+        }
+    });
+    let mut region = 0usize;
+    func.region.for_each_value_use(|u| region += usize::from(u == value));
+    (users, region)
+}
+
+/// Whether a merge (a phi, which no block schedules) reads `value`.
+fn merged(func: &HighFunction, value: ValueId) -> bool {
+    func.bindings.iter().any(|(_, b)| {
+        let mut reads = false;
+        if let Expr::Phi { incoming } = &b.expr {
+            reads = incoming.iter().any(|(_, v)| *v == value);
+        }
+        reads
+    })
+}
+
+/// When every use of the value read `load` is a choice between it and a
+/// fallback, made on the tag and taking the value exactly when the tag says
+/// present: each choice as `(select, load, fallback)`. The fallback reads
+/// nothing of the call.
+fn choices(
+    func: &HighFunction,
+    load: ValueId,
+    call: ValueId,
+    tag_loads: &[ValueId],
+    payload_loads: &[(ValueId, usize)],
+    helper: &Helper,
+) -> Option<Vec<(ValueId, ValueId, ValueId)>> {
+    let (users, region) = uses_of(func, load);
+    if region > 0 || users.is_empty() || merged(func, load) {
+        return None;
+    }
+    let of_call = |v: ValueId| {
+        let v = resolve_use(func, v);
+        v == call || tag_loads.contains(&v) || payload_loads.iter().any(|(l, _)| *l == v)
+    };
+    let mut out = Vec::new();
+    for (_, select) in users {
+        let (t, f, c) = select_parts(func, select)?;
+        let (t, f) = (resolve_use(func, t), resolve_use(func, f));
+        if resolve_use(func, c) == load || (t == load) == (f == load) {
+            return None;
+        }
+        let present = eval(func, c, tag_loads, helper.present, 0)? != 0;
+        let absent = eval(func, c, tag_loads, helper.absent, 0)? != 0;
+        // The value's arm must be the one the present tag selects, and the
+        // absent tag the other.
+        if present == absent || present != (t == load) {
+            return None;
+        }
+        let fallback = if t == load { f } else { t };
+        if of_call(fallback) {
+            return None;
+        }
+        out.push((select, load, fallback));
+    }
+    Some(out)
+}
+
+/// The first block a region runs, when it starts with one.
+fn first_block(region: &Region) -> Option<BlockId> {
+    match region {
+        Region::Basic(b) => Some(*b),
+        Region::Sequence(items) => first_block(items.first()?),
+        _ => None,
+    }
+}
+
+/// Where the value read `load`, placed above its test, can move: the block
+/// that starts the arm of a later `if` whose test on the tag sends the
+/// present tag there, when every use of the read is inside that arm. The
+/// `if` must follow the read in a sequence that holds both, with nothing
+/// but scopes between, so the arm runs after the read on every path.
+fn sink_target(func: &HighFunction, load: ValueId, tag_loads: &[ValueId], helper: &Helper) -> Option<BlockId> {
+    let block = block_containing(func, load)?;
+    let path = path_to(&func.region, block)?;
+    let (users, region_uses) = uses_of(func, load);
+    if merged(func, load) {
+        return None;
+    }
+    let polarity = |cond: ValueId| -> Option<bool> {
+        let p = eval(func, cond, tag_loads, helper.present, 0)?;
+        let a = eval(func, cond, tag_loads, helper.absent, 0)?;
+        ((p != 0) != (a != 0)).then_some(p != 0)
+    };
+    for (region, child) in path.iter().rev() {
+        match region {
+            Region::Sequence(items) => {
+                for item in &items[child + 1..] {
+                    let Region::If { cond, then_region, else_region } = item else {
+                        continue;
+                    };
+                    let Some(present_takes_then) = polarity(*cond) else {
+                        continue;
+                    };
+                    let arm: &Region = if present_takes_then {
+                        then_region
+                    } else {
+                        let Some(e) = else_region else {
+                            continue;
+                        };
+                        e
+                    };
+                    let mut inside: HashSet<BlockId> = HashSet::new();
+                    arm.for_each_node(|n| {
+                        if let Region::Basic(b) = n {
+                            inside.insert(*b);
+                        }
+                    });
+                    let mut arm_uses = 0usize;
+                    arm.for_each_value_use(|u| arm_uses += usize::from(u == load));
+                    if arm_uses == region_uses && users.iter().all(|(b, _)| inside.contains(b)) {
+                        return first_block(arm);
+                    }
+                }
+            }
+            Region::Scope { .. } => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// How control can leave a region: by falling out of its end, or by a
+/// branch to a label outside it. A return or a trap is no way on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Exit {
+    Falls,
+    Break(BlockId),
+    Continue(BlockId),
+}
+
+/// Every way control can leave `region`; `None` for unstructured flow.
+fn exits(region: &Region) -> Option<HashSet<Exit>> {
+    Some(match region {
+        Region::Basic(_) | Region::Transfer { .. } => HashSet::from([Exit::Falls]),
+        Region::Sequence(items) => {
+            let mut out = HashSet::new();
+            for item in items {
+                let e = exits(item)?;
+                let falls = e.contains(&Exit::Falls);
+                out.extend(e.into_iter().filter(|x| *x != Exit::Falls));
+                if !falls {
+                    return Some(out);
+                }
+            }
+            out.insert(Exit::Falls);
+            out
+        }
+        Region::Scope { out, body } => {
+            let mut e = exits(body)?;
+            if e.remove(&Exit::Break(*out)) {
+                e.insert(Exit::Falls);
+            }
+            e
+        }
+        Region::If { then_region, else_region, .. } => {
+            let mut e = exits(then_region)?;
+            match else_region {
+                Some(r) => e.extend(exits(r)?),
+                None => {
+                    e.insert(Exit::Falls);
+                }
+            }
+            e
+        }
+        Region::Switch { arms, default, .. } => {
+            let mut e = exits(default)?;
+            for arm in arms {
+                e.extend(exits(&arm.body)?);
+            }
+            e
+        }
+        // Going round stays inside. Falling off the body's end goes round
+        // too, and is kept as a way out as well: more ways out only ever
+        // mean more code counted as running after.
+        Region::Loop { header, body, .. } => {
+            let mut e = exits(body)?;
+            e.remove(&Exit::Continue(*header));
+            e
+        }
+        Region::Break { target, .. } => HashSet::from([Exit::Break(*target)]),
+        Region::Continue { target, .. } => HashSet::from([Exit::Continue(*target)]),
+        Region::Return { .. } | Region::Unreachable | Region::Panic { .. } => HashSet::new(),
+        Region::Unstructured { .. } => return None,
+    })
+}
+
+/// Whether `written` covers every byte of `range`.
+fn covers(written: &[Slot], range: Slot) -> bool {
+    let mut slots = written.to_vec();
+    slots.sort();
+    let mut reached = range.offset;
+    for s in slots {
+        if s.offset <= reached {
+            reached = reached.max(s.offset + s.bytes);
+        }
+    }
+    reached >= range.offset + range.bytes
+}
+
+/// The bindings that may run after `call` in one run of the function, as the
+/// region tree tells it, before `range` at `base` is all written over: what
+/// follows the call in its block, then, climbing out, each later item of a
+/// sequence control can still fall into, and the whole body of a loop it can
+/// go round. More than can run, never less; `None` when the tree cannot
+/// tell.
+///
+/// The writing-over only counts on the straight line from the call — blocks
+/// every path that falls on from the call runs, in order. Once paths merge
+/// at a scope's end, or go round a loop (where the call itself may run
+/// again), it stops counting.
+fn runs_after(func: &HighFunction, call: ValueId, base: ValueId, range: Slot) -> Option<HashSet<ValueId>> {
+    let block = block_containing(func, call)?;
+    let path = path_to(&func.region, block)?;
+    let bindings = &func.blocks.get(block)?.bindings;
+    let at = bindings.iter().position(|b| *b == call)?;
+    let mut after: HashSet<ValueId> = HashSet::new();
+    let mut written: Vec<Slot> = Vec::new();
+    // Walk one straight-line block, stopping once the range is written over.
+    let mut walk = |ids: &[ValueId], after: &mut HashSet<ValueId>| -> bool {
+        for &id in ids {
+            after.insert(id);
+            if let Some(slot) = definite_write(func, id, base) {
+                written.push(slot);
+                if covers(&written, range) {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    let add = |region: &Region, after: &mut HashSet<ValueId>| {
+        region.for_each_node(|n| {
+            if let Region::Basic(b) = n
+                && let Some(block) = func.blocks.get(*b)
+            {
+                after.extend(block.bindings.iter().copied());
+            }
+        });
+    };
+    let mut straight = true;
+    let mut pending: HashSet<Exit> = HashSet::new();
+    if !walk(&bindings[at + 1..], &mut after) {
+        pending.insert(Exit::Falls);
+    }
+    for (region, child) in path.iter().rev() {
+        match region {
+            Region::Sequence(items) if pending.remove(&Exit::Falls) => {
+                let mut falls = true;
+                for item in &items[child + 1..] {
+                    if straight
+                        && let Region::Basic(b) = item
+                        && let Some(block) = func.blocks.get(*b)
+                    {
+                        if walk(&block.bindings, &mut after) {
+                            falls = false;
+                            break;
+                        }
+                        continue;
+                    }
+                    add(item, &mut after);
+                    let e = exits(item)?;
+                    falls = e.contains(&Exit::Falls);
+                    pending.extend(e.into_iter().filter(|x| *x != Exit::Falls));
+                    if !falls {
+                        break;
+                    }
+                }
+                if falls {
+                    pending.insert(Exit::Falls);
+                }
+            }
+            Region::Scope { out, .. } => {
+                if pending.remove(&Exit::Break(*out)) {
+                    pending.insert(Exit::Falls);
+                    straight = false;
+                }
+            }
+            Region::Loop { header, body, .. } => {
+                let continued = pending.remove(&Exit::Continue(*header));
+                if continued || pending.contains(&Exit::Falls) {
+                    add(body, &mut after);
+                    let mut e = exits(body)?;
+                    e.remove(&Exit::Continue(*header));
+                    pending.extend(e);
+                    straight = false;
+                }
+            }
+            Region::Unstructured { .. } => return None,
+            _ => {}
+        }
+    }
+    Some(after)
 }
 
 /// Whether `binding` writes memory at `base` that may overlap `range`: a
@@ -1892,8 +2362,178 @@ mod tests {
     }
 
     #[test]
-    fn a_value_read_before_the_test_is_refused() {
-        assert_eq!(site_of(caller(true)), Err("a value read not proven present"));
+    fn a_value_read_before_the_test_moves_under_it() {
+        // Read in the entry block, used only on the arm the test proves it
+        // present on: it can move there.
+        assert_eq!(site_of(caller(true)), Ok(()));
+        let mut ir = module(vec![caller(true), helper(false)]);
+        assert!(OptionalOutParamPass.run(&mut ir).changed);
+        let c = &ir.functions[0];
+        assert!(matches!(c.bindings.get(v(5)).unwrap().expr, Expr::Unwrap { value, .. } if value == v(2)));
+        assert_eq!(block_containing(c, v(5)), Some(bb(1)), "the unwrap sits under the test");
+    }
+
+    /// `caller(true)`, but the early read is also returned after the
+    /// branch, where nothing proves it present.
+    fn caller_escaping() -> HighFunction {
+        let mut f = caller(true);
+        f.region = Region::Sequence(vec![
+            Region::Basic(bb(0)),
+            Region::If {
+                cond: v(4),
+                then_region: Box::new(Region::Sequence(vec![
+                    Region::Basic(bb(1)),
+                    Region::Return { values: vec![v(5)] },
+                ])),
+                else_region: None,
+            },
+            Region::Return { values: vec![v(5)] },
+        ]);
+        f
+    }
+
+    #[test]
+    fn a_value_read_used_outside_the_present_arm_is_refused() {
+        assert_eq!(site_of(caller_escaping()), Err("a value read not proven present"));
+    }
+
+    /// func_0: `return select(fallback, load(fp+8), load(fp+0))` — the
+    /// value when the tag is `0` (present), the fallback otherwise.
+    /// `swapped` puts the value on the absent side instead.
+    fn caller_choice(swapped: bool) -> HighFunction {
+        let (t, f) = if swapped { (4, 5) } else { (5, 4) };
+        let exprs = vec![
+            Expr::Phi { incoming: vec![] },                                         // v0 frame
+            Expr::Phi { incoming: vec![] },                                         // v1 x
+            Expr::Call { target: FuncId::from_index(1), args: vec![v(0), v(1)] }, // v2
+            load(0, 0, MemWidth::W8),                                               // v3 tag
+            load(0, 8, MemWidth::W8),                                               // v4 the value
+            Expr::Literal(Literal::I64(7)),                                         // v5 fallback
+            Expr::Unknown {
+                op_kind: WasmOpcodeKind::Select,
+                args: vec![v(t), v(f), v(3)],
+                reason: UnknownReason::InsufficientEvidence,
+            }, // v6
+        ];
+        func(
+            0,
+            exprs,
+            vec![1],
+            vec![vec![2, 3, 4, 5, 6]],
+            Region::Sequence(vec![Region::Basic(bb(0)), Region::Return { values: vec![v(6)] }]),
+        )
+    }
+
+    #[test]
+    fn a_choice_between_the_value_and_a_fallback_on_the_tag_is_unwrap_or() {
+        let mut ir = module(vec![caller_choice(false), helper(false)]);
+        assert!(OptionalOutParamPass.run(&mut ir).changed);
+        let c = &ir.functions[0];
+        assert!(
+            matches!(c.bindings.get(v(6)).unwrap().expr, Expr::UnwrapOr { value, default } if value == v(2) && default == v(5)),
+            "the select is `unwrap_or(fallback)`"
+        );
+        assert!(matches!(c.bindings.get(v(4)).unwrap().expr, Expr::Literal(Literal::Unit)), "the read goes with it");
+    }
+
+    #[test]
+    fn a_choice_taking_the_value_when_the_tag_says_absent_is_refused() {
+        assert_eq!(site_of(caller_choice(true)), Err("a value read not proven present"));
+    }
+
+    #[test]
+    fn what_runs_after_a_call_leaves_out_an_earlier_loop() {
+        // Loop A (v0) runs and is left; v1; then loop B holds the call v2
+        // and v4 after it, and is left only by returning.
+        let exprs = vec![
+            Expr::Literal(Literal::I32(0)),     // v0 in loop A
+            Expr::Literal(Literal::I32(1)),     // v1 between
+            Expr::Literal(Literal::I32(2)),     // v2 the call
+            Expr::Literal(Literal::Bool(true)), // v3 a condition
+            Expr::Literal(Literal::I32(4)),     // v4 after the call
+        ];
+        let f = func(
+            0,
+            exprs,
+            vec![],
+            vec![vec![0], vec![1], vec![2, 4]],
+            Region::Sequence(vec![
+                Region::Scope {
+                    out: bb(1),
+                    body: Box::new(Region::Loop {
+                        header: bb(0),
+                        body: Box::new(Region::Sequence(vec![
+                            Region::Basic(bb(0)),
+                            Region::If {
+                                cond: v(3),
+                                then_region: Box::new(Region::Break { target: bb(1), transfer: vec![] }),
+                                else_region: None,
+                            },
+                            Region::Continue { target: bb(0), transfer: vec![] },
+                        ])),
+                        kind: sordec_ir::LoopKind::Unclassified,
+                    }),
+                },
+                Region::Basic(bb(1)),
+                Region::Loop {
+                    header: bb(2),
+                    body: Box::new(Region::Sequence(vec![
+                        Region::Basic(bb(2)),
+                        Region::If {
+                            cond: v(3),
+                            then_region: Box::new(Region::Return { values: vec![] }),
+                            else_region: None,
+                        },
+                        Region::Continue { target: bb(2), transfer: vec![] },
+                    ])),
+                    kind: sordec_ir::LoopKind::Unclassified,
+                },
+            ]),
+        );
+        let after = runs_after(&f, v(2), v(3), Slot { offset: 0, bytes: 8 }).expect("structured");
+        assert_eq!(after, HashSet::from([v(2), v(4)]), "its own loop goes round; the earlier one never runs again");
+    }
+
+    #[test]
+    fn nothing_after_the_result_is_written_over_can_read_it() {
+        let exprs = vec![
+            Expr::Phi { incoming: vec![] },  // v0 frame
+            Expr::Literal(Literal::I32(1)),  // v1 the call
+            store(0, 5, 0),                  // v2 writes all 8 bytes
+            Expr::Literal(Literal::I32(3)),  // v3 after that
+            Expr::Literal(Literal::I32(4)),  // v4 a later block
+            Expr::Literal(Literal::I64(0)),  // v5
+        ];
+        let f = func(
+            0,
+            exprs,
+            vec![0],
+            vec![vec![1, 2, 3], vec![4]],
+            Region::Sequence(vec![Region::Basic(bb(0)), Region::Basic(bb(1))]),
+        );
+        assert_eq!(runs_after(&f, v(1), v(0), Slot { offset: 0, bytes: 8 }), Some(HashSet::from([v(2)])));
+        // A wider result is not covered by the one store: everything runs.
+        assert_eq!(
+            runs_after(&f, v(1), v(0), Slot { offset: 0, bytes: 16 }),
+            Some(HashSet::from([v(2), v(3), v(4)]))
+        );
+    }
+
+    #[test]
+    fn a_bulk_copy_touches_its_destination_and_its_source() {
+        let exprs = vec![
+            Expr::Phi { incoming: vec![] },                                              // v0 frame
+            Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(2) },                    // v1 fp+16
+            Expr::Literal(Literal::I32(16)),                                             // v2
+            Expr::Literal(Literal::I32(32)),                                             // v3 length
+            Expr::Phi { incoming: vec![] },                                              // v4 a length not known
+        ];
+        let f = func(0, exprs, vec![0], vec![vec![1]], Region::Basic(bb(0)));
+        assert_eq!(
+            bulk_touches(&f, &[v(1), v(0), v(3)], v(0)),
+            Some(vec![(Slot { offset: 16, bytes: 32 }, true), (Slot { offset: 0, bytes: 32 }, false)])
+        );
+        assert_eq!(bulk_touches(&f, &[v(1), v(0), v(4)], v(0)), None, "a length not known touches anything");
     }
 
     #[test]
@@ -1939,8 +2579,9 @@ mod tests {
     #[test]
     fn one_refused_site_keeps_the_helper_as_it_is() {
         // The same helper, called once properly and once with the value
-        // read before the test: the signature cannot change for one caller.
-        let mut early = caller(true);
+        // read where nothing proves it present: the signature cannot change
+        // for one caller.
+        let mut early = caller_escaping();
         early.id = FuncId::from_index(2);
         let mut ir = module(vec![caller(false), helper(false), early]);
         assert!(!OptionalOutParamPass.run(&mut ir).changed);
@@ -2007,10 +2648,26 @@ mod tests {
         let call = || caller_then(vec![Expr::Call { target: FuncId::from_index(2), args: vec![v(0)] }]);
         assert_eq!(
             plan_in(vec![call(), helper(false), callee(0)]),
-            Err("the frame is handed to a call that may read anything"),
-            "copying from its parameter, it may read the result"
+            Err("another call may read the result"),
+            "copying from its parameter, it reads the result"
         );
         assert_eq!(plan_in(vec![call(), helper(false), callee(1)]), Ok((1, 1)), "copying elsewhere, it touches nothing");
+        // func_2(p) { memory.copy(p + 64, src, 16) }: it writes beside the
+        // result and reads nothing of the frame.
+        let beside = func(
+            2,
+            vec![opaque(), opaque(), i32c(16), i32c(64), Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(3) }, bulk(4, 1, 2)],
+            vec![0],
+            vec![vec![2, 3, 4, 5]],
+            Region::Basic(bb(0)),
+        );
+        assert_eq!(plan_in(vec![call(), helper(false), beside]), Ok((1, 1)));
+        // func_2(p) { memory.copy(p, src, n) } with `n` not known: anything.
+        let unknown = func(2, vec![opaque(), opaque(), opaque(), bulk(0, 1, 2)], vec![0], vec![vec![3]], Region::Basic(bb(0)));
+        assert_eq!(
+            plan_in(vec![call(), helper(false), unknown]),
+            Err("the frame is handed to a call that may read anything")
+        );
     }
 
     fn raw_call_indirect(args: Vec<ValueId>) -> Expr {
