@@ -128,18 +128,63 @@
 //! matching on it — and without a type the hole's `let` falls back to `()`,
 //! which no cast or mask accepts. Only an enum the contract declares with
 //! integer discriminants: a payload union or a struct is no small `Val`.
+//!
+//! ## An encoded number is not the number
+//!
+//! `Val` is the top of the lattice, and a named type refines it
+//! ([`refines_val`]): an `Address` *is* its `Val`, so a host read used as
+//! an `Address` is one. That is true of an object handle and false of an
+//! encoded small scalar. The bits of `val_encode<u64>(x)` are
+//! `x << 8 | U64Small`, not `x`; an `obj_from_u64(x)` is a handle, not
+//! `x`. Refined anyway, the helper rustc outlines the `u64` encode into
+//! was declared to return the `u64` it was given while both its arms are
+//! `Val`s, and every caller handing that "number" on mismatched.
+//!
+//! So for a helper recognised as only encoding its argument
+//! ([`EncoderTable`]):
+//!
+//! - what it returns in an encoded component — the merge of the encode's
+//!   two forms, and the forms themselves — and that component wherever
+//!   the helper is called are `Val`s, and no evidence makes them the
+//!   number ([`encoded_values`]);
+//! - that component is a `Val` in the signature table, whatever its
+//!   callers do with it;
+//! - the parameter it encodes is the number (`Known`), as an inline
+//!   encode's operand is ([`semantic_arg_types`]): the helper hands it
+//!   unchanged to the encode, whose ABI says what it is. A caller holding
+//!   the raw 64-bit word passes it with the sign cast the emitter already
+//!   writes for a word of the other sign.
+//!
+//! Why it is exact: the first two only decline evidence — they never name
+//! a type the value does not have, and every value they cover is an encode
+//! of the argument on every path, which the recogniser's gates prove. The
+//! parameter pin is the encode's own operand type, carried through a
+//! helper that does nothing else.
+//!
+//! Gates: only a recognised encoder's encoded components; an object handle
+//! is never one and stays refinable. The parameter pin only for the
+//! scalars whose small form packs the value itself (`u64`, `i64`, `u32`,
+//! `i32`).
+//!
+//! Not every encode: an inline `val_encode` that a helper returns of a
+//! value it loaded is the same fact, but covering it was measured to add
+//! an error to five reconstructions. Each is a helper chain the encode
+//! collapse does not see through, whose callers use the encode as the
+//! number — typed as the number, the hole that stands for the encode
+//! happens to compile. That gap is the collapse's, and is left to it.
 
 use std::collections::{HashMap, HashSet};
 
 use sordec_common::{FuncId, Provenance, ProvenanceSource, TypeId, ValueId};
 use sordec_ir::{
     BinaryOp, CompositeType, CryptoOpKind, Expr, FunctionSignature, HighFunction, HighIr, IrType, KnownOp,
-    KnownType, Literal, PrimitiveType, SemanticOp, StructDef, TypeRef, UnaryOp, ValObjectKind,
+    KnownType, Literal, PrimitiveType, Region, SemanticOp, StructDef, TypeRef, UnaryOp, ValObjectKind,
     WasmOpcodeKind,
 };
 
 use crate::dataflow::{resolve_use, HighUseIndex};
 use crate::effects::expr_effects;
+use crate::marshalling::encode_helper::EncoderTable;
 use crate::metrics_catalog as mc;
 use crate::pass::{Pass, PassResult};
 
@@ -174,6 +219,9 @@ impl Pass<HighIr> for TypeInferPass {
         // produced. Both ascend, so this settles; see the module docs.
         let seed = seed_signatures(ir);
         let mut sigs = seed.clone();
+        // Which helpers only encode their argument. Read from the shape of
+        // each body, which inference does not change, so built once.
+        let encoders = EncoderTable::build(ir);
         let mut disagreements: u64 = 0;
         let structs: Vec<StructDef> =
             ir.soroban_facts.as_ref().map(|f| f.types.structs.clone()).unwrap_or_default();
@@ -197,11 +245,11 @@ impl Pass<HighIr> for TypeInferPass {
                 disagreements = 0;
                 for func in &mut ir.functions {
                     let (func_changed, func_disagreements) =
-                        infer_function(func, &sigs, catalog, &structs, &int_enums, awaiting_callers);
+                        infer_function(func, &sigs, catalog, &structs, &int_enums, awaiting_callers, &encoders);
                     round |= func_changed;
                     disagreements += func_disagreements;
                 }
-                let next = recompute_signatures(ir, &seed);
+                let next = recompute_signatures(ir, &seed, &encoders);
                 if next != sigs {
                     sigs = next;
                     round = true;
@@ -239,7 +287,8 @@ impl Pass<HighIr> for TypeInferPass {
 /// improvements back with `TypePropagation` provenance. `catalog` lets the
 /// host catalog's operand kinds speak ([`crypto_object_args`]); `structs`
 /// are the contract's declared structs, whose literals type their fields;
-/// `int_enums` its enums with integer discriminants.
+/// `int_enums` its enums with integer discriminants; `encoders` the
+/// helpers that only encode their argument.
 fn infer_function(
     func: &mut HighFunction,
     sigs: &SigTable,
@@ -247,15 +296,19 @@ fn infer_function(
     structs: &[StructDef],
     int_enums: &HashSet<TypeId>,
     awaiting_callers: bool,
+    encoders: &EncoderTable,
 ) -> (bool, u64) {
     let mut types: HashMap<ValueId, IrType> =
         func.bindings.iter().map(|(id, b)| (id, b.ty.clone())).collect();
     // Structure does not change during inference, so this is built once.
     let uses = HighUseIndex::build(func);
-    let mut ev = Evidence::default();
+    // An encoder helper's encoded components stay `Val` whatever later
+    // evidence says ("An encoded number is not the number").
+    let mut ev = Evidence { encoded: encoded_values(func, encoders), ..Evidence::default() };
 
     seed_abi(func, &mut types, &mut ev);
     seed_params(func, sigs, &mut types, &mut ev);
+    seed_encoder_params(func, encoders, &mut types, &mut ev);
 
     for _ in 0..MAX_ROUNDS {
         let mut round_changed = false;
@@ -321,6 +374,66 @@ fn infer_function(
         }
     }
     (changed, ev.disagreements)
+}
+
+/// The bindings that hold what a recognised encoding helper
+/// ([`EncoderTable`]) returns the encode of its argument in: the call's
+/// component where the helper is called, a copy of it, and, inside the
+/// helper, each value returned in that component with the merges and
+/// encodes it is made of — which the helper's recognition proved are
+/// encodes of the argument and nothing else.
+fn encoded_values(func: &HighFunction, encoders: &EncoderTable) -> HashSet<ValueId> {
+    let mut out: HashSet<ValueId> =
+        func.bindings.iter().map(|(id, _)| id).filter(|id| encoders.encoded_by_call(func, *id).is_some()).collect();
+    let Some(slots) = encoders.slots(func.id) else {
+        return out;
+    };
+    let mut work: Vec<ValueId> = Vec::new();
+    func.region.for_each_node(|node| {
+        if let Region::Return { values } = node {
+            for (value, slot) in values.iter().zip(slots) {
+                if slot.is_some() {
+                    work.push(*value);
+                }
+            }
+        }
+    });
+    while let Some(v) = work.pop() {
+        if !out.insert(v) {
+            continue;
+        }
+        match func.bindings.get(v).map(|b| &b.expr) {
+            Some(Expr::Phi { incoming }) => work.extend(incoming.iter().map(|(_, a)| *a)),
+            Some(Expr::Use(source)) => work.push(*source),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// An encoding helper's parameter is the number it encodes (`Known`), as
+/// the operand of an inline encode is ([`semantic_arg_types`]): the helper
+/// hands it unchanged to that encode on every path, so the encode's ABI
+/// says what it is. Only the scalars whose small form packs the value
+/// itself; a wide number's small form packs only a limb, and a timepoint's
+/// two forms disagree about what their operand is called.
+fn seed_encoder_params(
+    func: &HighFunction,
+    encoders: &EncoderTable,
+    types: &mut HashMap<ValueId, IrType>,
+    ev: &mut Evidence,
+) {
+    let Some(slots) = encoders.slots(func.id) else {
+        return;
+    };
+    for (index, ty) in slots.iter().flatten() {
+        if !matches!(ty, KnownType::U64 | KnownType::I64 | KnownType::U32 | KnownType::I32) {
+            continue;
+        }
+        if let Some(param) = func.params.get(*index) {
+            improve(types, ev, *param, IrType::Known(ty.clone()));
+        }
+    }
 }
 
 /// Seed the entry parameters and returned values from the `contractspecv0`
@@ -1464,7 +1577,7 @@ fn is_call(func: &HighFunction, v: ValueId) -> bool {
 /// Returns are witnessed by the function's own return sites; parameters by
 /// every call site in the module that names it. Functions carrying a
 /// `contractspecv0` signature keep the seeded ABI types untouched.
-fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
+fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable) -> SigTable {
     let mut table = seed.clone();
     let used_as = result_uses(ir, &table);
 
@@ -1519,6 +1632,17 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable) -> SigTable {
         if let Some(used) = used_as.get(&func.id) {
             for (slot, witness) in slots.iter_mut().zip(used) {
                 *slot = std::mem::replace(slot, Slot::Bottom).join(witness.clone());
+            }
+        }
+        // A component a helper returns the encode of its argument in, on
+        // every path, is that encode: a `Val`, whatever a caller does with
+        // it. A caller treating it as the number is the mistake, not
+        // evidence ("An encoded number is not the number").
+        if let Some(encoded) = encoders.slots(func.id) {
+            for (slot, encode) in slots.iter_mut().zip(encoded) {
+                if encode.is_some() {
+                    *slot = Slot::Agreed(KnownType::Val);
+                }
             }
         }
         entry.returns = slots;
@@ -1763,6 +1887,9 @@ struct Evidence {
     /// How many times inter-procedural evidence disagreed at equal rank,
     /// for the `TYPES_EVIDENCE_DISAGREEMENTS` metric.
     disagreements: u64,
+    /// Ids whose value is a small scalar's encoding ([`encoded_values`]):
+    /// a `Val`, which no evidence refines to the number it carries.
+    encoded: HashSet<ValueId>,
 }
 
 /// Raise `types[id]` to `cand` iff `cand` is strictly higher certainty.
@@ -1865,6 +1992,11 @@ fn improve(
 ) -> bool {
     // A conflicted id is a terminal `Unknown`: never resurrect a type for it.
     if ev.conflicted.contains(&id) {
+        return false;
+    }
+    // An encoded number is the `Val`, never the number: its bits are the
+    // payload shifted past a tag ("An encoded number is not the number").
+    if ev.encoded.contains(&id) && base_of(Some(&cand)) != Some(KnownType::Val) {
         return false;
     }
     let cand_rank = rank(&cand);
@@ -2133,7 +2265,7 @@ mod tests {
     /// Run only the intra-procedural half: no inter-procedural evidence, so
     /// a single function can be tested without building a module around it.
     fn infer_isolated(func: &mut HighFunction) -> bool {
-        infer_function(func, &SigTable::new(), true, &[], &HashSet::new(), false).0
+        infer_function(func, &SigTable::new(), true, &[], &HashSet::new(), false, &EncoderTable::default()).0
     }
 
     // ---- lattice ----
@@ -2420,7 +2552,7 @@ mod tests {
     fn a_decoded_integer_enum_is_its_u32_discriminant() {
         use crate::marshalling::test_support::v;
         let mut f = decoded_flag();
-        infer_function(&mut f, &SigTable::new(), true, &[], &HashSet::from([TypeId::new(5)]), false);
+        infer_function(&mut f, &SigTable::new(), true, &[], &HashSet::from([TypeId::new(5)]), false, &EncoderTable::default());
         assert_eq!(f.bindings.get(v(1)).unwrap().ty, IrType::Inferred(KnownType::U32));
     }
 
@@ -2804,6 +2936,119 @@ mod tests {
         // Neither end of the lattice yields a type to apply.
         assert_eq!(Slot::Bottom.to_ir(Certainty::Inferred), None);
         assert_eq!(Slot::Conflict.to_ir(Certainty::Inferred), None);
+    }
+
+    /// The outlined `u64` encode, as function `id`:
+    /// `r = phi [obj_from_u64(x), val_encode<u64>(x)]; return (0, r)`.
+    fn u64_encoder(id: u32) -> HighFunction {
+        let v = ValueId::from_index;
+        let mut f = func_at(
+            id,
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0: x
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValObject {
+                    kind: ValObjectKind::ObjFromU64,
+                    args: vec![v(0)],
+                })), // v1
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty: KnownType::U64, value: v(0) })), // v2
+                Expr::Phi { incoming: vec![(BlockId::from_index(0), v(1)), (BlockId::from_index(1), v(2))] }, // v3
+                Expr::Literal(Literal::I64(0)), // v4
+            ],
+            vec![v(0)],
+            vec![1, 2, 4],
+            vec![vec![v(4), v(3)]],
+        );
+        f.region =
+            Region::Sequence(vec![Region::Basic(BlockId::from_index(0)), Region::Return { values: vec![v(4), v(3)] }]);
+        f
+    }
+
+    /// A caller comparing the encoder's component with a `u64` is not
+    /// evidence that the component is one: it stays a `Val`, and so does
+    /// the merge the helper returns it from.
+    #[test]
+    fn an_encoded_number_is_not_refined_to_the_number() {
+        let v = ValueId::from_index;
+        // fn0(y) { t = fn1(y); return 5u64 == t.1 }
+        let caller = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },                                 // v0: y
+                Expr::Call { target: FuncId::from_index(1), args: vec![v(0)] }, // v1
+                Expr::Project { value: v(1), index: 1 },                        // v2
+                Expr::Literal(Literal::U64(5)),                                 // v3
+                Expr::Binary { op: BinaryOp::Eq, lhs: v(3), rhs: v(2) },        // v4
+            ],
+            vec![v(0)],
+            vec![1, 2, 3, 4],
+            vec![vec![v(4)]],
+        );
+        let mut ir = crate::marshalling::test_support::module(vec![caller, u64_encoder(1)]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 2))), Some(KnownType::Val), "the component is the encode");
+        assert_eq!(base_of(Some(&ty_of(&ir, 1, 3))), Some(KnownType::Val), "the helper returns a Val");
+        assert_eq!(ty_of(&ir, 1, 0), IrType::Known(KnownType::U64), "and encodes a u64");
+    }
+
+    /// A wrapper that only hands its parameter to the encoder takes the
+    /// encoded type for it, though its caller holds a raw 64-bit word.
+    #[test]
+    fn a_wrapper_of_the_encoder_takes_the_number_it_encodes() {
+        let v = ValueId::from_index;
+        // fn2(p) { t = fn1(p); return (0, t.1) }
+        let mut wrapper = func_at(
+            2,
+            vec![
+                Expr::Phi { incoming: vec![] },                                 // v0: p
+                Expr::Call { target: FuncId::from_index(1), args: vec![v(0)] }, // v1
+                Expr::Project { value: v(1), index: 1 },                        // v2
+                Expr::Literal(Literal::I64(0)),                                 // v3
+            ],
+            vec![v(0)],
+            vec![1, 2, 3],
+            vec![vec![v(3), v(2)]],
+        );
+        wrapper.region =
+            Region::Sequence(vec![Region::Basic(BlockId::from_index(0)), Region::Return { values: vec![v(3), v(2)] }]);
+        // fn0(w: i64) { fn2(w) }
+        let mut caller = func_at(
+            0,
+            vec![Expr::Phi { incoming: vec![] }, Expr::Call { target: FuncId::from_index(2), args: vec![v(0)] }],
+            vec![v(0)],
+            vec![1],
+            vec![],
+        );
+        caller.bindings.get_mut(v(0)).unwrap().ty = IrType::Inferred(KnownType::I64);
+        let mut ir = crate::marshalling::test_support::module(vec![caller, u64_encoder(1), wrapper]);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 2, 0), IrType::Known(KnownType::U64));
+        assert_eq!(base_of(Some(&ty_of(&ir, 2, 2))), Some(KnownType::Val));
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Inferred(KnownType::I64), "the caller's word is cast, not retyped");
+    }
+
+    /// Inside the encoder, what it returns in its encoded component and the
+    /// encodes that merge is made of; not its parameter, nor the status it
+    /// returns beside them. An encode in a function that is not such a
+    /// helper is left to the rules that type it today.
+    #[test]
+    fn the_encoder_s_returned_encodes_are_the_encoded_values() {
+        let v = ValueId::from_index;
+        let ir = crate::marshalling::test_support::module(vec![u64_encoder(1)]);
+        let encoders = EncoderTable::build(&ir);
+        let encoded = encoded_values(&ir.functions[0], &encoders);
+        for id in [1, 2, 3] {
+            assert!(encoded.contains(&v(id)), "v{id}");
+        }
+        for id in [0, 4] {
+            assert!(!encoded.contains(&v(id)), "v{id}");
+        }
+        // The same body returning a loaded word instead of its parameter's
+        // encode is not a recognised encoder: nothing in it is covered.
+        let mut other = u64_encoder(1);
+        other.bindings.get_mut(v(0)).unwrap().expr = Expr::GlobalGet { index: 0 };
+        other.params = vec![];
+        let ir = crate::marshalling::test_support::module(vec![other]);
+        assert!(encoded_values(&ir.functions[0], &EncoderTable::build(&ir)).is_empty());
     }
 
     #[test]
