@@ -578,3 +578,21 @@ itself per path; the converter's error for the code read back is exactly that
 code's contract error (its two constants cancel). It follows the shared rule that a
 helper a function table may reach keeps its signature. Only privacy_pools changed
 (6 → 3); scores as for 8631f8a.
+
+## 2026-10-30 — commit 7f7e7c3 (vec searches, numbers encoded through a reference, a tag-checked unpack)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | **25/25** | **0** | 3,879 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 4,214 |
+| third-party | 2 | 1/2 | 11 | 765 |
+| SDK 26 test contracts | 39 | 37/39 | 3 | 1,371 |
+
+Errors 22 → 18; **every single-crate Stellar example now compiles** (fuzzing was the
+last). The receiver of a vec search is a `Vec` by the host catalog (the SDK calls
+those only from `Vec`'s methods); a helper that loads a number through a pointer
+and returns only its encode is, at each call site, the value read through the
+pointer; the unpack of a word a one-tag `Option` decoder hands back is its decode.
+privacy_pools 3 → 1. Held-out mean 0.7860 → 0.7861 (fuzzing 0.5389 → 0.5407);
+corpus bands pass.
