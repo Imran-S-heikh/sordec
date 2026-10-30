@@ -507,3 +507,22 @@ in each of privacy_pools and fuzzing). Also: a flag merged from `false` and a
 comparison is a `bool`, and the code after a scope nothing can leave is dropped.
 privacy_pools 13 → 6, fuzzing 6 → 4. Scores unchanged: corpus bands pass, held-out
 mean 0.7851.
+
+## 2026-10-30 — commit e41127f (object words from memory, tuple structs, parameters typed later)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | **24/25** | 4 | 3,883 |
+| Stellar examples, multi-contract | 13 | 12/13 | 6 | 4,229 |
+| third-party | 2 | 1/2 | 11 | 765 |
+| SDK 26 test contracts | 39 | 35/39 | 6 | 1,402 |
+
+Errors 33 → 28; other_custom_types compiles. An untyped 8-byte word read into a
+vec of objects, or merged into a value of an object type, is that object (an
+object's value is its handle); a returned vec is the tuple struct the spec
+declares (fields named `0..n`), printed `Name(a, b)`; and a helper parameter waits
+for callers still holding an untyped call result before it settles. spec_import
+2 → 1. Four other contracts gain only a type annotation on a gap. Scores
+unchanged: corpus bands pass, held-out mean 0.7851 (other_custom_types 0.7255,
+as before — the scorer gives no credit for compiling).
