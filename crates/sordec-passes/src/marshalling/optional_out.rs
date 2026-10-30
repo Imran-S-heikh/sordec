@@ -34,8 +34,9 @@
 //! and a read of the value becomes `unwrap()` — placed only where a test on
 //! the tag proves it present, so it never traps.
 //!
-//! A signature changes, so it is every call site or none, and nothing when
-//! the module has an indirect call. It runs after the elision group, so
+//! A signature changes, so it is every call site or none, and none for a
+//! helper an indirect call could reach (see *Gates*). It runs after the
+//! elision group, so
 //! [`super::option_sret`]'s `get(..).unwrap()` keeps every helper it can
 //! take.
 //!
@@ -61,15 +62,58 @@
 //! where a test on the tag proves it present. Any other use of the frame by
 //! another call refuses the site: the rewrite stops writing that memory,
 //! and a callee reading it would see something else.
+//!
+//! # Gates
+//!
+//! The refusals that keep the two facts the rewrite rests on true.
+//!
+//! **Every caller is a direct call.** The helper stops taking its
+//! out-pointer, so a caller this pass cannot see would still hand it one.
+//!
+//! - An indirect call can reach any function the module's element segments
+//!   declare. When the module has one — recovered, or a raw `call_indirect`
+//!   the pipeline left as it found it — a helper they declare keeps its
+//!   signature, and so does every helper when the declared set could not
+//!   be read. This is the caller-set rule `memory::calls` gives `sret`; a
+//!   helper outside the set has only the direct callers the census saw.
+//! - A raw `call_indirect` handed a pointer into the frame is a call whose
+//!   extent is unknown, like a recovered one: the site is refused.
+//!
+//! **Nothing else sees the result's bytes.** Bulk memory operations
+//! (`memory.copy`, `memory.fill`, here an `Unknown` of kind `MemoryOp`
+//! taking `[destination, source or byte, length]`) count as the reads and
+//! writes they are:
+//!
+//! - One with its source or destination in the frame and a length that is
+//!   not a constant may touch any of it: the site is refused.
+//! - A copy whose source overlaps the result reads it: refused, as for a
+//!   call that may read it. A fill's second operand is a byte, not an
+//!   address; reading it as one can only refuse more.
+//! - A copy or fill whose destination overlaps the result writes it: a
+//!   write a later read can see, like a store.
+//! - Inside a callee handed the frame, any bulk operation on that pointer
+//!   makes what the callee touches unknown, so the site is refused.
+//!
+//! **A read sees all of one write.** A read's nearest write before it,
+//! when that is a store or a bulk operation, must write every byte the
+//! read takes. One that writes only some leaves the rest to an earlier
+//! write — maybe the call's, which the rewrite removes — and refuses the
+//! site. When the nearest write is another call (the next call to a
+//! helper, reusing the slot), the read is taken to see that call's bytes:
+//! what a call writes is known only as a range it may write, so this one
+//! premise is not checked byte for byte.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use sordec_common::{BlockId, FuncId, IrId, Provenance, ProvenanceSource, UnknownReason, ValueId};
-use sordec_ir::{BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownType, Literal, Region, UnaryOp};
+use sordec_ir::{
+    BinaryOp, Binding, Expr, HighFunction, HighIr, ImportKind, IrType, KnownType, Literal, Region, UnaryOp,
+    WasmOpcodeKind,
+};
 
 use super::sret::emission_order;
-use crate::dataflow::{block_containing, canon_addr, resolve_use, trace_int};
+use crate::dataflow::{block_containing, canon_addr, resolve_use, trace_int, CallIndex};
 use crate::effects::expr_effects;
 use crate::metrics_catalog::{
     MARSHALLING_OPTIONAL_OUT_HELPERS as M_HELPERS, MARSHALLING_OPTIONAL_OUT_REWRITTEN as M_REWRITTEN,
@@ -171,16 +215,21 @@ impl Pass<HighIr> for OptionalOutParamPass {
             }
         }
 
-        // The rewrite changes a signature, so it is every site or none. An
-        // indirect call anywhere means callers this pass cannot see.
-        let indirect = ir
-            .functions
-            .iter()
-            .any(|f| f.bindings.iter().any(|(_, b)| matches!(b.expr, Expr::IndirectCall { .. })));
-        if indirect {
-            return result;
-        }
+        // The rewrite changes a signature, so it is every site or none — and
+        // none for a helper an indirect call, recovered or raw, could reach:
+        // its callers are more than the census saw.
+        let indirect = CallIndex::build(ir).has_indirect_calls();
+        let table = table_functions(ir);
+        let reachable = |t: FuncId| indirect && table.as_ref().is_none_or(|set| set.contains(&t));
         let mut targets: Vec<FuncId> = plans.keys().copied().filter(|t| !refused.contains(t)).collect();
+        targets.retain(|t| {
+            if reachable(*t)
+                && let Some(f) = ir.functions.iter().find(|f| f.id == *t)
+            {
+                trace(f, "kept: an indirect call may reach it");
+            }
+            !reachable(*t)
+        });
         targets.sort_unstable();
         for target in targets {
             let helper = &helpers[&target];
@@ -220,6 +269,17 @@ fn trace(func: &HighFunction, what: &str) {
     if std::env::var_os("SORDEC_OPTION_TRACE").is_some() {
         eprintln!("optional-out: func_{}: {what}", func.id.index());
     }
+}
+
+/// The local functions a table can ever hold — every function an element
+/// segment declares, shifted out of the global index space that counts
+/// imports — or `None` when that set could not be read.
+fn table_functions(ir: &HighIr) -> Option<HashSet<FuncId>> {
+    let imported = ir.facts.imports.iter().filter(|i| matches!(i.kind, ImportKind::Func(_))).count() as u32;
+    ir.facts
+        .table_functions
+        .as_ref()
+        .map(|set| set.iter().filter_map(|i| i.checked_sub(imported)).map(FuncId::from_index).collect())
 }
 
 // ---------------------------------------------------------------------
@@ -1065,6 +1125,66 @@ fn cover(a: Option<Slot>, b: Slot) -> Slot {
     }
 }
 
+/// Whether `outer` holds every byte of `inner`.
+fn holds(outer: Slot, inner: Slot) -> bool {
+    outer.offset <= inner.offset && outer.offset + outer.bytes >= inner.offset + inner.bytes
+}
+
+/// What a bulk memory operation does to the frame at `base`, as touches
+/// relative to it. `memory.copy` and `memory.fill` take `[destination,
+/// source or byte, length]`: the destination is written for the length,
+/// and the second operand, when it is an address in the frame, is read for
+/// as long — a fill's byte never is, so reading it as one only refuses
+/// more. `None` when an operand is in the frame and the length is not a
+/// constant (or is in the frame itself); empty when nothing it is handed is
+/// in the frame, which is also `memory.size` and `memory.grow` unless their
+/// operand is.
+fn bulk_touches(func: &HighFunction, args: &[ValueId], base: ValueId) -> Option<Vec<Touch>> {
+    let at = |v: ValueId| {
+        let (b, o) = canon_addr(func, v);
+        (b == base).then_some(o)
+    };
+    let [dst, src, len] = args else {
+        return args.iter().all(|a| at(*a).is_none()).then(Vec::new);
+    };
+    if at(*len).is_some() {
+        return None;
+    }
+    let (d, s) = (at(*dst), at(*src));
+    if d.is_none() && s.is_none() {
+        return Some(Vec::new());
+    }
+    let bytes = u32::try_from(trace_int(func, *len)?).ok()?;
+    let mut out = Vec::new();
+    for (offset, write) in [(d, true), (s, false)] {
+        if let Some(offset) = offset
+            && bytes > 0
+        {
+            offset.checked_add(bytes)?;
+            out.push((Slot { offset, bytes }, write));
+        }
+    }
+    Some(out)
+}
+
+/// The bytes `id` writes at `base` whenever it runs: a store's slot, or a
+/// bulk operation's destination for its constant length. `None` when it
+/// writes nothing there, or what it writes is not known.
+fn definite_write(func: &HighFunction, id: ValueId, base: ValueId) -> Option<Slot> {
+    match &func.bindings.get(id)?.expr {
+        Expr::Store { addr, offset, width, .. } => {
+            let (b, o) = canon_addr(func, *addr);
+            let offset = o.checked_add(*offset)?;
+            offset.checked_add(width.bytes())?;
+            (b == base).then_some(Slot { offset, bytes: width.bytes() })
+        }
+        Expr::Unknown { op_kind: WasmOpcodeKind::MemoryOp, args, .. } => bulk_touches(func, args, base)?
+            .into_iter()
+            .find_map(|(slot, write)| write.then_some(slot)),
+        _ => None,
+    }
+}
+
 impl Frames<'_> {
     /// What the call at `binding` can touch in the frame at `base`, or
     /// `None` when it is handed a pointer into it and the extent is not
@@ -1072,7 +1192,13 @@ impl Frames<'_> {
     fn touches(&self, func: &HighFunction, binding: ValueId, base: ValueId) -> Option<Vec<Touch>> {
         let (target, args) = match func.bindings.get(binding).map(|b| &b.expr) {
             Some(Expr::Call { target, args }) => (Some(*target), args),
-            Some(Expr::IndirectCall { args, .. }) => (None, args),
+            Some(
+                Expr::IndirectCall { args, .. }
+                | Expr::Unknown { op_kind: WasmOpcodeKind::CallIndirect, args, .. },
+            ) => (None, args),
+            Some(Expr::Unknown { op_kind: WasmOpcodeKind::MemoryOp, args, .. }) => {
+                return bulk_touches(func, args, base);
+            }
             _ => return Some(Vec::new()),
         };
         let mut out = Vec::new();
@@ -1236,13 +1362,23 @@ fn site(
         if id == call {
             continue;
         }
+        // A bulk copy or fill is counted like a call: what it reads and
+        // what it writes, by its operands.
+        let bulk = matches!(
+            func.bindings.get(id).map(|b| &b.expr),
+            Some(Expr::Unknown { op_kind: WasmOpcodeKind::MemoryOp, .. })
+        );
         let Some(touched) = frames.touches(func, id, base) else {
             trace(func, &format!("  call v{} into the frame, extent unknown", id.index()));
-            return Err("the frame is handed to a call that may read anything");
+            return Err(if bulk {
+                "a bulk copy or fill of unknown length on the frame"
+            } else {
+                "the frame is handed to a call that may read anything"
+            });
         };
         if touched.iter().any(|(slot, write_only)| !write_only && slot.overlaps(range)) {
             trace(func, &format!("  call v{} may read the result", id.index()));
-            return Err("another call may read the result");
+            return Err(if bulk { "a bulk copy may read the result" } else { "another call may read the result" });
         }
     }
 
@@ -1306,18 +1442,40 @@ struct SitePlan {
 }
 
 /// Whether `binding` writes memory at `base` that may overlap `range`: a
-/// store there, or a call handed a pointer into the frame.
+/// store there, a bulk copy or fill into it, or a call handed a pointer
+/// into the frame.
 fn writes(frames: &Frames<'_>, func: &HighFunction, binding: ValueId, base: ValueId, range: Slot) -> bool {
     match func.bindings.get(binding).map(|b| &b.expr) {
         Some(Expr::Store { addr, offset, width, .. }) => {
             let (b, o) = canon_addr(func, *addr);
             b == base && o.checked_add(*offset).is_none_or(|start| Slot { offset: start, bytes: width.bytes() }.overlaps(range))
         }
-        Some(Expr::Call { .. } | Expr::IndirectCall { .. }) => frames
+        // Its destination; its source it only reads.
+        Some(Expr::Unknown { op_kind: WasmOpcodeKind::MemoryOp, args, .. }) => bulk_touches(func, args, base)
+            .is_none_or(|touched| touched.iter().any(|(slot, write)| *write && slot.overlaps(range))),
+        Some(
+            Expr::Call { .. }
+            | Expr::IndirectCall { .. }
+            | Expr::Unknown { op_kind: WasmOpcodeKind::CallIndirect, .. },
+        ) => frames
             .touches(func, binding, base)
             .is_none_or(|touched| touched.iter().any(|(slot, _)| slot.overlaps(range))),
         _ => false,
     }
+}
+
+/// `writer`, the nearest write before a read of `range`, as the write the
+/// read sees. A store or bulk operation must write every byte of it: one
+/// that writes only some leaves the rest to an earlier write.
+fn seen(func: &HighFunction, writer: ValueId, base: ValueId, range: Slot) -> Result<Option<ValueId>, &'static str> {
+    let direct = matches!(
+        func.bindings.get(writer).map(|b| &b.expr),
+        Some(Expr::Store { .. } | Expr::Unknown { op_kind: WasmOpcodeKind::MemoryOp, .. })
+    );
+    if direct && !definite_write(func, writer, base).is_some_and(|w| holds(w, range)) {
+        return Err("a read whose nearest write covers only part of it");
+    }
+    Ok(Some(writer))
 }
 
 /// The write that `load` reads: the last write on every path to it, when
@@ -1333,7 +1491,7 @@ fn nearest_writer(
     let bindings = &func.blocks.get(block).ok_or("a missing block")?.bindings;
     let at = bindings.iter().position(|b| *b == load).ok_or("an unscheduled read")?;
     if let Some(w) = bindings[..at].iter().rev().find(|b| writes(frames, func, **b, base, range)) {
-        return Ok(Some(*w));
+        return seen(func, *w, base, range);
     }
     let path = path_to(&func.region, block).ok_or("a read outside the region tree")?;
     let writes_in = |region: &Region| -> Vec<ValueId> {
@@ -1354,7 +1512,7 @@ fn nearest_writer(
                     let found = writes_in(item);
                     match (item, found.last()) {
                         (_, None) => {}
-                        (Region::Basic(_), Some(w)) => return Ok(Some(*w)),
+                        (Region::Basic(_), Some(w)) => return seen(func, *w, base, range),
                         _ => return Err("a write inside an earlier branch"),
                     }
                 }
@@ -1615,7 +1773,13 @@ mod tests {
     }
 
     fn site_of(caller: HighFunction) -> Result<(), &'static str> {
-        let ir = module(vec![caller, helper(false)]);
+        plan_in(vec![caller, helper(false)]).map(|_| ())
+    }
+
+    /// The site at `functions[0]`'s `v2`, calling the helper func_1, as
+    /// how many tag reads and value reads it rewrites.
+    fn plan_in(functions: Vec<HighFunction>) -> Result<(usize, usize), &'static str> {
+        let ir = module(functions);
         let helpers: HashMap<FuncId, Helper> = ir
             .functions
             .iter()
@@ -1627,7 +1791,45 @@ mod tests {
         let Some(Expr::Call { args, .. }) = f.bindings.get(v(2)).map(|b| &b.expr) else {
             panic!("v2 is the call");
         };
-        site(&frames, f, &order, v(2), args, &helpers[&FuncId::from_index(1)]).map(|_| ())
+        site(&frames, f, &order, v(2), args, &helpers[&FuncId::from_index(1)]).map(|p| (p.tags.len(), p.values.len()))
+    }
+
+    /// `caller(false)` with `extra` bindings (ids from 6) run right after
+    /// the call.
+    fn caller_then(extra: Vec<Expr>) -> HighFunction {
+        let mut f = caller(false);
+        let mut ids = Vec::new();
+        for expr in extra {
+            let id = ValueId::from_index(f.bindings.len() as u32);
+            f.bindings.push(Binding::new(
+                id,
+                IrType::Unknown(UnknownReason::InsufficientEvidence),
+                expr,
+                Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+            ));
+            ids.push(id);
+        }
+        let entry = &mut f.blocks.get_mut(bb(0)).expect("the entry block").bindings;
+        let at = entry.iter().position(|b| *b == v(2)).expect("the call") + 1;
+        entry.splice(at..at, ids);
+        f
+    }
+
+    /// A `memory.copy` or `memory.fill`, as the pipeline leaves it.
+    fn bulk(dst: u32, src: u32, len: u32) -> Expr {
+        Expr::Unknown {
+            op_kind: WasmOpcodeKind::MemoryOp,
+            args: vec![v(dst), v(src), v(len)],
+            reason: UnknownReason::UnsupportedPattern,
+        }
+    }
+
+    fn i32c(n: i32) -> Expr {
+        Expr::Literal(Literal::I32(n))
+    }
+
+    fn opaque() -> Expr {
+        Expr::Phi { incoming: vec![] }
     }
 
     #[test]
@@ -1706,5 +1908,116 @@ mod tests {
         let mut ir = module(vec![caller(false), helper(false), early]);
         assert!(!OptionalOutParamPass.run(&mut ir).changed);
         assert_eq!(ir.functions[1].params.len(), 2, "the helper keeps its out-pointer");
+    }
+
+    #[test]
+    fn a_bulk_copy_out_of_the_result_reads_it() {
+        // memory.copy(elsewhere, fp, 16): the result's 16 bytes, read
+        // through a copy the rewrite would leave reading stale memory.
+        let copy = caller_then(vec![i32c(16), opaque(), bulk(7, 0, 6)]);
+        assert_eq!(plan_in(vec![copy, helper(false)]), Err("a bulk copy may read the result"));
+        // memory.copy(elsewhere, fp + 64, 16) reads beside it.
+        let beside = caller_then(vec![
+            i32c(16),
+            opaque(),
+            i32c(64),
+            Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(8) },
+            bulk(7, 9, 6),
+        ]);
+        assert_eq!(plan_in(vec![beside, helper(false)]), Ok((1, 1)));
+    }
+
+    #[test]
+    fn a_bulk_operation_of_unknown_length_on_the_frame_is_refused() {
+        let fill = caller_then(vec![opaque(), i32c(0), bulk(0, 7, 6)]);
+        assert_eq!(plan_in(vec![fill, helper(false)]), Err("a bulk copy or fill of unknown length on the frame"));
+    }
+
+    #[test]
+    fn a_bulk_fill_over_the_result_is_the_write_its_reads_see() {
+        // memory.fill(fp, 0, 16) right after the call: both reads see the
+        // fill's zeros, not the helper's bytes, and are left as they are.
+        let fill = || caller_then(vec![i32c(16), i32c(0), bulk(0, 7, 6)]);
+        assert_eq!(plan_in(vec![fill(), helper(false)]), Ok((0, 0)));
+        let mut ir = module(vec![fill(), helper(false)]);
+        assert!(OptionalOutParamPass.run(&mut ir).changed);
+        let c = &ir.functions[0];
+        for read in [v(3), v(5)] {
+            assert!(matches!(c.bindings.get(read).unwrap().expr, Expr::Load { .. }), "the read still reads the fill");
+        }
+    }
+
+    #[test]
+    fn a_write_over_part_of_a_read_refuses_the_site() {
+        // memory.fill(fp, 0, 2) leaves the tag read's upper two bytes to
+        // the helper.
+        let fill = caller_then(vec![i32c(2), i32c(0), bulk(0, 7, 6)]);
+        assert_eq!(plan_in(vec![fill, helper(false)]), Err("a read whose nearest write covers only part of it"));
+        // So does a one-byte store.
+        let store = caller_then(vec![
+            i32c(0),
+            Expr::Store { addr: v(0), value: v(6), offset: 0, width: MemWidth::W1 },
+        ]);
+        assert_eq!(plan_in(vec![store, helper(false)]), Err("a read whose nearest write covers only part of it"));
+    }
+
+    #[test]
+    fn a_callee_that_bulk_copies_through_the_frame_refuses_the_site() {
+        // func_2(p) { memory.copy(dst, src, 16) }, handed the frame.
+        let callee = |src: u32| {
+            func(2, vec![opaque(), opaque(), i32c(16), bulk(1, src, 2)], vec![0], vec![vec![2, 3]], Region::Basic(bb(0)))
+        };
+        let call = || caller_then(vec![Expr::Call { target: FuncId::from_index(2), args: vec![v(0)] }]);
+        assert_eq!(
+            plan_in(vec![call(), helper(false), callee(0)]),
+            Err("the frame is handed to a call that may read anything"),
+            "copying from its parameter, it may read the result"
+        );
+        assert_eq!(plan_in(vec![call(), helper(false), callee(1)]), Ok((1, 1)), "copying elsewhere, it touches nothing");
+    }
+
+    fn raw_call_indirect(args: Vec<ValueId>) -> Expr {
+        Expr::Unknown { op_kind: WasmOpcodeKind::CallIndirect, args, reason: UnknownReason::UnsupportedPattern }
+    }
+
+    #[test]
+    fn a_raw_call_indirect_handed_the_frame_may_read_anything() {
+        let call = caller_then(vec![i32c(3), raw_call_indirect(vec![v(0), v(6)])]);
+        assert_eq!(plan_in(vec![call, helper(false)]), Err("the frame is handed to a call that may read anything"));
+    }
+
+    #[test]
+    fn an_unrecovered_indirect_call_keeps_a_helper_a_table_may_hold() {
+        // func_2 makes a raw `call_indirect`; the helper is func_1.
+        let indirect = || {
+            let mut f = crate::marshalling::test_support::func_with(
+                vec![i32c(0), raw_call_indirect(vec![v(0)])],
+                vec![],
+                vec![0, 1],
+            );
+            f.id = FuncId::from_index(2);
+            f
+        };
+        let import = sordec_ir::Import {
+            index: 0,
+            module: "x".to_string(),
+            name: "_".to_string(),
+            kind: sordec_ir::ImportKind::Func(0),
+        };
+        // (function imports, element-declared global indices, rewritten)
+        let cases = [
+            (0, None, false),          // the declared set is not known
+            (0, Some(vec![1]), false), // the table holds the helper
+            (0, Some(vec![2]), true),  // only the indirect caller is declared
+            (1, Some(vec![2]), false), // global 2 is local 1, the helper
+            (1, Some(vec![1]), true),  // global 1 is local 0, the caller
+        ];
+        for (imports, table, rewritten) in cases {
+            let mut ir = module(vec![caller(false), helper(false), indirect()]);
+            ir.facts.imports = vec![import.clone(); imports];
+            ir.facts.table_functions = table.clone();
+            assert_eq!(OptionalOutParamPass.run(&mut ir).changed, rewritten, "imports {imports}, table {table:?}");
+            assert_eq!(ir.functions[1].params.len(), if rewritten { 1 } else { 2 });
+        }
     }
 }
