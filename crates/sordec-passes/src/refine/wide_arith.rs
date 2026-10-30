@@ -42,6 +42,19 @@
 //! source never had — so a sum still requires operands the function
 //! already names.
 //!
+//! # Which 128-bit type
+//!
+//! Wrapping addition and subtraction are the same bits signed or not, so
+//! the limbs say nothing of sign. An operand the function already typed
+//! does: `min_y - delta`, where `delta` is a `u128` an unsigned division
+//! returned, is a `u128` subtraction, and its loose other operand is the
+//! `u128` it is subtracted from. So the recovered value, and any operand
+//! joined from loose limbs, take the 128-bit type the named operands agree
+//! on; with none, or with two that disagree, `i128` as before.
+//!
+//! Why it is exact: the type changes no bit of any value. It only stops a
+//! `u128` and the value computed from it being named as two types.
+//!
 //! # Gates
 //!
 //! - **Both limbs of both operands**, and the same two values throughout.
@@ -116,16 +129,17 @@ impl Pass<HighIr> for WideArithPass {
                 if !available_before(&order, &[f.a, f.b], first_pos) {
                     continue;
                 }
+                let ty = IrType::Inferred(wide_type(func, [f.a, f.b]));
                 let base = ValueId::from_index(func.bindings.len() as u32);
                 let lhs = materialize(func, f.a, PASS_NAME);
                 let rhs = materialize(func, f.b, PASS_NAME);
+                for joined in [lhs, rhs].into_iter().filter(|v| *v >= base) {
+                    if let Some(b) = func.bindings.get_mut(joined) {
+                        b.ty = ty.clone();
+                    }
+                }
                 let whole = ValueId::from_index(func.bindings.len() as u32);
-                func.bindings.push(Binding::new(
-                    whole,
-                    IrType::Inferred(KnownType::I128),
-                    Expr::Binary { op: f.op, lhs, rhs },
-                    note.clone(),
-                ));
+                func.bindings.push(Binding::new(whole, ty, Expr::Binary { op: f.op, lhs, rhs }, note.clone()));
                 // Reverse order, because each insertion pushes the last
                 // one right: the joins end up ahead of the value that
                 // reads them.
@@ -152,6 +166,24 @@ impl Pass<HighIr> for WideArithPass {
         }
         result
     }
+}
+
+/// The 128-bit type the named operands agree on ("Which 128-bit type"):
+/// `u128` or `i128` when every operand the function already names with
+/// one of the two names the same, `i128` otherwise.
+fn wide_type(func: &HighFunction, sides: [Side; 2]) -> KnownType {
+    let mut agreed: Option<KnownType> = None;
+    for side in sides {
+        let Side::Whole(v) = side else { continue };
+        let named = match func.bindings.get(resolve_use(func, v)).map(|b| &b.ty) {
+            Some(IrType::Known(k) | IrType::Inferred(k)) if matches!(k, KnownType::U128 | KnownType::I128) => k.clone(),
+            _ => continue,
+        };
+        if agreed.get_or_insert_with(|| named.clone()) != &named {
+            return KnownType::I128;
+        }
+    }
+    agreed.unwrap_or(KnownType::I128)
 }
 
 /// The operation a high limb completes, given the whole function.
@@ -295,6 +327,53 @@ mod tests {
     fn a_sum_over_loose_limbs_is_left_alone() {
         let mut m = loose(BinaryOp::Add, 4);
         assert!(!WideArithPass.run(&mut m).changed);
+    }
+
+    /// `a - d`, `a` two loose registers and `d` a value the function
+    /// typed `named` (v9), whose halves are v2 and v3.
+    fn minus_named(named: Option<KnownType>) -> HighIr {
+        let mut m = loose(BinaryOp::Sub, 0);
+        let f = &mut m.functions[0];
+        let d = v(f.bindings.len() as u32);
+        f.bindings.push(Binding::new(
+            d,
+            named.map_or(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence), IrType::Inferred),
+            Expr::Phi { incoming: vec![] },
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        f.bindings.get_mut(v(2)).unwrap().expr = Expr::Unary { op: UnaryOp::WideLo, value: d };
+        f.bindings.get_mut(v(3)).unwrap().expr = Expr::Unary { op: UnaryOp::WideHi, value: d };
+        m
+    }
+
+    fn whole_and_join(m: &HighIr) -> (IrType, IrType) {
+        let f = &m.functions[0];
+        let Expr::Unary { op: UnaryOp::WideLo, value: whole } = f.bindings.get(v(4)).unwrap().expr else {
+            panic!("the low limb names its half");
+        };
+        let Expr::Binary { op: BinaryOp::Sub, lhs, .. } = f.bindings.get(whole).unwrap().expr else {
+            panic!("the whole is the difference");
+        };
+        (f.bindings.get(whole).unwrap().ty.clone(), f.bindings.get(lhs).unwrap().ty.clone())
+    }
+
+    /// A difference from a `u128` the function named is a `u128`, and so
+    /// is the loose operand it is taken from.
+    #[test]
+    fn a_difference_with_a_u128_operand_is_a_u128() {
+        let mut m = minus_named(Some(KnownType::U128));
+        assert!(WideArithPass.run(&mut m).changed);
+        let u128 = IrType::Inferred(KnownType::U128);
+        assert_eq!(whole_and_join(&m), (u128.clone(), u128));
+    }
+
+    /// With no operand named as a 128-bit type the value is an `i128`.
+    #[test]
+    fn a_difference_with_no_typed_operand_is_an_i128() {
+        let mut m = minus_named(None);
+        assert!(WideArithPass.run(&mut m).changed);
+        let i128 = IrType::Inferred(KnownType::I128);
+        assert_eq!(whole_and_join(&m), (i128.clone(), i128));
     }
 
     #[test]
