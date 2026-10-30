@@ -335,6 +335,7 @@ fn infer_function(
     seed_returned_merges(func, &mut types, &mut ev);
     seed_params(func, sigs, &mut types, &mut ev);
     seed_encoder_params(func, encoders, &mut types, &mut ev);
+    seed_tests(func, &mut types, &mut ev);
 
     for _ in 0..MAX_ROUNDS {
         let mut round_changed = false;
@@ -476,6 +477,32 @@ fn seed_abi(func: &HighFunction, types: &mut HashMap<ValueId, IrType>, ev: &mut 
         }
     }
     seed_returns(func, sig, types, ev);
+}
+
+/// Type every test a `bool` before the first round.
+///
+/// A comparison (or `eqz`) is a `bool` by its opcode alone, so the forward
+/// rule would say so in the first round anyway — but only once the walk
+/// reaches it. A merge listed earlier is joined first, sees the test still
+/// untyped and settles on its constant arm's word: the `exhausted` flag of
+/// an inclusive range loop is `phi [0i32, i >= n]`, typed `i32` in the
+/// first round and conflicted to nothing in the second, when the test
+/// arrives as a `bool`. Typed up front, the merge sees both arms at once
+/// and the constant `0` joins as `false` ([`fits_constant`]).
+///
+/// Exact: it is the forward rule's own answer, moved ahead of the walk;
+/// nothing else is typed by it.
+fn seed_tests(func: &HighFunction, types: &mut HashMap<ValueId, IrType>, ev: &mut Evidence) {
+    for (id, binding) in func.bindings.iter() {
+        let test = match &binding.expr {
+            Expr::Binary { op, .. } => is_comparison(*op),
+            Expr::Unary { op: UnaryOp::Eqz, .. } => true,
+            _ => false,
+        };
+        if test {
+            improve(types, ev, id, IrType::Inferred(KnownType::Bool));
+        }
+    }
 }
 
 /// Seed this function's own parameters from the inter-procedural table —
@@ -668,10 +695,21 @@ fn backward(
             // tag extraction, not shared-type arithmetic — so only a
             // *numeric* base propagates; a logical base is never forced onto
             // an operand.
+            //
+            // Nor is a number forced onto a `bool` operand. Wasm has no
+            // `bool`: a test yields the `i32` `0` or `1`, and whatever
+            // computes with it computes with that word — `flag & 1`,
+            // `i + (i < n)`. The arithmetic says what the word is, not that
+            // the value is an integer; read as evidence it conflicts the
+            // `bool` and the flag loses its type.
             Expr::Binary { op, lhs, rhs } if is_arithmetic(*op) => {
                 if let Some(base) = numeric_base(types.get(lhs), types.get(rhs)) {
-                    changed |= improve(types, ev, *lhs, IrType::Inferred(base.clone()));
-                    changed |= improve(types, ev, *rhs, IrType::Inferred(base));
+                    for operand in [lhs, rhs] {
+                        if base_of(types.get(operand)) == Some(KnownType::Bool) {
+                            continue;
+                        }
+                        changed |= improve(types, ev, *operand, IrType::Inferred(base.clone()));
+                    }
                 }
             }
             // A join's limbs are the two 64-bit halves of one value —
@@ -2638,6 +2676,59 @@ mod tests {
             infer_isolated(&mut f);
             assert_ne!(f.bindings.get(v(2)).unwrap().ty, IrType::Known(copy), "{entrypoint}");
         }
+    }
+
+    /// An inclusive range's `exhausted` flag: `flag = phi [start, i >= n]`,
+    /// listed before its test, read as `flag & 1`, beside the step
+    /// `i + (i < n)`. Both results are returned, so both are read.
+    fn range_flag(start: i32) -> HighFunction {
+        use crate::marshalling::test_support::{func_with, v};
+        let (b0, b1) = (BlockId::from_index(0), BlockId::from_index(1));
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                // v0 i
+                Expr::Phi { incoming: vec![] },                                // v1 n
+                Expr::Literal(Literal::I32(start)),                            // v2
+                Expr::Phi { incoming: vec![(b0, v(2)), (b1, v(4))] },          // v3 flag
+                Expr::Binary { op: BinaryOp::GeU, lhs: v(0), rhs: v(1) },      // v4
+                Expr::Literal(Literal::I32(1)),                                // v5
+                Expr::Binary { op: BinaryOp::BitAnd, lhs: v(3), rhs: v(5) },   // v6
+                Expr::Binary { op: BinaryOp::LtU, lhs: v(0), rhs: v(1) },      // v7
+                Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(7) },      // v8
+            ],
+            vec![v(0), v(1)],
+            vec![2, 4, 5, 6, 7, 8],
+        );
+        f.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(KnownType::I32);
+        f.bindings.get_mut(v(1)).unwrap().ty = IrType::Known(KnownType::I32);
+        f.region = Region::Sequence(vec![Region::Basic(b0), Region::Return { values: vec![v(6), v(8)] }]);
+        f.returns = vec![vec![v(6), v(8)]];
+        f
+    }
+
+    /// The flag is a `bool`: its test is typed before the merge is joined,
+    /// the `0` joins as `false`, and neither `flag & 1` nor `i + (i < n)`
+    /// makes a number of a `bool` operand.
+    #[test]
+    fn a_flag_merged_from_false_and_a_test_is_a_bool() {
+        use crate::marshalling::test_support::v;
+        let mut f = range_flag(0);
+        infer_isolated(&mut f);
+        let ty = |i: u32| f.bindings.get(v(i)).unwrap().ty.clone();
+        assert_eq!(ty(3), IrType::Inferred(KnownType::Bool));
+        assert_eq!(ty(7), IrType::Inferred(KnownType::Bool));
+        assert_eq!(ty(6), IrType::Inferred(KnownType::I32));
+        assert_eq!(ty(8), IrType::Inferred(KnownType::I32));
+    }
+
+    /// A constant that is no `bool` beside a test does not make the merge
+    /// one.
+    #[test]
+    fn a_merge_of_a_test_and_a_number_is_not_a_bool() {
+        use crate::marshalling::test_support::v;
+        let mut f = range_flag(5);
+        infer_isolated(&mut f);
+        assert_ne!(f.bindings.get(v(3)).unwrap().ty, IrType::Inferred(KnownType::Bool));
     }
 
     /// `d = val_decode(flag)`, `flag` a parameter typed as the declared

@@ -31,6 +31,17 @@
 //! dropped arm keeps that entry in its list — the transfer that fed it is
 //! gone with the arm, which is the same state a dead predecessor leaves in
 //! any other pass.
+//!
+//! ## What the fold leaves unreachable
+//!
+//! Code after a terminal (`return`, a trap, a `break`) in the same
+//! sequence, and code after a labeled scope that nothing can leave forward
+//! any more — the dropped arm held its only `break`, and its body ends in
+//! a jump elsewhere on every path ([`dead_scope_tail`]). Both are dropped,
+//! the scope unwrapped, and each merge keeps only the inputs a surviving
+//! edge assigns. Why it is exact: control never reaches what is dropped.
+//! Gates: any `break` to the label keeps the tail, and a body holding a
+//! loop or an unstructured region is taken to fall through.
 
 use sordec_common::{Diagnostic, LiftDiagnosticCode, Location};
 use sordec_ir::{BinaryOp, Expr, HighFunction, HighIr, Literal, Region, UnaryOp};
@@ -163,6 +174,18 @@ fn fold(func: &HighFunction, region: Region, c: &mut Counts) -> Region {
                 out.truncate(end + 1);
                 c.truncated += 1;
             }
+            // Nor after a scope nothing leaves: see [`dead_scope_tail`].
+            if let Some(end) = dead_scope_tail(&out) {
+                out.truncate(end + 1);
+                let Some(Region::Scope { body, .. }) = out.pop() else {
+                    unreachable!("dead_scope_tail returns the index of a scope");
+                };
+                match *body {
+                    Region::Sequence(inner) => out.extend(inner),
+                    other => out.push(other),
+                }
+                c.truncated += 1;
+            }
             Region::Sequence(out)
         }
         Region::Scope { out, body } => Region::Scope {
@@ -194,6 +217,73 @@ fn fold(func: &HighFunction, region: Region, c: &mut Counts) -> Region {
         },
         leaf => leaf,
     }
+}
+
+/// The first scope in a sequence that control can never leave forward,
+/// when code follows it.
+///
+/// A folded `if` can take with it the only `break` to a scope's label:
+/// rustc's `?` on a conversion that cannot fail leaves
+///
+/// ```text
+/// 'b3: { ..; if err { break 'b3 }; r = Ok(v); break 'b2 }
+/// r = Err(conversion error)          ← reached only by `break 'b3`
+/// ```
+///
+/// and once the test is a constant `false` the `Err` arm after the scope
+/// is dead, while the merge it feeds still counts it and comes out
+/// untyped. The code after a scope runs only when a `break` to its label
+/// leaves it, or when its body falls off the end. When the body does
+/// neither — no `break` names the label, and every path through it ends
+/// in a `break` elsewhere, a `return` or a trap — nothing after the scope
+/// runs. The scope is then a label nothing targets, and its body stands in
+/// its place.
+///
+/// Why it is exact: the dropped code is unreachable, and unwrapping a
+/// scope no `break` names changes no path. Gates: a `break` to the label
+/// anywhere inside the body keeps the tail, however nested; a loop or an
+/// unstructured region in the body is taken to fall through (a loop leaves
+/// by breaking to some scope, which is not worth modelling here).
+fn dead_scope_tail(items: &[Region]) -> Option<usize> {
+    let end = items.iter().position(|item| match item {
+        Region::Scope { out, body } => !may_fall_through(body) && !breaks_to(body, *out),
+        _ => false,
+    })?;
+    (end + 1 < items.len()).then_some(end)
+}
+
+/// Whether control can run off the end of `region` into what follows it.
+/// Errs towards `true`.
+fn may_fall_through(region: &Region) -> bool {
+    match region {
+        Region::Sequence(items) => items.iter().all(may_fall_through),
+        Region::Scope { out, body } => may_fall_through(body) || breaks_to(body, *out),
+        Region::If { then_region, else_region, .. } => {
+            may_fall_through(then_region) || else_region.as_ref().is_none_or(|e| may_fall_through(e))
+        }
+        Region::Switch { arms, default, .. } => {
+            may_fall_through(default) || arms.iter().any(|arm| may_fall_through(&arm.body))
+        }
+        Region::Break { .. }
+        | Region::Continue { .. }
+        | Region::Return { .. }
+        | Region::Unreachable
+        | Region::Panic { .. } => false,
+        Region::Basic(_) | Region::Transfer { .. } | Region::Loop { .. } | Region::Unstructured { .. } => true,
+    }
+}
+
+/// Whether a `break` to `label` occurs anywhere inside `region`.
+fn breaks_to(region: &Region, label: sordec_common::BlockId) -> bool {
+    let mut found = false;
+    region.for_each_node(|node| {
+        if let Region::Break { target, .. } = node
+            && *target == label
+        {
+            found = true;
+        }
+    });
+    found
 }
 
 /// A node control never falls out of.
@@ -327,6 +417,77 @@ mod tests {
     #[test]
     fn an_ordered_comparison_is_not_folded() {
         let mut m = module(vec![guarded(BinaryOp::Lt)]);
+        assert!(!ConstBranchFoldPass.run(&mut m).changed);
+    }
+
+    /// `'b3: { bb0; break 'b2 (v2 <- v0) }; bb3; transfer 'b2 (v2 <- v1)`
+    /// inside `'b2`, then `return v2`: the `Err` arm after `'b3` is reached
+    /// only by a `break 'b3` that no longer exists.
+    fn dead_tail(live_break: bool) -> HighFunction {
+        let mut f = func_with(
+            vec![
+                Expr::Literal(Literal::I64(0)),
+                Expr::Literal(Literal::I64(1)),
+                Expr::Phi { incoming: vec![(bb(5), v(0)), (bb(3), v(1))] },
+                Expr::Literal(Literal::Bool(true)),
+            ],
+            vec![],
+            vec![0, 1, 3],
+        );
+        let mut inner = vec![Region::Basic(bb(0))];
+        if live_break {
+            // `if v3 { break 'b3 }`.
+            inner.push(Region::If {
+                cond: v(3),
+                then_region: Box::new(Region::Break { target: bb(3), transfer: vec![] }),
+                else_region: None,
+            });
+        }
+        inner.push(Region::Break { target: bb(2), transfer: vec![(v(2), v(0))] });
+        f.region = Region::Sequence(vec![
+            Region::Scope {
+                out: bb(2),
+                body: Box::new(Region::Sequence(vec![
+                    Region::Scope { out: bb(3), body: Box::new(Region::Sequence(inner)) },
+                    Region::Basic(bb(3)),
+                    Region::Transfer { target: bb(2), transfer: vec![(v(2), v(1))] },
+                ])),
+            },
+            Region::Basic(bb(2)),
+            Region::Return { values: vec![v(2)] },
+        ]);
+        f
+    }
+
+    /// Nothing breaks to `'b3` and its body never falls out, so the code
+    /// after it is dropped, the scope unwrapped, and the merge keeps only
+    /// the input a surviving edge assigns.
+    #[test]
+    fn the_tail_of_a_scope_nothing_leaves_is_dropped() {
+        let mut m = module(vec![dead_tail(false)]);
+        assert!(ConstBranchFoldPass.run(&mut m).changed);
+        let f = &m.functions[0];
+        let Region::Sequence(items) = &f.region else { panic!("sequence") };
+        let Region::Scope { body, .. } = &items[0] else { panic!("outer scope kept") };
+        let Region::Sequence(inner) = body.as_ref() else { panic!("sequence") };
+        assert!(matches!(inner[..], [Region::Basic(_), Region::Break { .. }]), "{inner:?}");
+        let Expr::Phi { incoming } = &f.bindings.get(v(2)).unwrap().expr else { panic!("phi") };
+        assert_eq!(incoming, &vec![(bb(5), v(0))]);
+    }
+
+    /// A `break` to the label, even under an `if`, keeps the tail.
+    #[test]
+    fn a_scope_something_breaks_to_keeps_its_tail() {
+        let mut f = dead_tail(true);
+        // The test must stay a variable for the `if` to survive the fold.
+        f.bindings.get_mut(v(3)).unwrap().expr = Expr::Load {
+            addr: v(0),
+            offset: 0,
+            width: sordec_ir::MemWidth::W4,
+            signed: None,
+            ty: sordec_ir::IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+        };
+        let mut m = module(vec![f]);
         assert!(!ConstBranchFoldPass.run(&mut m).changed);
     }
 
