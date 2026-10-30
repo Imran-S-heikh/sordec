@@ -285,7 +285,62 @@ fn validate_high_function(func: &HighFunction) -> Result<(), ValidateError> {
     // Region-order dominance (linear emission-order walk).
     check_region_dominance(func)?;
 
+    check_variant_payloads(func)?;
+
     Ok(())
+}
+
+/// Every scheduled [`Expr::VariantPayload`] opens an arm of a switch on its
+/// value's variant: the switch's `index` and `dispatch` are both that
+/// value, and the binding is among the leading bindings of the arm's first
+/// block. Anywhere else it names a payload no pattern binds.
+fn check_variant_payloads(func: &HighFunction) -> Result<(), ValidateError> {
+    let mut allowed: HashSet<ValueId> = HashSet::new();
+    func.region.for_each_node(|node| {
+        let Region::Switch { index, arms, dispatch: Some(d), .. } = node else { return };
+        if d != index {
+            return;
+        }
+        for arm in arms {
+            let first = match &arm.body {
+                Region::Basic(b) => Some(*b),
+                Region::Sequence(items) => match items.first() {
+                    Some(Region::Basic(b)) => Some(*b),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(block) = first.and_then(|b| get_block(func, b)) else { continue };
+            for &id in &block.bindings {
+                match get_binding(func, id).map(|b| &b.expr) {
+                    Some(Expr::VariantPayload { value, .. }) if value == index => {
+                        allowed.insert(id);
+                    }
+                    _ => break,
+                }
+            }
+        }
+    });
+    let mut stray = None;
+    func.region.for_each_node(|node| {
+        let Region::Basic(b) = node else { return };
+        let Some(block) = get_block(func, *b) else { return };
+        for &id in &block.bindings {
+            if stray.is_none()
+                && matches!(get_binding(func, id).map(|b| &b.expr), Some(Expr::VariantPayload { .. }))
+                && !allowed.contains(&id)
+            {
+                stray = Some(id);
+            }
+        }
+    });
+    match stray {
+        Some(id) => Err(ValidateError::Other(format!(
+            "func {} schedules variant payload {} outside the opening of an arm of a switch on its value",
+            func.id, id
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// An enclosing labeled construct, for the [`Region::Break`] /
@@ -375,7 +430,9 @@ fn check_region_structure(
                 if !value_exists(*d) {
                     return Err(dangling_value(*d));
                 }
-                let is_dispatch = get_binding(func, *d).is_some_and(|b| {
+                // A switch on an enum value's variant names the value
+                // itself; see `Region::Switch::dispatch`.
+                let is_dispatch = *d == *index || get_binding(func, *d).is_some_and(|b| {
                     matches!(
                         b.expr,
                         Expr::Semantic(SemanticOp::Known(KnownOp::SymbolDispatch { .. }))
@@ -765,6 +822,37 @@ mod tests {
     #[test]
     fn well_formed_function_validates() {
         assert_eq!(validate_high_function(&straight_line()), Ok(()));
+    }
+
+    /// `match v0 { 1 => { v1 = payload 0 of v0 as B; .. } _ => {} }`, the
+    /// payload scheduled at the arm's opening (`in_arm`) or before the
+    /// switch.
+    fn variant_switch(in_arm: bool) -> HighFunction {
+        let payload = Expr::VariantPayload { value: v(0), variant: "B".into(), index: 0 };
+        let (entry, arm) = if in_arm { (vec![], vec![1]) } else { (vec![1], vec![]) };
+        func(
+            vec![binding(0, Expr::Phi { incoming: vec![] }), binding(1, payload)],
+            vec![block(0, entry), block(1, arm), block(2, vec![])],
+            Region::Sequence(vec![
+                Region::Basic(bb(0)),
+                Region::Switch {
+                    index: v(0),
+                    arms: vec![crate::SwitchArm { cases: vec![1], body: Region::Basic(bb(1)) }],
+                    default: Box::new(Region::Basic(bb(2))),
+                    dispatch: Some(v(0)),
+                },
+            ]),
+        )
+    }
+
+    #[test]
+    fn a_variant_payload_opening_its_arm_validates() {
+        assert_eq!(validate_high_function(&variant_switch(true)), Ok(()));
+    }
+
+    #[test]
+    fn a_variant_payload_outside_its_arm_is_rejected() {
+        assert!(validate_high_function(&variant_switch(false)).is_err());
     }
 
     #[test]

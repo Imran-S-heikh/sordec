@@ -513,9 +513,11 @@ fn copyable(expr: &Expr, this: FuncId) -> bool {
         // phis and other unrecovered operators all reach state the
         // caller cannot see through a copy.
         // An `Unwrap`'s proof of presence is a test in the function it sits
-        // in, which a copy does not take along.
+        // in, which a copy does not take along; a variant's payload is
+        // legal only at the opening of its own `match` arm.
         Expr::Project { .. }
         | Expr::Unwrap { .. }
+        | Expr::VariantPayload { .. }
         | Expr::IndirectCall { .. }
         | Expr::Phi { .. }
         | Expr::GlobalGet { .. }

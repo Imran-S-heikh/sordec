@@ -303,7 +303,7 @@ struct Planned {
 
 /// What one slot of a decode's output holds.
 #[derive(Debug, Clone, PartialEq)]
-enum Role {
+pub(super) enum Role {
     /// The whole of a field.
     Field(String),
     /// One half of a wide field, which crosses a helper's out-parameter
@@ -320,33 +320,33 @@ enum Role {
 /// One slot of a decode's output: `width` bytes at `rel` from the frame
 /// start.
 #[derive(Debug, Clone, PartialEq)]
-struct Slot {
-    rel: u32,
-    width: u32,
-    role: Role,
+pub(super) struct Slot {
+    pub(super) rel: u32,
+    pub(super) width: u32,
+    pub(super) role: Role,
 }
 
 /// One decode whose result lands in the caller's frame: an unpack's slot
 /// region, or a helper's out-parameter. Whether its reads are rewritten,
 /// and it removed, is decided by [`reach::check`].
-struct Candidate<'a> {
+pub(super) struct Candidate<'a> {
     /// The frame pointer and the byte offset the output starts at.
-    base: ValueId,
-    start: u32,
+    pub(super) base: ValueId,
+    pub(super) start: u32,
     /// The unpack or the helper call.
-    producer: ValueId,
-    map: ValueId,
-    def: &'a StructDef,
+    pub(super) producer: ValueId,
+    pub(super) map: ValueId,
+    pub(super) def: &'a StructDef,
     /// Ascending by offset, none overlapping.
-    slots: Vec<Slot>,
+    pub(super) slots: Vec<Slot>,
     /// The slots hold the fields' `Val`s (a host unpack), not decoded
     /// values (a helper's out-parameter): only then is a slot's first
     /// byte its field's tag.
-    vals: bool,
+    pub(super) vals: bool,
     /// The map is an `Option<T>` parameter, unpacked on its `Some` path:
     /// no expression spells "this field of the payload", so the decode is
     /// taken only when every read of it is a relocated check.
-    payload: bool,
+    pub(super) payload: bool,
 }
 
 impl Candidate<'_> {
@@ -362,7 +362,7 @@ impl Candidate<'_> {
     /// host writes them all or traps), and every field and discriminant
     /// slot of a helper on a proven value, whose decode therefore takes
     /// its `Ok` path.
-    fn certain_writes(&self) -> Vec<(u32, u32)> {
+    pub(super) fn certain_writes(&self) -> Vec<(u32, u32)> {
         self.slots
             .iter()
             .filter(|s| s.role != Role::Unexplained)
@@ -451,7 +451,7 @@ fn widens_as_declared(ty: Option<KnownType>, signed: Option<bool>) -> bool {
 
 /// Another decode in the same function, as its producer, its frame base,
 /// and the `(offset from base, width)` ranges it certainly writes.
-type CertainWrite = (ValueId, ValueId, Vec<(u32, u32)>);
+pub(super) type CertainWrite = (ValueId, ValueId, Vec<(u32, u32)>);
 
 /// What every caller hands each helper parameter, when they agree: a
 /// value proven to be one struct (`Some`), or — `None` — only host
@@ -1485,19 +1485,19 @@ fn classify_helper(func: &HighFunction, structs: &[StructDef], unions: &[UnionDe
 /// to it touches the memory it is handed there at these offsets and no
 /// others.
 #[derive(Debug, Clone, Default)]
-struct ParamAccess {
+pub(super) struct ParamAccess {
     /// `(offset, width)` of every load through the parameter.
-    reads: Vec<(u32, u32)>,
+    pub(super) reads: Vec<(u32, u32)>,
     /// `(offset, width)` of every store through it.
-    writes: Vec<(u32, u32)>,
+    pub(super) writes: Vec<(u32, u32)>,
     /// The stores made on every path the function returns by.
-    must_writes: Vec<(u32, u32)>,
+    pub(super) must_writes: Vec<(u32, u32)>,
 }
 
 /// [`ParamAccess`] for each parameter of a helper, `None` for one used any
 /// other way (passed on, stored, computed with). Entrypoints get none:
 /// their parameters are ABI values, never caller memory.
-fn param_accesses(func: &HighFunction) -> Vec<Option<ParamAccess>> {
+pub(super) fn param_accesses(func: &HighFunction) -> Vec<Option<ParamAccess>> {
     if func.signature.is_some() {
         return Vec::new();
     }
@@ -1569,7 +1569,7 @@ fn param_accesses(func: &HighFunction) -> Vec<Option<ParamAccess>> {
 ///
 /// [`check`] is the decode's flow over that walk (see the module docs for
 /// what it decides and why).
-mod reach {
+pub(super) mod reach {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     use sordec_common::{BlockId, FuncId, ValueId};
@@ -1591,6 +1591,11 @@ mod reach {
         fn join(into: &mut Self::State, other: &Self::State);
         /// Advance the state over one binding.
         fn step(&mut self, id: ValueId, state: &mut Self::State);
+        /// Enter one side of an `if` on `cond`: `taken` is the `then` side.
+        fn branch(&mut self, _cond: ValueId, _taken: bool, _state: &mut Self::State) {}
+        /// Enter one arm of a switch on `index`: `cases` are the arm's
+        /// (`None` for the default arm), `all` every arm's.
+        fn arm(&mut self, _index: ValueId, _cases: Option<&[u32]>, _all: &[u32], _state: &mut Self::State) {}
     }
 
     /// The meet of the states at every `return` (falling off the end
@@ -1670,18 +1675,26 @@ mod reach {
                     }
                     merge::<F>(fall, broke)
                 }
-                Region::If { then_region, else_region, .. } => {
-                    let then_out = self.region(then_region, Some(state.clone()));
+                Region::If { cond, then_region, else_region } => {
+                    let mut then_in = state.clone();
+                    self.flow.branch(*cond, true, &mut then_in);
+                    let then_out = self.region(then_region, Some(then_in));
+                    self.flow.branch(*cond, false, &mut state);
                     let else_out = match else_region {
                         Some(e) => self.region(e, Some(state)),
                         None => Some(state),
                     };
                     merge::<F>(then_out, else_out)
                 }
-                Region::Switch { arms, default, .. } => {
-                    let mut out = self.region(default, Some(state.clone()));
+                Region::Switch { index, arms, default, .. } => {
+                    let all: Vec<u32> = arms.iter().flat_map(|a| a.cases.iter().copied()).collect();
+                    let mut default_in = state.clone();
+                    self.flow.arm(*index, None, &all, &mut default_in);
+                    let mut out = self.region(default, Some(default_in));
                     for arm in arms {
-                        let arm_out = self.region(&arm.body, Some(state.clone()));
+                        let mut arm_in = state.clone();
+                        self.flow.arm(*index, Some(&arm.cases), &all, &mut arm_in);
+                        let arm_out = self.region(&arm.body, Some(arm_in));
                         out = merge::<F>(out, arm_out);
                     }
                     out
@@ -1774,12 +1787,39 @@ mod reach {
     pub(super) struct Live {
         must: BTreeSet<usize>,
         may: BTreeMap<usize, u8>,
+        /// Tag words a [`Gated`] helper wrote, by offset from the base,
+        /// not overwritten since: what the helper also wrote unless the
+        /// tag is its `none` constant.
+        pending: BTreeMap<u32, Pending>,
+    }
+
+    /// What a helper writes through a pointer parameter on every path on
+    /// which the tag word it leaves at the pointer is not `none`: a
+    /// helper handing back an `Option`-like result writes its payload
+    /// only when it has one. Offsets are from the pointer.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(in crate::marshalling) struct Gated {
+        /// Width of the tag store at offset 0.
+        pub width: u32,
+        /// The tag that says nothing else was written.
+        pub none: i128,
+        /// `(offset, width)` written whenever the tag is anything else.
+        pub writes: Vec<(u32, u32)>,
+    }
+
+    /// A [`Gated`] call's tag word as it sits in the frame, with its
+    /// writes as offsets from the decode's base.
+    #[derive(Debug, Clone, PartialEq)]
+    struct Pending {
+        width: u32,
+        none: i128,
+        writes: Vec<(u32, u32)>,
     }
 
     /// What a decode's value is read for, once every read it may reach
     /// is accounted for.
     #[derive(Debug, Default)]
-    pub(super) struct Reads {
+    pub(in crate::marshalling) struct Reads {
         /// Exact reads of a slot, as `(load, slot)`.
         pub fields: Vec<(ValueId, usize)>,
         /// One-byte reads of a `Val` slot's tag, as `(load, slot, the
@@ -1796,17 +1836,40 @@ mod reach {
     /// `certain` names every decode in the function with its base and the
     /// bytes it certainly writes; `access`, what each helper does through
     /// each of its parameters.
-    pub(super) fn check(
+    pub(in crate::marshalling) fn check(
         func: &HighFunction,
         cand: &Candidate<'_>,
         certain: &[CertainWrite],
         access: &HashMap<FuncId, Vec<Option<ParamAccess>>>,
+    ) -> Result<Reads, String> {
+        check_gated(func, cand, certain, access, &HashMap::new())
+    }
+
+    /// [`check`], seeing through helpers whose writes a tag word gates
+    /// ([`Gated`]): on the side of a branch where the tag the helper left
+    /// is not its `none` constant, the helper made its gated writes.
+    ///
+    /// Exact because the walk knows the tag only as a load of it: a load
+    /// of the whole tag store, made while nothing has written its bytes
+    /// since the call, is the tag the helper left. A branch on that load
+    /// — directly, or on its low 32 bits, which equal `none`'s whenever
+    /// the word is `none`, so a side taken on their being different is
+    /// one on which the word is not `none` — applies the writes only
+    /// while the tag word is still unwritten, so they are that call's.
+    pub(in crate::marshalling) fn check_gated(
+        func: &HighFunction,
+        cand: &Candidate<'_>,
+        certain: &[CertainWrite],
+        access: &HashMap<FuncId, Vec<Option<ParamAccess>>>,
+        gated: &HashMap<FuncId, Vec<Option<Gated>>>,
     ) -> Result<Reads, String> {
         let mut flow = DecodeFlow {
             func,
             cand,
             certain,
             access,
+            gated,
+            tag_words: HashMap::new(),
             derived: HashMap::new(),
             reads: BTreeMap::new(),
             tags: BTreeMap::new(),
@@ -1842,6 +1905,11 @@ mod reach {
         cand: &'c Candidate<'a>,
         certain: &'c [CertainWrite],
         access: &'c HashMap<FuncId, Vec<Option<ParamAccess>>>,
+        gated: &'c HashMap<FuncId, Vec<Option<Gated>>>,
+        /// Loads of a [`Gated`] call's tag word: the tag's offset and what
+        /// was pending there, the same on every visit (`None` once a visit
+        /// disagrees, or saw nothing pending).
+        tag_words: HashMap<ValueId, Option<(u32, Pending)>>,
         /// Memo for [`Self::derived`].
         derived: HashMap<ValueId, bool>,
         /// Exact reads seen so far, load -> slot.
@@ -1859,6 +1927,49 @@ mod reach {
             for (i, bits) in &other.may {
                 *into.may.entry(*i).or_default() |= *bits;
             }
+            into.pending.retain(|at, p| other.pending.get(at) == Some(p));
+        }
+
+        fn branch(&mut self, cond: ValueId, taken: bool, live: &mut Live) {
+            let Some(Expr::Binary { op, lhs, rhs }) =
+                self.func.bindings.get(resolve_use(self.func, cond)).map(|b| &b.expr)
+            else {
+                return;
+            };
+            if !matches!((op, taken), (sordec_ir::BinaryOp::Ne, true) | (sordec_ir::BinaryOp::Eq, false)) {
+                return;
+            }
+            for (word, other) in [(*lhs, *rhs), (*rhs, *lhs)] {
+                if let Some((at, p)) = self.tag_word(word, live)
+                    && crate::dataflow::trace_int(self.func, other) == Some(p.none)
+                {
+                    self.overwrite(live, &p.writes, true);
+                    live.pending.remove(&at);
+                    return;
+                }
+            }
+        }
+
+        fn arm(&mut self, index: ValueId, cases: Option<&[u32]>, all: &[u32], live: &mut Live) {
+            let mut word = resolve_use(self.func, index);
+            if let Some(Expr::Unary { op: sordec_ir::UnaryOp::Wrap32, value }) =
+                self.func.bindings.get(word).map(|b| &b.expr)
+            {
+                word = resolve_use(self.func, *value);
+            }
+            let Some((at, p)) = self.tag_word(word, live) else { return };
+            let Ok(none) = u32::try_from(p.none) else { return };
+            // The arm is taken only when the selector is one of its cases
+            // (the default: none of any arm's); a selector that is not
+            // `none`'s low 32 bits comes from a word that is not `none`.
+            let not_none = match cases {
+                Some(cases) => !cases.contains(&none),
+                None => all.contains(&none),
+            };
+            if not_none {
+                self.overwrite(live, &p.writes, true);
+                live.pending.remove(&at);
+            }
         }
 
         fn step(&mut self, id: ValueId, live: &mut Live) {
@@ -1869,6 +1980,7 @@ mod reach {
             if id == cand.producer {
                 live.may = (0..cand.slots.len()).map(|i| (i, self.whole(i))).collect();
                 live.must = (0..cand.slots.len()).filter(|i| cand.slots[*i].role != Role::Unexplained).collect();
+                live.pending.clear();
                 return;
             }
             if let Some((_, _, writes)) = self.certain.iter().find(|(p, b, _)| *p == id && *b == cand.base) {
@@ -1935,6 +2047,14 @@ mod reach {
                     live.must.remove(&i);
                 }
             }
+            live.pending.retain(|at, p| u64::from(*at) + u64::from(p.width) <= lowest);
+        }
+
+        /// The pending tag word `value` is a load of, while it is still
+        /// what that load read.
+        fn tag_word(&self, value: ValueId, live: &Live) -> Option<(u32, Pending)> {
+            let (at, p) = self.tag_words.get(&resolve_use(self.func, value))?.clone()?;
+            (live.pending.get(&at) == Some(&p)).then_some((at, p))
         }
 
         /// Where `value` points relative to the decode's base.
@@ -2003,6 +2123,13 @@ mod reach {
         /// `must` side; when the write is certain, the bytes they cover
         /// leave the `may` side.
         fn overwrite(&self, live: &mut Live, ranges: &[(u32, u32)], certain: bool) {
+            live.pending.retain(|at, p| {
+                ranges.iter().all(|&(lo, w)| {
+                    let (a, b) = (u64::from(*at), u64::from(*at) + u64::from(p.width));
+                    let (x, y) = (u64::from(lo), u64::from(lo) + u64::from(w));
+                    b <= x || y <= a
+                })
+            });
             for i in 0..self.cand.slots.len() {
                 for &(at, width) in ranges {
                     let bits = self.cover(i, u64::from(at), u64::from(at) + u64::from(width));
@@ -2021,6 +2148,15 @@ mod reach {
         }
 
         fn load(&mut self, id: ValueId, live: &Live, at: u32, offset: u32, width: MemWidth, signed: Option<bool>) {
+            // A whole load of a pending tag word is that tag; recorded only
+            // while every visit agrees.
+            let word = at
+                .checked_add(offset)
+                .and_then(|o| live.pending.get(&o).filter(|p| p.width == width.bytes()).map(|p| (o, p.clone())));
+            let seen = self.tag_words.entry(id).or_insert_with(|| word.clone());
+            if *seen != word {
+                *seen = None;
+            }
             if live.may.is_empty() {
                 return;
             }
@@ -2149,6 +2285,19 @@ mod reach {
             }
             for (at, width, certain) in writes {
                 self.overwrite(live, &[(at, width)], certain);
+            }
+            // A gated helper's tag word, left at the pointer it was handed.
+            if let Expr::Call { target, .. } = expr
+                && let Some(params) = self.gated.get(target)
+            {
+                for (k, p) in &pointers {
+                    let (Points::At(at), Some(Some(g))) = (p, params.get(*k)) else { continue };
+                    let shifted: Option<Vec<(u32, u32)>> =
+                        g.writes.iter().map(|(o, w)| Some((at.checked_add(*o)?, *w))).collect();
+                    if let Some(writes) = shifted {
+                        live.pending.insert(*at, Pending { width: g.width, none: g.none, writes });
+                    }
+                }
             }
         }
 

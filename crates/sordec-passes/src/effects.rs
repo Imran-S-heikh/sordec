@@ -782,6 +782,9 @@ pub fn expr_effects(expr: &Expr) -> Effects {
         // effects are theirs, accounted where they are.
         | Expr::Select { .. }
         | Expr::Variant { .. }
+        // Naming a payload the enclosing `match` arm's pattern binds: the
+        // arm is taken only on that variant, so it is there.
+        | Expr::VariantPayload { .. }
         // Building an `Option` and asking whether it holds a value are
         // total. Taking the value out would trap on `None`, but an
         // `Unwrap` is only placed where a test proves the value present.

@@ -1260,6 +1260,13 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             }
             None => ctx.policy.unknown_expr("variant of an unnamed type"),
         },
+        // A payload is bound by its arm's pattern (`E::X(p) => ..`), never
+        // by a `let`: the body walk prints the pattern and skips the
+        // binding. Reached only if it stands anywhere else, which has no
+        // Rust spelling.
+        Expr::VariantPayload { variant, index, .. } => {
+            ctx.policy.unknown_expr(&format!("payload {index} of variant {variant} outside its match arm"))
+        }
         // A raw memory access names its address and, for a store, the
         // value it writes.
         //
