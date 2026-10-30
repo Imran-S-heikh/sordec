@@ -122,6 +122,10 @@ const M_ORDERED: &str = "val_packed_compare_ordered";
 const M_MASKED_VALUE: &str = "val_packed_compare_masked_value";
 /// Shape C — a `Bool` Val narrowed to a machine bool by `== 1`.
 const M_BOOL: &str = "val_packed_compare_bool";
+/// Shape F — `p + (k << 32)`, the packed form of `payload + k`.
+const M_ADD: &str = "val_packed_compare_add";
+/// Shape G — a mask with no tag bits, read only by a zero test.
+const M_ZERO_TEST: &str = "val_packed_compare_zero_test";
 
 /// Rewrites bit-packed `U32Val` comparisons into payload comparisons.
 #[derive(Debug, Default, Clone, Copy)]
@@ -135,10 +139,19 @@ impl Pass<HighIr> for ValPackedComparePass {
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
         for func in &mut ir.functions {
-            let (changed, metrics) = recognize_function(func);
-            result.changed |= changed;
-            for (key, value) in metrics.iter() {
-                result.metrics.increment(key, value);
+            // One shape can expose another: the identity mask a sum is taken
+            // of becomes a rename of the argument only in this run. Every
+            // shape rewrites into a form none matches again, so this ends;
+            // the cap is a guard, not a limit anything reaches.
+            for _ in 0..4 {
+                let (changed, metrics) = recognize_function(func);
+                result.changed |= changed;
+                for (key, value) in metrics.iter() {
+                    result.metrics.increment(key, value);
+                }
+                if !changed {
+                    break;
+                }
             }
         }
         result
@@ -327,7 +340,9 @@ fn try_oriented(
             try_ordered(func, cmp, value, const_id, bits)
         }
         BinaryOp::GtU if side == ConstSide::Rhs => try_ordered_gt(func, value, const_id, bits),
-        BinaryOp::BitAnd => try_masked_value(func, cmp, value, const_id, bits),
+        BinaryOp::BitAnd => try_masked_value(func, cmp, value, const_id, bits)
+            .or_else(|| try_masked_zero_test(func, uses, cmp, value, const_id, bits)),
+        BinaryOp::Add => try_packed_add(func, uses, cmp, value, const_id, bits),
         _ => None,
     }
 }
@@ -415,6 +430,176 @@ fn try_masked_value(
         ],
         metric: M_MASKED_VALUE,
     })
+}
+
+/// Shape F — `p + (k << 32)`, the packed form of `payload + k`.
+///
+/// **Exact.** The constant's minor field is zero, so the tag passes through
+/// unchanged and nothing carries out of it; the major field gets
+/// `payload + k`, wrapping at 2³² exactly as the 64-bit add wraps out of
+/// its top. The sum is the `U32Val` of `payload + k`, so at the payload
+/// level it is that addition. rustc writes `v + 1` on a `u32` argument this
+/// way, straight on the word, after an overflow check against
+/// `u32::MAX << 32`.
+///
+/// Gated on the sum being read only by the return of an entrypoint the
+/// spec declares `-> u32`: there the return already reads a word of the
+/// declared type as its payload. A reader wanting the word's bits would be
+/// broken by the retype.
+fn try_packed_add(
+    func: &HighFunction,
+    uses: &HighUseIndex,
+    add: ValueId,
+    value: ValueId,
+    const_id: ValueId,
+    bits: u64,
+) -> Option<Site> {
+    if bits & !val_abi::MAJOR_MASK != 0 {
+        return None;
+    }
+    let k = u32::try_from(bits >> val_abi::MAJOR_SHIFT).ok()?;
+    if k == 0 || u32val_producer(func, value)? != KnownType::U32 {
+        return None;
+    }
+    if !returned_as_u32(func, uses, add) {
+        return None;
+    }
+    let expr = binding_expr(func, add)?;
+    Some(Site {
+        metric: M_ADD,
+        rewrites: vec![
+            Rewrite {
+                id: const_id,
+                expr: Expr::Literal(Literal::U32(k)),
+                ty: Some(IrType::Known(KnownType::U32)),
+                source: ProvenanceSource::SdkPattern,
+                note: format!(
+                    "val-packed-compare: `+ ({k} << {shift})` on a packed U32Val is `+ {k}` on its \
+                     payload (no tag bits to carry)",
+                    shift = val_abi::MAJOR_SHIFT
+                ),
+                metric: M_ADD,
+            },
+            Rewrite {
+                id: add,
+                expr,
+                ty: Some(IrType::Known(KnownType::U32)),
+                source: ProvenanceSource::SdkPattern,
+                note: "val-packed-compare: the packed sum is the U32Val of the payload sum".to_string(),
+                metric: M_ADD,
+            },
+        ],
+    })
+}
+
+/// Shape G — `(p & (m << 32))` read only by `== 0` / `!= 0` / `eqz`, which
+/// is the same test on `payload & m`.
+///
+/// **Exact under its gate.** A mask with no tag bits clears the tag and
+/// leaves `(payload & m) << 32`, which is zero exactly when `payload & m`
+/// is. That is not a `U32Val` any more, so the masked word is only
+/// renamed to the payload mask where every reader is a zero test — the one
+/// reading under which the cleared tag does not matter. `u32 % 2 == 1` is
+/// compiled this way: `word & (1 << 32)`, tested against zero.
+fn try_masked_zero_test(
+    func: &HighFunction,
+    uses: &HighUseIndex,
+    and: ValueId,
+    value: ValueId,
+    const_id: ValueId,
+    bits: u64,
+) -> Option<Site> {
+    if bits == 0 || bits & !val_abi::MAJOR_MASK != 0 {
+        return None;
+    }
+    let m = u32::try_from(bits >> val_abi::MAJOR_SHIFT).ok()?;
+    if u32val_producer(func, value)? != KnownType::U32 {
+        return None;
+    }
+    let mut zeros = Vec::new();
+    for site in uses.uses_of(and) {
+        let crate::dataflow::HighUseSite::Binding { user } = site else {
+            return None;
+        };
+        match binding_expr(func, *user)? {
+            Expr::Unary { op: sordec_ir::UnaryOp::Eqz, .. } => {}
+            Expr::Binary { op: BinaryOp::Eq | BinaryOp::Ne, lhs, rhs } => {
+                let other = if resolve_use(func, lhs) == and { rhs } else { lhs };
+                let (zero, z) = direct_int_literal(func, other)?;
+                if z != 0 || uses.use_count(zero) != 1 {
+                    return None;
+                }
+                zeros.push(zero);
+            }
+            _ => return None,
+        }
+    }
+    let expr = binding_expr(func, and)?;
+    let mut rewrites = vec![
+        Rewrite {
+            id: const_id,
+            expr: Expr::Literal(Literal::U32(m)),
+            ty: Some(IrType::Known(KnownType::U32)),
+            source: ProvenanceSource::SdkPattern,
+            note: format!(
+                "val-packed-compare: `& ({m} << {shift})` on a packed U32Val, tested against zero, \
+                 is `& {m}` on its payload tested the same way",
+                shift = val_abi::MAJOR_SHIFT
+            ),
+            metric: M_ZERO_TEST,
+        },
+        Rewrite {
+            id: and,
+            expr,
+            ty: Some(IrType::Known(KnownType::U32)),
+            source: ProvenanceSource::SdkPattern,
+            note: "val-packed-compare: the zero-tested mask read at the payload".to_string(),
+            metric: M_ZERO_TEST,
+        },
+    ];
+    for zero in zeros {
+        rewrites.push(Rewrite {
+            id: zero,
+            expr: Expr::Literal(Literal::U32(0)),
+            ty: Some(IrType::Known(KnownType::U32)),
+            source: ProvenanceSource::SdkPattern,
+            note: "val-packed-compare: the zero a payload mask is tested against".to_string(),
+            metric: M_ZERO_TEST,
+        });
+    }
+    Some(Site { metric: M_ZERO_TEST, rewrites })
+}
+
+/// Whether `value` is read only by the returns of an entrypoint the spec
+/// declares `-> u32`.
+fn returned_as_u32(func: &HighFunction, uses: &HighUseIndex, value: ValueId) -> bool {
+    let declared_u32 = func.signature.as_ref().is_some_and(|sig| {
+        matches!(sig.outputs.as_slice(), [sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::U32)])
+    });
+    if !declared_u32 || uses.use_count(value) == 0 {
+        return false;
+    }
+    if uses
+        .uses_of(value)
+        .iter()
+        .any(|s| matches!(s, crate::dataflow::HighUseSite::Binding { .. }))
+    {
+        return false;
+    }
+    // Region reads must all be returns: not a condition, an index or a
+    // transfer into a merge.
+    let mut only_returns = true;
+    func.region.for_each_node(|node| match node {
+        sordec_ir::Region::If { cond, .. } => only_returns &= *cond != value,
+        sordec_ir::Region::Switch { index, .. } => only_returns &= *index != value,
+        sordec_ir::Region::Break { transfer, .. }
+        | sordec_ir::Region::Continue { transfer, .. }
+        | sordec_ir::Region::Transfer { transfer, .. } => {
+            only_returns &= transfer.iter().all(|(_, src)| *src != value);
+        }
+        _ => {}
+    });
+    only_returns
 }
 
 /// Shape D — `p > (k << 32) - 1`, which is `payload > k - 1`.
@@ -583,11 +768,10 @@ fn try_ordered(
     if k == 0 {
         return None;
     }
-    // A constant with its top bit set would bound the payload at 2³¹ or
-    // more, which no length or index reaches: not this shape.
-    if (bits as i64) < 0 {
-        return None;
-    }
+    // A constant with its top bit set is still a boundary on an unsigned
+    // reading — the operator is `LtU`/`GeU`, so it is the reading — and a
+    // `u32` parameter's payload reaches it: `v + 1`'s overflow check is
+    // `ge_u word, u32::MAX << 32`.
     u32val_producer(func, value)?;
 
     let mut rewrites = vec![Rewrite {
@@ -604,24 +788,26 @@ fn try_ordered(
     }];
 
     // `payload < 1` and `payload == 0` are the same predicate on a u32,
-    // and `== 0` is what a person writes. Normalizing between provably
-    // equal spellings is not a guess, and it is what makes the recovered
-    // line read as `message.len() == 0`.
+    // and `== 0` is what a person writes; `payload >= 1` is likewise
+    // `!= 0`. Normalizing between provably equal spellings is not a guess,
+    // and it is what makes the recovered line read as
+    // `message.len() == 0`. The operator decides which: `>=` is the
+    // negation of `<`, so it normalizes to `!=`.
     if k == 1 {
-        let Expr::Binary { lhs, rhs, .. } = binding_expr(func, cmp)? else {
+        let Expr::Binary { op, lhs, rhs } = binding_expr(func, cmp)? else {
             return None;
+        };
+        let (normal, note) = match op {
+            BinaryOp::LtU => (BinaryOp::Eq, "val-packed-compare: `< 1` normalized to `== 0` (identical on a u32)"),
+            BinaryOp::GeU => (BinaryOp::Ne, "val-packed-compare: `>= 1` normalized to `!= 0` (identical on a u32)"),
+            _ => return None,
         };
         rewrites.push(Rewrite {
             id: cmp,
-            expr: Expr::Binary {
-                op: BinaryOp::Eq,
-                lhs,
-                rhs,
-            },
+            expr: Expr::Binary { op: normal, lhs, rhs },
             ty: Some(IrType::Known(KnownType::Bool)),
             source: ProvenanceSource::SdkPattern,
-            note: "val-packed-compare: `< 1` normalized to `== 0` (identical on a u32)"
-                .to_string(),
+            note: note.to_string(),
             metric: M_ORDERED,
         });
     }
@@ -1225,9 +1411,10 @@ mod tests {
     }
 
     #[test]
-    fn a_negative_boundary_is_declined() {
-        // `k << 32` with the sign bit set: signed and unsigned readings
-        // differ for every payload, so the premise fails outright.
+    fn a_boundary_with_its_top_bit_set_is_read_unsigned() {
+        // `k << 32` with the sign bit set: the operator is `LtU`, so the
+        // unsigned reading is the one the program makes, and it holds for
+        // every payload.
         let bits = (1u64 << 31) << val_abi::MAJOR_SHIFT;
         let mut func = func_with(vec![
             Expr::Phi { incoming: vec![] },
@@ -1235,7 +1422,126 @@ mod tests {
             Expr::Literal(Literal::I64(bits as i64)),
             Expr::Binary { op: BinaryOp::LtU, lhs: v(1), rhs: v(2) },
         ]);
-        assert_eq!(run(&mut func).get(M_ORDERED), None);
+        assert_eq!(run(&mut func).get(M_ORDERED), Some(1));
+        assert!(matches!(func.bindings.get(v(2)).unwrap().expr, Expr::Literal(Literal::U32(2_147_483_648))));
+    }
+
+    /// `>= 1 << 32` is `payload >= 1`, which is `!= 0` — not `== 0`, the
+    /// spelling `< 1` normalizes to.
+    #[test]
+    fn a_ge_one_boundary_normalizes_to_not_equal_zero() {
+        let mut func = func_with(vec![
+            Expr::Phi { incoming: vec![] },
+            bytes_len(v(0)),
+            Expr::Literal(Literal::I64(1 << val_abi::MAJOR_SHIFT)),
+            Expr::Binary { op: BinaryOp::GeU, lhs: v(1), rhs: v(2) },
+        ]);
+        assert_eq!(run(&mut func).get(M_ORDERED), Some(1));
+        assert!(matches!(func.bindings.get(v(3)).unwrap().expr, Expr::Binary { op: BinaryOp::Ne, .. }));
+        assert!(matches!(func.bindings.get(v(2)).unwrap().expr, Expr::Literal(Literal::U32(0))));
+    }
+
+    /// `fn f(v: u32) -> u32` with body `v + 1`, compiled on the word.
+    fn u32_entrypoint(exprs: Vec<Expr>, scheduled: Vec<u32>, returned: u32) -> HighFunction {
+        use sordec_ir::{FunctionParam, FunctionSignature, PrimitiveType, Region, TypeRef};
+        let mut f = crate::marshalling::test_support::func_with(exprs, vec![v(0)], scheduled);
+        f.signature = Some(FunctionSignature {
+            name: "f".to_string(),
+            inputs: vec![FunctionParam { name: "v".to_string(), ty: TypeRef::Primitive(PrimitiveType::U32) }],
+            outputs: vec![TypeRef::Primitive(PrimitiveType::U32)],
+        });
+        f.region = Region::Sequence(vec![
+            Region::Basic(sordec_common::BlockId::from_index(0)),
+            Region::Return { values: vec![v(returned)] },
+        ]);
+        f
+    }
+
+    #[test]
+    fn a_packed_add_on_a_u32_argument_is_the_payload_add() {
+        let mut func = u32_entrypoint(
+            vec![
+                Expr::Phi { incoming: vec![] },                                  // v0 the u32
+                Expr::Literal(Literal::I64(1 << val_abi::MAJOR_SHIFT)),          // v1
+                Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(1) },        // v2
+            ],
+            vec![1, 2],
+            2,
+        );
+        assert_eq!(run(&mut func).get(M_ADD), Some(1));
+        assert!(matches!(func.bindings.get(v(1)).unwrap().expr, Expr::Literal(Literal::U32(1))));
+        assert_eq!(func.bindings.get(v(2)).unwrap().ty, IrType::Known(KnownType::U32));
+    }
+
+    /// The sum is taken of the identity mask the same run renames to the
+    /// argument: the second round sees the rename.
+    #[test]
+    fn a_packed_add_over_an_identity_mask_is_found_on_the_second_round() {
+        let mut func = u32_entrypoint(
+            vec![
+                Expr::Phi { incoming: vec![] },                                  // v0
+                Expr::Literal(Literal::I64(-4_294_967_292)),                     // v1 u32::MAX << 32 | 4
+                Expr::Binary { op: BinaryOp::BitAnd, lhs: v(0), rhs: v(1) },     // v2
+                Expr::Literal(Literal::I64(1 << val_abi::MAJOR_SHIFT)),          // v3
+                Expr::Binary { op: BinaryOp::Add, lhs: v(2), rhs: v(3) },        // v4
+            ],
+            vec![1, 2, 3, 4],
+            4,
+        );
+        // Two rounds of the function-level recogniser, as `run` makes them.
+        let first = recognize_function(&mut func).1;
+        let second = recognize_function(&mut func).1;
+        assert_eq!(first.get(M_MASKED_VALUE), Some(1));
+        assert_eq!(second.get(M_ADD), Some(1));
+    }
+
+    #[test]
+    fn a_packed_sum_someone_else_reads_is_left_alone() {
+        let mut func = u32_entrypoint(
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Literal(Literal::I64(1 << val_abi::MAJOR_SHIFT)),
+                Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(1) },        // v2
+                Expr::Literal(Literal::I64(255)),                                // v3
+                Expr::Binary { op: BinaryOp::BitAnd, lhs: v(2), rhs: v(3) },    // v4 reads the word
+            ],
+            vec![1, 2, 3, 4],
+            2,
+        );
+        assert_eq!(run(&mut func).get(M_ADD), None);
+    }
+
+    #[test]
+    fn a_zero_tested_tagless_mask_is_the_payload_mask() {
+        // `v % 2 == 1` on a `u32` argument: `eqz(word & (1 << 32))`.
+        let mut func = u32_entrypoint(
+            vec![
+                Expr::Phi { incoming: vec![] },                                  // v0
+                Expr::Literal(Literal::I64(1 << val_abi::MAJOR_SHIFT)),          // v1
+                Expr::Binary { op: BinaryOp::BitAnd, lhs: v(0), rhs: v(1) },     // v2
+                Expr::Unary { op: sordec_ir::UnaryOp::Eqz, value: v(2) },       // v3
+            ],
+            vec![1, 2, 3],
+            3,
+        );
+        assert_eq!(run(&mut func).get(M_ZERO_TEST), Some(1));
+        assert!(matches!(func.bindings.get(v(1)).unwrap().expr, Expr::Literal(Literal::U32(1))));
+    }
+
+    #[test]
+    fn a_tagless_mask_read_as_a_value_is_left_alone() {
+        // The masked word is returned itself: not a zero test, and with its
+        // tag cleared it is no U32Val.
+        let mut func = u32_entrypoint(
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Literal(Literal::I64(1 << val_abi::MAJOR_SHIFT)),
+                Expr::Binary { op: BinaryOp::BitAnd, lhs: v(0), rhs: v(1) },     // v2
+            ],
+            vec![1, 2],
+            2,
+        );
+        assert_eq!(run(&mut func).get(M_ZERO_TEST), None);
     }
 
     #[test]
