@@ -679,3 +679,20 @@ throws away memory and rolls back host state). Stack frames kept only to build a
 message or pass an unused pointer go, with their loads, stores and bookkeeping
 (phoenix-vesting 688 → 565). Corpus: dex's panic helper loses an argument it never
 read. Corpus bands pass; held-out mean 0.7861 → 0.7862.
+
+## 2026-10-30 — commit b82e7b3 (a parameter's two unpacks, and a branch whose two ways end the same, go)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,835 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 4,084 |
+| third-party | 2 | 1/2 | 8 | 661 |
+| SDK 26 test contracts | 39 | 38/39 | 2 | 1,355 |
+
+Holes 10,058 → 10,020 (summed); errors unchanged at 11. A parameter the spec declares
+`u64`, `i64`, timepoint or duration is the value in each branch of its two-form unpack;
+a branch whose two ways both fall through or return the same values, with only pure
+code between, is dropped. Entrypoints that only hand their argument back now read as
+returning it (other_custom_types, the three contracttrait builds). Corpus byte-identical;
+corpus bands pass; held-out mean 0.7862 → 0.7865.
