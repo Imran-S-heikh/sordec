@@ -614,3 +614,13 @@ the value — `if s.a != 4 { panic!() }`, which panics for every value but 4; in
 phoenix-vesting a field written in 4 bytes was read as 8, and another was read after
 the caller partly overwrote it. Those reads are now honest gaps
 (phoenix-vesting +26, spec_shaking +7 each). Scored sets unchanged.
+
+## 2026-10-30 — commit 7b5c975 (a packed length shifted down by 32 is the length)
+
+Numbers unchanged (errors 18, holes 10,364). **Correctness fix:** the SDK stores a
+length it holds as a `U32Val` back as a number with `word >> 32`; once the length is
+typed as its value, that shift read the decoded value — `len >> 32`, which is `0` or
+an overflow panic where the program had the length. An unsigned shift right by
+exactly 32 of a packed `U32Val` is now its payload. udt stores its lengths again;
+phoenix-vesting's length arithmetic now reads as the lengths (and an underflow
+check folds into the `len - 1` that already makes it). Scored sets unchanged.
