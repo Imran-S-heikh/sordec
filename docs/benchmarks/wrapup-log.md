@@ -596,3 +596,21 @@ and returns only its encode is, at each call site, the value read through the
 pointer; the unpack of a word a one-tag `Option` decoder hands back is its decode.
 privacy_pools 3 → 1. Held-out mean 0.7860 → 0.7861 (fuzzing 0.5389 → 0.5407);
 corpus bands pass.
+
+## 2026-10-30 — commit b946d64 (a struct field read only when the read is the whole slot)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,879 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 4,214 |
+| third-party | 2 | 1/2 | 11 | 791 |
+| SDK 26 test contracts | 39 | 37/39 | 3 | 1,385 |
+
+Errors unchanged (18); holes +40. **Correctness fix:** the struct-decode recogniser
+turned reads of a decode helper's output into field accesses without checking the
+read's width. In spec_shaking v1/v2 a one-byte read of a field's tag became a test on
+the value — `if s.a != 4 { panic!() }`, which panics for every value but 4; in
+phoenix-vesting a field written in 4 bytes was read as 8, and another was read after
+the caller partly overwrote it. Those reads are now honest gaps
+(phoenix-vesting +26, spec_shaking +7 each). Scored sets unchanged.
