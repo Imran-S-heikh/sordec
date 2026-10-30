@@ -689,6 +689,14 @@ fn backward(
         if uses.is_unused(id) && expr_effects(&binding.expr).is_pure_total() {
             continue;
         }
+        // The other direction: a vec settled as `Vec<T>` holds `T`s, so an
+        // element that is an untyped word read out of memory is a `T`
+        // ([`opaque_vec_elements`]).
+        if let Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { elements: Some(values), .. })) = &binding.expr {
+            for (v, ty) in opaque_vec_elements(func, types.get(&id), values, types) {
+                changed |= improve(types, ev, v, ty);
+            }
+        }
         match &binding.expr {
             // Numeric arithmetic: both operands share the numeric type. A
             // bitwise op that involves a logical type (`address & 255`) is a
@@ -1113,6 +1121,63 @@ fn returns_receiver(kind: sordec_ir::VecOpKind) -> bool {
         kind,
         K::Put | K::Del | K::PushFront | K::PopFront | K::PushBack | K::PopBack | K::Insert | K::Append | K::Slice
     )
+}
+
+/// The elements of a vec typed `Vec<T>` that are untyped words read out of
+/// memory, each with the `T` it holds.
+///
+/// `vec![&e, a, b]` is `Vec::from_array(&e, [a, b])`, and an array has one
+/// element type: the vec's. So when the vec is settled as a `Vec<T>` —
+/// typically by the return it reaches, which the spec types — each element
+/// the SDK wrote into the buffer was a `T`. A Symbol beside a struct
+/// field read back out of the frame left the field untyped; emitted as the
+/// `Val` an untyped value is named, it made the vec a `Vec<Val>` and the
+/// function's `Vec<Symbol>` return did not compile.
+///
+/// # Why it is exact
+///
+/// The element is the word the host reads out of that slot of the buffer,
+/// which is the `Val` of the vec's element there — and a `T` whose `Val`
+/// is the word *is* that value, under the convention every typed value
+/// follows. Nothing else says what an opaque memory word is.
+///
+/// # Gates
+///
+/// - **The vec's type names its element**, at any certainty, and the name
+///   is not `Val`: a `Vec<Val>` says nothing an untyped element lacks.
+/// - **`T` is a type whose `Val` is the value itself**: a host object, a
+///   symbol or a contract type. A number's `Val` is its encoding — the
+///   payload shifted over a tag — so a word read out of a `Vec<u32>`'s slot
+///   is not the `u32`, and is left alone.
+/// - **The element is a full-width load nothing has typed.** A value with
+///   a type of its own keeps it; one computed by arithmetic is not an
+///   opaque word.
+fn opaque_vec_elements(
+    func: &HighFunction,
+    vec_ty: Option<&IrType>,
+    values: &[ValueId],
+    types: &HashMap<ValueId, IrType>,
+) -> Vec<(ValueId, IrType)> {
+    let Some(KnownType::Vec(element)) = base_of(vec_ty) else {
+        return Vec::new();
+    };
+    let Some(element) = base_of(Some(element.as_ref())) else {
+        return Vec::new();
+    };
+    if !is_own_val(&element) {
+        return Vec::new();
+    }
+    values
+        .iter()
+        .filter(|v| base_of(types.get(v)).is_none())
+        .filter(|v| {
+            matches!(
+                func.bindings.get(**v).map(|b| &b.expr),
+                Some(Expr::Load { width, .. }) if width.bytes() == 8
+            )
+        })
+        .map(|v| (*v, IrType::Inferred(element.clone())))
+        .collect()
 }
 
 /// Whether two of these values carry *different* recovered bases.
@@ -1885,6 +1950,15 @@ fn crosses_only_as_val(k: &KnownType) -> bool {
             | KnownType::I256
             | KnownType::U256
     )
+}
+
+/// Whether a value of this type *is* the `Val` it travels as: a host
+/// object, a symbol or a contract type. A word read where the host stored
+/// one is then that value. A number is not — its `Val` is an encoding, the
+/// payload shifted over a tag or an object holding it — so a raw word in a
+/// number's place is the encoding, never the number.
+pub(crate) fn is_own_val(k: &KnownType) -> bool {
+    crosses_only_as_val(k) && !matches!(k, KnownType::I128 | KnownType::U128 | KnownType::I256 | KnownType::U256)
 }
 
 /// What each helper's returned components are *used as*, joined over every
@@ -3717,6 +3791,59 @@ mod tests {
         let mut ir = vec_op_on(sordec_ir::VecOpKind::Del, IrType::Known(KnownType::Val));
         TypeInferPass.run(&mut ir);
         assert_eq!(ty_of(&ir, 0, 1), IrType::Known(vec_of(unknown())));
+    }
+
+    /// `v4 = vec_new([v2, v1])` typed `vec_ty` and returned: `v1` a word read
+    /// out of the frame (`v0`), `v2` the decoded symbol `"Hello"`, `v3` an
+    /// unrelated word `element` is swapped in for when `computed`.
+    fn vec_of_symbol_and_word(vec_ty: KnownType, computed: bool) -> HighIr {
+        use crate::marshalling::test_support::{load, v};
+        let element = if computed { v(3) } else { v(1) };
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                load(v(0), 16),
+                Expr::Literal(Literal::Symbol("Hello".into())),
+                Expr::Binary { op: BinaryOp::BitOr, lhs: v(1), rhs: v(1) },
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                    vals_pos: v(0),
+                    len: v(0),
+                    elements: Some(vec![v(2), element]),
+                })),
+            ],
+            vec![v(0)],
+            vec![1, 2, 3, 4],
+            vec![vec![v(4)]],
+        );
+        f.bindings.get_mut(v(2)).unwrap().ty = IrType::Known(KnownType::Symbol);
+        f.bindings.get_mut(v(4)).unwrap().ty = IrType::Known(vec_ty);
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn a_word_read_into_a_vec_of_symbols_is_a_symbol() {
+        let symbols = vec_of(IrType::Known(KnownType::Symbol));
+        let mut ir = vec_of_symbol_and_word(symbols.clone(), false);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Inferred(KnownType::Symbol));
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 4))), Some(symbols));
+    }
+
+    #[test]
+    fn only_an_opaque_word_in_a_vec_of_objects_takes_the_element_type() {
+        // A `u32`'s slot holds its encoding, not the number.
+        let mut ir = vec_of_symbol_and_word(vec_of(IrType::Known(KnownType::U32)), false);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 1))), None);
+        // A `Vec<Val>` says nothing an untyped element lacks.
+        let mut ir = vec_of_symbol_and_word(vec_of(IrType::Known(KnownType::Val)), false);
+        TypeInferPass.run(&mut ir);
+        assert_ne!(base_of(Some(&ty_of(&ir, 0, 1))), Some(KnownType::Symbol));
+        // A value computed by arithmetic is not an opaque word.
+        let mut ir = vec_of_symbol_and_word(vec_of(IrType::Known(KnownType::Symbol)), true);
+        TypeInferPass.run(&mut ir);
+        assert_ne!(base_of(Some(&ty_of(&ir, 0, 3))), Some(KnownType::Symbol));
     }
 
     /// `v3 = State { count: v0, owner: v1, memo: v2 }`, the struct declared
