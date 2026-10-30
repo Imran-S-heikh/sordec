@@ -71,11 +71,14 @@
 //!
 //! ## What the host catalog fixes
 //!
-//! A crypto call's object operand is the object the catalog names: a
-//! `BytesObject` operand is a `Bytes`, a `VecObject` one a `Vec` (`Known`,
-//! by the ABI). Exact because an object crosses into the host as its
-//! handle, so the operand is that object whatever computed it — the same
-//! reasoning that types an unnamed host call's object *result*. Two limits
+//! A crypto or bytes call's object operand is the object the catalog
+//! names: a `BytesObject` operand is a `Bytes`, a `VecObject` one a `Vec`
+//! (`Known`, by the ABI). Exact because an object crosses into the host as
+//! its handle, so the operand is that object whatever computed it — the
+//! same reasoning that types an unnamed host call's object *result*. The
+//! value whose length a `bytes_len` reads is a bytes object, whether it
+//! was loaded from a slot nothing else reads or handed in as a helper's
+//! parameter. Two limits
 //! keep it from saying more than the catalog does. It names only an
 //! operand nothing has named, or named only `Val`: a `BytesObject` may be a
 //! `BytesN` the source converted on the way in, and the catalog says
@@ -285,7 +288,7 @@ impl Pass<HighIr> for TypeInferPass {
 /// many times inter-procedural evidence disagreed with an equal-rank
 /// incumbent. Works on a `ValueId -> IrType` snapshot and writes the
 /// improvements back with `TypePropagation` provenance. `catalog` lets the
-/// host catalog's operand kinds speak ([`crypto_object_args`]); `structs`
+/// host catalog's operand kinds speak ([`catalog_object_args`]); `structs`
 /// are the contract's declared structs, whose literals type their fields;
 /// `int_enums` its enums with integer discriminants; `encoders` the
 /// helpers that only encode their argument.
@@ -683,11 +686,15 @@ fn backward(
                     changed |= improve(types, ev, arg, IrType::Known(ty));
                 }
                 // The object kind the host's catalog fixes for the rest —
-                // only where nothing better is said ([`crypto_object_args`]).
-                for (arg, ty) in crypto_object_args(op) {
+                // only where nothing better is said ([`catalog_object_args`]).
+                // A bytes op's operand already named `Val` is the value the
+                // SDK's fixed-width decode checks the tag and length of, and
+                // keeps that name ([`catalog_object_args`]).
+                let refines_val = !matches!(op, KnownOp::BufOp { .. });
+                for (arg, ty) in catalog_object_args(op) {
                     if !catalog
                         || pinned.iter().any(|(p, _)| *p == arg)
-                        || base_of(types.get(&arg)).is_some_and(|have| have != KnownType::Val)
+                        || base_of(types.get(&arg)).is_some_and(|have| have != KnownType::Val || !refines_val)
                     {
                         continue;
                     }
@@ -1303,7 +1310,8 @@ fn semantic_arg_types(op: &KnownOp) -> Vec<(ValueId, KnownType)> {
 }
 
 /// The object type the host catalog declares for each operand of a crypto
-/// call: a `BytesObject` operand is a `Bytes`, a `VecObject` one a `Vec`.
+/// or bytes call: a `BytesObject` operand is a `Bytes`, a `VecObject` one a
+/// `Vec`.
 ///
 /// Objects only. An object's handle *is* the `Val` the host receives, so
 /// the operand is that object whatever produced it — the same reason
@@ -1312,12 +1320,20 @@ fn semantic_arg_types(op: &KnownOp) -> Vec<(ValueId, KnownType)> {
 /// encoding, not the number. The caller applies these only to an operand
 /// nothing has named, or named only `Val`: the catalog says the object's
 /// kind, not its length, so a `BytesN<32>` handed to `sha256` stays one.
-fn crypto_object_args(op: &KnownOp) -> Vec<(ValueId, KnownType)> {
-    let KnownOp::CryptoOp { kind, args } = op else {
-        return vec![];
+///
+/// A bytes op's operand named `Val` keeps that name. `bytes_len` is how the
+/// SDK's `BytesN<N>` decode checks a `Val`'s length before the source holds
+/// it as the fixed-width type: the helper takes the `Val` its callers hand
+/// it, and returns it as `Some(BytesN<N>)` once the length agrees. Naming
+/// that parameter `Bytes` contradicts both its callers and the width its
+/// other use carries, which the catalog cannot see.
+fn catalog_object_args(op: &KnownOp) -> Vec<(ValueId, KnownType)> {
+    let (module, name, args) = match op {
+        KnownOp::CryptoOp { kind, args } => ("c", crate::val_abi::crypto_kind_name(*kind), args),
+        KnownOp::BufOp { kind, args } => ("b", crate::val_abi::buf_kind_name(*kind), args),
+        _ => return vec![],
     };
-    let name = crate::val_abi::crypto_kind_name(*kind);
-    let Some(call) = crate::host_calls::all().iter().find(|c| c.module == "c" && c.friendly_name == name) else {
+    let Some(call) = crate::host_calls::all().iter().find(|c| c.module == module && c.friendly_name == name) else {
         return vec![];
     };
     if call.arg_types.len() != args.len() {
@@ -2256,7 +2272,7 @@ fn composite_to_known(c: &CompositeType) -> Option<KnownType> {
 mod tests {
     use super::*;
     use sordec_common::{Arena, BlockId, FuncId, IrId, UnknownReason};
-    use sordec_ir::{Binding, FunctionParam, HighBlock, Region};
+    use sordec_ir::{Binding, BufOpKind, FunctionParam, HighBlock, Region};
 
     fn unknown() -> IrType {
         IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)
@@ -3258,6 +3274,50 @@ mod tests {
         assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::BytesN(32)));
         assert_eq!(ty_of(&ir, 0, 1), IrType::Known(KnownType::Bytes));
         assert_eq!(ty_of(&ir, 0, 2), IrType::Known(KnownType::BytesN(64)));
+    }
+
+    /// One function whose `v0..v(n-1)` are untyped parameters handed to
+    /// the bytes op `kind`, which is `v(n)`; `ty` seeds `v0`.
+    fn buf_on_params(kind: BufOpKind, n: u32, ty: Option<IrType>) -> HighIr {
+        let mut exprs: Vec<Expr> = (0..n).map(|_| Expr::Phi { incoming: vec![] }).collect();
+        exprs.push(Expr::Semantic(SemanticOp::Known(KnownOp::BufOp {
+            kind,
+            args: (0..n).map(ValueId::from_index).collect(),
+        })));
+        let mut f = func_at(0, exprs, (0..n).map(ValueId::from_index).collect(), vec![n], vec![]);
+        if let Some(ty) = ty {
+            f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = ty;
+        }
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn the_value_a_bytes_len_reads_is_the_bytes_the_host_takes() {
+        let mut ir = buf_on_params(BufOpKind::BytesLen, 1, None);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::Bytes));
+        // `bytes_get(bytes, index)`: the index is a `U32Val`, the encoding,
+        // and is left alone.
+        let mut ir = buf_on_params(BufOpKind::BytesGet, 2, None);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::Bytes));
+        assert!(matches!(ty_of(&ir, 0, 1), IrType::Unknown(_)));
+    }
+
+    #[test]
+    fn a_bytes_len_operand_already_named_keeps_its_width() {
+        let mut ir = buf_on_params(BufOpKind::BytesLen, 1, Some(IrType::Inferred(KnownType::BytesN(96))));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Inferred(KnownType::BytesN(96)));
+        // A `Val` whose length a fixed-width decode checks stays the `Val`
+        // its callers hand over (unlike a crypto op's, which is refined).
+        let mut ir = buf_on_params(BufOpKind::BytesLen, 1, Some(IrType::Inferred(KnownType::Val)));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Inferred(KnownType::Val));
+        // `serialize_to_bytes` takes any `Val`: the catalog names no object.
+        let mut ir = buf_on_params(BufOpKind::SerializeToBytes, 1, None);
+        TypeInferPass.run(&mut ir);
+        assert!(matches!(ty_of(&ir, 0, 0), IrType::Unknown(_)));
     }
 
     fn vec_of(t: IrType) -> KnownType {
