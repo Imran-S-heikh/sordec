@@ -1673,6 +1673,22 @@ fn wide_type(ty: &IrType) -> syn::Type {
     }
 }
 
+/// A rotation's count as Rust's `rotate_left`/`rotate_right` take it: a
+/// `u32`, whatever the width of the value rotated. WASM's count has the
+/// operand's own type and is used modulo the bit width, as Rust's is.
+/// Keeping the low 32 bits keeps the count modulo 32 and modulo 64 alike,
+/// so the rotation is the same: a literal is rewritten as that `u32`, and
+/// anything else is cast.
+fn rotate_count(r: syn::Expr) -> syn::Expr {
+    if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Int(i), .. }) = &r
+        && let Ok(n) = i.base10_parse::<u128>()
+    {
+        let lit = proc_macro2::Literal::u32_unsuffixed((n & 0xFFFF_FFFF) as u32);
+        return parse_quote!(#lit);
+    }
+    parse_quote!((#r as u32))
+}
+
 fn binary_expr(op: BinaryOp, l: syn::Expr, r: syn::Expr) -> syn::Expr {
     match op {
         BinaryOp::Add => parse_quote!(#l + #r),
@@ -1685,8 +1701,14 @@ fn binary_expr(op: BinaryOp, l: syn::Expr, r: syn::Expr) -> syn::Expr {
         BinaryOp::BitXor => parse_quote!(#l ^ #r),
         BinaryOp::Shl => parse_quote!(#l << #r),
         BinaryOp::Shr | BinaryOp::ShrU => parse_quote!(#l >> #r),
-        BinaryOp::Rotl => parse_quote!(#l.rotate_left(#r)),
-        BinaryOp::Rotr => parse_quote!(#l.rotate_right(#r)),
+        BinaryOp::Rotl => {
+            let r = rotate_count(r);
+            parse_quote!(#l.rotate_left(#r))
+        }
+        BinaryOp::Rotr => {
+            let r = rotate_count(r);
+            parse_quote!(#l.rotate_right(#r))
+        }
         BinaryOp::Eq => parse_quote!(#l == #r),
         BinaryOp::Ne => parse_quote!(#l != #r),
         BinaryOp::Lt | BinaryOp::LtU => parse_quote!(#l < #r),
@@ -1728,7 +1750,12 @@ mod tests {
     fn rotate_and_bitcount_render_as_methods() {
         assert_eq!(
             render(&binary_expr(BinaryOp::Rotl, parse_quote!(a), parse_quote!(b))),
-            render(&syn::parse_str::<syn::Expr>("a.rotate_left(b)").unwrap()),
+            render(&syn::parse_str::<syn::Expr>("a.rotate_left((b as u32))").unwrap()),
+        );
+        // A literal count is the `u32` Rust's rotate takes, whatever its suffix.
+        assert_eq!(
+            render(&binary_expr(BinaryOp::Rotr, parse_quote!(a), parse_quote!(8i32))),
+            render(&syn::parse_str::<syn::Expr>("a.rotate_right(8)").unwrap()),
         );
         assert_eq!(
             render(&unary_expr(UnaryOp::Clz, parse_quote!(x), false)),
