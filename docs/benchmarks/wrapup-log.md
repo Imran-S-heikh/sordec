@@ -437,3 +437,19 @@ the struct — so other_custom_types trades three errors for three honest gaps;
 and a struct field declared `Option<T>` filled from `Void` or an encode is
 `None`/`Some(x)`. phoenix-vesting 17 → 11. Scores unchanged: corpus bands pass,
 held-out mean 0.7851.
+
+## 2026-10-30 — commit 5aff83a (a Result returned through caller memory is the Result)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 23/25 | 11 | 3,882 |
+| Stellar examples, multi-contract | 13 | **12/13** | 13 | 4,228 |
+| third-party | 2 | 1/2 | 11 | 765 |
+| SDK 26 test contracts | 39 | 31/39 | 23 | 1,419 |
+
+Errors 66 → 58, holes 10,391 → 10,379. A helper returning `Result<bool, E>` by
+writing a tag byte and a payload into memory its caller passes, followed by the
+SDK's conversion of that memory to a `Val`, is now the `Result` itself, built as
+`Ok(..)` / `Err(E::Variant)` on each path. Both groth16 verifiers compile; only
+they changed. Corpus bands pass; the held-out set is untouched (0.7851).
