@@ -87,6 +87,13 @@ impl EncoderTable {
         self.helpers.contains_key(&target)
     }
 
+    /// `target`'s return slots, each the parameter index and type it
+    /// returns the encode of, when it does; `None` for a function that is
+    /// not such a helper.
+    pub(crate) fn slots(&self, target: FuncId) -> Option<&[Option<(usize, KnownType)>]> {
+        self.helpers.get(&target).map(Vec::as_slice)
+    }
+
     /// The payload and type `value` encodes when it is a call's component
     /// an encoder slot returns: `func1(x).1` is `encode::<u64>(x)`.
     pub(crate) fn encoded_by_call(&self, func: &HighFunction, value: ValueId) -> Option<(ValueId, KnownType)> {
