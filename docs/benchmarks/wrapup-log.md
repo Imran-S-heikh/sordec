@@ -471,3 +471,20 @@ call folds to the symbol. The three contracttrait builds compile: their
 enum-variant function returns its declared type, with honest gaps on two of its
 three paths (rebuilding it as the argument itself is parked). Only SDK 26
 changed; scores as for 5aff83a.
+
+## 2026-10-30 — commit a386e20 (Option and Result of user types, and numbers, at the return)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 23/25 | 11 | 3,882 |
+| Stellar examples, multi-contract | 13 | 12/13 | 13 | 4,228 |
+| third-party | 2 | 1/2 | 11 | 765 |
+| SDK 26 test contracts | 39 | **35/39** | 7 | 1,404 |
+
+Errors 55 → 42. Six return-side facts: an error constant returned under the SDK's own
+`Error` with no enum declared; a returned tuple whose parts a shared helper only
+encodes; a returned merge typed by the declared number before a `0` arm's suffix can;
+a struct named by an `Option<S>` return; `Result<Option<T>, E>` returns as
+`Ok(Some(..))`/`Ok(None)`; an `Option` parameter returned where it was tested present.
+associated_type_chained compiles; udt 7 → 2. Only those two changed; scores as before.
