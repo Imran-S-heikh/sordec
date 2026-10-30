@@ -25,7 +25,11 @@
 //!
 //! # Gates
 //!
-//! - **The spec declares a tuple**, bare or as a `Result`'s `Ok`.
+//! - **The spec declares a tuple**, bare or as a `Result`'s `Ok` — and
+//!   either as an `Option`'s `Some`. A vec is never `Void`, `None`'s
+//!   encoding, so a vec returned as an `Option` is the `Some`'s payload;
+//!   it becomes that payload here, and [`super::option_return`] then
+//!   writes the `Some` around it.
 //! - **The vec reaches a return** through renames and merges only.
 //! - **Nothing else reads it**, nor any rename on the way: a vec that is
 //!   also stored or passed somewhere is used as a vec there. A binding no
@@ -75,7 +79,8 @@
 //! A `#[contracttype]` enum's variant travels as a vec too: the variant's
 //! name as a symbol, then each value it carries, encoded. `UsedReturnEnum::
 //! A(1)` returned is `vec![Symbol("A"), 1 << 32 | U32Val]`. Where the spec
-//! declares the entrypoint returns the enum, a returned vec whose first
+//! declares the entrypoint returns the enum (in any of the positions the
+//! gates above allow a tuple), a returned vec whose first
 //! element is a constant symbol naming one of its variants, with exactly
 //! as many elements after it as that variant carries values, is that
 //! variant: [`Expr::Variant`] with the rest read as the tuple's components
@@ -206,12 +211,18 @@ enum Declared<'a> {
 }
 
 /// What the function's spec says it returns, bare or as a `Result`'s `Ok`,
-/// when that travels as a vec: a tuple, or an enum with variants.
+/// and either of those as an `Option`'s `Some`, when that travels as a
+/// vec: a tuple, or an enum with variants.
 fn declared<'a>(func: &HighFunction, unions: &'a [UnionDef]) -> Option<Declared<'a>> {
     let ty = match func.signature.as_ref()?.outputs.as_slice() {
         [TypeRef::Composite(CompositeType::Result(ok, _))] => ok.as_ref(),
         [one] => one,
         _ => return None,
+    };
+    // A vec is never `Void`, so a returned one is the `Some`'s payload.
+    let ty = match ty {
+        TypeRef::Composite(CompositeType::Option(inner)) => inner.as_ref(),
+        other => other,
     };
     match known_of_type_ref(ty)? {
         KnownType::Tuple(slots) if !slots.is_empty() => Some(Declared::Tuple(slots)),
@@ -687,6 +698,11 @@ mod tests {
     /// `enum UsedReturnEnum { A(u32), B(i64) }` (5), declared as the return;
     /// the returned vec is `[symbol, words..]`, through a rename.
     fn variant(symbol: Expr, words: &[i64]) -> HighIr {
+        variant_as(symbol, words, TypeRef::UserDefined(TypeId::new(5)))
+    }
+
+    /// `variant`, from an entrypoint declared to return `output`.
+    fn variant_as(symbol: Expr, words: &[i64], output: TypeRef) -> HighIr {
         use sordec_ir::{SorobanFacts, TypeRegistry, UnionCase};
         let mut exprs = vec![symbol]; // v0
         exprs.extend(words.iter().map(|w| Expr::Literal(Literal::I64(*w)))); // v1..
@@ -704,7 +720,7 @@ mod tests {
         func.signature = Some(FunctionSignature {
             name: "ret".to_string(),
             inputs: vec![],
-            outputs: vec![TypeRef::UserDefined(TypeId::new(5))],
+            outputs: vec![output],
         });
         func.returns = vec![vec![v(n + 1)]];
         let mut m = module(vec![func]);
@@ -772,6 +788,31 @@ mod tests {
             let mut ir = variant(symbol, &words);
             assert!(!TupleReturnPass.run(&mut ir).changed, "{words:?}");
         }
+    }
+
+    /// `Option<UsedReturnEnum>`, bare or as a `Result`'s `Ok`: a vec is
+    /// never `Void`, so the returned one is the `Some`'s variant.
+    #[test]
+    fn a_vec_returned_as_an_option_is_the_some_s_variant() {
+        let option = TypeRef::Composite(CompositeType::Option(Box::new(TypeRef::UserDefined(TypeId::new(5)))));
+        let result = TypeRef::Composite(CompositeType::Result(
+            Box::new(option.clone()),
+            Box::new(TypeRef::Primitive(PrimitiveType::Error)),
+        ));
+        for output in [option, result] {
+            let mut ir = variant_as(symbol_new("A"), &[(1 << 32) | 4], output);
+            assert!(TupleReturnPass.run(&mut ir).changed);
+            let b = ir.functions[0].bindings.get(v(2)).unwrap();
+            assert!(matches!(&b.expr, Expr::Variant { name, .. } if name == "A"));
+            assert_eq!(b.ty, IrType::Known(KnownType::UserDefined(TypeId::new(5))));
+        }
+        // An `Option` of something no vec encodes declines.
+        let mut ir = variant_as(
+            symbol_new("A"),
+            &[(1 << 32) | 4],
+            TypeRef::Composite(CompositeType::Option(Box::new(TypeRef::Primitive(PrimitiveType::U32)))),
+        );
+        assert!(!TupleReturnPass.run(&mut ir).changed);
     }
 
     /// func 0 encodes its argument as a `u64`, small form or object, and

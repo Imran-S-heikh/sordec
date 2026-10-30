@@ -49,6 +49,22 @@
 //! - **A `T` arm leaves from a block the body schedules.** Its `Some(t)` is
 //!   built at the end of that block and the edge carries it; an edge whose
 //!   block cannot be told from the region tree leaves the return alone.
+//!
+//! # An `Option` that is a `Result`'s `Ok`
+//!
+//! `-> Result<Option<T>, E>` returns the same words for its `Ok` side, and
+//! an `Error` `Val` for its `Err`: `Ok(None)` is `Void`, `Ok(Some(t))` is
+//! `t`'s `Val`. So its arms are rewritten as above, and the emitter wraps
+//! each `Option` arm in `Ok(..)` as it wraps any `Ok` payload.
+//!
+//! Why it is exact: the three encodings are disjoint — `Void` is no `T`'s
+//! encoding (the payload gate above) and no error's, and an `Error` `Val`
+//! carries a tag no `T` encodes to — so each word is read back as exactly
+//! one of them, and the rewrite spells that one.
+//!
+//! Gates: as above, with one more kind of arm allowed and left alone: an
+//! error — a value typed `Error`, or a constant carrying `Error`'s tag.
+//! The merges keep the `Result` type they have; only the arms change.
 
 use std::collections::{HashMap, HashSet};
 
@@ -79,8 +95,9 @@ impl Pass<HighIr> for OptionReturnPass {
         let encoders = EncoderTable::build(ir);
         for func in &mut ir.functions {
             let Some(option) = declared_option(func) else { continue };
-            for plan in plans(func, &option, &encoders) {
-                apply(func, &option, plan);
+            let in_result = returns_result(func);
+            for plan in plans(func, &option, &encoders, in_result) {
+                apply(func, &option, plan, in_result);
                 result.metrics.increment(M_OPTION_RETURNS, 1);
                 result.changed = true;
             }
@@ -109,14 +126,44 @@ struct Plan {
     in_place: Vec<(ValueId, ValueId)>,
 }
 
-/// `Option<T>` when the spec's one output is that, with `T` named.
+/// `Option<T>` when the spec's one output is that, bare or as a `Result`'s
+/// `Ok`, with `T` named.
 fn declared_option(func: &HighFunction) -> Option<KnownType> {
     let [out] = func.signature.as_ref()?.outputs.as_slice() else { return None };
-    let option @ KnownType::Option(_) = known_of_type_ref(out)? else { return None };
+    let option = match known_of_type_ref(out)? {
+        KnownType::Result(ok, _) => match *ok {
+            IrType::Known(k) | IrType::Inferred(k) => k,
+            IrType::Unknown(_) => return None,
+        },
+        other => other,
+    };
+    let KnownType::Option(_) = option else { return None };
     // A payload that may itself be `Void` makes `Void` ambiguous.
     match payload(&option)? {
         KnownType::Val | KnownType::Unit | KnownType::Option(_) => None,
         _ => Some(option),
+    }
+}
+
+/// Whether the spec's one output is a `Result` (whose `Ok` is the
+/// `Option`, by [`declared_option`]).
+fn returns_result(func: &HighFunction) -> bool {
+    matches!(
+        func.signature.as_ref().map(|s| s.outputs.as_slice()),
+        Some([out]) if matches!(known_of_type_ref(out), Some(KnownType::Result(..)))
+    )
+}
+
+/// An error arm of a returned `Result`: a value typed `Error`, or a
+/// constant carrying `Error`'s tag. No `Ok` payload encodes to either.
+fn is_error(binding: &Binding) -> bool {
+    if matches!(binding.ty, IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error)) {
+        return true;
+    }
+    match binding.expr {
+        Expr::Literal(Literal::I64(n)) => (n as u64 & 0xFF) as u8 == crate::val_abi::TAG_ERROR,
+        Expr::Literal(Literal::U64(n)) => (n & 0xFF) as u8 == crate::val_abi::TAG_ERROR,
+        _ => false,
     }
 }
 
@@ -131,7 +178,7 @@ fn payload(option: &KnownType) -> Option<KnownType> {
     }
 }
 
-fn plans(func: &HighFunction, option: &KnownType, encoders: &EncoderTable) -> Vec<Plan> {
+fn plans(func: &HighFunction, option: &KnownType, encoders: &EncoderTable, in_result: bool) -> Vec<Plan> {
     let Some(t) = payload(option) else { return Vec::new() };
     let mut returned = Vec::new();
     func.region.for_each_node(|node| {
@@ -147,7 +194,7 @@ fn plans(func: &HighFunction, option: &KnownType, encoders: &EncoderTable) -> Ve
     let scheduled: HashSet<BlockId> = scheduled_blocks(func);
     returned
         .into_iter()
-        .filter_map(|r| plan(func, r, &t, &scheduled, encoders))
+        .filter_map(|r| plan(func, r, &t, &scheduled, encoders, in_result))
         .filter(|p| !p.nones.is_empty() || !p.somes.is_empty() || !p.in_place.is_empty())
         .collect()
 }
@@ -167,6 +214,7 @@ fn plan(
     t: &KnownType,
     scheduled: &HashSet<BlockId>,
     encoders: &EncoderTable,
+    in_result: bool,
 ) -> Option<Plan> {
     let mut plan = Plan::default();
     if !matches!(func.bindings.get(r)?.expr, Expr::Phi { .. }) {
@@ -204,6 +252,8 @@ fn plan(
                     }
                 }
                 Expr::Optional { .. } => {}
+                // A `Result`'s `Err`, which the emitter wraps as it is.
+                _ if in_result && is_error(b) => {}
                 _ if matches!(&b.ty, IrType::Known(KnownType::Option(_)) | IrType::Inferred(KnownType::Option(_))) => {}
                 _ if matches!(&b.ty, IrType::Known(k) | IrType::Inferred(k) if k == t) => {
                     if !scheduled.contains(pred) {
@@ -296,7 +346,7 @@ fn read_only_by(func: &HighFunction, v: ValueId, merges: &HashSet<ValueId>) -> b
     ok
 }
 
-fn apply(func: &mut HighFunction, option: &KnownType, plan: Plan) {
+fn apply(func: &mut HighFunction, option: &KnownType, plan: Plan, in_result: bool) {
     let ty = IrType::Inferred(option.clone());
     for n in &plan.nones {
         if let Some(b) = func.bindings.get_mut(*n) {
@@ -350,6 +400,10 @@ fn apply(func: &mut HighFunction, option: &KnownType, plan: Plan) {
         plan.somes.iter().map(|(m, p, v, _)| ((*m, *p), *v)).collect();
     let mut found = 0;
     retarget(&mut func.region, &mut None, &expected, &built, &mut found);
+    // A `Result`'s merges are the `Result`, not the `Option` in its `Ok`.
+    if in_result {
+        return;
+    }
     for m in &plan.merges {
         if let Some(b) = func.bindings.get_mut(*m)
             && !matches!(&b.ty, IrType::Known(KnownType::Option(_)) | IrType::Inferred(KnownType::Option(_)))
@@ -529,6 +583,48 @@ mod tests {
         assert!(matches!(f.bindings.get(v(1)).unwrap().expr, Expr::Semantic(_)), "the stored Val stays");
         let Expr::Phi { incoming } = &f.bindings.get(v(3)).unwrap().expr else { unreachable!() };
         assert!(matches!(&f.bindings.get(incoming[0].1).unwrap().expr, Expr::Optional { payload: Some(_) }));
+    }
+
+    fn result_of_option(p: PrimitiveType) -> TypeRef {
+        TypeRef::Composite(CompositeType::Result(
+            Box::new(option_of(p)),
+            Box::new(TypeRef::Primitive(PrimitiveType::Error)),
+        ))
+    }
+
+    /// `-> Result<Option<Symbol>, Error>`: the same arms, and the merge
+    /// keeps the `Result` it is.
+    #[test]
+    fn the_arms_of_a_result_s_ok_option_are_none_and_some() {
+        let mut ir = shape(result_of_option(PrimitiveType::Symbol));
+        assert!(OptionReturnPass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        assert!(matches!(f.bindings.get(v(2)).unwrap().expr, Expr::Optional { payload: None }));
+        let merge = f.bindings.get(v(3)).unwrap();
+        let Expr::Phi { incoming } = &merge.expr else { unreachable!() };
+        assert!(matches!(&f.bindings.get(incoming[0].1).unwrap().expr, Expr::Optional { payload: Some(p) } if p == &vec![v(1)]));
+        assert!(!matches!(&merge.ty, IrType::Known(KnownType::Option(_)) | IrType::Inferred(KnownType::Option(_))));
+        assert!(!OptionReturnPass.run(&mut ir).changed, "idempotent");
+    }
+
+    /// An error constant beside the `Void`: the `Result`'s `Err`, left as
+    /// it is. Under a bare `Option` it is no arm the rewrite knows.
+    #[test]
+    fn an_error_arm_is_left_to_the_result() {
+        let error_arm = |out: TypeRef| {
+            let mut ir = shape(out);
+            let b = ir.functions[0].bindings.get_mut(v(1)).unwrap();
+            b.expr = Expr::Literal(Literal::I64((1 << 32) | 3));
+            b.ty = IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence);
+            ir
+        };
+        let mut ir = error_arm(result_of_option(PrimitiveType::Symbol));
+        assert!(OptionReturnPass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        assert!(matches!(f.bindings.get(v(2)).unwrap().expr, Expr::Optional { payload: None }));
+        assert!(matches!(f.bindings.get(v(1)).unwrap().expr, Expr::Literal(Literal::I64(_))));
+        let mut ir = error_arm(option_of(PrimitiveType::Symbol));
+        assert!(!OptionReturnPass.run(&mut ir).changed);
     }
 
     #[test]
