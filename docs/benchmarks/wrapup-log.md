@@ -526,3 +526,22 @@ for callers still holding an untyped call result before it settles. spec_import
 2 → 1. Four other contracts gain only a type annotation on a gap. Scores
 unchanged: corpus bands pass, held-out mean 0.7851 (other_custom_types 0.7255,
 as before — the scorer gives no credit for compiling).
+
+## 2026-10-30 — commit 8631f8a (an inlined symbol loop is its symbol; a Result built in the entrypoint's frame)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 24/25 | 4 | 3,882 |
+| Stellar examples, multi-contract | 13 | 12/13 | 6 | 4,227 |
+| third-party | 2 | 1/2 | 11 | 765 |
+| SDK 26 test contracts | 39 | **37/39** | 3 | 1,371 |
+
+Errors 28 → 25. `Symbol::new` inlined into a function is a loop over the name's
+bytes; with constant inputs, no effects and a fallback naming the same text, it now
+folds to the symbol. A `Result` an entrypoint builds in its own frame on several
+paths and converts through the SDK's helper is now `Ok(x)` or
+`Err(Error::from_contract_error(code))` on each path. spec_import and
+import_contract compile; three key-building helpers elsewhere print
+`symbol_short!(..)` for the name (same bits). Held-out mean 0.7851 → **0.7860**
+(modular_account's structure: the loop became the symbol); corpus bands pass.
