@@ -382,3 +382,20 @@ Rust's `rotate_left`/`rotate_right` take a `u32`; it is now that `u32` (a litera
 or cast (anything else), the same count modulo 32 or 64. Only privacy_pools
 changed (18 → 14 errors), in its four rotations; it is in no scored set, so
 scores are as for 2db10d1.
+
+## 2026-10-30 — commit d21b23d (the value a bytes call reads is a Bytes)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 23/25 | 16 | 3,879 |
+| Stellar examples, multi-contract | 13 | 10/13 | 21 | 4,240 |
+| third-party | 2 | 1/2 | 17 | 776 |
+| SDK 26 test contracts | 39 | 31/39 | 26 | 1,444 |
+
+Errors 89 → 80. A gap read only by a bytes length, slice or get call had no type,
+so rustc could not infer it; the host catalog's argument kinds now type it
+`Bytes`, as they already typed crypto arguments, except where something has
+already typed it `Val`. Both groth16 verifiers 8 → 4, privacy_pools 14 → 13,
+merkle-voting one gap typed (still compiles). The single-crate Stellar set is
+unchanged, so the held-out mean stays 0.7851.
