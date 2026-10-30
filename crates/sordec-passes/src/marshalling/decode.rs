@@ -76,6 +76,24 @@
 //!   helper's callers to all be visible (not exported, not held by the
 //!   function table when the module calls through one) and to agree.
 //!   Nothing else carries the guarantee.
+//!
+//! ## A result written back, then read back
+//!
+//! After the conversion the caller still writes the call's components into
+//! its frame and may load them back. The write is elided as bookkeeping,
+//! so its read-back has to be rebound to the same half, or it reads a
+//! slot nothing writes any more. The slot is named by its address — the
+//! frame's base and the constant byte offset from it — not by how the
+//! address is spelled: rustc writes `fp + 112` with offset 0 and reads
+//! `fp` with offset 112, one slot in two spellings.
+//!
+//! Why it is exact: both spellings are the same byte address, and the
+//! read is rebound only while nothing between the write and it could have
+//! changed the slot.
+//!
+//! Gates: any other store into the same frame forgets every slot written
+//! back to it, and so does any call or other memory write handed a
+//! pointer into that frame — the callee may write anywhere through it.
 
 use std::collections::{HashMap, HashSet};
 
@@ -87,7 +105,7 @@ use sordec_ir::{
 
 use super::sret::{self, SretShape};
 use super::{apply_elisions, metrics, Elision};
-use crate::dataflow::{resolve_use, trace_int};
+use crate::dataflow::{canon_addr, resolve_use, trace_int};
 use crate::effects::expr_effects;
 use crate::pass::{Pass, PassMetrics, PassResult};
 use crate::type_infer::known_of_type_ref;
@@ -889,6 +907,9 @@ fn plan(
     // back. This records which half each written slot holds, so those
     // read-backs collapse too — `SlotPromotionPass` forwards the payload
     // but declines the discriminant, whose i64 store is read as an i32.
+    // Keyed by the slot's address, frame base and byte offset, however
+    // the write and the read spell it ("A result written back, then read
+    // back").
     let mut restored: HashMap<(ValueId, u32), (ValueId, Half)> = HashMap::new();
     // Decodes no longer current — displaced by a later decode into the
     // same frame, or invalidated. They still need their call neutralised
@@ -905,8 +926,10 @@ fn plan(
                 let (invalidate, claimed) = on_call(func, helpers, &active, id, *target, args, guaranteed);
                 for frame in invalidate {
                     finished.extend(active.remove(&frame));
-                    restored.retain(|(f, _), _| *f != frame);
                 }
+                // The callee may write anywhere through a pointer into a
+                // frame, so a slot written back there is no longer known.
+                forget_reached(func, &mut restored, args);
                 match claimed {
                     Claimed::Frame(frame, act) => {
                         finished.extend(active.insert(frame, act));
@@ -932,7 +955,8 @@ fn plan(
             Expr::Load { addr, offset, .. } => {
                 let frame = resolve_use(func, *addr);
                 // A slot the converted caller wrote its own component into.
-                if let Some((call, half)) = restored.get(&(frame, *offset))
+                if let Some(slot) = slot_of(func, *addr, *offset)
+                    && let Some((call, half)) = restored.get(&slot)
                     && let Some(act) = by_call.get_mut(call)
                 {
                     act.consumed = true;
@@ -963,8 +987,11 @@ fn plan(
                 // for a value that is already in SSA. Recording which half
                 // it holds is what lets the read-back collapse; the store
                 // itself becomes dead once nothing reads the slot.
-                if let Some((call, half)) = projected_half(func, &by_call, *value) {
-                    restored.insert((frame, *offset), (call, half));
+                let slot = slot_of(func, *addr, *offset);
+                if let Some((call, half)) = projected_half(func, &by_call, *value)
+                    && let Some(slot) = slot
+                {
+                    restored.insert(slot, (call, half));
                     elisions.push(Elision {
                         id,
                         expr: Expr::Literal(Literal::Unit),
@@ -978,7 +1005,15 @@ fn plan(
                 }
                 // Any other write through a tracked frame invalidates it.
                 finished.extend(active.remove(&frame));
-                restored.retain(|(f, _), _| *f != frame);
+                let base = canon_addr(func, *addr).0;
+                restored.retain(|(b, _), _| *b != base);
+            }
+            // Anything else that writes memory through a pointer into a
+            // frame (a copy, a fill) leaves its written-back slots unknown.
+            other if expr_effects(other).writes_memory => {
+                let mut reached = Vec::new();
+                other.for_each_value_use(|u| reached.push(u));
+                forget_reached(func, &mut restored, &reached);
             }
             _ => {}
         }
@@ -1146,6 +1181,23 @@ enum Claimed {
 
 /// When `value` is a `Project` of a tracked converted decode, which call
 /// it came from and which half it is.
+/// The slot a load or store at `addr + offset` touches: its frame base and
+/// byte offset from it, however the address is spelled.
+fn slot_of(func: &HighFunction, addr: ValueId, offset: u32) -> Option<(ValueId, u32)> {
+    let (base, at) = canon_addr(func, addr);
+    Some((base, at.checked_add(offset)?))
+}
+
+/// Forget every written-back slot in a frame one of `pointers` points
+/// into.
+fn forget_reached(func: &HighFunction, restored: &mut HashMap<(ValueId, u32), (ValueId, Half)>, pointers: &[ValueId]) {
+    if restored.is_empty() {
+        return;
+    }
+    let reached: HashSet<ValueId> = pointers.iter().map(|p| canon_addr(func, *p).0).collect();
+    restored.retain(|(base, _), _| !reached.contains(base));
+}
+
 fn projected_half(
     func: &HighFunction,
     by_call: &HashMap<ValueId, Active>,
@@ -1639,6 +1691,67 @@ pub(crate) mod tests {
         // Both calls are neutralised.
         assert!(matches!(by_id.get(&v(3)), Some(Expr::Literal(Literal::Unit))));
         assert!(matches!(by_id.get(&v(6)), Some(Expr::Literal(Literal::Unit))));
+    }
+
+    /// `claim(sender, index: u64)` after the conversion: `t = decode(a)`,
+    /// both components written back through `fp + 112`, then read back as
+    /// `fp` at offsets 112 and 120 — one slot spelled two ways. With
+    /// `between`, a call handed `fp + 16` sits between the write and the
+    /// read.
+    fn written_back_through_another_spelling(between: bool) -> HighFunction {
+        let mut exprs = vec![
+            Expr::Phi { incoming: vec![] },                                      // v0 frame base
+            Expr::Phi { incoming: vec![] },                                      // v1 param `a`
+            Expr::Call { target: FuncId::from_index(0), args: vec![v(1)] },     // v2
+            Expr::Project { value: v(2), index: 0 },                             // v3 disc
+            Expr::Project { value: v(2), index: 1 },                             // v4 payload
+            Expr::Literal(Literal::I32(112)),                                    // v5
+            Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(5) },           // v6 fp + 112
+            store(v(6), v(3), 0),                                                // v7
+            store(v(6), v(4), 8),                                                // v8
+            load(v(0), 112),                                                     // v9  disc read-back
+            load(v(0), 120),                                                     // v10 payload read-back
+            Expr::Literal(Literal::I32(16)),                                     // v11
+            Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(11) },          // v12 fp + 16
+            Expr::Call { target: FuncId::from_index(5), args: vec![v(12)] },    // v13
+        ];
+        exprs.truncate(if between { 14 } else { 11 });
+        let order = if between { vec![2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 9, 10] } else { vec![2, 3, 4, 5, 6, 7, 8, 9, 10] };
+        let mut func = func_with(exprs, vec![v(1)], order);
+        func.id = FuncId::from_index(1);
+        func.signature = Some(FunctionSignature {
+            name: "claim".to_string(),
+            inputs: vec![FunctionParam { name: "index".to_string(), ty: TypeRef::Primitive(PrimitiveType::U64) }],
+            outputs: vec![],
+        });
+        func
+    }
+
+    fn converted_helpers() -> HashMap<FuncId, DecodeHelper> {
+        HashMap::from([(FuncId::from_index(0), classify(&u64_decode_helper_converted()).unwrap())])
+    }
+
+    /// A write-back through `fp + 112` read back as `fp` at offset 112 is
+    /// the same slot: the read-back is the decode's half, as when both
+    /// spell the address alike.
+    #[test]
+    fn a_read_back_through_another_spelling_of_the_slot_is_the_decode_s_half() {
+        let func = written_back_through_another_spelling(false);
+        let (elisions, _) = plan(&func, &converted_helpers(), &HashMap::new());
+        let by_id: HashMap<ValueId, &Expr> = elisions.iter().map(|e| (e.id, &e.expr)).collect();
+        assert!(matches!(by_id.get(&v(9)), Some(Expr::Literal(Literal::I32(0)))), "the discriminant read back is Ok");
+        assert!(matches!(by_id.get(&v(10)), Some(Expr::Use(p)) if *p == v(1)), "the payload read back is `index`");
+        assert!(matches!(by_id.get(&v(8)), Some(Expr::Literal(Literal::Unit))), "the write-back is bookkeeping");
+    }
+
+    /// A call handed a pointer into the frame may have rewritten the slot:
+    /// the read-back after it stays a read.
+    #[test]
+    fn a_call_handed_the_frame_between_write_and_read_back_forgets_the_slot() {
+        let func = written_back_through_another_spelling(true);
+        let (elisions, _) = plan(&func, &converted_helpers(), &HashMap::new());
+        let rebound: HashSet<ValueId> = elisions.iter().map(|e| e.id).collect();
+        assert!(!rebound.contains(&v(9)) && !rebound.contains(&v(10)), "{rebound:?}");
     }
 
     #[test]
