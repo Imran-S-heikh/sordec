@@ -48,11 +48,28 @@
 //!   use is doing something this pass cannot see.
 //! - **The caller has every slot.** All of them, proven at the call by the
 //!   frame facts. Half a literal is not a literal.
+//! - **Every caller has every slot.** The callee's parameter changes type,
+//!   so it is every call site or none: a call left passing the pointer to
+//!   a function that now takes the struct would hand it the frame's
+//!   address as the struct (inlined, the struct *is* that address). A
+//!   callee with a site that cannot build its literal yet waits for a
+//!   later round, when the frame facts there may be complete. A forwarder
+//!   handing its own promoted parameter on is such a site already.
+//!
+//! # A field read narrower than it was written
+//!
+//! rustc copies a struct by words: a `u32` last field at offset 24 is
+//! written with the 8-byte store that copies bytes 24..32, and read by the
+//! callee as the 4 bytes at 24. Wasm memory is little-endian, so those 4
+//! bytes are the low half of the stored word: the field is
+//! `wrap32(stored)`. Why it is exact: that is what the load reads, byte for
+//! byte. Gates: a 4-byte read at the very offset of an 8-byte store; any
+//! other width mismatch still leaves the slot unproven.
 
 use std::collections::HashMap;
 
 use sordec_common::{FuncId, IrId, Provenance, ProvenanceSource, ValueId};
-use sordec_ir::{Expr, HighFunction, HighIr, IrType, MemWidth};
+use sordec_ir::{Expr, HighFunction, HighIr, IrType, MemWidth, UnaryOp};
 
 use crate::dataflow::{canon_addr, facts_at, resolve_use};
 use crate::metrics_catalog::INTERPROC_STRUCT_ARGS as M_ARGS;
@@ -104,7 +121,33 @@ impl Pass<HighIr> for StructArgPass {
             }
             promoted.extend(found);
         }
+        // Every call site or none ("Every caller has every slot"). A
+        // forwarder stands for what it forwards to, so one whose onward
+        // callee is withdrawn goes too; repeated until nothing is short.
+        loop {
+            let short: Vec<FuncId> = promoted
+                .keys()
+                .copied()
+                .filter(|target| {
+                    let stands = ir
+                        .functions
+                        .iter()
+                        .find(|g| g.id == *target)
+                        .is_some_and(|g| by_pointer(g).is_some() || forwarder(g, &promoted).is_some());
+                    !stands || ir.functions.iter().any(|f| !every_site_builds(f, *target, &promoted))
+                })
+                .collect();
+            if short.is_empty() {
+                break;
+            }
+            for target in short {
+                promoted.remove(&target);
+            }
+        }
         let promoted = promoted;
+        if promoted.is_empty() {
+            return result;
+        }
         for func in &mut ir.functions {
             if let Some(plan) = promoted.get(&func.id).cloned() {
                 take_the_struct(func, &plan);
@@ -262,19 +305,33 @@ fn build_at_calls(func: &mut HighFunction, promoted: &HashMap<FuncId, ByPointer>
         .collect();
     let mut changed = false;
     for (call, plan, pointer) in plans {
-        let (base, start) = canon_addr(func, pointer);
-        let facts = facts_at(func, call, base);
-        let Some(fields) = plan
-            .slots
-            .iter()
-            .map(|(offset, width, name)| {
-                let value = facts.value_at(start.checked_add(*offset)?, *width)?;
-                Some((name.clone(), resolve_use(func, value)))
-            })
-            .collect::<Option<Vec<_>>>()
-        else {
+        let Some(slots) = site_slots(func, call, pointer, &plan) else {
             continue;
         };
+        let mut fields = Vec::with_capacity(slots.len());
+        for (name, slot) in slots {
+            let value = match slot {
+                SlotValue::Whole(v) => v,
+                // The low half of a wider store ("A field read narrower
+                // than it was written").
+                SlotValue::Low32(v) => {
+                    let low = ValueId::from_index(func.bindings.len() as u32);
+                    func.bindings.push(sordec_ir::Binding::new(
+                        low,
+                        IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+                        Expr::Unary { op: UnaryOp::Wrap32, value: v },
+                        Provenance::new(
+                            PASS_NAME,
+                            ProvenanceSource::SdkPattern,
+                            "the 4-byte field read as the low half of the 8-byte word stored there",
+                        ),
+                    ));
+                    schedule_before(func, call, low);
+                    low
+                }
+            };
+            fields.push((name, value));
+        }
         let literal = ValueId::from_index(func.bindings.len() as u32);
         func.bindings.push(sordec_ir::Binding::new(
             literal,
@@ -286,18 +343,77 @@ fn build_at_calls(func: &mut HighFunction, promoted: &HashMap<FuncId, ByPointer>
                 "the struct these frame slots were filled for",
             ),
         ));
-        for (_, block) in func.blocks.iter_mut() {
-            if let Some(pos) = block.bindings.iter().position(|v| *v == call) {
-                block.bindings.insert(pos, literal);
-                break;
-            }
-        }
+        schedule_before(func, call, literal);
         if let Some(Expr::Call { args, .. }) = func.bindings.get_mut(call).map(|b| &mut b.expr) {
             args[plan.param] = literal;
             changed = true;
         }
     }
     changed
+}
+
+/// Schedule `value` just before `at`.
+fn schedule_before(func: &mut HighFunction, at: ValueId, value: ValueId) {
+    for (_, block) in func.blocks.iter_mut() {
+        if let Some(pos) = block.bindings.iter().position(|v| *v == at) {
+            block.bindings.insert(pos, value);
+            break;
+        }
+    }
+}
+
+/// What one slot of a call site's literal is.
+enum SlotValue {
+    /// The value stored there, at the width it is read.
+    Whole(ValueId),
+    /// The low 4 bytes of an 8-byte value stored there.
+    Low32(ValueId),
+}
+
+/// Each field of the literal the call at `call` passes through `pointer`,
+/// when the frame facts there prove every slot.
+fn site_slots(func: &HighFunction, call: ValueId, pointer: ValueId, plan: &ByPointer) -> Option<Vec<(String, SlotValue)>> {
+    let (base, start) = canon_addr(func, pointer);
+    let facts = facts_at(func, call, base);
+    plan.slots
+        .iter()
+        .map(|(offset, width, name)| {
+            let at = start.checked_add(*offset)?;
+            let slot = match facts.value_at(at, *width) {
+                Some(v) => SlotValue::Whole(resolve_use(func, v)),
+                None if *width == MemWidth::W4 && facts.value_at(at, MemWidth::W8).is_some() => {
+                    SlotValue::Low32(resolve_use(func, facts.value_at(at, MemWidth::W8)?))
+                }
+                None => return None,
+            };
+            Some((name.clone(), slot))
+        })
+        .collect()
+}
+
+/// Whether every call in `func` to `target` can be handed the struct: it
+/// builds the literal from its frame, or passes on a parameter of its own
+/// that already stands for the same struct.
+fn every_site_builds(func: &HighFunction, target: FuncId, promoted: &HashMap<FuncId, ByPointer>) -> bool {
+    let Some(plan) = promoted.get(&target) else {
+        return true;
+    };
+    func.bindings.iter().all(|(id, b)| {
+        let Expr::Call { target: t, args } = &b.expr else {
+            return true;
+        };
+        if *t != target {
+            return true;
+        }
+        let Some(&pointer) = args.get(plan.param) else {
+            return false;
+        };
+        let own = resolve_use(func, pointer);
+        let forwarded = promoted
+            .get(&func.id)
+            .is_some_and(|mine| func.params.get(mine.param) == Some(&own) && mine.ty == plan.ty);
+        forwarded || site_slots(func, id, pointer, plan).is_some()
+    })
 }
 
 #[cfg(test)]
@@ -392,6 +508,40 @@ mod tests {
     fn a_pointer_with_another_reader_is_left_alone() {
         let mut m = shape(true);
         assert!(!StructArgPass.run(&mut m).changed);
+    }
+
+    /// A second caller that stores only the first slot cannot build the
+    /// literal, so neither side changes: the callee would otherwise take
+    /// the struct while that caller hands it a frame address.
+    #[test]
+    fn a_callee_one_caller_cannot_build_for_is_left_alone() {
+        let mut m = shape(false);
+        let mut short = m.functions[1].clone();
+        short.id = FuncId::from_index(2);
+        short.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings.retain(|b| *b != v(4));
+        m.functions.push(short);
+        assert!(!StructArgPass.run(&mut m).changed);
+        assert!(matches!(m.functions[0].bindings.get(v(1)).unwrap().expr, Expr::Load { .. }));
+        assert!(matches!(&m.functions[1].bindings.get(v(5)).unwrap().expr, Expr::Call { args, .. } if args[0] == v(0)));
+    }
+
+    /// The callee reads its second field as 4 bytes where the caller
+    /// stored 8: the field is the low half of the stored word.
+    #[test]
+    fn a_field_read_narrower_than_stored_is_the_low_half() {
+        let mut m = shape(false);
+        if let Expr::Load { width, .. } = &mut m.functions[0].bindings.get_mut(v(2)).unwrap().expr {
+            *width = MemWidth::W4;
+        }
+        assert!(StructArgPass.run(&mut m).changed);
+        let caller = &m.functions[1];
+        let Expr::Call { args, .. } = &caller.bindings.get(v(5)).unwrap().expr else { panic!("still a call") };
+        let Expr::Struct { fields } = &caller.bindings.get(args[0]).unwrap().expr else { panic!("the literal") };
+        assert_eq!(fields[0], ("a".to_string(), v(1)));
+        assert!(matches!(
+            caller.bindings.get(fields[1].1).unwrap().expr,
+            Expr::Unary { op: UnaryOp::Wrap32, value } if value == v(2)
+        ));
     }
 
     #[test]

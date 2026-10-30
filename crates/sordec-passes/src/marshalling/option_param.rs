@@ -29,9 +29,43 @@
 //!   declared `Option<T>`.
 //! - **A returned `2` only where the spec returns an `Option`**, and only
 //!   when every use of that constant is a return.
+//!
+//! # A struct field built as `Void` or an encode
+//!
+//! The same encoding going into a `#[contracttype]` field: a field
+//! declared `Option<u64>` is filled from a merge whose arms are the `Void`
+//! word and the encode of a `u64` (often through the helper rustc outlines
+//! the encode into):
+//!
+//! ```text
+//! if t.is_none() { f = 2 }                 if t.is_none() { g = None }
+//! else { f = encode::<u64>(x) }      →     else { g = Some(x) }
+//! S { time_limit: f }                      S { time_limit: g }
+//! ```
+//!
+//! The literal's field becomes a new merge with `None` on each `Void` arm
+//! and `Some(x)` on each encode arm. The old merge stays for any other
+//! reader (the derive's slot store).
+//!
+//! Why it is exact: the SDK encodes `None` as `Void` and `Some(x)` as the
+//! encode of `x`, so on every edge the old merge is the encoding of the new
+//! one, and a field declared `Option<T>` holds the value whose encoding the
+//! derive writes.
+//!
+//! Gates: the field is declared `Option<T>`; the merge is a phi whose every
+//! arm is the `Void` word or an encode of a value as exactly `T` (an
+//! outlined encode helper's component, or a small encode); at least one
+//! arm is an encode; no two arms hand over the same value.
 
-use sordec_common::{Provenance, ProvenanceSource, ValueId};
-use sordec_ir::{BinaryOp, Expr, HighFunction, HighIr, IrType, KnownType, Literal, Region, UnaryOp};
+use std::collections::HashMap;
+
+use sordec_common::{BlockId, IrId, Provenance, ProvenanceSource, ValueId};
+use sordec_ir::{
+    BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region, SemanticOp,
+    StructDef, UnaryOp,
+};
+
+use super::encode_helper::EncoderTable;
 
 use crate::dataflow::resolve_use;
 use crate::metrics_catalog::MARSHALLING_OPTION_PARAMS as M_OPTION;
@@ -53,10 +87,17 @@ impl Pass<HighIr> for OptionParamPass {
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
+        let structs: Vec<StructDef> =
+            ir.soroban_facts.as_ref().map(|f| f.types.structs.clone()).unwrap_or_default();
+        let encoders = if structs.is_empty() { EncoderTable::default() } else { EncoderTable::build(ir) };
         for func in &mut ir.functions {
+            let fields = option_fields(func, &structs, &encoders);
+            for field in &fields {
+                apply_field(func, field);
+            }
             let tests = tests(func);
             let nones = returned_nones(func);
-            let count = tests.len() + nones.len();
+            let count = tests.len() + nones.len() + fields.len();
             for (id, expr) in tests {
                 rewrite(func, id, expr, IrType::Inferred(KnownType::Bool), "an `Option` compared with `Void` is tested for `None`");
             }
@@ -164,6 +205,140 @@ fn returned_nones(func: &HighFunction) -> Vec<(ValueId, IrType)> {
     out
 }
 
+/// A struct literal's field built as `Void` or an encode ("A struct field
+/// built as `Void` or an encode").
+struct FieldOption {
+    literal: ValueId,
+    index: usize,
+    merge: ValueId,
+    /// Each edge into the merge: its block, the value it hands over, and
+    /// the payload when that value is an encode.
+    arms: Vec<(BlockId, ValueId, Option<ValueId>)>,
+    ty: IrType,
+}
+
+fn option_fields(func: &HighFunction, structs: &[StructDef], encoders: &EncoderTable) -> Vec<FieldOption> {
+    let mut out = Vec::new();
+    for (id, b) in func.bindings.iter() {
+        let Expr::Struct { fields } = &b.expr else { continue };
+        let (IrType::Known(KnownType::UserDefined(ty)) | IrType::Inferred(KnownType::UserDefined(ty))) = &b.ty else {
+            continue;
+        };
+        let Some(def) = structs.iter().find(|s| s.id == *ty) else { continue };
+        for (index, (name, value)) in fields.iter().enumerate() {
+            let Some(KnownType::Option(inner)) =
+                def.fields.iter().find(|f| f.name == *name).and_then(|f| known_of_type_ref(&f.ty))
+            else {
+                continue;
+            };
+            let (IrType::Known(payload) | IrType::Inferred(payload)) = inner.as_ref() else { continue };
+            let merge = resolve_use(func, *value);
+            let Some(Expr::Phi { incoming }) = func.bindings.get(merge).map(|b| &b.expr) else { continue };
+            let mut arms = Vec::with_capacity(incoming.len());
+            for (block, arm) in incoming {
+                let encoded = if is_void(func, resolve_use(func, *arm)) {
+                    None
+                } else if let Some(x) = encode_of(func, *arm, payload, encoders) {
+                    Some(x)
+                } else {
+                    arms.clear();
+                    break;
+                };
+                arms.push((*block, *arm, encoded));
+            }
+            let distinct = arms.iter().all(|(_, a, _)| arms.iter().filter(|(_, b, _)| b == a).count() == 1);
+            if arms.is_empty() || !distinct || arms.iter().all(|(_, _, x)| x.is_none()) {
+                continue;
+            }
+            let ty = IrType::Inferred(KnownType::Option(Box::new(IrType::Inferred(payload.clone()))));
+            out.push(FieldOption { literal: id, index, merge, arms, ty });
+        }
+    }
+    out
+}
+
+/// The value `arm` encodes as exactly `payload`: an outlined encode
+/// helper's component, or a small encode.
+fn encode_of(func: &HighFunction, arm: ValueId, payload: &KnownType, encoders: &EncoderTable) -> Option<ValueId> {
+    if let Some((x, ty)) = encoders.encoded_by_call(func, arm) {
+        return (ty == *payload).then_some(x);
+    }
+    match &func.bindings.get(resolve_use(func, arm))?.expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty, value })) if ty == payload => {
+            Some(resolve_use(func, *value))
+        }
+        _ => None,
+    }
+}
+
+/// The new merge: `None` or `Some(x)` placed on each edge, handed over
+/// beside the old merge's value, and read by the field.
+fn apply_field(func: &mut HighFunction, field: &FieldOption) {
+    let note = |what: &str| Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, what.to_string());
+    let mut by_arm: HashMap<ValueId, ValueId> = HashMap::new();
+    let mut incoming = Vec::with_capacity(field.arms.len());
+    for (block, arm, payload) in &field.arms {
+        let id = ValueId::from_index(func.bindings.len() as u32);
+        let (expr, what) = match payload {
+            None => (Expr::Optional { payload: None }, "`Void` going into an `Option` field is `None`"),
+            Some(x) => (
+                Expr::Optional { payload: Some(vec![*x]) },
+                "the encode of `x` going into an `Option` field is `Some(x)`",
+            ),
+        };
+        func.bindings.push(Binding::new(id, field.ty.clone(), expr, note(what)));
+        if let Some(b) = func.blocks.get_mut(*block) {
+            b.bindings.push(id);
+        }
+        by_arm.insert(*arm, id);
+        incoming.push((*block, id));
+    }
+    let option = ValueId::from_index(func.bindings.len() as u32);
+    func.bindings.push(Binding::new(
+        option,
+        field.ty.clone(),
+        Expr::Phi { incoming },
+        note("the `Option` whose encoding the field's merge is"),
+    ));
+    hand_over(&mut func.region, field.merge, option, &by_arm);
+    if let Some(b) = func.bindings.get_mut(field.literal) {
+        if let Expr::Struct { fields } = &mut b.expr {
+            fields[field.index].1 = option;
+        }
+        b.add_provenance(note("an `Option` field built as `Void` or an encode is the `Option`"));
+    }
+}
+
+/// Beside every edge's assignment to `merge`, assign the `Option` the
+/// value handed over stands for.
+fn hand_over(region: &mut Region, merge: ValueId, option: ValueId, by_arm: &HashMap<ValueId, ValueId>) {
+    match region {
+        Region::Sequence(items) => items.iter_mut().for_each(|r| hand_over(r, merge, option, by_arm)),
+        Region::Scope { body, .. } | Region::Loop { body, .. } => hand_over(body, merge, option, by_arm),
+        Region::If { then_region, else_region, .. } => {
+            hand_over(then_region, merge, option, by_arm);
+            if let Some(e) = else_region {
+                hand_over(e, merge, option, by_arm);
+            }
+        }
+        Region::Switch { arms, default, .. } => {
+            hand_over(default, merge, option, by_arm);
+            for arm in arms {
+                hand_over(&mut arm.body, merge, option, by_arm);
+            }
+        }
+        Region::Break { transfer, .. } | Region::Continue { transfer, .. } | Region::Transfer { transfer, .. } => {
+            let added: Vec<(ValueId, ValueId)> = transfer
+                .iter()
+                .filter(|(phi, _)| *phi == merge)
+                .filter_map(|(_, value)| by_arm.get(value).map(|o| (option, *o)))
+                .collect();
+            transfer.extend(added);
+        }
+        _ => {}
+    }
+}
+
 fn is_void(func: &HighFunction, v: ValueId) -> bool {
     matches!(
         func.bindings.get(v).map(|b| &b.expr),
@@ -188,7 +363,6 @@ fn is_option_param(func: &HighFunction, v: ValueId) -> bool {
 mod tests {
     use super::*;
     use crate::marshalling::test_support::{func_with, module, v};
-    use sordec_common::{BlockId, IrId};
     use sordec_ir::{CompositeType, FunctionParam, FunctionSignature, PrimitiveType, TypeRef};
 
     /// `option == 2` over a parameter declared `Option<u32>`, then a
@@ -215,6 +389,90 @@ mod tests {
             Region::Return { values: vec![v(0)] },
         ]);
         module(vec![f])
+    }
+
+    /// `S { t: f }`, `t` declared `Option<field>`, where `f` merges the
+    /// `Void` word (from bb0) and `encode::<u32>(x)` (from bb1).
+    fn field_shape(field: PrimitiveType) -> HighIr {
+        use sordec_common::TypeId;
+        use sordec_ir::{EnvCompatibility, HighBlock, SorobanFacts, StructField, TypeRegistry};
+        let (b0, b1, b2) = (BlockId::from_index(0), BlockId::from_index(1), BlockId::from_index(2));
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                                     // v0 x
+                Expr::Literal(Literal::I64(2)),                                                     // v1 Void
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v(0) })), // v2
+                Expr::Phi { incoming: vec![(b0, v(1)), (b1, v(2))] },                              // v3 f
+                Expr::Struct { fields: vec![("t".into(), v(3))] },                                 // v4
+                Expr::Phi { incoming: vec![] },                                                     // v5 cond
+            ],
+            vec![v(0), v(5)],
+            vec![1],
+        );
+        f.blocks.push(HighBlock { id: b1, bindings: vec![v(2)] });
+        f.blocks.push(HighBlock { id: b2, bindings: vec![v(4)] });
+        f.bindings.get_mut(v(4)).unwrap().ty = IrType::Known(KnownType::UserDefined(TypeId::new(9)));
+        f.region = Region::Sequence(vec![
+            Region::Basic(b0),
+            Region::If {
+                cond: v(5),
+                then_region: Box::new(Region::Transfer { target: b2, transfer: vec![(v(3), v(1))] }),
+                else_region: Some(Box::new(Region::Sequence(vec![
+                    Region::Basic(b1),
+                    Region::Transfer { target: b2, transfer: vec![(v(3), v(2))] },
+                ]))),
+            },
+            Region::Basic(b2),
+        ]);
+        let mut ir = module(vec![f]);
+        ir.soroban_facts = Some(SorobanFacts {
+            functions: std::collections::BTreeMap::new(),
+            types: TypeRegistry {
+                structs: vec![StructDef {
+                    id: TypeId::new(9),
+                    name: "S".into(),
+                    fields: vec![StructField {
+                        name: "t".into(),
+                        ty: TypeRef::Composite(CompositeType::Option(Box::new(TypeRef::Primitive(field)))),
+                    }],
+                }],
+                ..Default::default()
+            },
+            contract_meta: std::collections::BTreeMap::new(),
+            env_meta: EnvCompatibility::default(),
+        });
+        ir
+    }
+
+    /// The field is a new merge of `None` and `Some(x)`, handed over beside
+    /// the old one on each edge.
+    #[test]
+    fn an_option_field_built_as_void_or_an_encode_is_none_or_some() {
+        let mut ir = field_shape(PrimitiveType::U32);
+        assert!(OptionParamPass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        let Expr::Struct { fields } = &f.bindings.get(v(4)).unwrap().expr else { panic!() };
+        let option = fields[0].1;
+        let Expr::Phi { incoming } = &f.bindings.get(option).unwrap().expr else { panic!("a merge") };
+        let arm = |block: u32| incoming.iter().find(|(b, _)| *b == BlockId::from_index(block)).unwrap().1;
+        assert!(matches!(f.bindings.get(arm(0)).unwrap().expr, Expr::Optional { payload: None }));
+        assert!(matches!(&f.bindings.get(arm(1)).unwrap().expr, Expr::Optional { payload: Some(p) } if p == &vec![v(0)]));
+        let mut handed = Vec::new();
+        f.region.for_each_node(|n| {
+            if let Region::Transfer { transfer, .. } = n {
+                handed.extend(transfer.iter().filter(|(phi, _)| *phi == option).map(|(_, x)| *x));
+            }
+        });
+        assert_eq!(handed, vec![arm(0), arm(1)], "each edge assigns the new merge too");
+        assert!(matches!(f.bindings.get(v(3)).unwrap().expr, Expr::Phi { .. }), "the old merge stays");
+    }
+
+    /// An encode of another type than the field's payload is not that
+    /// field's `Some`.
+    #[test]
+    fn an_encode_of_another_type_than_the_payload_is_left_alone() {
+        let mut ir = field_shape(PrimitiveType::U64);
+        assert!(!OptionParamPass.run(&mut ir).changed);
     }
 
     #[test]
