@@ -1322,6 +1322,20 @@ impl<'a> FnCtx<'a> {
     /// value, collected from several paths before one `return`. An error
     /// goes in as `Err(e)`; the `Void` a `Result<(), E>` encodes `Ok` as
     /// goes in as `Ok(())`. Anything else is left to the other rules.
+    /// An error value: the SDK's `Error`, or one of the contract's own
+    /// `#[contracterror]` enums. Neither is ever a `Result`'s `Ok` payload
+    /// — the spec has no way to declare an error enum as a value type — so
+    /// in a function returning a `Result`, a value of either is its `Err`.
+    fn is_error_type(&self, ty: &IrType) -> bool {
+        match ty {
+            IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error) => true,
+            IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => {
+                self.reg.errors.iter().any(|d| d.id == *id)
+            }
+            _ => false,
+        }
+    }
+
     fn result_wrapped(&self, source: ValueId, merge_ty: &IrType) -> Option<syn::Expr> {
         if !matches!(merge_ty, IrType::Known(KnownType::Result(..)) | IrType::Inferred(KnownType::Result(..))) {
             return None;
@@ -1329,7 +1343,7 @@ impl<'a> FnCtx<'a> {
         let ok_ty = sig::result_ok_type(self.func)?;
         let binding = self.func.bindings.get(source)?;
         match &binding.ty {
-            IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error) => {
+            ty if self.is_error_type(ty) => {
                 let v = self.value_ref(source);
                 Some(parse_quote!(Err(#v)))
             }
@@ -1512,9 +1526,7 @@ impl<'a> FnCtx<'a> {
             return v; // not a Result-returning entrypoint
         };
         match self.func.bindings.get(vid).map(|b| &b.ty) {
-            Some(IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error)) => {
-                parse_quote!(Err(#v))
-            }
+            Some(ty) if self.is_error_type(ty) => parse_quote!(Err(#v)),
             Some(IrType::Known(KnownType::Result(..)) | IrType::Inferred(KnownType::Result(..)))
             | Some(IrType::Unknown(_))
             | None => v,

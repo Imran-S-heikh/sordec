@@ -519,6 +519,9 @@ pub const MARSHALLING_RESULT_PAIR_SITES: &str = "marshalling_result_pair_sites";
 pub const MARSHALLING_RESULT_PAIR_SITES_REFUSED: &str = "marshalling_result_pair_sites_refused";
 /// Those helpers rewritten to return the `Result`, every call site with them.
 pub const MARSHALLING_RESULT_PAIR_REWRITTEN: &str = "marshalling_result_pair_rewritten";
+/// Errors an entrypoint returns whose code is known only at run time,
+/// returned as the declared error.
+pub const MARSHALLING_ERROR_CODES_RETURNED: &str = "marshalling_error_codes_returned";
 /// Helpers returning `(tag, value)` in two registers, the tag a different
 /// constant on different paths.
 pub const MARSHALLING_OPTIONAL_PAIR_HELPERS: &str = "marshalling_optional_pair_helpers";
@@ -1104,6 +1107,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_RESULT_PAIR_SITES,
         MARSHALLING_RESULT_PAIR_SITES_REFUSED,
         MARSHALLING_RESULT_PAIR_REWRITTEN,
+        MARSHALLING_ERROR_CODES_RETURNED,
         MARSHALLING_OPTIONAL_PAIR_HELPERS,
         MARSHALLING_OPTIONAL_PAIR_SITES,
         MARSHALLING_OPTIONAL_PAIR_SITES_REFUSED,
