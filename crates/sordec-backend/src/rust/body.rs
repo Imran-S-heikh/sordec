@@ -2732,6 +2732,33 @@ mod tests {
         emitted(exprs, tail, &TypeRegistry::default())
     }
 
+    /// `vec_get(v, val_encode::<u32>(i))`: the index is `i`, when `i` is a
+    /// `u32`; typed otherwise, the encode is not known to hold it.
+    fn get_at_encoded(index_ty: KnownType) -> String {
+        let new = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::New, args: vec![] });
+        let index = Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(0) };
+        let encode = known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v(2) });
+        let get = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::Get, args: vec![v(1), v(3)] });
+        emitted(
+            vec![
+                (IrType::Known(KnownType::Vec(Box::new(IrType::Known(KnownType::Val)))), new),
+                (IrType::Known(index_ty), index),
+                (IrType::Known(KnownType::Val), encode),
+                (IrType::Known(KnownType::Val), get),
+            ],
+            vec![ret(4)],
+            &TypeRegistry::default(),
+        )
+    }
+
+    #[test]
+    fn a_get_at_an_encoded_u32_index_reads_the_index() {
+        let body = get_at_encoded(KnownType::U32);
+        assert!(body.contains("get_unchecked (v2)"), "{body}");
+        assert!(!body.contains("todo !"), "the encode is not read any more: {body}");
+        assert!(get_at_encoded(KnownType::I64).contains("todo !"));
+    }
+
     #[test]
     fn a_wide_hole_read_by_its_limbs_is_annotated() {
         let lo = Expr::Unary { op: sordec_ir::UnaryOp::WideLo, value: v(1) };

@@ -70,6 +70,8 @@ fn entries_vec(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
 /// exactly — tag 4 in the low word, the `u32` above it — and the host's
 /// `vec_get` traps out of range just as `get_unchecked` does, so the chain
 /// is the call. `account`'s `args.get(2)` is `vec_get(args, 0x2_0000_0004)`.
+/// So does the recognized `U32Val` encode of a `u32` value
+/// ([`encoded_index`]): `v.get_unchecked(i)`.
 ///
 /// A receiver the IR has not typed as a `Vec` goes through `Val`, as
 /// `len()` does ([`converted_to_val`]), and its element is then a `Val`;
@@ -86,7 +88,10 @@ pub(crate) fn vec_get_at_literal(
     let [recv, index] = args.as_slice() else {
         return None;
     };
-    let n = literal_index(ctx, *index)?;
+    let n: syn::Expr = match literal_index(ctx, *index) {
+        Some(n) => parse_quote!(#n),
+        None => ctx.value_ref(encoded_index(ctx.func, *index)?),
+    };
     let eb = ctx.env_borrow();
     let v = ctx.value_ref(*recv);
     if converted_to_val(ctx, op).is_none() {
@@ -114,6 +119,39 @@ pub(crate) fn vec_get_at_literal(
 fn u32_val_payload(raw: i64) -> Option<u32> {
     (raw & 0xFFFF_FFFF == 4).then_some(())?;
     u32::try_from(raw >> 32).ok()
+}
+
+/// The `u32` an index operand is the `U32Val` encode of, when that value
+/// is itself typed `u32`: `v.get_unchecked(i)` for `vec_get(v,
+/// val_encode::<u32>(i))`.
+///
+/// Why it is exact: the encode is the `U32Val` of `i` (tag 4 in the low
+/// word, `i` above it), and the host's `vec_get` reads the index out of
+/// that word, so it reads `i` — the literal case above, with the number
+/// still a variable. Gate: the encode is the recognized `U32` one and its
+/// payload is typed `u32`, so the method's `u32` parameter takes it as it
+/// prints.
+fn encoded_index(func: &sordec_ir::HighFunction, index: sordec_common::ValueId) -> Option<sordec_common::ValueId> {
+    // Through renames, as the operand prints.
+    let mut at = index;
+    for _ in 0..16 {
+        match &func.bindings.get(at)?.expr {
+            sordec_ir::Expr::Use(next) => at = *next,
+            _ => break,
+        }
+    }
+    let sordec_ir::Expr::Semantic(sordec_ir::SemanticOp::Known(KnownOp::ValEncodeSmall {
+        ty: sordec_ir::KnownType::U32,
+        value,
+    })) = &func.bindings.get(at)?.expr
+    else {
+        return None;
+    };
+    matches!(
+        func.bindings.get(*value).map(|b| &b.ty),
+        Some(IrType::Known(KnownType::U32) | IrType::Inferred(KnownType::U32))
+    )
+    .then_some(*value)
 }
 
 /// The `u32` an index operand carries when it is a literal `U32Val`.
@@ -148,7 +186,7 @@ pub(crate) fn converted_to_val(ctx: &FnCtx, op: &KnownOp) -> Option<sordec_commo
             let [recv, index] = args.as_slice() else {
                 return None;
             };
-            literal_index(ctx, *index)?;
+            literal_index(ctx, *index).map(|_| ()).or_else(|| encoded_index(ctx.func, *index).map(|_| ()))?;
             (!typed_vec(ctx, *recv)).then_some(*recv)
         }
         KnownOp::AuthorizeAsCurrContract { auth_entries } => {
@@ -830,6 +868,13 @@ pub(crate) fn rendered_operands(
         }
     };
     match op {
+        // `v.get_unchecked(i)` reads `i`, not its encode.
+        KnownOp::VecOp { kind: VecOpKind::Get, args } => {
+            let [recv, index] = args.as_slice() else {
+                return None;
+            };
+            encoded_index(func, *index).map(|i| vec![*recv, i])
+        }
         KnownOp::StorageGet { tier, key, resolved_key, missing, .. } => {
             tier_method(tier)?;
             let mut reads = key_reads(*key, resolved_key);
