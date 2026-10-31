@@ -297,6 +297,13 @@ pub const UDT_DECODE_AFTER_ENUM_ITER: &str = "udt-decode-after-enum-iter";
 /// value parameter (every caller now hands it a proven struct), and only
 /// a typed helper is read as that struct's decode at its call sites.
 pub const UDT_DECODE_AFTER_HELPER_TYPES: &str = "udt-decode-after-helper-types";
+/// [`EnumIterPass`] again once the struct decodes in its arms are taken:
+/// a recovered field typed `Map<K, E>` or `Vec<E>` proves the values read
+/// from it to be the enum, and their own inline decodes are the shape.
+pub const ENUM_ITER_AFTER_UDT_DECODE: &str = "enum-iter-after-udt-decode";
+/// [`UdtDecodePass`] after that run: the payloads it binds are proven
+/// structs handed to their decoder helpers.
+pub const UDT_DECODE_AFTER_NESTED_ENUM: &str = "udt-decode-after-nested-enum";
 /// [`ArgGuardElisionPass`] once more, after those runs: a field they read
 /// out of a variant's payload is typed by its struct, and the derived tag
 /// check on it is a guard the group's own run never saw.
@@ -782,6 +789,8 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(VecIterPass),
             Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_ENUM_ITER, &[])),
             Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_HELPER_TYPES, &[])),
+            Box::new(pass::Rerun::new(EnumIterPass, ENUM_ITER_AFTER_UDT_DECODE, &[])),
+            Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_NESTED_ENUM, &[])),
             Box::new(pass::Rerun::new(ArgGuardElisionPass, ARG_GUARD_AFTER_ENUM_ITER, &[])),
             // Any other `Option` a helper hands back through its caller's
             // frame. After the group, not in it: the group's own

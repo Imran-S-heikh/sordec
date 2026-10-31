@@ -54,11 +54,13 @@
 //! element `vec_get` reads from a vector of the enum — a parameter the spec
 //! declares `Vec<E>`, a vector an earlier pass proved one, or
 //! `__check_auth`'s `Vec<Context>`, which the custom account interface
-//! fixes. Its `Val` is then a vector holding the variant's name and its
-//! payload's `Val`s, one each — and the code that reads it is the derived
-//! decode, which the re-emitted `#[contracttype]` regenerates where the
-//! value enters: in the entrypoint wrapper, or, for an element, in the
-//! typed vector's own read (`get_unchecked`, `iter`), as every marshalling
+//! fixes — or a value `map_get` reads from a map an earlier pass typed
+//! `Map<K, E>` from a declaration (a recovered struct's field). Its `Val`
+//! is then a vector holding the variant's name and its payload's `Val`s,
+//! one each — and the code that reads it is the derived decode, which the
+//! re-emitted `#[contracttype]` regenerates where the value enters: in the
+//! entrypoint wrapper, or, for an element, in the typed collection's own
+//! read (`get_unchecked`, `iter`, `Map::get`), as every marshalling
 //! elision relocates its decode. The element is then typed as the enum.
 //!
 //! `Context` is the SDK's (`soroban_sdk::auth`, `export = false`), so no
@@ -75,6 +77,19 @@
 //!   `2` only. The state is set from the value (`v`, `0`, `vec_len(v)`)
 //!   and nothing but these calls and loads of the index and length touches
 //!   those 16 bytes, so the state is the iterator's own.
+//! - **Two decodes may take the same 16 bytes in turn.** rustc gives the
+//!   iterator state of a decode nested in another's arm (a payload's own
+//!   field decoded as the enum again) the frame slot the outer decode is
+//!   done with. Each setting of the state is the three stores of one
+//!   vector, its `0` and its length, in one block with no call or load of
+//!   the state between them. A forward walk of the region tree
+//!   (`reach::walk`) records, for every `next` call and load of the index
+//!   or length, which settings last ran on some path to it. One that
+//!   follows this decode's setting on every path, and no other, reads this
+//!   decode's state: no other setting lies on any path between them, so
+//!   the bytes are this vector's. One that follows only another's setting
+//!   is that decode's and is left alone; one that may follow either
+//!   refuses the site. What this decode removes is only its own.
 //! - **The k-th call reads element k.** The state's three stores sit in
 //!   one block with no call between them, so after the first a call sees
 //!   all three. A forward walk of the region tree counts, on every path,
@@ -152,13 +167,17 @@
 //!   and index stores together on the paths whose tag is not `2`; the
 //!   element `vec_get(load +0, U32Val(load +8))`, the index that load
 //!   plus one.
-//! - The value proven to be a declared enum every variant of which has at
-//!   most one payload component (`Context` declared by the auth table, for
+//! - The value proven to be a declared enum (a parameter, a typed value, an
+//!   element of a typed vector, a value of a typed map) every variant of
+//!   which has at most one payload component (`Context` declared by the auth table, for
 //!   an SDK major it covers, and only when the contract declares no type
 //!   of its name).
 //! - The state: three stores of the value, `0` and its `vec_len`, in one
 //!   block with no call between them; nothing else touches its 16 bytes
-//!   but `next` calls handed it and loads of the index and length.
+//!   but `next` calls handed it and loads of the index and length. When
+//!   several vectors set it, each setting is such a group, the walk over
+//!   the whole region completes, and every call and state load this
+//!   decode takes follows its setting alone on every path.
 //! - One lookup over the enum's variant names, on an element of the first
 //!   call; one switch on its position; every other call in a single-case
 //!   arm (or the default, or the code its bare `break` alone reaches) of
@@ -176,15 +195,14 @@
 //!
 //! Not taken yet: a variant of several components (`X(a, b)`), a payload
 //! of a numeric type other than `u32` (`i64`, `i128`: their two-form
-//! decodes), a tuple payload, a payload carried out of its arm by a merge,
-//! and a frame slot two decodes reuse for their iterators (the check that
-//! nothing else touches the state is flow-insensitive).
+//! decodes), a tuple payload, and a payload carried out of its arm by a
+//! merge.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use sordec_common::{BlockId, FuncId, Provenance, ProvenanceSource, TypeId, ValueId};
 use sordec_ir::{
-    BinaryOp, BufOpKind, CompositeType, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MemWidth,
+    BinaryOp, BufOpKind, CompositeType, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MapOpKind, MemWidth,
     Region, SdkType, SemanticOp, StructDef, SwitchArm, TypeRef, TypeRegistry, UnaryOp, UnionDef, VecOpKind,
 };
 
@@ -313,6 +331,22 @@ fn proven_union(func: &HighFunction, value: ValueId, context: Option<TypeId>) ->
         Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::Get, args })) if args.len() == 2 => {
             element_union(func, args[0], context).map(|id| (id, true))
         }
+        Expr::Semantic(SemanticOp::Known(KnownOp::MapOp { kind: MapOpKind::Get, args })) if args.len() == 2 => {
+            map_value_union(func, args[0]).map(|id| (id, true))
+        }
+        _ => None,
+    }
+}
+
+/// The declared enum the values of `map` are: a map an earlier pass typed
+/// `Map<K, E>` from a declaration (a recovered struct's field, say). A value
+/// `map_get` reads from it is then an `E`, decoded where `Map::get` reads it.
+fn map_value_union(func: &HighFunction, map: ValueId) -> Option<TypeId> {
+    match &func.bindings.get(resolve_use(func, map))?.ty {
+        IrType::Known(KnownType::Map(_, v)) => match &**v {
+            IrType::Known(KnownType::UserDefined(id)) => Some(*id),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -642,6 +676,134 @@ fn addr(func: &HighFunction, v: ValueId) -> (ValueId, u32) {
     canon_addr(func, raw_address(func, v))
 }
 
+/// One setting of an iterator's state: the stores of a vector, of the
+/// index `0` and of the vector's length into the same 16 bytes, all in one
+/// block with nothing on the state between them.
+struct InitGroup {
+    /// The vector, the index, the length.
+    stores: [ValueId; 3],
+    /// The vector the state iterates.
+    value: ValueId,
+    /// The first of the three in the block: where the state becomes this
+    /// vector's.
+    first: ValueId,
+}
+
+/// The decodes sharing one iterator state, and which of them each `next`
+/// call and state load follows.
+struct Split {
+    groups: Vec<InitGroup>,
+    /// Per call and state load, the vectors whose setting of the state
+    /// last ran on some path to it (`None`: a path on which none ran).
+    seen: HashMap<ValueId, BTreeSet<Option<ValueId>>>,
+}
+
+/// The forward walk behind [`owners`]: the settings of the state that
+/// last ran on some path, and what each call or state load saw.
+struct Owner<'a> {
+    starts: HashMap<ValueId, ValueId>,
+    touches: &'a dyn Fn(ValueId) -> bool,
+    seen: HashMap<ValueId, BTreeSet<Option<ValueId>>>,
+}
+
+impl reach::Flow for Owner<'_> {
+    type State = BTreeSet<Option<ValueId>>;
+
+    fn join(into: &mut Self::State, other: &Self::State) {
+        into.extend(other.iter().copied());
+    }
+
+    fn step(&mut self, id: ValueId, state: &mut Self::State) {
+        if let Some(y) = self.starts.get(&id) {
+            *state = BTreeSet::from([Some(*y)]);
+        } else if (self.touches)(id) {
+            self.seen.entry(id).or_default().extend(state.iter().copied());
+        }
+    }
+}
+
+/// The ordered split of one iterator state several decodes reuse: every
+/// setting of it ([`InitGroup`]), and, by a forward walk of the region
+/// tree, which setting each `next` call and load of the index or length
+/// follows on every path. A call that follows exactly one setting on every
+/// path reads that vector's state: no other setting lies on any path from
+/// it to the call, and the stores of one setting run together.
+fn owners(
+    func: &HighFunction,
+    order: &[(BlockId, ValueId)],
+    nexts: &HashSet<FuncId>,
+    base: ValueId,
+    at: u32,
+) -> Result<Split, String> {
+    let position: HashMap<ValueId, usize> = func
+        .blocks
+        .iter()
+        .flat_map(|(_, blk)| blk.bindings.iter().enumerate().map(|(i, v)| (*v, i)))
+        .collect();
+    let store_at = |v: ValueId| match func.bindings.get(v).map(|b| &b.expr) {
+        Some(Expr::Store { addr: a, value: x, offset, width }) => {
+            let (b, k) = canon_addr(func, *a);
+            (b == base).then_some(())?;
+            Some((k.checked_add(*offset)?, *width, resolve_use(func, *x)))
+        }
+        _ => None,
+    };
+    let touches = |v: ValueId| match func.bindings.get(v).map(|b| &b.expr) {
+        Some(Expr::Call { target, args }) => {
+            nexts.contains(target) && args.len() == 2 && addr(func, args[1]) == (base, at)
+        }
+        Some(Expr::Load { addr: a, offset, width: MemWidth::W4, .. }) => {
+            let (lb, k) = canon_addr(func, *a);
+            lb == base && matches!(k.checked_add(*offset), Some(o) if o == at + 8 || o == at + 12)
+        }
+        _ => false,
+    };
+    let mut groups = Vec::new();
+    for (b, v) in order {
+        let Some((o, MemWidth::W8, y)) = store_at(*v) else { continue };
+        if o != at {
+            continue;
+        }
+        let in_block: Vec<ValueId> = func.blocks.get(*b).map(|blk| blk.bindings.clone()).unwrap_or_default();
+        let idx: Vec<ValueId> = in_block
+            .iter()
+            .copied()
+            .filter(|s| matches!(store_at(*s), Some((k, MemWidth::W4, x)) if k == at + 8 && trace_int(func, x) == Some(0)))
+            .collect();
+        let lens: Vec<ValueId> = in_block
+            .iter()
+            .copied()
+            .filter(|s| {
+                matches!(store_at(*s), Some((k, MemWidth::W4, x)) if k == at + 12
+                    && matches!(expr_of(func, x), Some(Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::Len, args })))
+                        if args.len() == 1 && resolve_use(func, args[0]) == y))
+            })
+            .collect();
+        let ([i], [l]) = (idx.as_slice(), lens.as_slice()) else {
+            return Err(format!("{v:?} sets the state without one index and one length store beside it"));
+        };
+        let stores = [*v, *i, *l];
+        let ps: Vec<usize> = stores.iter().filter_map(|s| position.get(s).copied()).collect();
+        let (Some(lo), Some(hi)) = (ps.iter().min().copied(), ps.iter().max().copied()) else {
+            return Err("a state store is not scheduled".into());
+        };
+        if ps.len() != 3 || in_block[lo..=hi].iter().any(|x| touches(*x)) {
+            return Err(format!("the state is read between the stores that set it at {v:?}"));
+        }
+        groups.push(InitGroup { stores, value: y, first: in_block[lo] });
+    }
+    let mut flow = Owner {
+        starts: groups.iter().map(|g| (g.first, g.value)).collect(),
+        touches: &touches,
+        seen: HashMap::new(),
+    };
+    let walked = reach::walk(func, &mut flow, BTreeSet::from([None]));
+    if !walked.complete {
+        return Err("the walk of the state's owners did not settle".into());
+    }
+    Ok(Split { groups, seen: flow.seen })
+}
+
 /// Whether `v` is computed from `base` (arithmetic, conversions, merges).
 fn derived_from(func: &HighFunction, v: ValueId, base: ValueId) -> bool {
     let mut seen = HashSet::new();
@@ -917,8 +1079,42 @@ fn site(
             _ => None,
         }
     };
-    let s_idx = find(at + 8, &|x| trace_int(func, x) == Some(0)).ok_or("no single zero index store")?;
-    let s_len = find(at + 12, &|x| x == len).ok_or("no single length store")?;
+    // One decode's state, or several decodes taking the same 16 bytes in
+    // turn: then each `next` call and state load is the decode's whose
+    // setting of the state it follows on every path (see `owners`).
+    let zero_stores = order
+        .iter()
+        .filter(|(_, v)| {
+            matches!(store(*v), Some((b, k, MemWidth::W4, x)) if b == base && k == at + 8 && trace_int(func, x) == Some(0))
+        })
+        .count();
+    let split = if zero_stores > 1 { Some(owners(func, order, nexts, base, at)?) } else { None };
+    let (s_idx, s_len) = match &split {
+        None => (
+            find(at + 8, &|x| trace_int(func, x) == Some(0)).ok_or("no single zero index store")?,
+            find(at + 12, &|x| x == len).ok_or("no single length store")?,
+        ),
+        Some(split) => {
+            let g = split.groups.iter().find(|g| g.stores[0] == *s_vec).ok_or("the state is not set in one block")?;
+            if g.value != value || !matches!(store(g.stores[2]), Some((_, _, _, x)) if x == len) {
+                return Err("the length stored is not the value's".into());
+            }
+            (g.stores[1], g.stores[2])
+        }
+    };
+    // Whether a call or load on the state is this decode's: always, with
+    // one decode; with several, where this decode set it on every path.
+    let mine = |v: ValueId| -> Result<bool, String> {
+        let Some(split) = &split else { return Ok(true) };
+        let owner = split.seen.get(&v).ok_or_else(|| format!("{v:?} is not reached by the walk"))?;
+        if owner.len() == 1 && owner.contains(&Some(value)) {
+            Ok(true)
+        } else if owner.contains(&Some(value)) {
+            Err(format!("{v:?} may follow another decode's setting of the state"))
+        } else {
+            Ok(false)
+        }
+    };
     // The state is set at once: its three stores in one block.
     let state_block = block_of.get(s_vec).ok_or("the state is not scheduled")?;
     if [s_idx, s_len].iter().any(|s| block_of.get(s) != Some(state_block)) {
@@ -928,10 +1124,21 @@ fn site(
     // The `next` calls on it, and the loads of its index and length.
     let mut calls: Vec<(ValueId, u32)> = Vec::new();
     let mut state_loads: Vec<ValueId> = Vec::new();
+    // Another decode's: its own setting of the state, calls and loads.
+    let mut others: HashSet<ValueId> = HashSet::new();
+    if let Some(split) = &split {
+        for g in split.groups.iter().filter(|g| g.stores[0] != *s_vec) {
+            others.extend(g.stores);
+        }
+    }
     for (_, v) in order {
         match func.bindings.get(*v).map(|b| &b.expr) {
             Some(Expr::Call { target, args }) if nexts.contains(target) && args.len() == 2 => {
                 if addr(func, args[1]) != (base, at) {
+                    continue;
+                }
+                if !mine(*v)? {
+                    others.insert(*v);
                     continue;
                 }
                 let (ob, r) = addr(func, args[0]);
@@ -943,7 +1150,11 @@ fn site(
             Some(Expr::Load { addr: a, offset, width: MemWidth::W4, .. }) => {
                 let (lb, k) = canon_addr(func, *a);
                 if lb == base && matches!(k.checked_add(*offset), Some(o) if o == at + 8 || o == at + 12) {
-                    state_loads.push(*v);
+                    if mine(*v)? {
+                        state_loads.push(*v);
+                    } else {
+                        others.insert(*v);
+                    }
                 }
             }
             _ => {}
@@ -974,6 +1185,7 @@ fn site(
     let mut allowed: HashSet<ValueId> = [*s_vec, s_idx, s_len].into_iter().collect();
     allowed.extend(calls.iter().map(|(c, _)| *c));
     allowed.extend(state_loads.iter().copied());
+    allowed.extend(others.iter().copied());
     if let Some(other) = foreign_touch(func, base, at, &allowed, access) {
         return Err(format!("{other:?} may touch the iterator state"));
     }
@@ -1825,6 +2037,8 @@ mod tests {
         stale_first: bool,
         /// The value is an element `vec_get` reads from a `Vec<E>`.
         element: bool,
+        /// The value is one `map_get` reads from a `Map<u32, E>`.
+        map_value: bool,
         /// `B`'s arm is the default, `break 'scope`, and its work follows
         /// the scope; with `true` twice, a second break to that scope.
         hoisted: Option<bool>,
@@ -1838,6 +2052,7 @@ mod tests {
         looped: false,
         stale_first: false,
         element: false,
+        map_value: false,
         hoisted: None,
     };
 
@@ -1904,13 +2119,23 @@ mod tests {
     fn entry(shape: &Shape) -> HighFunction {
         let mut f = Builder { b: Arena::new() };
         let enum_ty = IrType::Known(KnownType::UserDefined(TypeId::new(0)));
-        let param_ty = if shape.element { IrType::Known(KnownType::Vec(Box::new(enum_ty))) } else { enum_ty };
+        let param_ty = if shape.map_value {
+            IrType::Known(KnownType::Map(Box::new(IrType::Known(KnownType::U32)), Box::new(enum_ty)))
+        } else if shape.element {
+            IrType::Known(KnownType::Vec(Box::new(enum_ty)))
+        } else {
+            enum_ty
+        };
         let param = f.seed(param_ty, Expr::Phi { incoming: vec![] });
         let fp = f.seed(IrType::Known(KnownType::I32), Expr::Phi { incoming: vec![] });
         let mut prologue = Vec::new();
-        let e = if shape.element {
+        let e = if shape.element || shape.map_value {
             let at = f.lit64(4);
-            let got = f.known(KnownOp::VecOp { kind: VecOpKind::Get, args: vec![v(param), v(at)] });
+            let got = if shape.map_value {
+                f.known(KnownOp::MapOp { kind: MapOpKind::Get, args: vec![v(param), v(at)] })
+            } else {
+                f.known(KnownOp::VecOp { kind: VecOpKind::Get, args: vec![v(param), v(at)] })
+            };
             let not_vec = f.known(KnownOp::ValTagCheck { value: v(got), tag: crate::val_abi::TAG_VEC_OBJECT, negated: true });
             prologue.extend([at, got, not_vec]);
             got
@@ -2006,7 +2231,7 @@ mod tests {
             Region::Return { values: vec![v(user)] },
         ];
         let mut items = vec![Region::Basic(bb(0))];
-        if shape.element {
+        if shape.element || shape.map_value {
             // The element's check that it is a vector, a trap guard.
             let check = blocks[0][2];
             items.push(guard(check));
@@ -2244,6 +2469,162 @@ mod tests {
     fn a_continuation_reached_another_way_keeps_the_decode() {
         let mut func = entry(&Shape { hoisted: Some(true), ..PLAIN });
         assert_eq!(run(&mut func, PrimitiveType::U32), Err(()));
+    }
+
+    /// A value read from a map the declaration types `Map<u32, E>` is an
+    /// `E`, decoded where `Map::get` reads it.
+    #[test]
+    fn a_value_of_a_map_of_the_enum_is_the_enum() {
+        let mut func = entry(&Shape { map_value: true, ..PLAIN });
+        assert_eq!(run(&mut func, PrimitiveType::U32), Ok(1));
+        let (index, _, _) = the_switch(&func);
+        let got = func.bindings.get(index).expect("the value");
+        assert!(matches!(got.expr, Expr::Semantic(SemanticOp::Known(KnownOp::MapOp { kind: MapOpKind::Get, .. }))));
+        assert_eq!(got.ty, IrType::Known(KnownType::UserDefined(TypeId::new(0))));
+    }
+
+    /// A map of `Val`s says nothing about what it holds.
+    #[test]
+    fn a_value_of_a_map_of_another_type_keeps_the_decode() {
+        let mut func = entry(&Shape { map_value: true, ..PLAIN });
+        let vals = KnownType::Map(Box::new(IrType::Known(KnownType::U32)), Box::new(IrType::Known(KnownType::Val)));
+        func.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(vals);
+        assert_eq!(run(&mut func, PrimitiveType::U32), Err(()));
+    }
+
+    /// One plain decode of `e` through the state at `fp`, its payload arm
+    /// falling through: its blocks (numbered from `at`) and region items.
+    /// The state's setting has a block of its own, `at`.
+    fn decode_of(f: &mut Builder, e: u32, fp: u32, at: u32) -> (Vec<Vec<u32>>, Vec<Region>) {
+        let len = f.known(KnownOp::VecOp { kind: VecOpKind::Len, args: vec![v(e)] });
+        let zero = f.lit32(0);
+        let s0 = f.store(fp, e, 0, MemWidth::W8);
+        let s1 = f.store(fp, zero, 8, MemWidth::W4);
+        let s2 = f.store(fp, len, 12, MemWidth::W4);
+        let sixteen = f.lit32(16);
+        let out = f.bin(BinaryOp::Add, fp, sixteen);
+        let next = Expr::Call { target: FuncId::from_index(NEXT), args: vec![v(out), v(fp)] };
+        let c0 = f.untyped(next.clone());
+        let t0 = f.load(fp, 16, MemWidth::W8);
+        let z64 = f.lit64(0);
+        let t0_bad = f.bin(BinaryOp::Ne, t0, z64);
+        let sym = f.load(fp, 24, MemWidth::W8);
+        let (pos, n) = (f.lit32(0), f.lit32(2));
+        let lookup = f.known(KnownOp::SymbolDispatch {
+            sym: v(sym),
+            table_pos: v(pos),
+            len: v(n),
+            table: DispatchTable { cases: vec!["A".into(), "B".into()], enum_name: Some("E".into()) },
+        });
+        let decoded = f.known(KnownOp::ValDecodeSmall { value: v(lookup) });
+        let one64 = f.lit64(1);
+        let bound = f.bin(BinaryOp::GtU, decoded, one64);
+        let sel = f.untyped(Expr::Unary { op: UnaryOp::Wrap32, value: v(decoded) });
+        let idx = f.load(fp, 8, MemWidth::W4);
+        let end = f.load(fp, 12, MemWidth::W4);
+        let left = f.bin(BinaryOp::Sub, end, idx);
+        let one32 = f.lit32(1);
+        let too_many = f.bin(BinaryOp::GtU, left, one32);
+        let c1 = f.untyped(next);
+        let t1 = f.load(fp, 16, MemWidth::W8);
+        let t1_bad = f.bin(BinaryOp::Ne, t1, z64);
+        let x = f.load(fp, 24, MemWidth::W8);
+        let not_u32 = f.known(KnownOp::ValTagCheck { value: v(x), tag: 4, negated: true });
+        let body = f.known(KnownOp::ValDecodeSmall { value: v(x) });
+        let user = f.bin(BinaryOp::Add, body, body);
+        let blocks = vec![
+            vec![len, zero, s0, s1, s2],
+            vec![sixteen, out, c0, t0, z64, t0_bad],
+            vec![sym, pos, n, lookup, decoded, one64, bound, sel],
+            vec![idx, end, left, one32, too_many],
+            vec![c1, t1, t1_bad],
+            vec![x, not_u32],
+            vec![body, user],
+            vec![],
+        ];
+        let arm = Region::Sequence(vec![
+            Region::Basic(bb(at + 3)),
+            guard(too_many),
+            Region::Basic(bb(at + 4)),
+            guard(t1_bad),
+            Region::Basic(bb(at + 5)),
+            guard(not_u32),
+            Region::Basic(bb(at + 6)),
+        ]);
+        let items = vec![
+            Region::Basic(bb(at)),
+            Region::Basic(bb(at + 1)),
+            guard(t0_bad),
+            Region::Basic(bb(at + 2)),
+            guard(bound),
+            Region::Switch {
+                index: v(sel),
+                arms: vec![SwitchArm { cases: vec![1], body: arm }],
+                default: Box::new(Region::Basic(bb(at + 7))),
+                dispatch: Some(v(lookup)),
+            },
+        ];
+        (blocks, items)
+    }
+
+    /// Two enum values decoded one after the other through the same frame
+    /// slot; with `maybe`, the second's setting of the state happens on one
+    /// path only, so its first call may read the first's state.
+    fn two_decodes(maybe: bool) -> HighFunction {
+        let mut f = Builder { b: Arena::new() };
+        let enum_ty = IrType::Known(KnownType::UserDefined(TypeId::new(0)));
+        let first = f.seed(enum_ty.clone(), Expr::Phi { incoming: vec![] });
+        let fp = f.seed(IrType::Known(KnownType::I32), Expr::Phi { incoming: vec![] });
+        let second = f.seed(enum_ty, Expr::Phi { incoming: vec![] });
+        let flag = f.seed(IrType::Known(KnownType::Bool), Expr::Phi { incoming: vec![] });
+        let (mut blocks, mut items) = decode_of(&mut f, first, fp, 0);
+        let (more, mut rest) = decode_of(&mut f, second, fp, 8);
+        blocks.extend(more);
+        if maybe {
+            let setting = rest.remove(0);
+            rest.insert(0, Region::If { cond: v(flag), then_region: Box::new(setting), else_region: None });
+        }
+        items.extend(rest);
+        items.push(Region::Return { values: vec![] });
+        f.func(0, blocks, Region::Sequence(items))
+    }
+
+    /// Every site `plan` finds, applied in turn.
+    fn run_all(func: &mut HighFunction) -> usize {
+        let (access, gated) = summaries();
+        let nexts = HashSet::from([FuncId::from_index(NEXT)]);
+        let types = types(PrimitiveType::U32);
+        let mut tried = HashSet::new();
+        let mut sites = 0;
+        while let (Some(site), _) = plan(func, &MemoryImage::empty(), &types, None, &nexts, &access, &gated, &mut tried) {
+            apply(func, site);
+            sites += 1;
+        }
+        sites
+    }
+
+    /// The second decode takes the slot once the first is done with it:
+    /// each call follows its own decode's setting on every path, and both
+    /// become matches.
+    #[test]
+    fn two_decodes_taking_one_state_in_turn_are_both_taken() {
+        let mut func = two_decodes(false);
+        assert_eq!(run_all(&mut func), 2);
+        let mut on: Vec<ValueId> = Vec::new();
+        func.region.for_each_node(|n| {
+            if let Region::Switch { index, .. } = n {
+                on.push(*index);
+            }
+        });
+        assert_eq!(on, vec![v(0), v(2)]);
+    }
+
+    /// The second's first call may follow either setting: neither decode
+    /// can say whose element it reads.
+    #[test]
+    fn a_call_that_may_follow_either_setting_keeps_both_decodes() {
+        let mut func = two_decodes(true);
+        assert_eq!(run_all(&mut func), 0);
     }
 
     /// `next(out, state)` as rustc emits it; `bump` is what it adds to the
