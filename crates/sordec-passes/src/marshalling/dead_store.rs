@@ -98,7 +98,7 @@
 //!   function is left untouched.
 //! - The flow is structured (no fallback region), every `break` and
 //!   `continue` lands inside the function's own tree, and each loop
-//!   settles within [`MAX_ROUNDS`].
+//!   settles within `MAX_ROUNDS` rounds.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
