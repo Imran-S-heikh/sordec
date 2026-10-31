@@ -401,8 +401,10 @@ pub(super) struct Liveness<'a, 'ir> {
     /// What is live at each enclosing loop's header.
     continues: Vec<(BlockId, Live)>,
     /// Bindings that are neither stores nor loads but write a known slot of
-    /// the frame whenever they run — a host copy into a frame buffer. Each
-    /// is a definite write, like a store; empty for this module's own walk.
+    /// the frame whenever they run and return — a host copy into a frame
+    /// buffer, a `memset`, a helper's out-parameter. Each is a definite
+    /// write, like a store; one that is a call still reads what its reach
+    /// says it reads. Empty for this module's own walk.
     pub(super) writes: HashMap<ValueId, Slot>,
     /// Bindings that read a known slot of the frame and are neither loads
     /// nor calls — a host constructor reading a frame buffer.
@@ -507,6 +509,13 @@ impl<'a, 'ir> Liveness<'a, 'ir> {
                 self.after.insert(id, live.clone());
                 for byte in slot.offset..slot.offset.checked_add(slot.bytes)? {
                     live.remove(&byte);
+                }
+                if matches!(binding.expr, Expr::Call { .. }) {
+                    for (read, write_only) in self.frames.touches(self.func, id, self.fp)? {
+                        if !write_only {
+                            live.extend(read.offset..read.offset.checked_add(read.bytes)?);
+                        }
+                    }
                 }
                 continue;
             }
