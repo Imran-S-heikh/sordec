@@ -2306,7 +2306,7 @@ fn guarded(func: &HighFunction, load: ValueId, tag_loads: &[ValueId], helper: &H
 }
 
 /// Whether control never falls out of the bottom of `region`.
-fn leaves(region: &Region) -> bool {
+pub(super) fn leaves(region: &Region) -> bool {
     match region {
         Region::Return { .. }
         | Region::Break { .. }

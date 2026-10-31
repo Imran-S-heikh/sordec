@@ -288,12 +288,14 @@ fn try_upgrade(resolver: &mut Resolver<'_>, func: FuncId, op: &KnownOp) -> Upgra
             lm_pos,
             len,
             resolved: None,
+            array: None,
         } => match resolver.resolve_bytes(func, *lm_pos, *len) {
             Some(bytes) => Upgrade::Rewrite(
                 KnownOp::BytesNew {
                     lm_pos: *lm_pos,
                     len: *len,
                     resolved: Some(bytes),
+                    array: None,
                 },
                 "const-prop resolved bytes (rodata via phi/caller)".to_string(),
                 M_LITERAL_RESOLVED,

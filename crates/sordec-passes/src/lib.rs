@@ -97,7 +97,7 @@ pub use memory::{
 };
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
-    KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
+    KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, ByteArrayPass, BytesNConvertPass,
     AuthEntryPass, BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, TupleStructEncodePass, EnumSelectPass, IndexOfPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideInlineDecodePass, WideReturnPass,
     EncodeByRefPass, FromArrayLoopPass, OverwrittenFrameStorePass,
@@ -679,6 +679,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // The slab it was built from goes with it, because the
             // stores are then unread and `DeadFrameStorePass` is next.
             Box::new(ClientArgVecPass),
+            // A host copy into a frame buffer, read back as the `[u8; N]`
+            // array it fills. Inside the group because its reads come into
+            // the caller with the inliner, and before the dead-store pass,
+            // which then collects the buffer's zero fill and copies.
+            Box::new(ByteArrayPass),
             // A store into a private frame that nothing loads back is the
             // last reader of a frame pointer the bracket elision below
             // needs unread.
@@ -1076,7 +1081,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 34..88],
+        vec![1..7, 34..89],
     )
 }
 
@@ -1172,6 +1177,7 @@ mod tests {
                 marshalling::option_unwrap::PASS_NAME,
                 marshalling::key_construction::PASS_NAME,
                 marshalling::client_args::PASS_NAME,
+                marshalling::byte_array::PASS_NAME,
                 marshalling::dead_store::PASS_NAME,
                 marshalling::frame::PASS_NAME,
                 arith::wide_fold::PASS_NAME,

@@ -209,6 +209,10 @@ fn known(k: &KnownType, reg: &TypeRegistry, policy: &dyn HolePolicy) -> syn::Typ
             let n = Literal::u32_unsuffixed(*n);
             parse_quote!(soroban_sdk::BytesN<#n>)
         }
+        KnownType::ByteArray(n) => {
+            let n = Literal::u32_unsuffixed(*n);
+            parse_quote!([u8; #n])
+        }
         KnownType::Address => parse_quote!(soroban_sdk::Address),
         KnownType::MuxedAddress => parse_quote!(soroban_sdk::MuxedAddress),
         KnownType::Timepoint => parse_quote!(soroban_sdk::Timepoint),

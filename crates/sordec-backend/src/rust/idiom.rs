@@ -34,7 +34,7 @@ use quote::format_ident;
 use syn::parse_quote;
 
 use sordec_ir::{
-    BufOpKind, ClientInterface, CryptoOpKind, DeployOpKind, EnumKey, KnownOp, KnownTier, PrngOpKind,
+    ArrayFill, BufOpKind, ClientInterface, CryptoOpKind, DeployOpKind, EnumKey, KnownOp, KnownTier, PrngOpKind,
     StorageTier, ValObjectKind, VecOpKind, KnownType, IrType};
 
 use crate::rust::body::FnCtx;
@@ -820,6 +820,46 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                 ));
             }
             Some(parse_quote!(#bytes.len()))
+        }
+
+        // ---- Fixed-size byte arrays ----
+        // The host copy into a fresh array, as the SDK spells it. Both forms
+        // compile to `bytes_copy_to_linear_memory(b, 0, &mut a, N)`; the pass
+        // that recovers them picks the one the source type and the proven
+        // length allow (see `ArrayFill`).
+        KnownOp::BytesToArray { bytes, len, form } => {
+            // Only on the type the method is declared for: a `Val` or an
+            // untyped hole has no `to_array`, and converting it here would
+            // be a claim this call does not make.
+            let typed = ctx.func.bindings.get(ctx.fold_target(*bytes)).is_some_and(|b| match (&b.ty, form) {
+                (IrType::Known(k) | IrType::Inferred(k), ArrayFill::CopyIntoSlice) => {
+                    *k == KnownType::Bytes || *k == KnownType::BytesN(*len)
+                }
+                (IrType::Known(k) | IrType::Inferred(k), ArrayFill::ToArray) => *k == KnownType::BytesN(*len),
+                _ => false,
+            });
+            if !typed {
+                return None;
+            }
+            let b = ctx.value_ref(*bytes);
+            Some(match form {
+                ArrayFill::ToArray => parse_quote!(#b.to_array()),
+                ArrayFill::CopyIntoSlice => {
+                    let n = proc_macro2::Literal::u32_unsuffixed(*len);
+                    parse_quote!({
+                        let mut array = [0u8; #n];
+                        #b.copy_into_slice(&mut array);
+                        array
+                    })
+                }
+            })
+        }
+        // `Bytes::from_array` hands the host the array's bytes with
+        // `bytes_new_from_linear_memory(&a, N)` — the same call, reading the
+        // bytes the buffer held.
+        KnownOp::BytesNew { array: Some(array), .. } => {
+            let a = ctx.value_ref(*array);
+            Some(parse_quote!(soroban_sdk::Bytes::from_array(#eb, &#a)))
         }
 
         // ---- Linear-memory constructors ----
