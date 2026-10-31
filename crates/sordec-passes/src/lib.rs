@@ -107,7 +107,7 @@ pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
     AbiSweepPass, AuthFlowPass, AuthPass, CallResultPass, ClientCallPass, CollectionsPass, ConstPropPass,
     ContextPass, CrossContractPass, DispatcherPass, EnumKeyAfterInlinePass, EnumKeyPass, ErrorConstPass, LinearMemoryPass,
-    StoragePass, TtlPass, UnrecognizedScanPass, ValEncodingPass, ValPackedComparePass,
+    MemBuiltinPass, MemBuiltinResultPass, StoragePass, TtlPass, UnrecognizedScanPass, ValEncodingPass, ValPackedComparePass,
 };
 pub use refine::{
     AndMergePass, ConstBranchFoldPass, ConstLoadPass, ConstLoopFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
@@ -390,6 +390,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // projections, and so the overflow flag it plants is a
             // condition the panic classifier can name.
             Box::new(I128BuiltinPass),
+            // A `memcpy`/`memmove`/`memset` call's value is the destination
+            // it was handed. Read as that, an address built on it is an
+            // offset from the frame, which every frame analysis below can
+            // place. Reads only fingerprints and call arguments.
+            Box::new(MemBuiltinResultPass),
             Box::new(ValEncodingPass),
             Box::new(SpecializePass),
             Box::new(StoragePass),
@@ -1010,6 +1015,13 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the folds, which must have had every chance, and after the
             // typing above, which is what says a read is a stored value.
             Box::new(ResidualProbePass),
+            // The `compiler_builtins` memory routines' bodies, reduced to the
+            // `core` primitive each one is. Last of the rewrites on purpose:
+            // every analysis above has seen the original body, which each
+            // already treats as a callee it cannot see into, rather than a
+            // new operation it would have to be taught. The call sites that
+            // can use the knowledge ask the fingerprint, not the body.
+            Box::new(MemBuiltinPass),
             Box::new(TreeifyStatsPass),
             Box::new(StructuringCensusPass),
         ],
@@ -1021,7 +1033,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 33..87],
+        vec![1..7, 34..88],
     )
 }
 

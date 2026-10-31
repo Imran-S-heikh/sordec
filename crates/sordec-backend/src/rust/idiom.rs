@@ -646,6 +646,40 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             Some(parse_quote!(soroban_sdk::Bytes::from_slice(#eb, &[#(#items),*])))
         }
 
+        // ---- Guest memory routines ----
+        // The body of `memcpy`/`memmove`/`memset`, as the `core` primitive
+        // rustc lowers to that call. The operands are the routine's own
+        // 32-bit parameters; on wasm32 `as usize` and the cast to a pointer
+        // keep every bit, and `as u8` is the routine's own `c as u8`.
+        KnownOp::MemCopy { dst, src, len, may_overlap } => {
+            let (d, s, n) = (ctx.value_ref(*dst), ctx.value_ref(*src), ctx.value_ref(*len));
+            Some(if *may_overlap {
+                parse_quote!(unsafe { core::ptr::copy(#s as *const u8, #d as *mut u8, #n as usize) })
+            } else {
+                parse_quote!(unsafe { core::ptr::copy_nonoverlapping(#s as *const u8, #d as *mut u8, #n as usize) })
+            })
+        }
+        KnownOp::MemFill { dst, byte, len } => {
+            let (d, b, n) = (ctx.value_ref(*dst), ctx.value_ref(*byte), ctx.value_ref(*len));
+            Some(parse_quote!(unsafe { core::ptr::write_bytes(#d as *mut u8, #b as u8, #n as usize) }))
+        }
+        // No `core` primitive returns `memcmp`'s value, so the routine's own
+        // loop, as an iterator: the first unequal pair's difference, each
+        // byte unsigned, or 0. Read through slices, whose one precondition
+        // beyond the routine's — a non-null address — every caller meets:
+        // `memcmp` is reached only from slice comparisons.
+        KnownOp::MemCompare { a, b, len } => {
+            let (a, b, n) = (ctx.value_ref(*a), ctx.value_ref(*b), ctx.value_ref(*len));
+            Some(parse_quote!(unsafe {
+                core::iter::zip(
+                    core::slice::from_raw_parts(#a as *const u8, #n as usize),
+                    core::slice::from_raw_parts(#b as *const u8, #n as usize),
+                )
+                .find(|(x, y)| x != y)
+                .map_or(0i32, |(x, y)| i32::from(*x) - i32::from(*y))
+            }))
+        }
+
         // Everything else stays an honest hole (later waves).
         _ => None,
     }

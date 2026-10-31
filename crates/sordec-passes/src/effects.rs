@@ -751,6 +751,20 @@ pub fn known_op_effects(op: &KnownOp) -> Effects {
         | KnownOp::VecNew { .. }
         | KnownOp::MapNew { .. }
         | KnownOp::SymbolDispatch { .. } => TRAP_READ_MEM,
+        // The `compiler_builtins` memory routines, as the body they replace:
+        // a guest-memory copy reads its source and writes its destination,
+        // a fill only writes, a compare only reads, and each traps out of
+        // bounds. The original
+        // body also read the stack-pointer global for a scratch word of its
+        // own frame; nothing outside the routine can observe that word.
+        KnownOp::MemCopy { .. } => Effects {
+            may_trap: true,
+            reads_memory: true,
+            writes_memory: true,
+            ..Effects::PURE
+        },
+        KnownOp::MemFill { .. } => TRAP_WRITE_MEM,
+        KnownOp::MemCompare { .. } => TRAP_READ_MEM,
     }
 }
 

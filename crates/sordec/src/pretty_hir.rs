@@ -1178,6 +1178,13 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io:
         KnownOp::SymbolDispatch { sym, table, .. } => {
             render_symbol_dispatch(out, *sym, table, ctx)
         }
+        // ---- Guest memory routines (mem-builtins pass) ----
+        KnownOp::MemCopy { dst, src, len, may_overlap } => {
+            let name = if *may_overlap { "mem_move" } else { "mem_copy" };
+            render_call(out, name, &[*dst, *src, *len], ctx)
+        }
+        KnownOp::MemFill { dst, byte, len } => render_call(out, "mem_fill", &[*dst, *byte, *len], ctx),
+        KnownOp::MemCompare { a, b, len } => render_call(out, "mem_compare", &[*a, *b, *len], ctx),
         // ---- Crypto / PRNG / test / deploy (abi-sweep) ----
         KnownOp::CryptoOp { kind, args } => {
             render_call(out, val_abi::crypto_kind_name(*kind), args, ctx)

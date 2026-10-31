@@ -172,6 +172,10 @@ pub(crate) fn label_known_op(op: &KnownOp) -> String {
         KnownOp::VecOp { kind, .. } => format!("vec::{kind:?}"),
         KnownOp::BufOp { kind, .. } => format!("buf::{kind:?}"),
         KnownOp::SymbolDispatch { table, .. } => format!("symbol_dispatch {}", dispatch_label(table)),
+        KnownOp::MemCopy { may_overlap: false, .. } => "memcpy".to_string(),
+        KnownOp::MemCopy { may_overlap: true, .. } => "memmove".to_string(),
+        KnownOp::MemFill { .. } => "memset".to_string(),
+        KnownOp::MemCompare { .. } => "memcmp".to_string(),
     }
 }
 

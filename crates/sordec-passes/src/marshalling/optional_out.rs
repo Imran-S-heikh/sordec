@@ -163,6 +163,16 @@
 //!   touches unknown, and the site is refused. This is the premise the
 //!   callee's loads and stores are counted under: only addresses built
 //!   from the pointer reach the frame.
+//! - A call to a `compiler_builtins` `memcpy`, `memmove` or `memset`, as
+//!   [`crate::recognizers::mem_builtins::copy_or_fill`] names it from the
+//!   body's fingerprint, is counted as the bulk operation it is, from the call's
+//!   own arguments `[destination, source or byte, length]` — at the call
+//!   site, or inside a callee handed the frame. The routine's whole effect
+//!   on memory is its contract: the destination's bytes for the length
+//!   written, a copy's source read for as long. The scratch word its
+//!   unaligned path uses lies below the stack pointer at the call, so in
+//!   no frame of the caller's. Every other call keeps the reach its body
+//!   shows.
 //!
 //! **A read sees all of one write.** A read's nearest write before it,
 //! when that is a store or a bulk operation, must write every byte the
@@ -213,6 +223,7 @@ use crate::metrics_catalog::{
     MARSHALLING_OPTIONAL_OUT_SITES as M_SITES, MARSHALLING_OPTIONAL_OUT_SITES_REFUSED as M_SITES_REFUSED,
 };
 use crate::pass::{Pass, PassResult};
+use crate::recognizers::mem_builtins::copy_or_fill;
 
 /// Pass name — also the provenance `pass` field for every rewrite.
 pub const PASS_NAME: &str = "marshalling-optional-out";
@@ -1485,6 +1496,12 @@ impl Frames<'_> {
             }
             _ => return Some(Vec::new()),
         };
+        // A call to a memory routine is the bulk operation it performs.
+        if let Some(target) = target
+            && copy_or_fill(self.ir, target)
+        {
+            return bulk_touches(func, args, base);
+        }
         let mut out = Vec::new();
         for (i, arg) in args.iter().enumerate() {
             let (b, at) = canon_addr(func, *arg);
@@ -1563,11 +1580,17 @@ impl Frames<'_> {
                     let (_, o) = canon_addr(func, *addr);
                     extent.writes = Some(cover(extent.writes, Slot { offset: o.checked_add(*offset)?, bytes: width.bytes() }));
                 }
-                // A bulk copy or fill on the pointer, counted as for the
-                // caller; an address operand that does not resolve to the
-                // pointer plus a constant is not located, so nothing is told.
+                // A bulk copy or fill on the pointer — the instruction, or a
+                // call to a memory routine — counted as for the caller; an
+                // address operand that does not resolve to the pointer plus
+                // a constant is not located, so nothing is told.
                 Expr::Unknown { op_kind: WasmOpcodeKind::MemoryOp, args, .. }
-                    if args.iter().any(|a| is_address(*a)) =>
+                | Expr::Call { args, .. }
+                    if args.iter().any(|a| is_address(*a))
+                        && match expr {
+                            Expr::Call { target, .. } => copy_or_fill(self.ir, *target),
+                            _ => true,
+                        } =>
                 {
                     if args.iter().any(|a| is_address(*a) && canon_addr(func, *a).0 != param) {
                         return None;
@@ -2562,10 +2585,17 @@ mod tests {
 
     /// The site at `functions[0]`'s `v2`, calling the helper func_1, as
     /// how many tag reads and value reads it rewrites.
-    fn plan_in(mut functions: Vec<HighFunction>) -> Result<(usize, usize), &'static str> {
+    fn plan_in(functions: Vec<HighFunction>) -> Result<(usize, usize), &'static str> {
+        plan_with_prints(functions, vec![])
+    }
+
+    /// [`plan_in`] over a module whose bodies carry `prints`, the parse-time
+    /// fingerprints the memory routines are named by.
+    fn plan_with_prints(mut functions: Vec<HighFunction>, prints: Vec<Option<u128>>) -> Result<(usize, usize), &'static str> {
         let first = framed(functions.remove(0));
         functions.insert(0, first);
-        let ir = module(functions);
+        let mut ir = module(functions);
+        ir.facts.function_fingerprints = prints;
         let helpers: HashMap<FuncId, Helper> = ir
             .functions
             .iter()
@@ -2975,6 +3005,93 @@ mod tests {
         let unknown = func(2, vec![opaque(), opaque(), opaque(), bulk(0, 1, 2)], vec![0], vec![vec![3]], Region::Basic(bb(0)));
         assert_eq!(
             plan_in(vec![call(), helper(false), unknown]),
+            Err("the frame is handed to a call that may read anything")
+        );
+    }
+
+    /// func_2, three parameters whose body stores through `dst + n` — an
+    /// address no constant locates, so what it reaches is unknown — standing
+    /// in for a memory routine's loops. With `memcpy`'s fingerprint on it,
+    /// a call is counted by its arguments instead.
+    fn copy_routine() -> HighFunction {
+        func(
+            2,
+            vec![
+                opaque(),                                                    // v0 dst
+                opaque(),                                                    // v1 src
+                opaque(),                                                    // v2 n
+                Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(2) },    // v3
+                Expr::Store { addr: v(3), value: v(1), offset: 0, width: MemWidth::W1 },
+            ],
+            vec![0, 1, 2],
+            vec![vec![3, 4]],
+            Region::Basic(bb(0)),
+        )
+    }
+
+    fn memcpy_print() -> Option<u128> {
+        sordec_sigs::builtins::MEM_ROUTINES
+            .iter()
+            .find(|e| e.routine == sordec_sigs::MemRoutine::Memcpy)
+            .map(|e| e.fingerprint.to_u128())
+    }
+
+    #[test]
+    fn a_call_to_a_memory_routine_with_a_constant_length_touches_its_bytes() {
+        // func_2(fp + 64, x, 16) beside the result, func_2(x, fp, 16) reading
+        // it, and func_2(fp + 64, x, x) of a length not known.
+        let call = |dst: u32, src: u32, len: u32| {
+            caller_then(vec![
+                i32c(64),
+                Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(6) },
+                i32c(16),
+                Expr::Call { target: FuncId::from_index(2), args: vec![v(dst), v(src), v(len)] },
+            ])
+        };
+        let named = vec![None, None, memcpy_print()];
+        assert_eq!(plan_with_prints(vec![call(7, 1, 8), helper(false), copy_routine()], named.clone()), Ok((1, 1)));
+        assert_eq!(
+            plan_with_prints(vec![call(1, 0, 8), helper(false), copy_routine()], named.clone()),
+            Err("another call may read the result")
+        );
+        assert_eq!(
+            plan_with_prints(vec![call(7, 1, 1), helper(false), copy_routine()], named),
+            Err("the frame is handed to a call that may read anything")
+        );
+        // The same body without the fingerprint is a call it cannot see into.
+        assert_eq!(
+            plan_in(vec![call(7, 1, 8), helper(false), copy_routine()]),
+            Err("the frame is handed to a call that may read anything")
+        );
+    }
+
+    #[test]
+    fn a_callee_that_calls_a_memory_routine_on_its_pointer_touches_its_bytes() {
+        // func_3(p) { func_2(p + 64, src, 16) }, handed the frame.
+        let callee = func(
+            3,
+            vec![
+                opaque(),
+                opaque(),
+                i32c(64),
+                Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(2) },
+                i32c(16),
+                Expr::Call { target: FuncId::from_index(2), args: vec![v(3), v(1), v(4)] },
+            ],
+            vec![0],
+            vec![vec![2, 3, 4, 5]],
+            Region::Basic(bb(0)),
+        );
+        let call = || caller_then(vec![Expr::Call { target: FuncId::from_index(3), args: vec![v(0)] }]);
+        assert_eq!(
+            plan_with_prints(
+                vec![call(), helper(false), copy_routine(), callee.clone()],
+                vec![None, None, memcpy_print(), None]
+            ),
+            Ok((1, 1))
+        );
+        assert_eq!(
+            plan_in(vec![call(), helper(false), copy_routine(), callee]),
             Err("the frame is handed to a call that may read anything")
         );
     }
