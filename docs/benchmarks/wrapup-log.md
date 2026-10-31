@@ -787,3 +787,20 @@ pointer and length; it now prints as `Bytes::from_slice(&e, &[0x6f, …])`, the 
 hands the host the same bytes. Most are privacy_pools' Poseidon constants (3,151 → 2,521);
 also the BLS and BN254 examples. Holes 9,545 → 8,899 (summed); errors unchanged at 9;
 corpus byte-identical; held-out mean 0.7865.
+
+## 2026-10-31 — commit ace627f (`authorize_as_current_contract` built from the SDK's auth types)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,780 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 3,418 |
+| third-party | 2 | 1/2 | 8 | 642 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 922 |
+
+The argument of `authorize_as_current_contract` is, by protocol, a vector of
+`InvokerContractAuthEntry`; its parts now print as the SDK's `ContractContext`,
+`SubContractInvocation` and `InvokerContractAuthEntry` literals when every key table matches
+the declared fields and every leaf already has its declared type (deep_contract_auth `call_b`
+36 → 1 gaps). An empty vec prints as `Vec::new(&e)`. Holes 8,899 → 8,847 (summed); errors
+unchanged at 9; corpus byte-identical; held-out mean 0.7865.
