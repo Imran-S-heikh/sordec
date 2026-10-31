@@ -825,9 +825,9 @@ pub enum KnownOp {
 
     // ---- Guest memory routines (recognized by the mem-builtins pass) ----
     /// The whole body of the `compiler_builtins` `memcpy` or `memmove`:
-    /// `len` bytes from `src` to `dst`, as
-    /// `core::ptr::copy_nonoverlapping(src, dst, len)` — or `core::ptr::copy`
-    /// when the regions may overlap. Every operand is a 32-bit linear-memory
+    /// `len` bytes from `src` to `dst`, printed as
+    /// `core::ptr::copy(src, dst, len)` for both: `memcpy` admits identical
+    /// regions, where `copy_nonoverlapping` would be undefined. Every operand is a 32-bit linear-memory
     /// address or byte count. Placed only as the body of a function the
     /// signature table identified; no host interaction.
     MemCopy {

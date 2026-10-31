@@ -651,13 +651,12 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         // rustc lowers to that call. The operands are the routine's own
         // 32-bit parameters; on wasm32 `as usize` and the cast to a pointer
         // keep every bit, and `as u8` is the routine's own `c as u8`.
-        KnownOp::MemCopy { dst, src, len, may_overlap } => {
+        // `memcpy` prints as `copy` too: LLVM's `memcpy` admits two identical
+        // regions, where `copy_nonoverlapping` would be undefined and `copy`
+        // writes what the routine writes. On every other call they agree.
+        KnownOp::MemCopy { dst, src, len, .. } => {
             let (d, s, n) = (ctx.value_ref(*dst), ctx.value_ref(*src), ctx.value_ref(*len));
-            Some(if *may_overlap {
-                parse_quote!(unsafe { core::ptr::copy(#s as *const u8, #d as *mut u8, #n as usize) })
-            } else {
-                parse_quote!(unsafe { core::ptr::copy_nonoverlapping(#s as *const u8, #d as *mut u8, #n as usize) })
-            })
+            Some(parse_quote!(unsafe { core::ptr::copy(#s as *const u8, #d as *mut u8, #n as usize) }))
         }
         KnownOp::MemFill { dst, byte, len } => {
             let (d, b, n) = (ctx.value_ref(*dst), ctx.value_ref(*byte), ctx.value_ref(*len));

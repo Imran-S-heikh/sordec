@@ -24,7 +24,7 @@
 //! of the operation's value:
 //!
 //! ```text
-//! memcpy(dst, src, n)   →  unsafe { core::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, n as usize) }; dst
+//! memcpy(dst, src, n)   →  unsafe { core::ptr::copy(src as *const u8, dst as *mut u8, n as usize) }; dst
 //! memmove(dst, src, n)  →  unsafe { core::ptr::copy(src as *const u8, dst as *mut u8, n as usize) }; dst
 //! memset(dst, c, n)     →  unsafe { core::ptr::write_bytes(dst as *mut u8, c as u8, n as usize) }; dst
 //! memcmp(a, b, n)       →  unsafe { zip(slice(a, n), slice(b, n)).find(|(x, y)| x != y).map_or(0, |(x, y)| x - y) }
@@ -47,12 +47,11 @@
 //! - `memcpy` is C's `memcpy`, whose contract is `copy_nonoverlapping`'s:
 //!   the regions must not overlap. It is reached only through
 //!   `llvm.memcpy`, which `copy_nonoverlapping` and rustc's own moves lower
-//!   to. On every call that meets the contract, the forward copy and the
-//!   primitive write the same bytes. One edge is stated rather than hidden:
-//!   LLVM's `llvm.memcpy` also admits two *identical* regions, where the
-//!   routine copies each byte onto itself and `copy_nonoverlapping` is
-//!   undefined; `core::ptr::copy` is defined there too, and is the spelling
-//!   to switch to if that case is ever seen to matter.
+//!   to. On every call that meets the contract, the forward copy and
+//!   `core::ptr::copy` write the same bytes. It prints as `copy`, not
+//!   `copy_nonoverlapping`, because LLVM's `llvm.memcpy` also admits two
+//!   *identical* regions: the routine copies each byte onto itself, `copy`
+//!   does the same, and `copy_nonoverlapping` would be undefined there.
 //! - `memmove` is defined for any overlap, as `core::ptr::copy` is.
 //! - `memset` writes `c as u8`, which is the `as u8` printed.
 //! - `memcmp` walks `i` from 0 and returns `a[i] as c_int - b[i] as c_int`
