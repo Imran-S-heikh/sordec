@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
-    AuthEntryPass, BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    AuthEntryPass, BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideInlineDecodePass, WideReturnPass,
     EncodeByRefPass,
 };
@@ -285,6 +285,10 @@ pub const FRAME_ELISION_AFTER_DEAD_PARAMS: &str = "frame-elision-after-dead-para
 pub const SYMBOL_ARGS_AFTER_VEC: &str = "symbol-args-after-vec";
 /// [`SymbolArgsPass`] re-run on the positions the settled parameter types prove.
 pub const SYMBOL_ARGS_AFTER_TYPES: &str = "symbol-args-after-types";
+/// [`UdtDecodePass`] again once the inline enum decodes are taken apart:
+/// a struct payload is then a value typed by its variant, and its own
+/// derived decode in the arm is the shape the pass recognises.
+pub const UDT_DECODE_AFTER_ENUM_ITER: &str = "udt-decode-after-enum-iter";
 /// [`ValDecodeCollapsePass`] re-run once the `Option`-shaped decoders exist.
 pub const VAL_DECODE_AFTER_OPTIONAL: &str = "val-decode-after-optional";
 /// [`OptionReturnPass`] re-run once the type pass has typed the arms.
@@ -744,6 +748,13 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // `Result`, folded into the read it converts. Here so the
             // constant-branch fold below drops the `unwrap`'s trap.
             Box::new(BytesNConvertPass),
+            // An enum the entrypoint decodes inline through the SDK's
+            // vector iterator, and the switch on its looked-up variant, as
+            // a `match` on the value binding each payload. Before the
+            // out-pointer pass, which would otherwise turn the iterator's
+            // `next` into an `Option` at some call sites and not others.
+            Box::new(EnumIterPass),
+            Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_ENUM_ITER, &[])),
             // Any other `Option` a helper hands back through its caller's
             // frame. After the group, not in it: the group's own
             // `get(..).unwrap()` collapse is the better recovery wherever it

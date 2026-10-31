@@ -1038,6 +1038,11 @@ impl<'a> FnCtx<'a> {
             match_arms.push(parse_quote!(#(#pats)|* => #body_block));
         }
         let rest: Vec<usize> = (0..union.cases.len()).filter(|c| !named.contains(c)).collect();
+        // Every variant named: the match is exhaustive, and a trapping
+        // default would be an unreachable pattern.
+        if rest.is_empty() && matches!(default, Region::Unreachable) {
+            return parse_quote!(match #scrutinee { #(#match_arms)* });
+        }
         let default_block = self.region_block(default);
         match rest.as_slice() {
             [only] => {
