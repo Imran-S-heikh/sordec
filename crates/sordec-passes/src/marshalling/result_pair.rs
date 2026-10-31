@@ -148,6 +148,64 @@
 //!   `Result`, so an indirect call a table may route to it would still pass
 //!   the old pair. The same holds for every helper the declared `Result` is
 //!   climbed through.
+//!
+//! # A converter handed the pair in registers
+//!
+//! The converter need not read the pair from memory. When rustc keeps the
+//! `Result<u32, E>` in two registers all the way, the converter takes the
+//! tag and the payload as two parameters:
+//!
+//! ```text
+//! fn func29(t, p) -> Val {
+//!     if t & 1 { return (((p - 1) as u32 as u64) << 32) + <Error Val of code 1> }
+//!     return U32Val(p)
+//! }
+//! ```
+//!
+//! It is read like a wrapper and its converter in one: the tag test is
+//! evaluated on the tag parameter itself, the `Err` side builds the error
+//! of the code the payload parameter carries, and the `Ok` side is the
+//! payload's `U32Val`. Every binding is pure, so the result is exactly the
+//! side the test picks — the same composition as above, one step shorter.
+//!
+//! Its caller may hand it a writer's two components, as above, or two
+//! merges of its own: the entrypoint built the pair itself, path by path,
+//! and calls the converter once where the paths meet (`propose`'s
+//! `func29(tag, code)` after its `?`s and checks). Then each edge into
+//! the call's block builds the `Ok` or `Err` its pair stood for, a new
+//! merge there carries it, and the call becomes that merge — the writer's
+//! rewrite, in the caller.
+//!
+//! Why it is exact: the same argument, edge by edge. The two merges are
+//! read by nothing but the call, and every edge into its block hands both
+//! over, so the pairs on the edges are every pair the converter can see.
+//!
+//! Gates, beyond the ones above: the converter has no spec and is not
+//! exported; one `if` on a test of one parameter — the tag, whose test
+//! comes out differently at `0` and `1` — returning each side's value
+//! from the branch or through one merge; every binding pure. For the
+//! caller's merges: both merges, distinct, read by nothing but the call;
+//! every edge into the call's block hands over both, and nothing else
+//! hands them anything. An `Ok` payload typed other than the 32-bit word
+//! (or `u32`) is refused; one read by nothing but the merge is retyped
+//! `u32`, one other things read keeps its word for the typing to settle.
+//!
+//! # A code read from memory, and the spec's `Error`
+//!
+//! An edge's code need not be a constant. A helper's own `Result`, passed
+//! on by `?`, hands over the code word it wrote into the frame: a 4-byte
+//! read. As in [`super::error_code`], that word is the discriminant of the
+//! `E` written there — a `#[contracterror]` enum is `#[repr(u32)]` — so
+//! the edge built `Err` of it, and the read is typed `E`: in place when
+//! the merge is all that reads it, or read again right after itself when
+//! something else does too. Only for a declared enum: the SDK's own
+//! `Error` is not a `u32` discriminant.
+//!
+//! And the spec erases a `#[contracterror]` enum to `Error`, which the
+//! reconstruction names back when the contract declares exactly one (the
+//! emitter's `result_error`). So `E` is then that enum, and a constant
+//! code is its variant, as in [`super::error_code`]; spelled as the SDK's
+//! `Error` it would not be the type the function returns.
 
 use std::collections::{HashMap, HashSet};
 
@@ -202,17 +260,17 @@ impl Pass<HighIr> for ResultPairPass {
             .iter()
             .filter_map(|f| classify_converter(ir, f).map(|c| (f.id, c)))
             .collect();
-        if converters.is_empty() {
-            return result;
-        }
+        let registers: HashMap<FuncId, RegisterConverter> =
+            ir.functions.iter().filter_map(|f| classify_register_converter(f).map(|c| (f.id, c))).collect();
         let wrappers: HashMap<FuncId, Wrapper> = ir
             .functions
             .iter()
             .filter_map(|f| classify_wrapper(f, &converters).map(|w| (f.id, w)))
             .collect();
-        if wrappers.is_empty() {
+        if wrappers.is_empty() && registers.is_empty() {
             return result;
         }
+        let readers = Readers { wrappers: &wrappers, converters: &converters, registers: &registers };
         let writers: HashMap<FuncId, Writer> = ir
             .functions
             .iter()
@@ -239,7 +297,7 @@ impl Pass<HighIr> for ResultPairPass {
                 let Some(writer) = writers.get(target) else {
                     continue;
                 };
-                match plan_site(ir, &reg, &calls, caller, id, *target, writer, &wrappers, &converters) {
+                match plan_site(ir, &reg, &calls, caller, id, *target, writer, &readers) {
                     Ok(plan) => {
                         trace(caller.id, &format!("site v{} -> func_{} ok", id.index(), target.index()));
                         result.metrics.increment(M_SITES, 1);
@@ -284,6 +342,42 @@ impl Pass<HighIr> for ResultPairPass {
             }
             result.metrics.increment(M_REWRITTEN, 1);
             result.changed = true;
+        }
+
+        // A register converter handed two merges of its own caller.
+        if registers.is_empty() {
+            return result;
+        }
+        let mut inline: Vec<(FuncId, InlinePlan)> = Vec::new();
+        for caller in &ir.functions {
+            for id in emission_order(caller) {
+                let Some(Expr::Call { target, .. }) = caller.bindings.get(id).map(|b| &b.expr) else {
+                    continue;
+                };
+                let Some(rc) = registers.get(target) else {
+                    continue;
+                };
+                let Some(conv) = ir.function(*target) else {
+                    continue;
+                };
+                match plan_inline(ir, &reg, &calls, caller, id, conv, rc) {
+                    Ok(plan) => {
+                        trace(caller.id, &format!("inline site v{} -> func_{} ok", id.index(), target.index()));
+                        result.metrics.increment(M_SITES, 1);
+                        inline.push((caller.id, plan));
+                    }
+                    Err(why) => {
+                        trace(caller.id, &format!("inline site v{} -> func_{}: {why}", id.index(), target.index()));
+                    }
+                }
+            }
+        }
+        for (caller, plan) in inline {
+            if let Some(func) = ir.function_mut(caller) {
+                rewrite_inline(func, &plan);
+                result.metrics.increment(M_REWRITTEN, 1);
+                result.changed = true;
+            }
         }
         result
     }
@@ -790,6 +884,179 @@ fn classify_wrapper(func: &HighFunction, converters: &HashMap<FuncId, Converter>
 }
 
 // ---------------------------------------------------------------------
+// The register converter
+// ---------------------------------------------------------------------
+
+/// A helper that takes a `Result<u32, E>`'s `(tag, payload)` in two of its
+/// parameters, not through memory, and returns the `Result`'s `Val`: the
+/// same converter as [`Converter`], with no wrapper storing the pair first.
+#[derive(Debug, Clone)]
+struct RegisterConverter {
+    /// Which parameter is the tag, which the payload.
+    tag: usize,
+    payload: usize,
+    /// The test on the tag; `err_when` is the outcome that picks `Err`.
+    cond: ValueId,
+    err_when: bool,
+}
+
+/// `func` as a register converter: one `if` on a test of the tag parameter,
+/// each side returning one value — the error-of-code form of the payload
+/// parameter on one, its `U32Val` on the other — either from inside the
+/// branch (`if t { return err } return ok`) or through a merge; every
+/// binding pure.
+fn classify_register_converter(func: &HighFunction) -> Option<RegisterConverter> {
+    if func.signature.is_some() || func.name.is_some() {
+        return None;
+    }
+    let Region::Sequence(items) = &func.region else {
+        return None;
+    };
+    let (Region::Return { values }, body) = items.split_last()? else {
+        return None;
+    };
+    let [last] = values.as_slice() else {
+        return None;
+    };
+    let mut branch = None;
+    for item in body {
+        match item {
+            Region::Basic(_) => {}
+            Region::If { cond, then_region, else_region } if branch.is_none() => {
+                branch = Some((*cond, &**then_region, else_region.as_deref()));
+            }
+            _ => return None,
+        }
+    }
+    let (cond, then_region, else_region) = branch?;
+    let early_return = |r: &Region| -> Option<ValueId> {
+        let Region::Sequence(items) = r else {
+            return None;
+        };
+        let (Region::Return { values }, rest) = items.split_last()? else {
+            return None;
+        };
+        rest.iter().all(|r| matches!(r, Region::Basic(_))).then_some(())?;
+        match values.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
+    };
+    let (then_value, else_value) = match else_region {
+        None => (early_return(then_region)?, *last),
+        Some(e) => (branch_value(then_region, *last)?, branch_value(e, *last)?),
+    };
+    if func.returns.iter().any(|r| r.len() != 1) {
+        return None;
+    }
+    // Everything pure: the result is then exactly the side the test picks.
+    for id in emission_order(func) {
+        if !expr_effects(&func.bindings.get(id)?.expr).is_pure_total() {
+            return None;
+        }
+    }
+    let param_at = |v: ValueId| func.params.iter().position(|p| *p == resolve_use(func, v));
+    let ok_of = |v: ValueId| -> Option<usize> {
+        match expr_of(func, v)? {
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value })) => param_at(*value),
+            _ => None,
+        }
+    };
+    let err_of = |v: ValueId| error_of_param(func, v).and_then(param_at);
+    let (err_when, payload) = match (err_of(then_value), ok_of(else_value)) {
+        (Some(e), Some(o)) if e == o => (true, e),
+        _ => match (err_of(else_value), ok_of(then_value)) {
+            (Some(e), Some(o)) if e == o => (false, e),
+            _ => return None,
+        },
+    };
+    // The tag: the one other parameter the test reads, at either value.
+    let tag = (0..func.params.len()).find(|&t| {
+        let at = |x: i128| eval(func, cond, &[func.params[t]], x, 0);
+        t != payload && matches!((at(0), at(1)), (Some(a), Some(b)) if a != b)
+    })?;
+    Some(RegisterConverter { tag, payload, cond, err_when })
+}
+
+/// `((p + k0) as u32 as u64) << 32` wrapping-added to the `Error` `Val` of
+/// contract code `k`, `k0 + k ≡ 0 (mod 2^32)`: the `Error` of contract code
+/// `p` ([`error_of_code`], the code handed over rather than read). Returns
+/// `p`.
+fn error_of_param(func: &HighFunction, value: ValueId) -> Option<ValueId> {
+    let Expr::Binary { op: BinaryOp::Add, lhs, rhs } = expr_of(func, value)? else {
+        return None;
+    };
+    [(*lhs, *rhs), (*rhs, *lhs)].into_iter().find_map(|(shifted, constant)| {
+        let k = contract_error_code(func, constant)?;
+        let Expr::Binary { op: BinaryOp::Shl, lhs: widened, rhs: by } = expr_of(func, shifted)? else {
+            return None;
+        };
+        if trace_int(func, *by) != Some(32) {
+            return None;
+        }
+        let Expr::Unary { op: UnaryOp::ExtendU32, value: word } = expr_of(func, *widened)? else {
+            return None;
+        };
+        let word = resolve_use(func, *word);
+        let (code, k0) = match &func.bindings.get(word)?.expr {
+            Expr::Binary { op: BinaryOp::Add, lhs, rhs } => [(*lhs, *rhs), (*rhs, *lhs)]
+                .into_iter()
+                .find_map(|(c, n)| Some((resolve_use(func, c), trace_int(func, n)?)))?,
+            _ => (word, 0i128),
+        };
+        if !func.params.contains(&code) || (k0 + i128::from(k)).rem_euclid(1 << 32) != 0 {
+            return None;
+        }
+        Some(code)
+    })
+}
+
+/// The two converters a `(tag, payload)` pair can be handed to.
+struct Readers<'a> {
+    wrappers: &'a HashMap<FuncId, Wrapper>,
+    converters: &'a HashMap<FuncId, Converter>,
+    registers: &'a HashMap<FuncId, RegisterConverter>,
+}
+
+/// How a call reads the pair it is handed: the argument positions of the
+/// tag and the payload, and the test that picks the side, in the function
+/// that runs it, with `tag_input` standing for the tag.
+struct Reading<'a> {
+    tag: usize,
+    payload: usize,
+    func: &'a HighFunction,
+    cond: ValueId,
+    tag_input: ValueId,
+    err_when: bool,
+}
+
+impl Readers<'_> {
+    fn reading<'f>(&self, ir: &'f HighIr, target: FuncId) -> Option<Reading<'f>> {
+        if let Some(w) = self.wrappers.get(&target) {
+            let conv = self.converters.get(&w.converter)?;
+            return Some(Reading {
+                tag: w.tag,
+                payload: w.payload,
+                func: ir.function(w.converter)?,
+                cond: conv.cond,
+                tag_input: conv.tag_load,
+                err_when: conv.err_when,
+            });
+        }
+        let rc = self.registers.get(&target)?;
+        let func = ir.function(target)?;
+        Some(Reading {
+            tag: rc.tag,
+            payload: rc.payload,
+            func,
+            cond: rc.cond,
+            tag_input: *func.params.get(rc.tag)?,
+            err_when: rc.err_when,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------
 // The writer
 // ---------------------------------------------------------------------
 
@@ -885,8 +1152,11 @@ fn classify_writer(func: &HighFunction) -> Result<Writer, &'static str> {
 enum ErrSpelling {
     /// The SDK's `Error` of this contract code.
     Code(u32),
-    /// This variant of the declared enum.
-    Variant(String),
+    /// This variant of the declared enum (this one).
+    Variant(String, TypeId),
+    /// The declared enum (this one) whose discriminant this 4-byte read
+    /// holds.
+    Read(ValueId, TypeId),
 }
 
 /// What one edge of the writer built.
@@ -920,8 +1190,7 @@ fn plan_site(
     call: ValueId,
     target: FuncId,
     writer: &Writer,
-    wrappers: &HashMap<FuncId, Wrapper>,
-    converters: &HashMap<FuncId, Converter>,
+    readers: &Readers<'_>,
 ) -> Result<SitePlan, &'static str> {
     if caller.id == target {
         return Err("the writer calls itself");
@@ -975,16 +1244,14 @@ fn plan_site(
     let Some(Expr::Call { target: wrap_target, args }) = caller.bindings.get(*wrap).map(|b| &b.expr) else {
         return Err("the components are read other than by a call");
     };
-    let wrapper = wrappers.get(wrap_target).ok_or("the components go to something other than a wrapper")?;
-    let conv = &converters[&wrapper.converter];
-    let conv_func = ir.function(wrapper.converter).ok_or("a missing converter")?;
-    let tag_index = args.get(wrapper.tag).and_then(|a| component(*a)).ok_or("the tag is not a component")?;
-    let payload_index = args.get(wrapper.payload).and_then(|a| component(*a)).ok_or("the payload is not a component")?;
+    let reading = readers.reading(ir, *wrap_target).ok_or("the components go to something other than a wrapper")?;
+    let tag_index = args.get(reading.tag).and_then(|a| component(*a)).ok_or("the tag is not a component")?;
+    let payload_index = args.get(reading.payload).and_then(|a| component(*a)).ok_or("the payload is not a component")?;
     if tag_index == payload_index {
         return Err("the tag and the payload are one component");
     }
     for (j, a) in args.iter().enumerate() {
-        if j != wrapper.tag && j != wrapper.payload && component(*a).is_some() {
+        if j != reading.tag && j != reading.payload && component(*a).is_some() {
             return Err("a component passed in another position");
         }
     }
@@ -993,7 +1260,27 @@ fn plan_site(
     if !only_returned(caller, *wrap) {
         return Err("the converted value is used other than returned");
     }
-    let ty = declared_result(ir, calls, caller.id, CHAIN_DEPTH).ok_or("no entrypoint declares the result")?;
+    let (ty, err_enum) = declared_u32_result(ir, reg, calls, caller.id)?;
+
+    // Each edge, read through the converter.
+    let writer_func = ir.function(target).ok_or("a missing function")?;
+    let (tag_at, payload_at) = (tag_index as usize, payload_index as usize);
+    let pairs: Vec<(ValueId, ValueId)> = writer.edges.iter().map(|p| (p[tag_at], p[payload_at])).collect();
+    let kinds = edge_arms(writer_func, &pairs, &reading, err_enum)?;
+    let arms = writer.edges.iter().copied().zip(kinds).collect();
+    Ok(SitePlan { call, wrap: *wrap, projects: projects.iter().map(|(p, _)| *p).collect(), arms, ty })
+}
+
+/// The `Result<u32, E>` an entrypoint declares for what `func` returns, and
+/// `E`'s declaration when it is a `#[contracterror]` enum (`None` for the
+/// SDK's own `Error`).
+fn declared_u32_result<'r>(
+    ir: &HighIr,
+    reg: &'r TypeRegistry,
+    calls: &CallIndex,
+    func: FuncId,
+) -> Result<(KnownType, Option<&'r sordec_ir::EnumDef>), &'static str> {
+    let ty = declared_result(ir, calls, func, CHAIN_DEPTH).ok_or("no entrypoint declares the result")?;
     let KnownType::Result(ok, err) = &ty else {
         return Err("no entrypoint declares the result");
     };
@@ -1001,50 +1288,83 @@ fn plan_site(
         return Err("the declared result's `Ok` is not a u32");
     }
     let err_enum = match &**err {
-        IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error) => None,
+        // The spec erases a `#[contracterror]` enum to `Error`, and the
+        // reconstruction names it back when the contract declares exactly
+        // one (the emitter's `result_error`): then `E` is that enum, and an
+        // edge's code is its variant.
+        IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error) => sole_error_enum(reg),
         IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => {
             let id: TypeId = *id;
             Some(reg.errors.iter().find(|e| e.id == id).ok_or("the declared `Err` is not an error enum")?)
         }
         _ => return Err("the declared result's `Err` is not an error"),
     };
+    Ok((ty, err_enum))
+}
 
-    // Each edge, read through the converter.
-    let writer_func = ir.function(target).ok_or("a missing function")?;
-    let (tag_at, payload_at) = (tag_index as usize, payload_index as usize);
+/// What each `(tag, payload)` pair `func` hands over builds, read through
+/// the converter: its tag test, evaluated at the pair's constant tag,
+/// picks the side.
+fn edge_arms(
+    func: &HighFunction,
+    pairs: &[(ValueId, ValueId)],
+    reading: &Reading<'_>,
+    err_enum: Option<&sordec_ir::EnumDef>,
+) -> Result<Vec<ArmKind>, &'static str> {
     let mut arms = Vec::new();
-    for pair in &writer.edges {
-        let tag = trace_int(writer_func, pair[tag_at]).ok_or("a tag that is not a constant")?;
+    for &(tag, payload) in pairs {
+        let tag = trace_int(func, tag).ok_or("a tag that is not a constant")?;
         if !(0..128).contains(&tag) {
             return Err("a tag outside the small constants");
         }
-        let taken = eval(conv_func, conv.cond, &[conv.tag_load], tag, 0).ok_or("the tag test cannot be evaluated")?;
-        let payload = pair[payload_at];
-        let kind = if (taken != 0) == conv.err_when {
-            let code = trace_int(writer_func, payload).ok_or("an error code that is not a constant")?;
-            let code = u32::try_from(code).map_err(|_| "an error code outside u32")?;
-            match err_enum {
-                None => ArmKind::Err(ErrSpelling::Code(code)),
-                Some(e) => {
-                    let case = e.cases.iter().find(|c| c.value == code).ok_or("an error code no variant names")?;
-                    ArmKind::Err(ErrSpelling::Variant(case.name.clone()))
+        let taken =
+            eval(reading.func, reading.cond, &[reading.tag_input], tag, 0).ok_or("the tag test cannot be evaluated")?;
+        let kind = if (taken != 0) == reading.err_when {
+            match trace_int(func, payload) {
+                Some(code) => {
+                    let code = u32::try_from(code).map_err(|_| "an error code outside u32")?;
+                    match err_enum {
+                        None => ArmKind::Err(ErrSpelling::Code(code)),
+                        Some(e) => {
+                            let case = e.cases.iter().find(|c| c.value == code).ok_or("an error code no variant names")?;
+                            ArmKind::Err(ErrSpelling::Variant(case.name.clone(), e.id))
+                        }
+                    }
                 }
+                // A code read from memory is the discriminant of the `E`
+                // written there ([`super::error_code`]): the read, as `E`.
+                None if is_word_load(func, payload) => {
+                    let e = err_enum.ok_or("a code read from memory with no declared error enum")?;
+                    ArmKind::Err(ErrSpelling::Read(resolve_use(func, payload), e.id))
+                }
+                None => return Err("an error code that is not a constant"),
             }
         } else {
             ArmKind::Ok(payload)
         };
-        arms.push((*pair, kind));
+        arms.push(kind);
     }
     // The payload merge is a 32-bit word: a wasm merge has one type, and
-    // some edge hands it an `i32` constant.
-    let word = writer
-        .edges
-        .iter()
-        .any(|pair| matches!(trace_literal(writer_func, pair[payload_at]), Some(Literal::I32(_) | Literal::U32(_))));
+    // some edge hands it an `i32` constant or a 4-byte read.
+    let word = pairs.iter().any(|(_, p)| {
+        matches!(trace_literal(func, *p), Some(Literal::I32(_) | Literal::U32(_))) || is_word_load(func, *p)
+    });
     if !word {
         return Err("no edge shows the payload is a 32-bit word");
     }
-    Ok(SitePlan { call, wrap: *wrap, projects: projects.iter().map(|(p, _)| *p).collect(), arms, ty })
+    Ok(arms)
+}
+
+/// The contract's one `#[contracterror]` enum, which the reconstruction
+/// names a spec's `Error` back to.
+fn sole_error_enum(reg: &TypeRegistry) -> Option<&sordec_ir::EnumDef> {
+    let name = reg.sole_error_enum()?;
+    reg.errors.iter().find(|e| e.name == name)
+}
+
+/// A 4-byte read of memory.
+fn is_word_load(func: &HighFunction, value: ValueId) -> bool {
+    matches!(expr_of(func, value), Some(Expr::Load { width: MemWidth::W4, .. }))
 }
 
 /// Whether every `Ok` payload can be the `u32` the converter read: typed
@@ -1136,8 +1456,10 @@ fn rewrite_writer(func: &mut HighFunction, writer: &Writer, arms: &[([ValueId; 2
         result_ty.clone(),
         "the `Result` each edge built, merged where the edges meet",
     );
+    let reads = read_codes(func, writer, arms);
     let region = std::mem::replace(&mut func.region, Region::Unreachable);
-    let mut ctx = Place { func, writer, arms, merged, result_ty: &result_ty, err_ty: &err_ty, incoming: Vec::new() };
+    let mut ctx =
+        Place { func, writer, arms, merged, result_ty: &result_ty, err_ty: &err_ty, reads: &reads, incoming: Vec::new() };
     let region = ctx.region(region);
     let incoming = std::mem::take(&mut ctx.incoming);
     func.region = region;
@@ -1165,6 +1487,8 @@ struct Place<'a> {
     merged: ValueId,
     result_ty: &'a IrType,
     err_ty: &'a IrType,
+    /// Each code read from memory, and the read of it as the error.
+    reads: &'a HashMap<ValueId, ValueId>,
     incoming: Vec<(BlockId, ValueId)>,
 }
 
@@ -1194,17 +1518,39 @@ impl Place<'_> {
                 "this edge handed over the `Ok` tag and a u32: `Ok(value)`",
             ),
             ArmKind::Err(spelling) => {
+                let mut ty = self.err_ty.clone();
                 let (expr, note) = match spelling {
+                    ErrSpelling::Read(load, _) => {
+                        let Some(e) = self.reads.get(&load).copied() else {
+                            return;
+                        };
+                        let value = push(
+                            self.func,
+                            Expr::Variant { name: "Err".to_string(), payload: vec![e] },
+                            self.result_ty.clone(),
+                            "this edge handed over the `Err` tag and a code read from memory: `Err(error)`",
+                        );
+                        if let Some(b) = self.func.blocks.get_mut(block) {
+                            b.bindings.push(value);
+                        }
+                        transfer.retain(|(phi, _)| !self.writer.merges.contains(phi));
+                        transfer.push((self.merged, value));
+                        self.incoming.push((block, value));
+                        return;
+                    }
                     ErrSpelling::Code(code) => (
                         Expr::Semantic(SemanticOp::Known(KnownOp::MakeError { code, resolved: None })),
                         "the error code this edge handed over, as the SDK's `Error` of that contract code",
                     ),
-                    ErrSpelling::Variant(name) => (
-                        Expr::Variant { name, payload: Vec::new() },
-                        "the error code this edge handed over, as the declared variant with that discriminant",
-                    ),
+                    ErrSpelling::Variant(name, id) => {
+                        ty = IrType::Inferred(KnownType::UserDefined(id));
+                        (
+                            Expr::Variant { name, payload: Vec::new() },
+                            "the error code this edge handed over, as the declared variant with that discriminant",
+                        )
+                    }
                 };
-                let e = push(self.func, expr, self.err_ty.clone(), note);
+                let e = push(self.func, expr, ty, note);
                 new.push(e);
                 push(
                     self.func,
@@ -1218,7 +1564,8 @@ impl Place<'_> {
         if let Some(b) = self.func.blocks.get_mut(block) {
             b.bindings.extend(new);
         }
-        *transfer = vec![(self.merged, value)];
+        transfer.retain(|(phi, _)| !self.writer.merges.contains(phi));
+        transfer.push((self.merged, value));
         self.incoming.push((block, value));
     }
 
@@ -1325,6 +1672,250 @@ fn rewrite_site(func: &mut HighFunction, plan: &SitePlan) {
         plan.wrap,
         Some(Expr::Use(plan.call)),
         ty,
+        "the `Result`'s conversion to the entrypoint's `Val`, which the declared `Result` return performs",
+    );
+}
+
+/// Each code an edge reads from memory, as the declared error: the read
+/// itself, retyped, when the merge edges are all that read it (they go);
+/// otherwise a second read of the same address right after it, nothing
+/// between, typed as the error, while every other reader keeps the first.
+fn read_codes(func: &mut HighFunction, writer: &Writer, arms: &[([ValueId; 2], ArmKind)]) -> HashMap<ValueId, ValueId> {
+    let mut out = HashMap::new();
+    for (_, kind) in arms {
+        let ArmKind::Err(ErrSpelling::Read(load, e)) = kind else {
+            continue;
+        };
+        let err_ty = &IrType::Inferred(KnownType::UserDefined(*e));
+        if out.contains_key(load) {
+            continue;
+        }
+        // The pair's own merges go with the rewrite, so they do not count.
+        let mut reads = 0usize;
+        for (id, b) in func.bindings.iter() {
+            if !writer.merges.contains(&id) {
+                b.expr.for_each_value_use(|u| reads += usize::from(u == *load));
+            }
+        }
+        let mut region_reads = 0usize;
+        func.region.for_each_value_use(|u| region_reads += usize::from(u == *load));
+        let on_edges = writer.edges.iter().map(|e| e.iter().filter(|x| *x == load).count()).sum::<usize>();
+        if reads == 0 && region_reads == on_edges {
+            rewrite(func, *load, None, err_ty.clone(), "the code read back, as the declared error it is the discriminant of");
+            out.insert(*load, *load);
+            continue;
+        }
+        let Some(expr) = func.bindings.get(*load).map(|b| b.expr.clone()) else {
+            continue;
+        };
+        let Some(block) = crate::dataflow::block_containing(func, *load) else {
+            continue;
+        };
+        let again = push(func, expr, err_ty.clone(), "the code read again, as the declared error it is the discriminant of");
+        if let Some(b) = func.blocks.get_mut(block)
+            && let Some(at) = b.bindings.iter().position(|x| x == load)
+        {
+            b.bindings.insert(at + 1, again);
+        }
+        out.insert(*load, again);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------
+// The pair as two merges of the converter's own caller
+// ---------------------------------------------------------------------
+
+/// A register converter called on two merges of its caller.
+struct InlinePlan {
+    call: ValueId,
+    /// The two merges, as a writer's: at the call's block, every edge
+    /// into it handing both over.
+    writer: Writer,
+    arms: Vec<([ValueId; 2], ArmKind)>,
+    ty: KnownType,
+    /// The `Ok` payloads the merge is the only reader of.
+    sole: HashSet<ValueId>,
+}
+
+/// The plan for `call`, a call of the register converter `conv` in
+/// `caller` on two merges at the call's own block.
+fn plan_inline(
+    ir: &HighIr,
+    reg: &TypeRegistry,
+    calls: &CallIndex,
+    caller: &HighFunction,
+    call: ValueId,
+    conv: &HighFunction,
+    rc: &RegisterConverter,
+) -> Result<InlinePlan, &'static str> {
+    let Some(Expr::Call { args, .. }) = caller.bindings.get(call).map(|b| &b.expr) else {
+        return Err("not a call");
+    };
+    let merge_at = |i: usize| -> Option<ValueId> {
+        let m = resolve_use(caller, *args.get(i)?);
+        matches!(caller.bindings.get(m).map(|b| &b.expr), Some(Expr::Phi { incoming }) if !incoming.is_empty())
+            .then_some(m)
+    };
+    let (Some(tag), Some(payload)) = (merge_at(rc.tag), merge_at(rc.payload)) else {
+        return Err("the pair is not two merges");
+    };
+    if tag == payload {
+        return Err("one merge handed over twice");
+    }
+    let join = crate::dataflow::block_containing(caller, call).ok_or("the call is not scheduled")?;
+    let merges = [tag, payload];
+    // The merges are read by nothing but the call.
+    for id in emission_order(caller) {
+        let Some(b) = caller.bindings.get(id) else {
+            return Err("a missing binding");
+        };
+        let mut reads = false;
+        b.expr.for_each_value_use(|u| reads |= merges.contains(&resolve_use(caller, u)));
+        if reads && id != call {
+            return Err("a merge of the pair read by something else");
+        }
+    }
+    let mut region_reads = false;
+    caller.region.for_each_value_use(|u| region_reads |= merges.contains(&u));
+    if region_reads {
+        return Err("a merge of the pair read by the control flow");
+    }
+    // Every edge into the call's block hands over both merges, and only
+    // those edges hand them anything.
+    let mut edges = Vec::new();
+    let mut bad = false;
+    caller.region.for_each_node(|node| match node {
+        Region::Break { target, transfer } | Region::Transfer { target, transfer } => {
+            let get = |m: ValueId| transfer.iter().find(|(phi, _)| *phi == m).map(|(_, v)| *v);
+            match (get(tag), get(payload)) {
+                (Some(x), Some(y)) if *target == join => edges.push([x, y]),
+                (None, None) => {}
+                _ => bad = true,
+            }
+        }
+        Region::Continue { transfer, .. } => bad |= transfer.iter().any(|(phi, _)| merges.contains(phi)),
+        _ => {}
+    });
+    if bad || edges.is_empty() {
+        return Err("an edge does not hand over the pair");
+    }
+    for m in merges {
+        let Some(Expr::Phi { incoming }) = caller.bindings.get(m).map(|b| &b.expr) else {
+            return Err("a missing merge");
+        };
+        if incoming.len() != edges.len() {
+            return Err("a merge reached other than by the edges");
+        }
+    }
+    if !only_returned(caller, call) {
+        return Err("the converted value is used other than returned");
+    }
+    let (ty, err_enum) = declared_u32_result(ir, reg, calls, caller.id)?;
+    let reading = Reading {
+        tag: rc.tag,
+        payload: rc.payload,
+        func: conv,
+        cond: rc.cond,
+        tag_input: *conv.params.get(rc.tag).ok_or("a missing parameter")?,
+        err_when: rc.err_when,
+    };
+    let pairs: Vec<(ValueId, ValueId)> = edges.iter().map(|e| (e[0], e[1])).collect();
+    let kinds = edge_arms(caller, &pairs, &reading, err_enum)?;
+    let writer = Writer { merges, join, edges };
+    let arms: Vec<([ValueId; 2], ArmKind)> = writer.edges.iter().copied().zip(kinds).collect();
+    // An `Ok` payload is the `u32` the converter encodes: typed so, or the
+    // 32-bit word. One read by nothing but the merge is retyped here; one
+    // other things read keeps its word for the typing to settle, which
+    // reads the `Ok` it is now in.
+    for (_, kind) in &arms {
+        if let ArmKind::Ok(p) = kind
+            && !matches!(
+                caller.bindings.get(*p).map(|b| &b.ty),
+                Some(
+                    IrType::Known(KnownType::U32)
+                        | IrType::Inferred(KnownType::U32 | KnownType::I32)
+                        | IrType::Unknown(_)
+                )
+            )
+        {
+            return Err("an `Ok` payload typed other than the 32-bit word");
+        }
+    }
+    let sole: HashSet<ValueId> = arms
+        .iter()
+        .filter_map(|(_, k)| match k {
+            ArmKind::Ok(p) => Some(*p),
+            ArmKind::Err(_) => None,
+        })
+        .filter(|p| retypable(caller, &writer, &[([*p, *p], ArmKind::Ok(*p))]).is_ok())
+        .collect();
+    Ok(InlinePlan { call, writer, arms, ty, sole })
+}
+
+/// Each edge builds its `Result`, a merge at the call's block carries it,
+/// and the converter's call is that merge.
+fn rewrite_inline(func: &mut HighFunction, plan: &InlinePlan) {
+    let result_ty = IrType::Inferred(plan.ty.clone());
+    let KnownType::Result(_, err) = &plan.ty else {
+        return;
+    };
+    let err_ty = match (**err).clone() {
+        IrType::Known(k) | IrType::Inferred(k) => IrType::Inferred(k),
+        other => other,
+    };
+    for payload in &plan.sole {
+        if !matches!(
+            func.bindings.get(*payload).map(|b| &b.ty),
+            Some(IrType::Known(KnownType::U32) | IrType::Inferred(KnownType::U32))
+        ) {
+            rewrite(
+                func,
+                *payload,
+                None,
+                IrType::Inferred(KnownType::U32),
+                "the `Ok` payload the converter encoded as a `U32Val`",
+            );
+        }
+    }
+    let merged = push(
+        func,
+        Expr::Phi { incoming: Vec::new() },
+        result_ty.clone(),
+        "the `Result` each edge built, merged where the edges meet",
+    );
+    let reads = read_codes(func, &plan.writer, &plan.arms);
+    let region = std::mem::replace(&mut func.region, Region::Unreachable);
+    let mut ctx = Place {
+        func,
+        writer: &plan.writer,
+        arms: &plan.arms,
+        merged,
+        result_ty: &result_ty,
+        err_ty: &err_ty,
+        reads: &reads,
+        incoming: Vec::new(),
+    };
+    let region = ctx.region(region);
+    let incoming = std::mem::take(&mut ctx.incoming);
+    func.region = region;
+    if let Some(b) = func.bindings.get_mut(merged) {
+        b.expr = Expr::Phi { incoming };
+    }
+    for m in plan.writer.merges {
+        rewrite(
+            func,
+            m,
+            Some(Expr::Literal(Literal::Unit)),
+            IrType::Known(KnownType::Unit),
+            "one half of the pair handed to the converter, now part of the `Result`",
+        );
+    }
+    rewrite(
+        func,
+        plan.call,
+        Some(Expr::Use(merged)),
+        result_ty,
         "the `Result`'s conversion to the entrypoint's `Val`, which the declared `Result` return performs",
     );
 }
@@ -1648,10 +2239,10 @@ mod tests {
         };
         assert_eq!((err.as_str(), ok.as_str()), ("Err", "Ok"));
         assert_eq!(o, &vec![v(6)]);
-        assert!(matches!(
-            w.bindings.get(e[0]).unwrap().expr,
-            Expr::Semantic(SemanticOp::Known(KnownOp::MakeError { code: 5, resolved: None }))
-        ));
+        // The spec's `Error` is the contract's one error enum, named back.
+        let error = w.bindings.get(e[0]).unwrap();
+        assert!(matches!(&error.expr, Expr::Variant { name, .. } if name == "Full"), "{:?}", error.expr);
+        assert_eq!(error.ty, IrType::Inferred(KnownType::UserDefined(TypeId::from_index(1))));
         // The `Ok` payload is the u32 the converter encoded.
         assert_eq!(w.bindings.get(v(6)).unwrap().ty, IrType::Inferred(KnownType::U32));
         // The old merges are retired; the return hands back the `Result`.
@@ -1735,6 +2326,172 @@ mod tests {
         let mut fs = parts(lit(5), -1, 8, sdk_error());
         fs[5] = caller(Some(bin(BinaryOp::Eq, 3, 1)));
         unchanged(ir(fs, 5));
+    }
+
+    #[test]
+    fn the_sdk_error_with_no_error_enum_is_the_code() {
+        let mut ir = standard(sdk_error());
+        if let Some(f) = ir.soroban_facts.as_mut() {
+            f.types.errors.clear();
+        }
+        assert!(ResultPairPass.run(&mut ir).changed);
+        let w = ir.function(FuncId::from_index(0)).unwrap();
+        let arms = built(w);
+        let Expr::Variant { payload: e, .. } = arms[0] else { panic!() };
+        assert!(matches!(
+            w.bindings.get(e[0]).unwrap().expr,
+            Expr::Semantic(SemanticOp::Known(KnownOp::MakeError { code: 5, resolved: None }))
+        ));
+    }
+
+    /// `fn func0(t, p) { if t & 1 { return ((p - 1) as u32 as u64 << 32) +
+    /// Error(1) } return U32Val(p) }`: the pair in two registers.
+    fn register_converter() -> HighFunction {
+        let error = Expr::Semantic(SemanticOp::Known(KnownOp::MakeError {
+            code: 1,
+            resolved: Some(ErrorVariant { enum_name: "MyError".into(), variant: "First".into() }),
+        }));
+        let encode = Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v(1) }));
+        let exprs = vec![
+            param(),                                                          // v0 t
+            param(),                                                          // v1 p
+            lit(1),                                                           // v2
+            bin(BinaryOp::BitAnd, 0, 2),                                      // v3 cond
+            lit(-1),                                                          // v4
+            bin(BinaryOp::Add, 1, 4),                                         // v5
+            (Expr::Unary { op: UnaryOp::ExtendU32, value: v(5) }, untyped()), // v6
+            lit64(32),                                                        // v7
+            bin(BinaryOp::Shl, 6, 7),                                         // v8
+            (error, IrType::Known(KnownType::Error)),                         // v9
+            bin(BinaryOp::Add, 8, 9),                                         // v10
+            (encode, untyped()),                                              // v11
+        ];
+        let region = Region::Sequence(vec![
+            Region::Basic(bb(0)),
+            Region::If {
+                cond: v(3),
+                then_region: Box::new(Region::Sequence(vec![
+                    Region::Basic(bb(1)),
+                    Region::Return { values: vec![v(10)] },
+                ])),
+                else_region: None,
+            },
+            Region::Basic(bb(2)),
+            Region::Return { values: vec![v(11)] },
+        ]);
+        func(0, exprs, vec![vec![2, 3], vec![4, 5, 6, 7, 8, 9, 10], vec![11]], region, vec![0, 1])
+    }
+
+    /// The entrypoint `-> Result<u32, err>`: `if flag { (t, p) = (1, code) }
+    /// else { (t, p) = (0, a + 7) }; return func0(t, p)`, `extra` scheduled
+    /// before the call.
+    fn inline_entry(code: (Expr, IrType), err: TypeRef, extra: Option<(Expr, IrType)>) -> HighFunction {
+        let mut exprs = vec![
+            param(),                                                                 // v0 a
+            (Expr::Phi { incoming: vec![] }, IrType::Known(KnownType::Bool)),        // v1 flag
+            lit(1),                                                                  // v2 tag Err
+            code,                                                                    // v3 code
+            lit(0),                                                                  // v4 tag Ok
+            lit(7),                                                                  // v5
+            bin(BinaryOp::Add, 0, 5),                                                // v6 payload
+            (Expr::Phi { incoming: vec![(bb(0), v(2)), (bb(1), v(4))] }, untyped()), // v7 tag merge
+            (Expr::Phi { incoming: vec![(bb(0), v(3)), (bb(1), v(6))] }, untyped()), // v8 payload merge
+            call(0, &[7, 8]),                                                        // v9
+        ];
+        let mut join = vec![9];
+        if let Some(extra) = extra {
+            exprs.push(extra); // v10
+            join.insert(0, 10);
+        }
+        let region = Region::Sequence(vec![
+            Region::Basic(bb(0)),
+            Region::If {
+                cond: v(1),
+                then_region: Box::new(Region::Transfer { target: bb(2), transfer: vec![(v(7), v(2)), (v(8), v(3))] }),
+                else_region: Some(Box::new(Region::Sequence(vec![
+                    Region::Basic(bb(1)),
+                    Region::Transfer { target: bb(2), transfer: vec![(v(7), v(4)), (v(8), v(6))] },
+                ]))),
+            },
+            Region::Basic(bb(2)),
+            Region::Return { values: vec![v(9)] },
+        ]);
+        let mut f = func(1, exprs, vec![vec![2, 3, 4], vec![5, 6], join], region, vec![0, 1]);
+        f.name = Some("propose".into());
+        f.signature = Some(FunctionSignature {
+            name: "propose".into(),
+            inputs: vec![],
+            outputs: vec![TypeRef::Composite(CompositeType::Result(
+                Box::new(TypeRef::Primitive(PrimitiveType::U32)),
+                Box::new(err),
+            ))],
+        });
+        f
+    }
+
+    /// The `Result`s the edges into the entrypoint's join now hand over.
+    fn inline_built(ir: &HighIr) -> Vec<Expr> {
+        let f = ir.function(FuncId::from_index(1)).unwrap();
+        let Expr::Use(merged) = f.bindings.get(v(9)).unwrap().expr else { panic!("{:?}", f.bindings.get(v(9))) };
+        let Expr::Phi { incoming } = &f.bindings.get(merged).unwrap().expr else { panic!() };
+        for m in [7, 8] {
+            assert!(matches!(f.bindings.get(v(m)).unwrap().expr, Expr::Literal(Literal::Unit)), "v{m} retired");
+        }
+        incoming.iter().map(|(_, val)| f.bindings.get(*val).unwrap().expr.clone()).collect()
+    }
+
+    #[test]
+    fn a_register_converter_on_its_callers_merges_is_the_result() {
+        let mut ir = ir(vec![register_converter(), inline_entry(lit(5), sdk_error(), None)], 5);
+        assert!(ResultPairPass.run(&mut ir).changed);
+        let arms = inline_built(&ir);
+        let [Expr::Variant { name: err, payload: e }, Expr::Variant { name: ok, payload: o }] = arms.as_slice() else {
+            panic!("{arms:?}")
+        };
+        assert_eq!((err.as_str(), ok.as_str()), ("Err", "Ok"));
+        assert_eq!(o, &vec![v(6)]);
+        let f = ir.function(FuncId::from_index(1)).unwrap();
+        assert!(matches!(&f.bindings.get(e[0]).unwrap().expr, Expr::Variant { name, .. } if name == "Full"));
+    }
+
+    #[test]
+    fn a_code_read_from_memory_is_the_declared_error() {
+        let mut ir = ir(vec![register_converter(), inline_entry(load4(0), sdk_error(), None)], 5);
+        assert!(ResultPairPass.run(&mut ir).changed);
+        let arms = inline_built(&ir);
+        let Expr::Variant { payload: e, .. } = &arms[0] else { panic!("{arms:?}") };
+        assert_eq!(e, &vec![v(3)], "the read itself, read by nothing else");
+        let f = ir.function(FuncId::from_index(1)).unwrap();
+        assert_eq!(f.bindings.get(v(3)).unwrap().ty, IrType::Inferred(KnownType::UserDefined(TypeId::from_index(1))));
+    }
+
+    #[test]
+    fn a_merge_of_the_pair_read_by_something_else_is_left() {
+        let extra = bin(BinaryOp::Eq, 8, 2);
+        let mut ir = ir(vec![register_converter(), inline_entry(lit(5), sdk_error(), Some(extra))], 5);
+        assert!(!ResultPairPass.run(&mut ir).changed);
+        let f = ir.function(FuncId::from_index(1)).unwrap();
+        assert!(matches!(f.bindings.get(v(9)).unwrap().expr, Expr::Call { .. }));
+    }
+
+    #[test]
+    fn a_tag_that_is_not_a_constant_is_left() {
+        let mut entry = inline_entry(lit(5), sdk_error(), None);
+        if let Some(b) = entry.bindings.get_mut(v(2)) {
+            b.expr = Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(4) };
+        }
+        let mut ir = ir(vec![register_converter(), entry], 5);
+        assert!(!ResultPairPass.run(&mut ir).changed);
+    }
+
+    #[test]
+    fn a_converter_whose_ok_side_is_not_the_payload_is_not_one() {
+        let mut conv = register_converter();
+        if let Some(b) = conv.bindings.get_mut(v(11)) {
+            b.expr = Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v(0) }));
+        }
+        assert!(classify_register_converter(&conv).is_none());
+        assert!(classify_register_converter(&register_converter()).is_some());
     }
 
     #[test]

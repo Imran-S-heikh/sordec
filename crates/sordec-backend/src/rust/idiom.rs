@@ -384,6 +384,20 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                     let x = arg(1)?;
                     Some(parse_quote!(#v.last_index_of(&#x)))
                 }
+                // `vec_del(v, U32Val(i))` hands back `v` without the element
+                // at `i`, and traps when `i` is out of range: the SDK's
+                // `remove_unchecked(i)`, on a copy of the handle as
+                // `push_back` is. Only for a vec the IR typed as one, and an
+                // index that is the recognised encode of a `u32`
+                // ([`encoded_index`]); a raw `Val` index stays a hole.
+                VecOpKind::Del if typed_vec(ctx, *args.first()?) => {
+                    let i = ctx.value_ref(encoded_index(ctx.func, *args.get(1)?)?);
+                    Some(parse_quote!({
+                        let mut removed = #v.clone();
+                        removed.remove_unchecked(#i);
+                        removed
+                    }))
+                }
                 _ => None,
             }
         }
@@ -947,6 +961,20 @@ pub(crate) fn rendered_operands(
             let [recv, index] = args.as_slice() else {
                 return None;
             };
+            encoded_index(func, *index).map(|i| vec![*recv, i])
+        }
+        // `removed.remove_unchecked(i)` likewise, where the idiom applies.
+        KnownOp::VecOp { kind: VecOpKind::Del, args } => {
+            let [recv, index] = args.as_slice() else {
+                return None;
+            };
+            let vec = matches!(
+                func.bindings.get(*recv).map(|b| &b.ty),
+                Some(IrType::Known(KnownType::Vec(_)) | IrType::Inferred(KnownType::Vec(_)))
+            );
+            if !vec {
+                return None;
+            }
             encoded_index(func, *index).map(|i| vec![*recv, i])
         }
         KnownOp::StorageGet { tier, key, resolved_key, missing, .. } => {

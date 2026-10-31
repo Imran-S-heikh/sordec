@@ -1363,19 +1363,28 @@ impl<'a> FnCtx<'a> {
     }
 
     fn result_wrapped(&self, source: ValueId, merge_ty: &IrType) -> Option<syn::Expr> {
-        if !matches!(merge_ty, IrType::Known(KnownType::Result(..)) | IrType::Inferred(KnownType::Result(..))) {
+        let (IrType::Known(KnownType::Result(merge_ok, _)) | IrType::Inferred(KnownType::Result(merge_ok, _))) = merge_ty
+        else {
             return None;
-        }
-        let ok_ty = sig::result_ok_type(self.func)?;
+        };
+        // An entrypoint's `Ok` type is its spec's. A helper has none; the
+        // `Result` its merge is typed as is the one it is emitted returning
+        // (the merge reaches its return), so that merge's `Ok` says it.
+        let ok_unit = match sig::result_ok_type(self.func) {
+            Some(ok_ty) => sig::is_unit(ok_ty),
+            None if self.func.signature.is_none() => {
+                matches!(&**merge_ok, IrType::Known(k) | IrType::Inferred(k)
+                    if *k == KnownType::Unit || matches!(k, KnownType::Tuple(items) if items.is_empty()))
+            }
+            None => return None,
+        };
         let binding = self.func.bindings.get(source)?;
         match &binding.ty {
             ty if self.is_error_type(ty) => {
                 let v = self.value_ref(source);
                 Some(parse_quote!(Err(#v)))
             }
-            _ if sig::is_unit(ok_ty)
-                && matches!(binding.expr, Expr::Literal(sordec_ir::Literal::I64(2))) =>
-            {
+            _ if ok_unit && matches!(binding.expr, Expr::Literal(sordec_ir::Literal::I64(2))) => {
                 Some(parse_quote!(Ok(())))
             }
             // The `Ok` payload itself, typed as the `Result`'s `Ok` side.
@@ -2772,6 +2781,32 @@ mod tests {
         assert!(pushed(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)).contains("todo !"));
     }
 
+    /// `vec_del(v, val_encode::<u32>(i))` with `v` typed `vec_ty` and `i`
+    /// typed `index_ty`.
+    fn deleted(vec_ty: IrType, index_ty: KnownType) -> String {
+        let new = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::New, args: vec![] });
+        let index = Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(0) };
+        let encode = known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v(2) });
+        let del = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::Del, args: vec![v(1), v(3)] });
+        emitted(
+            vec![(vec_ty.clone(), new), (IrType::Known(index_ty), index), (IrType::Known(KnownType::Val), encode), (vec_ty, del)],
+            vec![ret(4)],
+            &TypeRegistry::default(),
+        )
+    }
+
+    #[test]
+    fn a_del_at_an_encoded_u32_index_is_remove_unchecked_on_a_copy() {
+        let vec_val = IrType::Known(KnownType::Vec(Box::new(IrType::Known(KnownType::Val))));
+        let body = deleted(vec_val.clone(), KnownType::U32);
+        assert!(body.contains("removed . remove_unchecked (v2)"), "{body}");
+        assert!(!body.contains("todo !"), "the encode is not read any more: {body}");
+        // An index not known to be the encoded `u32` stays a hole.
+        assert!(!deleted(vec_val, KnownType::I64).contains("remove_unchecked"));
+        // So does a receiver not typed as a vec.
+        assert!(!deleted(IrType::Known(KnownType::Val), KnownType::U32).contains("remove_unchecked"));
+    }
+
     #[test]
     fn a_bare_map_new_is_an_empty_map() {
         let map = IrType::Known(KnownType::Map(
@@ -3261,5 +3296,45 @@ mod tests {
         assert!(body.contains("Kind :: A (v1)"), "{body}");
         assert!(body.contains("Kind :: B"), "{body}");
         assert!(!body.contains("Kind :: B ("), "{body}");
+    }
+
+    /// A helper's merge typed `Result<i128, Error>`: its `i128` arm goes in
+    /// as `Ok(..)` and its error arm as `Err(..)`, as an entrypoint's do.
+    fn helper_result_merge(merge: IrType) -> String {
+        let ty = |k: KnownType| IrType::Inferred(k);
+        let load = |ty: IrType| Expr::Load { addr: v(0), offset: 0, width: sordec_ir::MemWidth::W8, signed: None, ty };
+        let b0 = BlockId::from_index(0);
+        let exprs = vec![
+            (ty(KnownType::I128), load(untyped())),
+            (ty(KnownType::Error), load(untyped())),
+            (merge, Expr::Phi { incoming: vec![(b0, v(1)), (b0, v(2))] }),
+            (IrType::Known(KnownType::Bool), Expr::Literal(sordec_ir::Literal::Bool(true))),
+        ];
+        let tail = vec![
+            Region::If {
+                cond: v(4),
+                then_region: Box::new(Region::Transfer { target: b0, transfer: vec![(v(3), v(1))] }),
+                else_region: Some(Box::new(Region::Transfer { target: b0, transfer: vec![(v(3), v(2))] })),
+            },
+            ret(3),
+        ];
+        emitted_returning(exprs, tail, &TypeRegistry::default(), vec![vec![v(3)]])
+    }
+
+    #[test]
+    fn a_helpers_result_merge_wraps_its_arms() {
+        let result = KnownType::Result(
+            Box::new(IrType::Inferred(KnownType::I128)),
+            Box::new(IrType::Inferred(KnownType::Error)),
+        );
+        let body = helper_result_merge(IrType::Inferred(result));
+        assert!(body.contains("v3 = Ok (v1)"), "{body}");
+        assert!(body.contains("v3 = Err (v2)"), "{body}");
+    }
+
+    #[test]
+    fn a_helpers_merge_not_typed_result_is_not_wrapped() {
+        let body = helper_result_merge(IrType::Inferred(KnownType::I128));
+        assert!(!body.contains("Ok (") && !body.contains("Err ("), "{body}");
     }
 }

@@ -531,6 +531,8 @@ pub const MARSHALLING_TUPLE_STRUCT_ENCODES: &str = "marshalling_tuple_struct_enc
 /// Selects between two integer-enum variants' encodings, in a struct field
 /// declared that enum, named as the choice between the variants.
 pub const MARSHALLING_ENUM_SELECTS: &str = "marshalling_enum_selects";
+/// Vec searches read as the `Option<u32>` the SDK makes of their result.
+pub const MARSHALLING_INDEX_OF_OPTIONS: &str = "marshalling_index_of_options";
 /// Helpers returning `(tag, value)` in two registers, the tag a different
 /// constant on different paths.
 pub const MARSHALLING_OPTIONAL_PAIR_HELPERS: &str = "marshalling_optional_pair_helpers";
@@ -1120,6 +1122,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_ERROR_CODES_RETURNED,
         MARSHALLING_TUPLE_STRUCT_ENCODES,
         MARSHALLING_ENUM_SELECTS,
+        MARSHALLING_INDEX_OF_OPTIONS,
         MARSHALLING_OPTIONAL_PAIR_HELPERS,
         MARSHALLING_OPTIONAL_PAIR_SITES,
         MARSHALLING_OPTIONAL_PAIR_SITES_REFUSED,

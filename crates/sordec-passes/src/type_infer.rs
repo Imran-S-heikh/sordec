@@ -129,6 +129,18 @@
 //! than removing it. Callers are the exception: separate callers pass
 //! separate vecs, so their `Vec<?>` and `Vec<T>` still conflict.
 //!
+//! A map is the same case. `map_put` and `map_del` hand back the map they
+//! were given (`m.set(k, v)` is `m = map_put(m, k, v)`, a `&mut self`
+//! method of one `Map<K, V>`), and `Map<?, ?>` — all the host says of
+//! `map_new`'s and `map_put`'s results — merges with `Map<K, V>` as
+//! `Map<K, V>`, wherever `Vec<?>` does with `Vec<T>`: a loop's map
+//! starting from `Map::new` and growing by `set`, returned where the spec
+//! declares `Map<Address, Role>`. Why it is exact: the same argument — one
+//! variable, the host's `?` saying nothing of the key and value types
+//! rather than naming different ones. Gates: those two map ops only (the
+//! others return a key, a value, a count or a vec); a named key or value
+//! type that differs still conflicts; separate callers' maps still conflict.
+//!
 //! ## A struct literal's fields
 //!
 //! A value placed in a `#[contracttype]` struct literal's field is the
@@ -241,6 +253,33 @@
 //! typed (or typed only as the outside of a container) that comes from a
 //! guest call through at most [`AWAIT_DEPTH`] steps; in the first settling
 //! only, as the host catalog speaks only in the second.
+//!
+//! ## An unwrapped payload is the `Option`'s
+//!
+//! `x = o.unwrap()` says the value inside the `Option` and the value
+//! outside it are the same value. The forward direction was always read
+//! (an `Option<T>`'s unwrap is a `T`); the backward one was not, so a
+//! vec iterator's outlined `next` — `if tag == 2 { None } else {
+//! Some(word) }`, the word read back from the iterator's frame — stayed
+//! `Option<Val>` while every caller handed its unwrap to a helper taking
+//! an `Address`.
+//!
+//! So an `unwrap` typed `T` names the `Option<?>` it unwraps `Option<T>`
+//! (`Inferred`). With the call's result named, the helper's return slot
+//! takes the callers' `Option<T>` ([`result_uses`]), and the merge it
+//! returns, and so its `Option<?>` arms, as a merge's `Vec<?>` arm takes
+//! the merge's `Vec<T>`.
+//!
+//! Why it is exact: an `Option<T>`'s payload is a `T` by the definition of
+//! the type, and `unwrap` hands back that payload unchanged. Gates: one
+//! payload (a tuple payload is left); the `Option` only while its payload
+//! is untyped — a named payload stands, or conflicts on its own evidence;
+//! `T` never the `Val` that says nothing.
+//!
+//! Not the other way, from a `Some(x)` to its `x`: a fallible decode
+//! builds `Some` of the `Val` it checked, and the emitter converts that
+//! `Val` to the payload type there, so `x` is the value before the
+//! conversion, not the payload (account's `BytesN<32>` decode helper).
 //!
 //! ## A loop counter is the number it counts to
 //!
@@ -923,9 +962,10 @@ fn backward(
                     let fits = match base_of(types.get(source)) {
                         None => base.is_numeric(),
                         Some(KnownType::Val) => true,
-                        // A `Vec<?>` the copy names `Vec<T>`: one value, the
-                        // element type less said about it, not a conversion.
-                        Some(have @ KnownType::Vec(_)) => {
+                        // A `Vec<?>` the copy names `Vec<T>` (a `Map<?, ?>`,
+                        // `Map<K, V>`): one value, the element types less
+                        // said about it, not a conversion.
+                        Some(have @ (KnownType::Vec(_) | KnownType::Map(..))) => {
                             have != base && merge_partial(&have, &base).as_ref() == Some(&base)
                         }
                         Some(have) => unsigned_word(&have, &base).is_some(),
@@ -935,15 +975,21 @@ fn backward(
                     }
                 }
             }
-            // A merge's arm known only as `Vec<?>` is the merge's `Vec<T>`:
-            // the arms are the values of one variable, and an unknown
-            // element type is less said about it, not a different type
+            // A merge's arm known only as `Vec<?>` is the merge's `Vec<T>`,
+            // one known only as `Map<?, ?>` the merge's `Map<K, V>`, and
+            // one known only as `Option<?>` the merge's `Option<T>`: the
+            // arms are the values of one variable, and an unknown element
+            // type is less said about it, not a different type
             // ([`merge_partial`]). Only that arm: a named element is left
             // to stand or conflict on its own evidence.
             Expr::Phi { incoming } => {
-                if let Some(merged @ KnownType::Vec(_)) = base_of(types.get(&id)) {
+                if let Some(merged @ (KnownType::Vec(_) | KnownType::Map(..) | KnownType::Option(_))) =
+                    base_of(types.get(&id))
+                {
                     for (_, arm) in incoming {
-                        let Some(have @ KnownType::Vec(_)) = base_of(types.get(arm)) else {
+                        let Some(have @ (KnownType::Vec(_) | KnownType::Map(..) | KnownType::Option(_))) =
+                            base_of(types.get(arm))
+                        else {
                             continue;
                         };
                         if have != merged && merge_partial(&have, &merged).as_ref() == Some(&merged) {
@@ -1033,6 +1079,17 @@ fn backward(
                     && let Some(base) = base_of(Some(payload.as_ref()))
                 {
                     changed |= improve(types, ev, *default, IrType::Inferred(base));
+                }
+            }
+            // An `Option`'s payload and the value it is unwrapped to are
+            // one value ("An unwrapped payload is the `Option`'s").
+            Expr::Unwrap { value, arity: 1, .. } => {
+                if let Some(base) = base_of(types.get(&id)).filter(|b| *b != KnownType::Val)
+                    && let Some(KnownType::Option(payload)) = base_of(types.get(value))
+                    && base_of(Some(payload.as_ref())).is_none()
+                {
+                    let named = KnownType::Option(Box::new(IrType::Inferred(base)));
+                    changed |= improve(types, ev, *value, IrType::Inferred(named));
                 }
             }
             _ => {}
@@ -1242,6 +1299,20 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
         // loop that pushes onto a `Vec<u32>` merging it with a `Vec<?>`.
         Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind, args })) if returns_receiver(*kind) => {
             let ty @ KnownType::Vec(_) = base_of(types.get(args.first()?))? else {
+                return None;
+            };
+            Some(IrType::Inferred(ty))
+        }
+        // And the map ops that hand back the map they were given: the SDK's
+        // `m.set(k, v)` is `m = map_put(m, k, v)` and `m.remove(k)` is
+        // `m = map_del(m, k)`, both `&mut self` methods of one `Map<K, V>`
+        // storing the host's result back into it. The host types the result
+        // only `Map<?, ?>`.
+        Expr::Semantic(SemanticOp::Known(KnownOp::MapOp {
+            kind: sordec_ir::MapOpKind::Put | sordec_ir::MapOpKind::Del,
+            args,
+        })) => {
+            let ty @ KnownType::Map(..) = base_of(types.get(args.first()?))? else {
                 return None;
             };
             Some(IrType::Inferred(ty))
@@ -2242,7 +2313,10 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable, w
 /// element type gives way, [`merge_partial`]); everything else joins as
 /// before.
 fn join_own(own: Slot, callers: Slot) -> Slot {
-    if let (Slot::Agreed(a @ KnownType::Vec(_)), Slot::Agreed(b @ KnownType::Vec(_))) = (&own, &callers)
+    if let (
+        Slot::Agreed(a @ (KnownType::Vec(_) | KnownType::Map(..))),
+        Slot::Agreed(b @ (KnownType::Vec(_) | KnownType::Map(..))),
+    ) = (&own, &callers)
         && let Some(merged) = merge_partial(a, b)
     {
         return Slot::Agreed(merged);
@@ -2455,6 +2529,7 @@ fn refine_element(slot: &IrType, cand: &IrType) -> Option<IrType> {
     };
     match (base_of(Some(slot))?, base_of(Some(cand))?) {
         (have @ KnownType::Vec(_), got @ KnownType::Vec(_))
+        | (have @ KnownType::Map(..), got @ KnownType::Map(..))
         | (have @ KnownType::Option(_), got @ KnownType::Option(_)) => {
             let merged = merge_partial(&have, &got)?;
             (merged != have).then(|| rewrap(merged))
@@ -2474,13 +2549,15 @@ fn refine_element(slot: &IrType, cand: &IrType) -> Option<IrType> {
 /// `Option` loses its type entirely. A `Vec` is the same case: the host
 /// hands every vec back as `Vec<?>`, so a loop that pushes onto one merges
 /// a `Vec<?>` arm with the `Vec<u32>` the return proves, and conflicted the
-/// merge to `Val`. Every other pair merges only when equal.
+/// merge to `Val`. A `Map` is the same case again: `map_new` and `map_put`
+/// hand back `Map<?, ?>`, merged in a loop with the `Map<Address, Role>`
+/// the return proves. Every other pair merges only when equal.
 fn merge_partial(a: &KnownType, b: &KnownType) -> Option<KnownType> {
     merge_partial_with(a, b, true)
 }
 
-/// [`merge_partial`], with the `Vec` case optional: `vecs` false merges two
-/// different vecs no more than two different scalars. For witnesses that
+/// [`merge_partial`], with the `Vec` and `Map` cases optional: `vecs` false
+/// merges two different vecs (or maps) no more than two different scalars. For witnesses that
 /// are *different values* — the arguments separate callers pass — rather
 /// than the values of one variable ([`Slot::join_with`]).
 fn merge_partial_with(a: &KnownType, b: &KnownType, vecs: bool) -> Option<KnownType> {
@@ -2503,6 +2580,9 @@ fn merge_partial_with(a: &KnownType, b: &KnownType, vecs: bool) -> Option<KnownT
     match (a, b) {
         (KnownType::Option(x), KnownType::Option(y)) => Some(KnownType::Option(Box::new(part(x, y)?))),
         (KnownType::Vec(x), KnownType::Vec(y)) if vecs => Some(KnownType::Vec(Box::new(part(x, y)?))),
+        (KnownType::Map(xk, xv), KnownType::Map(yk, yv)) if vecs => {
+            Some(KnownType::Map(Box::new(part(xk, yk)?), Box::new(part(xv, yv)?)))
+        }
         (KnownType::Tuple(xs), KnownType::Tuple(ys)) if xs.len() == ys.len() => Some(KnownType::Tuple(
             xs.iter().zip(ys).map(|(x, y)| part(x, y)).collect::<Option<_>>()?,
         )),
@@ -4350,6 +4430,161 @@ mod tests {
         let mut ir = vec_op_on(sordec_ir::VecOpKind::Del, IrType::Known(KnownType::Val));
         TypeInferPass.run(&mut ir);
         assert_eq!(ty_of(&ir, 0, 1), IrType::Known(vec_of(unknown())));
+    }
+
+    fn map_of(k: IrType, v: IrType) -> KnownType {
+        KnownType::Map(Box::new(k), Box::new(v))
+    }
+
+    /// `v1 = map_<kind>(v0, v2, v3)` with `v0` typed `receiver`; the result
+    /// as the host types it, `Map<?, ?>`.
+    fn map_op_on(kind: sordec_ir::MapOpKind, receiver: IrType) -> HighIr {
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapOp {
+                    kind,
+                    args: vec![ValueId::from_index(0), ValueId::from_index(2), ValueId::from_index(3)],
+                })),
+                Expr::Phi { incoming: vec![] },
+                Expr::Phi { incoming: vec![] },
+            ],
+            vec![ValueId::from_index(0), ValueId::from_index(2), ValueId::from_index(3)],
+            vec![1],
+            vec![vec![ValueId::from_index(1)]],
+        );
+        f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = receiver;
+        f.bindings.get_mut(ValueId::from_index(1)).unwrap().ty = IrType::Known(map_of(unknown(), unknown()));
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn a_map_put_is_the_map_it_was_put_into() {
+        let roles = map_of(IrType::Known(KnownType::Address), IrType::Known(KnownType::U32));
+        for kind in [sordec_ir::MapOpKind::Put, sordec_ir::MapOpKind::Del] {
+            let mut ir = map_op_on(kind, IrType::Known(roles.clone()));
+            TypeInferPass.run(&mut ir);
+            assert_eq!(base_of(Some(&ty_of(&ir, 0, 1))), Some(roles.clone()));
+        }
+    }
+
+    #[test]
+    fn a_map_op_names_its_result_only_when_it_hands_the_map_back() {
+        // `map_get` hands back a value, not the map.
+        let roles = map_of(IrType::Known(KnownType::Address), IrType::Known(KnownType::U32));
+        let mut ir = map_op_on(sordec_ir::MapOpKind::Get, IrType::Known(roles));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Known(map_of(unknown(), unknown())));
+        // A receiver known only as a `Val` says nothing of the entries.
+        let mut ir = map_op_on(sordec_ir::MapOpKind::Put, IrType::Known(KnownType::Val));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 1), IrType::Known(map_of(unknown(), unknown())));
+    }
+
+    #[test]
+    fn an_untyped_map_merges_with_a_named_one() {
+        let roles = map_of(IrType::Inferred(KnownType::Address), IrType::Inferred(KnownType::U32));
+        assert_eq!(merge_partial(&map_of(unknown(), unknown()), &roles), Some(roles.clone()));
+        assert_eq!(merge_partial(&roles, &map_of(unknown(), unknown())), Some(roles.clone()));
+        assert_eq!(
+            merge_partial(&roles, &map_of(IrType::Known(KnownType::Symbol), unknown())),
+            None,
+            "two named key types still conflict"
+        );
+        // A loop's merge of `Map::new` and the map it puts into, returned as
+        // the declared map: the empty map is the same map.
+        let mut ir = vec_merge(IrType::Known(map_of(unknown(), unknown())), IrType::Inferred(roles.clone()));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 2))), Some(roles.clone()));
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 0))), Some(roles), "the empty map is the same map");
+    }
+
+    /// `v1 = unwrap(v0)` with `v0: Option<payload>` and `v1` typed `got`.
+    fn unwrap_of(payload: IrType, got: IrType) -> HighIr {
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Unwrap { value: ValueId::from_index(0), index: 0, arity: 1 },
+            ],
+            vec![ValueId::from_index(0)],
+            vec![1],
+            vec![vec![ValueId::from_index(1)]],
+        );
+        f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty =
+            IrType::Inferred(KnownType::Option(Box::new(payload)));
+        f.bindings.get_mut(ValueId::from_index(1)).unwrap().ty = got;
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn an_unwrap_names_the_option_it_unwraps() {
+        let mut ir = unwrap_of(unknown(), IrType::Known(KnownType::Address));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(
+            base_of(Some(&ty_of(&ir, 0, 0))),
+            Some(KnownType::Option(Box::new(IrType::Inferred(KnownType::Address))))
+        );
+    }
+
+    #[test]
+    fn an_unwrap_leaves_a_named_payload_and_says_nothing_as_a_val() {
+        // A payload with a name of its own stands.
+        let mut ir = unwrap_of(IrType::Inferred(KnownType::U32), IrType::Known(KnownType::Address));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(
+            base_of(Some(&ty_of(&ir, 0, 0))),
+            Some(KnownType::Option(Box::new(IrType::Inferred(KnownType::U32))))
+        );
+        // `Val` says nothing of the payload.
+        let mut ir = unwrap_of(unknown(), IrType::Known(KnownType::Val));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(
+            base_of(Some(&ty_of(&ir, 0, 0))),
+            Some(KnownType::Option(Box::new(unknown())))
+        );
+    }
+
+    /// `v1 = Some(v0)` returned, `v1` typed `option`, `v0` typed `inner`.
+    fn some_of(inner: IrType, option: IrType) -> HighIr {
+        let mut f = func_at(
+            0,
+            vec![Expr::Phi { incoming: vec![] }, Expr::Optional { payload: Some(vec![ValueId::from_index(0)]) }],
+            vec![ValueId::from_index(0)],
+            vec![1],
+            vec![vec![ValueId::from_index(1)]],
+        );
+        f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = inner;
+        f.bindings.get_mut(ValueId::from_index(1)).unwrap().ty = option;
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn a_named_option_does_not_name_what_its_some_holds() {
+        // A decode's `Some(val)` is converted by the emitter: the `Val`,
+        // or an untyped word, stays what it is.
+        let option = IrType::Known(KnownType::Option(Box::new(IrType::Known(KnownType::Address))));
+        let mut ir = some_of(unknown(), option.clone());
+        TypeInferPass.run(&mut ir);
+        assert!(!matches!(base_of(Some(&ty_of(&ir, 0, 0))), Some(KnownType::Address)));
+        let mut ir = some_of(IrType::Inferred(KnownType::Val), option);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 0))), Some(KnownType::Val));
+    }
+
+    #[test]
+    fn a_named_option_leaves_a_payload_with_a_type_of_its_own() {
+        let option = IrType::Known(KnownType::Option(Box::new(IrType::Known(KnownType::Address))));
+        let mut ir = some_of(IrType::Known(KnownType::U64), option);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::U64));
+    }
+
+    #[test]
+    fn callers_passing_different_maps_do_not_merge_them() {
+        let roles = map_of(IrType::Inferred(KnownType::Address), IrType::Inferred(KnownType::U32));
+        assert_eq!(merge_partial_with(&map_of(unknown(), unknown()), &roles, false), None);
     }
 
     /// `i64.load addr+offset`: eight bytes, typed as the opcode's word.
