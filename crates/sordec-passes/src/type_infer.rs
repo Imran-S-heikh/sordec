@@ -274,9 +274,12 @@
 //! Why it is exact: an `Option<T>`'s payload is a `T` by the definition of
 //! the type, and `unwrap` hands back that payload unchanged. Gates: one
 //! payload (a tuple payload is left); the `Option` only while its payload
-//! is untyped, and `x` only while it is untyped or only a `Val` — a named
-//! type on either side stands, or conflicts on its own evidence; `T` never
-//! the `Val` that says nothing.
+//! is untyped, and `x` only while it is untyped — a named type on either
+//! side stands, or conflicts on its own evidence; `T` never the `Val` that
+//! says nothing. Not an `x` typed `Val`: a fallible decode builds
+//! `Some(v)` of the `Val` it checked, and the emitter converts that `Val`
+//! to the payload type there — the `Val` is the value before the
+//! conversion, not the payload.
 //!
 //! ## A loop counter is the number it counts to
 //!
@@ -1093,7 +1096,7 @@ fn backward(
                 if let [only] = values.as_slice()
                     && let Some(KnownType::Option(payload)) = base_of(types.get(&id))
                     && let Some(base) = base_of(Some(payload.as_ref())).filter(|b| *b != KnownType::Val)
-                    && base_of(types.get(only)).is_none_or(|have| have == KnownType::Val)
+                    && base_of(types.get(only)).is_none()
                 {
                     changed |= improve(types, ev, *only, IrType::Inferred(base));
                 }
@@ -4569,11 +4572,13 @@ mod tests {
     #[test]
     fn a_named_option_names_its_untyped_payload() {
         let option = IrType::Known(KnownType::Option(Box::new(IrType::Known(KnownType::Address))));
-        for inner in [unknown(), IrType::Inferred(KnownType::Val)] {
-            let mut ir = some_of(inner, option.clone());
-            TypeInferPass.run(&mut ir);
-            assert_eq!(base_of(Some(&ty_of(&ir, 0, 0))), Some(KnownType::Address));
-        }
+        let mut ir = some_of(unknown(), option.clone());
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 0))), Some(KnownType::Address));
+        // A `Val` a decode checked is the value before the conversion.
+        let mut ir = some_of(IrType::Inferred(KnownType::Val), option);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 0, 0))), Some(KnownType::Val));
     }
 
     #[test]
