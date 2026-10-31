@@ -873,3 +873,21 @@ The five sets' totals are unchanged (84/86 compile, 9 errors, 7,988 holes; held-
 `i64` to Rust, and an unsigned comparison on it was printed bare, which reads it signed —
 wrong for values with the top bit set once the gap is filled. It is now reread unsigned,
 `(v12 as u64) >= (v16 as u64)`: six comparisons in import_ark_bn254's big-integer code.
+
+## 2026-10-31 — commit f46c790 (privacy_pools' constant tables: Vec::from_array loops, by-pointer helpers, U256 from bytes)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,489 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 1,686 |
+| third-party | 2 | 1/2 | 8 | 641 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 561 |
+
+`Vec::from_array`'s element loops, run on values every execution shares, are replaced by
+their loads and stores; a straight-line helper that reads the word behind its pointer into a
+typed host operation is inlined where the caller stored a value of that type there;
+`u256_val_from_be_bytes` prints as `U256::from_be_bytes`. privacy_pools 2,433 → 945 gaps (its
+Poseidon round constants print as plain `vec![…]` of constants); groth16 ×2, fuzzing, bls,
+bn254 and events_ref also drop. Holes 7,988 → 6,462 (summed); errors unchanged at 9; corpus
+byte-identical; held-out mean 0.7883.
