@@ -34,8 +34,8 @@ use quote::format_ident;
 use syn::parse_quote;
 
 use sordec_ir::{
-    BufOpKind, ClientInterface, CryptoOpKind, EnumKey, KnownOp, KnownTier, PrngOpKind, StorageTier,
-    VecOpKind, KnownType, IrType};
+    BufOpKind, ClientInterface, CryptoOpKind, DeployOpKind, EnumKey, KnownOp, KnownTier, PrngOpKind,
+    StorageTier, VecOpKind, KnownType, IrType};
 
 use crate::rust::body::FnCtx;
 use crate::rust::ty::ident;
@@ -438,6 +438,44 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         KnownOp::GetMaxLiveUntilLedger => Some(parse_quote!(#e.ledger().max_live_until_ledger())),
         KnownOp::GetCurrentContractAddress => Some(parse_quote!(#e.current_contract_address())),
 
+        // ---- Deploy ----
+        // The SDK's deployer methods are these host calls with their
+        // operands unchanged, so each prints as the method once every
+        // operand already has the type the method takes; an untyped `Val`
+        // would need a conversion the binary does not show.
+        KnownOp::DeployOp {
+            kind: DeployOpKind::UpdateCurrentContractWasm,
+            args,
+        } => {
+            let [hash] = args[..] else { return None };
+            if !has_type(ctx.func, hash, |t| matches!(t, KnownType::BytesN(32))) {
+                return None;
+            }
+            let hash = ctx.arg_ref(hash);
+            Some(parse_quote!(#e.deployer().update_current_contract_wasm(#hash)))
+        }
+        // `create_contract_with_constructor(deployer, wasm_hash, salt, args)`
+        // is `DeployerWithAddress::deploy_v2`; `with_current_contract`
+        // passes the current contract's address as the deployer, so a
+        // deployer that is that address reads as the source writes it.
+        KnownOp::DeployOp {
+            kind: DeployOpKind::CreateContractWithConstructor,
+            args,
+        } => {
+            if !deploy_typed(ctx.func, args) {
+                return None;
+            }
+            let [deployer, wasm_hash, salt, ctor_args] = args[..] else { return None };
+            let current = is_current_address(ctx.func, deployer);
+            let (wasm_hash, salt, ctor_args) = (ctx.arg_ref(wasm_hash), ctx.arg_ref(salt), ctx.arg_ref(ctor_args));
+            if current {
+                Some(parse_quote!(#e.deployer().with_current_contract(#salt).deploy_v2(#wasm_hash, #ctor_args)))
+            } else {
+                let deployer = ctx.arg_ref(deployer);
+                Some(parse_quote!(#e.deployer().with_address(#deployer, #salt).deploy_v2(#wasm_hash, #ctor_args)))
+            }
+        }
+
         // ---- Host panic ----
         KnownOp::PanicWithError { error } => {
             let err = ctx.value_ref(*error);
@@ -718,7 +756,48 @@ pub(crate) fn rendered_operands(
             reads.extend(amount(*extend_to, *resolved_extend_to));
             Some(reads)
         }
+        // `with_current_contract` names no deployer: the current address
+        // it stands for is not read.
+        KnownOp::DeployOp {
+            kind: DeployOpKind::CreateContractWithConstructor,
+            args,
+        } if deploy_typed(func, args) && is_current_address(func, args[0]) => Some(args[1..].to_vec()),
         _ => None,
+    }
+}
+
+/// Whether `value`'s recovered type, known or inferred, is one `want` accepts.
+fn has_type(
+    func: &sordec_ir::HighFunction,
+    value: sordec_common::ValueId,
+    want: impl Fn(&KnownType) -> bool,
+) -> bool {
+    matches!(
+        func.bindings.get(value).map(|b| &b.ty),
+        Some(IrType::Known(t) | IrType::Inferred(t)) if want(t)
+    )
+}
+
+/// `create_contract_with_constructor`'s four operands each carry the type
+/// `deploy_v2` and its deployer take: `(Address, BytesN<32>, BytesN<32>, Vec<_>)`.
+fn deploy_typed(func: &sordec_ir::HighFunction, args: &[sordec_common::ValueId]) -> bool {
+    let [deployer, wasm_hash, salt, ctor_args] = args[..] else { return false };
+    has_type(func, deployer, |t| matches!(t, KnownType::Address))
+        && has_type(func, wasm_hash, |t| matches!(t, KnownType::BytesN(32)))
+        && has_type(func, salt, |t| matches!(t, KnownType::BytesN(32)))
+        && has_type(func, ctor_args, |t| matches!(t, KnownType::Vec(_)))
+}
+
+/// Whether `value` is the current contract's address, through renames.
+fn is_current_address(func: &sordec_ir::HighFunction, mut value: sordec_common::ValueId) -> bool {
+    loop {
+        match func.bindings.get(value).map(|b| &b.expr) {
+            Some(sordec_ir::Expr::Use(inner)) => value = *inner,
+            Some(sordec_ir::Expr::Semantic(sordec_ir::SemanticOp::Known(KnownOp::GetCurrentContractAddress))) => {
+                return true;
+            }
+            _ => return false,
+        }
     }
 }
 
