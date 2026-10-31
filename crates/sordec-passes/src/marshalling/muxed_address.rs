@@ -37,6 +37,12 @@
 //! rewrites, and only on a parameter, so a dispatch with any other job is
 //! left alone.
 //!
+//! **A dispatch alone.** Once its flag has no reader left — an event's
+//! `to.id()` read took the branch that tested it — the dispatch does
+//! nothing but trap on a third tag: the argument's type check and nothing
+//! else. On a parameter the spec declares `MuxedAddress` it goes for the
+//! reason above, with no branch beside it.
+//!
 //! **The parameter's type.** Accepting exactly those two tags and taking
 //! the address out of the second is what `MuxedAddress` *is* on the wire.
 //! A module with a spec already says so; a stripped one leaves the
@@ -81,6 +87,8 @@ const M_COLLAPSED: &str = "marshalling_muxed_address_collapsed";
 const M_TYPED: &str = "marshalling_muxed_address_params_typed";
 /// Address merges of a branch with other work, read as `.address()`.
 const M_MERGES: &str = "marshalling_muxed_address_merges";
+/// Two-tag dispatches removed as the parameter's type check.
+const M_CHECKS: &str = "marshalling_muxed_address_checks_removed";
 
 /// Rewrites the inlined `MuxedAddress::address()` back into the call.
 #[derive(Debug, Default, Clone, Copy)]
@@ -103,24 +111,47 @@ impl Pass<HighIr> for MuxedAddressPass {
                 }
             });
             collapsed.retain(|m| func.params.contains(m));
-            if collapsed.is_empty() {
-                continue;
-            }
             // Decided on the intact tree: `rewrite` runs with the region
             // taken out, and a reader in it would be invisible from there.
+            // A dispatch whose flag nothing reads any more (an event's id
+            // read took the branch that did) is the argument's type check
+            // alone, on a parameter the spec declares `MuxedAddress`.
             let mut removable: HashSet<ValueId> = HashSet::new();
+            let mut checked: Vec<ValueId> = Vec::new();
             func.region.for_each_node(|node| {
                 if let Region::Switch { index, arms, default, .. } = node
                     && is_two_tag_check(arms, default)
-                    && tag_dispatch(func, *index).is_some_and(|m| collapsed.contains(&m))
-                    && flag_only_feeds_extraction(func, arms)
+                    && let Some(m) = tag_dispatch(func, *index)
+                    && let Some(readers) = flag_readers(func, arms)
                 {
-                    removable.insert(*index);
+                    if collapsed.contains(&m) && readers <= 1 {
+                        removable.insert(*index);
+                    } else if readers == 0 && declared_muxed(func, m) {
+                        removable.insert(*index);
+                        checked.push(m);
+                    }
                 }
             });
+            for m in checked {
+                if let Some(b) = func.bindings.get_mut(m) {
+                    b.add_provenance(Provenance::new(
+                        PASS_NAME,
+                        ProvenanceSource::SdkPattern,
+                        "its two-tag dispatch, its flag read by nothing, is the type check of the declared \
+                         `MuxedAddress` the entrypoint wrapper regenerates",
+                    ));
+                }
+            }
+            if collapsed.is_empty() && removable.is_empty() {
+                continue;
+            }
             let region = std::mem::replace(&mut func.region, Region::Unreachable);
             let mut count = 0_i64;
             func.region = rewrite(func, region, &collapsed, &removable, &mut count);
+            if !removable.is_empty() {
+                result.metrics.increment(M_CHECKS, removable.len() as i64);
+                result.changed = true;
+            }
             if count > 0 {
                 result.metrics.increment(M_COLLAPSED, count);
                 result.changed = true;
@@ -358,21 +389,21 @@ pub(super) fn is_two_tag_check(arms: &[sordec_ir::SwitchArm], default: &Region) 
     cases == [0, 1] && matches!(default, Region::Unreachable | Region::Panic { .. })
 }
 
-/// Whether the flag a dispatch sets is read only by the one branch this
-/// pass collapses.
+/// How many live readers the flag a dispatch sets has: read only by the
+/// one branch this pass collapses when one.
 ///
 /// token-v23's `transfer` reads it twice: once to pick the address, and
 /// again to decide whether to read the muxed *id*. Removing the dispatch
 /// then leaves the second reader with a flag nobody assigns — the
 /// dispatch had another job, which is exactly the case the module doc
 /// promises to leave alone.
-fn flag_only_feeds_extraction(func: &HighFunction, arms: &[sordec_ir::SwitchArm]) -> bool {
+fn flag_readers(func: &HighFunction, arms: &[sordec_ir::SwitchArm]) -> Option<usize> {
     let flags: HashSet<ValueId> = arms
         .iter()
         .filter_map(|arm| sole_transfer(&arm.body).map(|(phi, _)| phi))
         .collect();
     let [flag] = flags.into_iter().collect::<Vec<_>>()[..] else {
-        return false;
+        return None;
     };
     // Live readers only: what the block schedules, the merges, and the
     // region tree — each through any rename of the flag. A rename is
@@ -416,7 +447,16 @@ fn flag_only_feeds_extraction(func: &HighFunction, arms: &[sordec_ir::SwitchArm]
         .count();
     let mut region = 0;
     func.region.for_each_value_use(|v| region += usize::from(names.contains(&v)));
-    scheduled + merges + region <= 1
+    Some(scheduled + merges + region)
+}
+
+/// Whether the spec declares parameter `m` a `MuxedAddress`.
+fn declared_muxed(func: &HighFunction, m: ValueId) -> bool {
+    let Some(index) = func.params.iter().position(|p| *p == m) else { return false };
+    func.signature
+        .as_ref()
+        .and_then(|s| s.inputs.get(index))
+        .is_some_and(|i| matches!(i.ty, TypeRef::Primitive(PrimitiveType::MuxedAddress)))
 }
 
 fn rewrite(
@@ -704,5 +744,46 @@ mod tests {
         let f = &ir.functions[0];
         assert!(!has_if(&f.region), "the branch still collapses");
         assert!(has_switch(&f.region), "but the dispatch is kept");
+    }
+
+    /// The dispatch with no branch left and its flag unread, on a
+    /// parameter `declared` (or not) `MuxedAddress` by the spec.
+    fn dispatch_alone(declared: bool) -> sordec_ir::HighFunction {
+        let mut f = shape(false);
+        if let Region::Sequence(items) = &mut f.region {
+            items.retain(|r| !matches!(r, Region::If { .. }));
+        }
+        if let Some(block) = f.blocks.get_mut(bb(0)) {
+            block.bindings.retain(|b| *b != v(9));
+        }
+        let ty = if declared {
+            TypeRef::Primitive(PrimitiveType::MuxedAddress)
+        } else {
+            TypeRef::Unknown(UnknownReason::NoMetadata)
+        };
+        f.signature = Some(sordec_ir::FunctionSignature {
+            name: "transfer".to_string(),
+            inputs: vec![sordec_ir::FunctionParam { name: "to".to_string(), ty }],
+            outputs: vec![],
+        });
+        f
+    }
+
+    /// Once nothing reads its flag, the dispatch is the declared
+    /// parameter's type check alone, and goes.
+    #[test]
+    fn a_dispatch_whose_flag_nothing_reads_goes_on_a_declared_parameter() {
+        let mut ir = module(vec![dispatch_alone(true)]);
+        assert!(MuxedAddressPass.run(&mut ir).changed);
+        assert!(!has_switch(&ir.functions[0].region));
+    }
+
+    /// Without the spec's word for it, two accepted tags are not proof of
+    /// the type: the dispatch stays.
+    #[test]
+    fn a_dispatch_on_an_undeclared_parameter_stays() {
+        let mut ir = module(vec![dispatch_alone(false)]);
+        assert!(!MuxedAddressPass.run(&mut ir).changed);
+        assert!(has_switch(&ir.functions[0].region));
     }
 }
