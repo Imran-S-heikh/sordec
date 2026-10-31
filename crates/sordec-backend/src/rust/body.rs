@@ -1002,7 +1002,8 @@ impl<'a> FnCtx<'a> {
     ///
     /// The same holds for a reader that hands the hole straight to a method
     /// generic in `IntoVal<Env, Val>` — the value `storage().set` stores,
-    /// the data `events().publish` publishes ([`idiom::generic_val_operand`]).
+    /// the data `events().publish` publishes, a map entry's value, what
+    /// `to_xdr` serializes ([`idiom::generic_val_operands`]).
     ///
     /// Keyed on the reader, not on the hole — annotating holes as such was
     /// measured to cost errors (see the comment in the machine-type branch
@@ -1024,7 +1025,7 @@ impl<'a> FnCtx<'a> {
             && readers.iter().all(|r| match self.func.bindings.get(*r).map(|b| &b.expr) {
                 Some(Expr::Semantic(SemanticOp::Known(op))) => {
                     idiom::converted_to_val(self, op).and_then(|x| self.fold.reads(x)) == Some(vid)
-                        || idiom::generic_val_operand(op).and_then(|x| self.fold.reads(x)) == Some(vid)
+                        || idiom::generic_val_operands(op).into_iter().any(|x| self.fold.reads(x) == Some(vid))
                 }
                 _ => false,
             })
@@ -2730,6 +2731,28 @@ mod tests {
         // `set` is generic in `IntoVal<Env, Val>`: nothing pins the hole,
         // and the `!` would fall back to `()`.
         let body = emitted(vec![(untyped(), wide_load()), (IrType::Known(KnownType::Unit), stored(1))], vec![], &TypeRegistry::default());
+        assert!(body.contains("let v1 : soroban_sdk :: Val = todo !"), "{body}");
+    }
+
+    #[test]
+    fn a_hole_only_a_map_entry_or_serialized_is_annotated_val() {
+        // `Map::<Symbol, Val>::from_array(&e, [(k, IntoVal::into_val(&v1, &e))])`
+        // and `ToXdr::to_xdr(v1, &e)`: both generic in `IntoVal<Env, Val>`.
+        let positions = known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v(0) });
+        let map = known(KnownOp::MapNew {
+            keys_pos: v(2),
+            vals_pos: v(2),
+            len: v(2),
+            entries: Some(vec![("weight".into(), v(1))]),
+        });
+        let body = emitted(
+            vec![(untyped(), wide_load()), (untyped(), positions), (IrType::Known(KnownType::Map(Box::new(IrType::Known(KnownType::Symbol)), Box::new(IrType::Known(KnownType::Val)))), map)],
+            vec![],
+            &TypeRegistry::default(),
+        );
+        assert!(body.contains("let v1 : soroban_sdk :: Val = todo !"), "{body}");
+        let xdr = known(KnownOp::BufOp { kind: sordec_ir::BufOpKind::SerializeToBytes, args: vec![v(1)] });
+        let body = emitted(vec![(untyped(), wide_load()), (IrType::Known(KnownType::Bytes), xdr)], vec![], &TypeRegistry::default());
         assert!(body.contains("let v1 : soroban_sdk :: Val = todo !"), "{body}");
     }
 
