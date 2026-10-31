@@ -914,6 +914,10 @@ impl<'a> FnCtx<'a> {
     /// reader already treats it as the `Val` the host call was handed, and
     /// `into_val` of a `Val` into a `Val` is the identity.
     ///
+    /// The same holds for a reader that hands the hole straight to a method
+    /// generic in `IntoVal<Env, Val>` — the value `storage().set` stores,
+    /// the data `events().publish` publishes ([`idiom::generic_val_operand`]).
+    ///
     /// Keyed on the reader, not on the hole — annotating holes as such was
     /// measured to cost errors (see the comment in the machine-type branch
     /// of `basic_block_stmts`). Any other reader that prints it, or a read
@@ -934,6 +938,7 @@ impl<'a> FnCtx<'a> {
             && readers.iter().all(|r| match self.func.bindings.get(*r).map(|b| &b.expr) {
                 Some(Expr::Semantic(SemanticOp::Known(op))) => {
                     idiom::converted_to_val(self, op).and_then(|x| self.fold.reads(x)) == Some(vid)
+                        || idiom::generic_val_operand(op).and_then(|x| self.fold.reads(x)) == Some(vid)
                 }
                 _ => false,
             })
@@ -2379,6 +2384,42 @@ mod tests {
         assert!(body.contains("into_val (& v1"), "the reader converts it:\n{body}");
     }
 
+    /// `storage().persistent().set(&v0, &v1)`, with `v1` an unread-elsewhere
+    /// 8-byte load.
+    fn stored(value: u32) -> Expr {
+        known(KnownOp::StorageSet {
+            tier: sordec_ir::StorageTier::Known(sordec_ir::KnownTier::Persistent),
+            durability: v(0),
+            key: v(0),
+            resolved_key: None,
+            value: v(value),
+        })
+    }
+
+    #[test]
+    fn a_hole_only_stored_is_annotated_val() {
+        // `set` is generic in `IntoVal<Env, Val>`: nothing pins the hole,
+        // and the `!` would fall back to `()`.
+        let body = emitted(vec![(untyped(), wide_load()), (IrType::Known(KnownType::Unit), stored(1))], vec![], &TypeRegistry::default());
+        assert!(body.contains("let v1 : soroban_sdk :: Val = todo !"), "{body}");
+    }
+
+    #[test]
+    fn a_hole_stored_and_read_otherwise_is_left_to_inference() {
+        // A second reader, arithmetic, may pin a type of its own.
+        let body = emitted(
+            vec![
+                (untyped(), wide_load()),
+                (IrType::Known(KnownType::Unit), stored(1)),
+                i64_lit(255),
+                (IrType::Known(KnownType::I64), mask(1, 3)),
+            ],
+            vec![ret(4)],
+            &TypeRegistry::default(),
+        );
+        assert!(!body.contains("let v1 : soroban_sdk :: Val"), "{body}");
+    }
+
     /// The body of `func0(v0: arg)`, which calls `func1(v0)`, a helper
     /// whose one parameter is typed `param`.
     fn call_body(arg: IrType, param: IrType) -> String {
@@ -2524,25 +2565,20 @@ mod tests {
 
     #[test]
     fn a_hole_a_recovered_call_reads_is_left_to_inference() {
-        // A storage write of it: a recovered chain, but not a conversion.
-        let set = known(KnownOp::StorageSet {
-            tier: sordec_ir::StorageTier::Known(sordec_ir::KnownTier::Persistent),
-            durability: v(0),
-            key: v(0),
-            resolved_key: None,
-            value: v(1),
-        });
+        // An auth check on it: a recovered chain, but one that takes it as
+        // a type of its own, not as a `Val`.
+        let auth = known(KnownOp::RequireAuth { address: v(1) });
         let body = emitted(
             vec![
                 (untyped(), wide_load()),
                 (IrType::Known(KnownType::U32), vec_len(1)),
                 (untyped(), store(2)),
-                (IrType::Known(KnownType::Unit), set),
+                (IrType::Known(KnownType::Unit), auth),
             ],
             vec![],
             &TypeRegistry::default(),
         );
-        assert!(body.contains(". set (& arg0 , & v1)"), "{body}");
+        assert!(body.contains("v1 . require_auth ()"), "{body}");
         assert!(body.contains("let v1 = todo !"), "{body}");
     }
 
