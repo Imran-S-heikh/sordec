@@ -142,7 +142,7 @@ use crate::dataflow::{canon_addr, resolve_use, trace_int, trace_u32val};
 use crate::metrics_catalog as mc;
 use crate::pass::{Pass, PassResult};
 use crate::type_infer::known_of_type_ref;
-use crate::val_abi::{TAG_I64_OBJECT, TAG_I64_SMALL};
+use crate::val_abi::{TAG_I64_OBJECT, TAG_I64_SMALL, TAG_U64_OBJECT, TAG_U64_SMALL};
 
 /// Pass name — also the provenance `pass` field for every rewrite.
 pub const PASS_NAME: &str = "marshalling-enum-match";
@@ -687,6 +687,28 @@ pub(super) fn code_chain_parts(func: &HighFunction, x: ValueId) -> Option<(HashS
 /// with no `else` and a `then` that returns its `Ok`, then the error
 /// return.
 fn is_i64_decoder(g: &HighFunction) -> bool {
+    two_form_decoder(g) == Some(KnownType::I64)
+}
+
+/// The derived decoder of a 64-bit scalar with two encodings, `i64` or
+/// `u64` — `TryFromVal<Env, Val>` from `soroban-env-common`, outlined as
+/// `(x) -> (tag, value)`: `(0, obj_to_*(x))` under the type's object tag,
+/// `(0, body)` under its small tag, any other tag a non-zero `Err` tag.
+/// The type it decodes, or `None` for anything else. Checked as
+/// [`is_i64_decoder`] describes.
+pub(super) fn two_form_decoder(g: &HighFunction) -> Option<KnownType> {
+    for (ty, object, small, extract) in [
+        (KnownType::I64, TAG_I64_OBJECT, TAG_I64_SMALL, ValObjectKind::ObjToI64),
+        (KnownType::U64, TAG_U64_OBJECT, TAG_U64_SMALL, ValObjectKind::ObjToU64),
+    ] {
+        if decodes_two_forms(g, object, small, extract) {
+            return Some(ty);
+        }
+    }
+    None
+}
+
+fn decodes_two_forms(g: &HighFunction, object: u8, small: u8, extract: ValObjectKind) -> bool {
     if g.signature.is_some() || g.params.len() != 1 {
         return false;
     }
@@ -720,11 +742,11 @@ fn is_i64_decoder(g: &HighFunction) -> bool {
             return false;
         }
         match expr_of(g, *v) {
-            Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValObject { kind: ValObjectKind::ObjToI64, args }))) => {
-                tag == TAG_I64_OBJECT && args.len() == 1 && resolve_use(g, args[0]) == x
+            Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValObject { kind, args }))) if *kind == extract => {
+                tag == object && args.len() == 1 && resolve_use(g, args[0]) == x
             }
             Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value }))) => {
-                tag == TAG_I64_SMALL && resolve_use(g, *value) == x
+                tag == small && resolve_use(g, *value) == x
             }
             _ => false,
         }
@@ -750,7 +772,9 @@ fn is_i64_decoder(g: &HighFunction) -> bool {
     }
     let Region::Return { values } = last else { return false };
     let failing = values.first().and_then(|t| trace_int(g, *t)).is_some_and(|t| t != 0);
-    failing && handled == [TAG_I64_OBJECT, TAG_I64_SMALL]
+    // Source order tests the small form first; rustc may test the object
+    // form first. Either order is the same conversion.
+    failing && handled.len() == 2 && handled.contains(&object) && handled.contains(&small)
 }
 
 /// The constants a value may be: a constant, or a component of a call
@@ -1753,5 +1777,27 @@ mod tests {
     fn a_select_chain_whose_fallback_is_a_code_is_not() {
         let f = chain(10, 15, 15);
         assert_eq!(code_chain(&f, v(9)), None);
+    }
+
+    #[test]
+    fn the_two_form_decoders_name_their_scalar() {
+        use crate::marshalling::test_support::two_form_decoder_fn;
+        let i = two_form_decoder_fn(0, TAG_I64_OBJECT, TAG_I64_SMALL, ValObjectKind::ObjToI64);
+        assert_eq!(two_form_decoder(&i), Some(KnownType::I64));
+        assert!(is_i64_decoder(&i));
+        let u = two_form_decoder_fn(0, TAG_U64_OBJECT, TAG_U64_SMALL, ValObjectKind::ObjToU64);
+        assert_eq!(two_form_decoder(&u), Some(KnownType::U64));
+        assert!(!is_i64_decoder(&u));
+    }
+
+    /// An object extractor of another type under the tag is not the
+    /// conversion: `obj_to_u64` of an `I64Object` traps.
+    #[test]
+    fn a_decoder_extracting_another_type_is_none() {
+        use crate::marshalling::test_support::two_form_decoder_fn;
+        let f = two_form_decoder_fn(0, TAG_I64_OBJECT, TAG_I64_SMALL, ValObjectKind::ObjToU64);
+        assert_eq!(two_form_decoder(&f), None);
+        let g = two_form_decoder_fn(0, TAG_I64_OBJECT, TAG_U64_SMALL, ValObjectKind::ObjToI64);
+        assert_eq!(two_form_decoder(&g), None);
     }
 }

@@ -127,6 +127,20 @@
 //! overwritten part — a callee's tag byte in the slot the decode used —
 //! does not see them.
 //!
+//! **A field decoded by an outlined scalar decoder.** rustc outlines the
+//! `TryFromVal<Env, Val>` of an `i64` or `u64` field (two encodings, so a
+//! branch) into a helper `(x) -> (tag, value)` the struct decoder calls
+//! with the field's slot and tests the tag of, storing the value. That
+//! helper is `soroban-env-common`'s conversion and nothing else: `(0,
+//! obj_to_*(x))` under the object tag, `(0, body)` under the small tag,
+//! a non-zero tag otherwise. On a value proven to be the struct, the
+//! field is a `Val` of its declared type — one of those two forms — so
+//! the call returns `Ok` with the field's number, and the slot the
+//! struct decoder stores it in holds `val.f` exactly as an inlined
+//! decode's would. The re-emitted derive regenerates the call with the
+//! rest of the conversion. A slot stored from the tag, or from a decoder
+//! of another type than the field's, explains no read.
+//!
 //! # Gates
 //!
 //! - The key table reads out of rodata as identifiers, and exactly one
@@ -137,7 +151,11 @@
 //! - A helper is `(out, val)`, `val` typed as the struct, touches no host
 //!   state, uses `out` only as a store address, and stores each slot from
 //!   exactly one field of `val` or a constant; each slot is stored at one
-//!   width and no two slots overlap.
+//!   width and no two slots overlap. It calls nothing but a two-encoding
+//!   scalar decoder (`enum_match::two_form_decoder`: `i64` or `u64`),
+//!   handed one field of `val` that the struct declares at that type; a
+//!   slot stored from such a call is its value component `.1`, never its
+//!   tag, and nothing else the call returns reaches a slot.
 //! - Every read the decode may reach is an exact read of a field, half of
 //!   a wide field, or a discriminant written on every path; nothing else
 //!   that may read memory is handed the decode's bytes while they may still
@@ -224,10 +242,17 @@ impl Pass<HighIr> for UdtDecodePass {
         // Helpers whose own body has already been recognised as a struct
         // decode, so their out-parameter can be read as the struct's
         // fields at every call site.
+        // The derived decoders of a two-encoding scalar (`i64`, `u64`)
+        // rustc outlines; a struct decoder hands each such field to one.
+        let scalars: HashMap<FuncId, KnownType> = ir
+            .functions
+            .iter()
+            .filter_map(|f| super::enum_match::two_form_decoder(f).map(|t| (f.id, t)))
+            .collect();
         let helpers: HashMap<FuncId, DecoderHelper> = ir
             .functions
             .iter()
-            .filter_map(|f| classify_helper(f, &structs, &unions).map(|h| (f.id, h)))
+            .filter_map(|f| classify_helper(f, &structs, &unions, &scalars).map(|h| (f.id, h)))
             .collect();
         // What each helper reads and writes through each pointer it is
         // handed: a call touches a decode's slots only there.
@@ -1321,7 +1346,12 @@ struct DecoderHelper {
     slots: Vec<Slot>,
 }
 
-fn classify_helper(func: &HighFunction, structs: &[StructDef], unions: &[UnionDef]) -> Option<DecoderHelper> {
+fn classify_helper(
+    func: &HighFunction,
+    structs: &[StructDef],
+    unions: &[UnionDef],
+    scalars: &HashMap<FuncId, KnownType>,
+) -> Option<DecoderHelper> {
     if func.signature.is_some() || func.params.len() != 2 {
         { trace(func, "not a two-parameter helper"); return None; }
     }
@@ -1346,6 +1376,14 @@ fn classify_helper(func: &HighFunction, structs: &[StructDef], unions: &[UnionDe
                 // matching one store and not the other.
                 if *widths.entry(*offset).or_insert(width.bytes()) != width.bytes() {
                     trace(func, &format!("slot +{offset} is stored at two widths"));
+                    return None;
+                }
+            }
+            // A field's derived scalar decode, handed that field and
+            // nothing of `out`; `field_source` reads its value component.
+            Expr::Call { target, args } if scalars.contains_key(target) && args.len() == 1 => {
+                if resolve_use(func, args[0]) == out {
+                    trace(func, "out-pointer handed to a scalar decoder");
                     return None;
                 }
             }
@@ -1391,7 +1429,7 @@ fn classify_helper(func: &HighFunction, structs: &[StructDef], unions: &[UnionDe
             flat_arms(func, *v, 6, &mut arms);
         }
         for arm in &arms {
-            match field_source(func, *arm, val) {
+            match field_source(func, *arm, val, scalars, def) {
                 Some(name) => {
                     names.insert(name);
                 }
@@ -1411,7 +1449,7 @@ fn classify_helper(func: &HighFunction, structs: &[StructDef], unions: &[UnionDe
                 // Every arm the same half of the field, or every arm the
                 // whole of it.
                 let mut halves: Vec<Option<sordec_ir::UnaryOp>> = Vec::new();
-                for a in arms.iter().filter(|a| field_source(func, **a, val).is_some()) {
+                for a in arms.iter().filter(|a| field_source(func, **a, val, scalars, def).is_some()) {
                     let half = half_of(func, *a, val);
                     if !halves.contains(&half) {
                         halves.push(half);
@@ -2483,10 +2521,22 @@ fn apply_limb(
     }
 }
 
-fn field_source(func: &HighFunction, value: ValueId, val: ValueId) -> Option<String> {
+///
+/// Through a call only one way: the value component (`.1`) of a field's
+/// derived scalar decoder (`scalars`), whose argument must be exactly that
+/// field, declared at the decoder's type. Its `Ok` value is the field's
+/// number; its tag, or any other call, is not a field at all.
+fn field_source(
+    func: &HighFunction,
+    value: ValueId,
+    val: ValueId,
+    scalars: &HashMap<FuncId, KnownType>,
+    def: &StructDef,
+) -> Option<String> {
     let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut seen: std::collections::HashSet<ValueId> = std::collections::HashSet::new();
     let mut queue: std::collections::VecDeque<ValueId> = std::collections::VecDeque::from([value]);
+    let expr = |v: ValueId| func.bindings.get(resolve_use(func, v)).map(|b| &b.expr);
     while let Some(v) = queue.pop_front() {
         let id = resolve_use(func, v);
         if !seen.insert(id) {
@@ -2503,6 +2553,18 @@ fn field_source(func: &HighFunction, value: ValueId, val: ValueId) -> Option<Str
                 found.insert(field.clone());
             }
             Expr::Literal(_) => {}
+            Expr::Project { value: call, index } if matches!(expr(*call), Some(Expr::Call { .. })) => {
+                let Some(Expr::Call { target, args }) = expr(*call) else { return None };
+                let ty = scalars.get(target)?;
+                let [arg] = args.as_slice() else { return None };
+                let Some(Expr::Field { base, field }) = expr(*arg) else { return None };
+                let declared = def.fields.iter().find(|f| f.name == *field).and_then(|f| known_of_type_ref(&f.ty));
+                if *index != 1 || resolve_use(func, *base) != val || declared.as_ref() != Some(ty) {
+                    return None;
+                }
+                found.insert(field.clone());
+            }
+            Expr::Call { .. } | Expr::IndirectCall { .. } => return None,
             other => other.for_each_value_use(|u| queue.push_back(u)),
         }
     }
@@ -3253,6 +3315,99 @@ mod tests {
         helper.bindings.get_mut(v(1)).unwrap().ty = IrType::Known(KnownType::UserDefined(TypeId::new(7)));
         let mut m = ir(helper_caller(0, 1));
         m.functions.push(helper);
+        UdtDecodePass.run(&mut m);
+        untouched(&m, 0, 2, &[3, 4]);
+    }
+
+    /// `Counter { count: i64, owner: Address }`, id 9, beside `Balance`.
+    fn with_counter(m: &mut HighIr, count: PrimitiveType) {
+        m.soroban_facts.as_mut().unwrap().types.structs.push(StructDef {
+            id: TypeId::new(9),
+            name: "Counter".to_string(),
+            fields: vec![
+                StructField { name: "count".to_string(), ty: TypeRef::Primitive(count) },
+                StructField { name: "owner".to_string(), ty: TypeRef::Primitive(PrimitiveType::Address) },
+            ],
+        });
+    }
+
+    /// A `Counter` decoder helper that hands `val.count` to the outlined
+    /// `i64` decoder `func_2` and stores component `component` of its
+    /// result at `out+8`, `val.owner` at `out+16`, and the `Ok` code at
+    /// `out+0`; an entrypoint `f(c: Counter)` calls it and reads all three.
+    fn scalar_helper_module(component: u32, count: PrimitiveType) -> HighIr {
+        let mut helper = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                          // v0 out
+                Expr::Phi { incoming: vec![] },                                          // v1 val
+                Expr::Field { base: v(1), field: "count".to_string() },                 // v2
+                Expr::Call { target: FuncId::from_index(2), args: vec![v(2)] },         // v3
+                Expr::Project { value: v(3), index: component },                        // v4
+                store(v(0), v(4), 8),                                                    // v5
+                Expr::Field { base: v(1), field: "owner".to_string() },                 // v6
+                store(v(0), v(6), 16),                                                   // v7
+                Expr::Literal(Literal::I64(0)),                                          // v8
+                store(v(0), v(8), 0),                                                    // v9
+            ],
+            vec![v(0), v(1)],
+            (2..10).collect(),
+        );
+        helper.id = FuncId::from_index(1);
+        helper.bindings.get_mut(v(1)).unwrap().ty = IrType::Known(KnownType::UserDefined(TypeId::new(9)));
+        let mut caller = helper_caller(0, 1);
+        caller.signature.as_mut().unwrap().inputs[0].ty = TypeRef::UserDefined(TypeId::new(9));
+        caller.bindings.push(sordec_ir::Binding::new(
+            v(5),
+            IrType::Unknown(UnknownReason::InsufficientEvidence),
+            load(v(1), 16),
+            sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+        ));
+        caller.blocks.get_mut(sordec_common::BlockId::from_index(0)).unwrap().bindings.push(v(5));
+        // The helper's reads: +8 the count, +0 the discriminant, +16 the owner.
+        caller.bindings.get_mut(v(3)).unwrap().expr = load(v(1), 8);
+        caller.bindings.get_mut(v(4)).unwrap().expr = load(v(1), 0);
+        let mut m = ir(caller);
+        with_counter(&mut m, count);
+        m.functions.push(helper);
+        m.functions.push(crate::marshalling::test_support::two_form_decoder_fn(
+            2,
+            crate::val_abi::TAG_I64_OBJECT,
+            crate::val_abi::TAG_I64_SMALL,
+            sordec_ir::ValObjectKind::ObjToI64,
+        ));
+        m
+    }
+
+    /// The `Ok` value of a field's outlined scalar decoder is the field.
+    #[test]
+    fn a_helper_handing_a_field_to_its_scalar_decoder_collapses() {
+        let mut m = scalar_helper_module(1, PrimitiveType::I64);
+        assert!(UdtDecodePass.run(&mut m).changed);
+        let c = m.function(FuncId::from_index(0)).unwrap();
+        let field = |id: u32| match &c.bindings.get(v(id)).unwrap().expr {
+            Expr::Field { base, field } if *base == v(0) => Some(field.clone()),
+            _ => None,
+        };
+        assert_eq!(field(3).as_deref(), Some("count"));
+        assert_eq!(field(5).as_deref(), Some("owner"));
+        assert!(matches!(c.bindings.get(v(4)).unwrap().expr, Expr::Literal(Literal::I32(0))));
+        assert!(matches!(c.bindings.get(v(2)).unwrap().expr, Expr::Literal(Literal::Unit)));
+    }
+
+    /// The decoder's tag is not the field: a helper storing it keeps
+    /// every call site.
+    #[test]
+    fn a_helper_storing_a_decoders_tag_keeps_the_call() {
+        let mut m = scalar_helper_module(0, PrimitiveType::I64);
+        UdtDecodePass.run(&mut m);
+        untouched(&m, 0, 2, &[3, 4]);
+    }
+
+    /// An `i64` decoder on a field declared another type is not that
+    /// field's derived conversion.
+    #[test]
+    fn a_decoder_of_another_type_than_the_field_keeps_the_call() {
+        let mut m = scalar_helper_module(1, PrimitiveType::U64);
         UdtDecodePass.run(&mut m);
         untouched(&m, 0, 2, &[3, 4]);
     }

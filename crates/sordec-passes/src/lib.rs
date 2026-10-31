@@ -291,6 +291,10 @@ pub const SYMBOL_ARGS_AFTER_TYPES: &str = "symbol-args-after-types";
 /// a struct payload is then a value typed by its variant, and its own
 /// derived decode in the arm is the shape the pass recognises.
 pub const UDT_DECODE_AFTER_ENUM_ITER: &str = "udt-decode-after-enum-iter";
+/// [`UdtDecodePass`] once more: the run above may type a decoder helper's
+/// value parameter (every caller now hands it a proven struct), and only
+/// a typed helper is read as that struct's decode at its call sites.
+pub const UDT_DECODE_AFTER_HELPER_TYPES: &str = "udt-decode-after-helper-types";
 /// [`ValDecodeCollapsePass`] re-run once the `Option`-shaped decoders exist.
 pub const VAL_DECODE_AFTER_OPTIONAL: &str = "val-decode-after-optional";
 /// [`OptionReturnPass`] re-run once the type pass has typed the arms.
@@ -762,6 +766,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // `next` into an `Option` at some call sites and not others.
             Box::new(EnumIterPass),
             Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_ENUM_ITER, &[])),
+            Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_HELPER_TYPES, &[])),
             // Any other `Option` a helper hands back through its caller's
             // frame. After the group, not in it: the group's own
             // `get(..).unwrap()` collapse is the better recovery wherever it

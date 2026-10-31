@@ -351,6 +351,56 @@ pub(crate) mod test_support {
         }
     }
 
+    /// `func_{id}`, the derived decoder of a two-encoding scalar as rustc
+    /// outlines it: `(x) -> (tag, value)`, `(0, extract(x))` under the
+    /// `object` tag, `(0, body(x))` under the `small` tag, else `(1, err)`.
+    pub(crate) fn two_form_decoder_fn(
+        id: u32,
+        object: u8,
+        small: u8,
+        extract: sordec_ir::ValObjectKind,
+    ) -> HighFunction {
+        use sordec_ir::{KnownOp, Literal, SemanticOp};
+        let tag = |tag| Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value: v(0), tag, negated: false }));
+        let mut func = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                                     // v0 x
+                Expr::Literal(Literal::I64(0)),                                                     // v1 Ok
+                tag(object),                                                                        // v2
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValObject { kind: extract, args: vec![v(0)] })), // v3
+                tag(small),                                                                         // v4
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value: v(0) })),         // v5
+                Expr::Literal(Literal::I64(1)),                                                     // v6 Err
+                Expr::Literal(Literal::I64(34_359_740_419)),                                        // v7
+            ],
+            vec![v(0)],
+            vec![1, 2],
+        );
+        for (i, b) in [vec![3], vec![4], vec![5], vec![6, 7]].into_iter().enumerate() {
+            func.blocks.push(HighBlock { id: BlockId::from_index(i as u32 + 1), bindings: b.into_iter().map(v).collect() });
+        }
+        let ret = |a: u32, b: u32| Region::Return { values: vec![v(a), v(b)] };
+        let bb = |i: u32| Region::Basic(BlockId::from_index(i));
+        func.region = Region::Sequence(vec![
+            bb(0),
+            Region::If {
+                cond: v(2),
+                then_region: Box::new(Region::Sequence(vec![bb(1), ret(1, 3)])),
+                else_region: None,
+            },
+            bb(2),
+            Region::If {
+                cond: v(4),
+                then_region: Box::new(Region::Sequence(vec![bb(3), ret(1, 5)])),
+                else_region: None,
+            },
+            bb(4),
+            ret(6, 7),
+        ]);
+        func.id = FuncId::from_index(id);
+        func
+    }
+
     /// A function, `func_{id}`, that makes one raw `call_indirect` — the
     /// form the pipeline leaves every real one in.
     pub(crate) fn raw_indirect_caller(id: u32) -> HighFunction {
