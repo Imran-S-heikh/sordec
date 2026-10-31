@@ -176,13 +176,21 @@ fn bools_as_ints(
 /// `bool` in a byte and masks it. `flag & 1` is the flag; any other
 /// combination casts the flag to the integer's type, which is the `0` or
 /// `1` the wasm held.
+///
+/// A shift is the same word: `(x == 2) << 1` is rustc's branchless `2` or
+/// `0`, the comparison's `0` or `1` shifted as the `i32` the opcode holds.
+/// Wasm shifts both operands at one width, so the flag takes the other
+/// operand's type whichever side it is on.
 fn bool_with_int(
     ctx: &FnCtx,
     op: BinaryOp,
     lhs: sordec_common::ValueId,
     rhs: sordec_common::ValueId,
 ) -> Option<syn::Expr> {
-    if !matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor) {
+    if !matches!(
+        op,
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::ShrU
+    ) {
         return None;
     }
     let int = |v: sordec_common::ValueId| {
@@ -211,7 +219,12 @@ fn bool_with_int(
         return Some(parse_quote!((#x as #ty)));
     }
     let x = bool_to_int(ctx, flag, &other_ty)?;
-    Some(binary_expr(op, x, ctx.value_ref(other)))
+    // Operand order matters for a shift; the bitwise three commute.
+    Some(if flag == lhs {
+        binary_expr(op, x, ctx.value_ref(other))
+    } else {
+        binary_expr(op, ctx.value_ref(other), x)
+    })
 }
 
 /// `x - n` for an addition of `x` and a negative constant `-n`, either way

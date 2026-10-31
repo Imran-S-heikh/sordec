@@ -2270,6 +2270,30 @@ mod tests {
         }
     }
 
+    /// `(x == 2) << 1` and `1 << (x == 2)`: the test is the `0` or `1` the
+    /// opcode shifts, in the other operand's type, and the order is kept.
+    #[test]
+    fn a_shifted_test_is_cast_to_the_shift_s_width() {
+        let shifted = |lhs: u32, rhs: u32| {
+            emitted(
+                vec![
+                    (IrType::Known(KnownType::I32), Expr::Phi { incoming: vec![] }), // v1 x
+                    (IrType::Known(KnownType::I32), Expr::Literal(sordec_ir::Literal::I32(2))), // v2
+                    (IrType::Inferred(KnownType::Bool), Expr::Binary { op: BinaryOp::Eq, lhs: v(1), rhs: v(2) }), // v3
+                    (IrType::Known(KnownType::I32), Expr::Literal(sordec_ir::Literal::I32(1))), // v4
+                    (IrType::Inferred(KnownType::I32), Expr::Binary { op: BinaryOp::Shl, lhs: v(lhs), rhs: v(rhs) }), // v5
+                    (untyped(), store(5)),
+                ],
+                vec![],
+                &TypeRegistry::default(),
+            )
+        };
+        let out = shifted(3, 4);
+        assert!(out.contains("as i32) << 1i32"), "{out}");
+        let out = shifted(4, 3);
+        assert!(out.contains("1i32 << (") && out.trim_end().contains("as i32)"), "{out}");
+    }
+
     /// `i + (i < n)` and `i * flag`, with `i: u32`: the test is the `0` or
     /// `1` the wasm added, in `i`'s type. Two integers stay as they were.
     #[test]
