@@ -2781,6 +2781,32 @@ mod tests {
         assert!(pushed(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)).contains("todo !"));
     }
 
+    /// `vec_del(v, val_encode::<u32>(i))` with `v` typed `vec_ty` and `i`
+    /// typed `index_ty`.
+    fn deleted(vec_ty: IrType, index_ty: KnownType) -> String {
+        let new = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::New, args: vec![] });
+        let index = Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(0) };
+        let encode = known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v(2) });
+        let del = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::Del, args: vec![v(1), v(3)] });
+        emitted(
+            vec![(vec_ty.clone(), new), (IrType::Known(index_ty), index), (IrType::Known(KnownType::Val), encode), (vec_ty, del)],
+            vec![ret(4)],
+            &TypeRegistry::default(),
+        )
+    }
+
+    #[test]
+    fn a_del_at_an_encoded_u32_index_is_remove_unchecked_on_a_copy() {
+        let vec_val = IrType::Known(KnownType::Vec(Box::new(IrType::Known(KnownType::Val))));
+        let body = deleted(vec_val.clone(), KnownType::U32);
+        assert!(body.contains("removed . remove_unchecked (v2)"), "{body}");
+        assert!(!body.contains("todo !"), "the encode is not read any more: {body}");
+        // An index not known to be the encoded `u32` stays a hole.
+        assert!(!deleted(vec_val, KnownType::I64).contains("remove_unchecked"));
+        // So does a receiver not typed as a vec.
+        assert!(!deleted(IrType::Known(KnownType::Val), KnownType::U32).contains("remove_unchecked"));
+    }
+
     #[test]
     fn a_bare_map_new_is_an_empty_map() {
         let map = IrType::Known(KnownType::Map(
