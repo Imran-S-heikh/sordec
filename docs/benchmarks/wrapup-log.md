@@ -911,3 +911,20 @@ the `match` in `check_time_bound`), but rustc inlined that helper into `claim`, 
 structure category counts it as a branch the source's `claim` lacks (timelock 1.0000 →
 0.9790). Faithful output was kept over the number; the band note in
 `crates/sordec/tests/benchmark.rs` records why. Held-out mean 0.7882.
+
+## 2026-10-31 — commit b8d86b9 (curve points as SDK calls; frame stores nothing can read)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 84 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,376 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 1,525 |
+| third-party | 2 | 1/2 | 8 | 607 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 518 |
+
+BLS12-381 and BN254 point operations print as `e.crypto().bls12_381()` / `bn254()` methods
+when each point operand is already a `BytesN` of the point's size (`from_bytes` is a plain
+wrap in every SDK version used; type names follow the recovered SDK major). A store into the
+frame is dropped when every path from it overwrites those bytes, returns or traps before
+anything may read them — the scratch of `vec!` builds, mostly. Holes 6,427 → 6,110 (summed);
+errors unchanged at 9; corpus byte-identical; held-out mean 0.7889.
