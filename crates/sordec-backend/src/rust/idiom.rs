@@ -290,9 +290,12 @@ pub(crate) fn converted_to_val(ctx: &FnCtx, op: &KnownOp) -> Option<sordec_commo
     }
 }
 
-/// The operand an op's chain hands to an SDK method generic in
-/// `IntoVal<Env, Val>` as it is: the value `storage().set(&k, &v)` stores,
-/// the data `events().publish(t, d)` publishes.
+/// The operands an op's chain hands to an SDK method generic in
+/// `IntoVal<Env, Val>` as they are: the value `storage().set(&k, &v)`
+/// stores, the data `events().publish(t, d)` publishes, each value of a
+/// `Map::<Symbol, Val>::from_array` entry (`IntoVal::into_val(&v, &e)`),
+/// and what `to_xdr` serializes (the SDK's `ToXdr` is implemented for every
+/// `IntoVal<Env, Val>`, and converts first).
 ///
 /// Nothing at such a position pins the operand's type, so an untyped hole
 /// read only there falls back to `()` — "depends on never type fallback".
@@ -303,11 +306,13 @@ pub(crate) fn converted_to_val(ctx: &FnCtx, op: &KnownOp) -> Option<sordec_commo
 /// The key is left out: [`key_expr`] may print a resolved key that does
 /// not read the operand, and a topic list goes through `Topics`, not
 /// `IntoVal`.
-pub(crate) fn generic_val_operand(op: &KnownOp) -> Option<sordec_common::ValueId> {
+pub(crate) fn generic_val_operands(op: &KnownOp) -> Vec<sordec_common::ValueId> {
     match op {
-        KnownOp::StorageSet { value, .. } => Some(*value),
-        KnownOp::PublishEvent { data, .. } => Some(*data),
-        _ => None,
+        KnownOp::StorageSet { value, .. } => vec![*value],
+        KnownOp::PublishEvent { data, .. } => vec![*data],
+        KnownOp::MapNew { entries: Some(entries), .. } => entries.iter().map(|(_, value)| *value).collect(),
+        KnownOp::BufOp { kind: BufOpKind::SerializeToBytes, args } if args.len() == 1 => args.clone(),
+        _ => Vec::new(),
     }
 }
 

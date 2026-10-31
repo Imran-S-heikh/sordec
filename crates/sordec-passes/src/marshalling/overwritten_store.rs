@@ -58,6 +58,40 @@
 //! though it reads its keys from memory too), and every other operation
 //! that may read memory stops the walk.
 //!
+//! ## A call whose reach into the frame is known
+//!
+//! A direct call reads the frame only through the frame addresses it is
+//! handed, when the function keeps its frame to itself: then no other
+//! address of it exists anywhere a callee could find one. So a call does not
+//! stop the walk when every frame address it is handed is the frame pointer
+//! plus a constant, and what the callee does through each is known and
+//! reads none of the bytes still unwritten — its body's loads and stores
+//! through that parameter, at constant offsets, and the same of the calls
+//! it hands it on to (`optional_out`'s `Frames`, which the out-parameter
+//! census already counts by). A call handed no frame address reads none of
+//! it, and neither does any other operation handed none: a load from
+//! another address, a host function reading a string out of the data
+//! section. What the callee may write there does not count as written
+//! over: a write it may make is not one it always makes.
+//!
+//! `execute`'s `enroll(..)?` in the treasury is the witness: the pair the
+//! call returned is stored back into the slot its out-pointer had, and
+//! nothing reads it, but the token transfer and the event after it are
+//! calls, so each slot printed as a hole.
+//!
+//! Why it is exact: a frame address reaches a callee only as an argument,
+//! or through memory, a merge or a return. **The frame is kept** (a gate)
+//! closes the other ways: no value computed from the frame pointer, in any
+//! way, is stored, returned, handed to an indirect call, or handed to a
+//! direct call that is not the copy or fill routine and whose reach through
+//! it is not known; a known reach is a body that only loads and stores
+//! through the pointer, so it keeps no copy of it either. In the walk, a
+//! call handed such a value other than as the frame pointer plus a constant
+//! (`(fp + 80) | 8` is one) stops it, as before. The one premise is the
+//! shadow stack's, which every frame analysis here rests on: a callee's own
+//! frame is carved below the stack pointer, and it reads its caller's only
+//! through a pointer it was given.
+//!
 //! # Gates
 //!
 //! - **The frame pointer**: `global.get - size`, as [`super::dead_store`]
@@ -65,19 +99,28 @@
 //! - **No frame address leaves**: none is returned or stored outside the
 //!   frame. (Handed to a call is fine — the call itself stops any walk
 //!   that reaches it.)
+//! - **The frame is kept**, for a call not to stop the walk: no value
+//!   computed from the frame pointer is stored anywhere, returned, handed to
+//!   an indirect call, or handed to a direct call whose reach is unknown or
+//!   that receives it other than as the frame pointer plus a constant,
+//!   unless that call is the copy or fill routine. A stack-pointer write is
+//!   the prologue and epilogue, and allowed.
 //! - **The walk**: entering a loop, going round one, an unstructured
 //!   region, or more than [`MAX_STEPS`] steps keeps the store. Both arms of
 //!   a branch, and every arm of a switch, must clear it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sordec_common::{BlockId, ValueId};
-use sordec_ir::{Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region, SemanticOp};
+use sordec_ir::{Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region, SemanticOp, WasmOpcodeKind};
 
+use super::optional_out::Frames;
+use super::sret::emission_order;
 use super::{apply_elisions, metrics, Elision};
 use crate::dataflow::{canon_addr, resolve_use};
 use crate::effects::expr_effects;
 use crate::pass::{Pass, PassResult};
+use crate::recognizers::mem_builtins::copy_or_fill;
 
 /// Pass name — also the provenance `pass` field for every elision.
 pub const PASS_NAME: &str = "marshalling-overwritten-frame-store";
@@ -96,8 +139,11 @@ impl Pass<HighIr> for OverwrittenFrameStorePass {
 
     fn run(&self, ir: &mut HighIr) -> PassResult {
         let mut result = PassResult::default();
-        for func in &mut ir.functions {
-            let elisions = plan(func);
+        let plans: Vec<Vec<Elision>> = {
+            let frames = Frames::new(ir);
+            ir.functions.iter().map(|f| plan(&frames, f)).collect()
+        };
+        for (func, elisions) in ir.functions.iter_mut().zip(plans) {
             if elisions.is_empty() {
                 continue;
             }
@@ -120,13 +166,14 @@ enum Frame<'r> {
     Loop,
 }
 
-fn plan(func: &HighFunction) -> Vec<Elision> {
+fn plan(frames: &Frames<'_>, func: &HighFunction) -> Vec<Elision> {
     let Some(fp) = super::dead_store::frame_pointer(func) else {
         return Vec::new();
     };
     if frame_address_leaves(func, fp) {
         return Vec::new();
     }
+    let kept = frame_kept(frames, func, fp);
     let mut after: HashMap<BlockId, Vec<Frame<'_>>> = HashMap::new();
     index(&func.region, Vec::new(), &mut after);
 
@@ -142,7 +189,15 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
             if base != fp || width.bytes() > 8 {
                 continue;
             }
-            let mut walk = Walk { func, fp, start, mask: full_mask(width.bytes()), steps: 0 };
+            let mut walk = Walk {
+                func,
+                fp,
+                start,
+                mask: full_mask(width.bytes()),
+                steps: 0,
+                frames,
+                kept: kept.as_ref(),
+            };
             let dead = match walk.scan(&block.bindings[i + 1..]) {
                 Some(dead) => dead,
                 None => walk.rest(k.clone()),
@@ -222,6 +277,84 @@ fn frame_address_leaves(func: &HighFunction, fp: ValueId) -> bool {
     leaves
 }
 
+/// The values computed from the frame pointer, when the function keeps its
+/// frame to itself (see *The frame is kept*); `None` when it may not.
+///
+/// Computed from: any binding reading such a value but a load (what it
+/// reads is not the address: none is ever stored), a store (it yields
+/// nothing), or a direct call other than the copy or fill routine. Such a
+/// call handed a frame address must have a known reach, and a known reach
+/// is a body that reads the pointer only as an address: it does not return
+/// it (the routine returns its destination, so its result is one). A host
+/// operation's result counts: a linear-memory position is handed to the
+/// host as an encoded `U32Val`, and `val_encode(fp + 16)` is one.
+fn frame_kept(frames: &Frames<'_>, func: &HighFunction, fp: ValueId) -> Option<HashSet<ValueId>> {
+    let mut tainted: HashSet<ValueId> = HashSet::from([fp]);
+    let returns_nothing_of_it = |expr: &Expr| match expr {
+        Expr::Load { .. } | Expr::Store { .. } => true,
+        Expr::Call { target, .. } => !copy_or_fill(frames.ir(), *target),
+        _ => false,
+    };
+    loop {
+        let mut grew = false;
+        for (id, binding) in func.bindings.iter() {
+            if tainted.contains(&id) || returns_nothing_of_it(&binding.expr) {
+                continue;
+            }
+            let mut reads = false;
+            binding.expr.for_each_value_use(|u| reads |= tainted.contains(&u));
+            if reads {
+                tainted.insert(id);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let is = |v: ValueId| tainted.contains(&v) || tainted.contains(&resolve_use(func, v));
+    let mut returned = false;
+    func.region.for_each_node(|node| {
+        if let Region::Return { values } = node {
+            returned |= values.iter().any(|v| is(*v));
+        }
+    });
+    if returned {
+        trace(func, fp, "the frame is not kept: a frame address is returned");
+        return None;
+    }
+    for id in emission_order(func) {
+        let kept = match &func.bindings.get(id)?.expr {
+            Expr::Store { value, .. } => !is(*value),
+            Expr::IndirectCall { args, .. } | Expr::Unknown { op_kind: WasmOpcodeKind::CallIndirect, args, .. } => {
+                !args.iter().any(|a| is(*a))
+            }
+            Expr::Call { target, args } if args.iter().any(|a| is(*a)) => {
+                copy_or_fill(frames.ir(), *target)
+                    || (args.iter().all(|a| !is(*a) || canon_addr(func, *a).0 == fp)
+                        && frames.touches(func, id, fp).is_some())
+            }
+            _ => true,
+        };
+        if !kept {
+            trace(func, id, "the frame is not kept: a frame address reaches this");
+            return None;
+        }
+    }
+    Some(tainted)
+}
+
+/// Why a function's frame is not kept, printed when
+/// `SORDEC_DEAD_STORE_TRACE` is set (the switch [`super::dead_store`]
+/// reads).
+#[allow(clippy::print_stderr)]
+fn trace(func: &HighFunction, at: ValueId, why: &str) {
+    if std::env::var_os("SORDEC_DEAD_STORE_TRACE").is_some() {
+        use sordec_common::IrId as _;
+        eprintln!("overwritten-store: func_{} v{}: {why}", func.id.index(), at.index());
+    }
+}
+
 /// The low `width` bits set: one per byte of a store.
 fn full_mask(width: u32) -> u8 {
     if width >= 8 { u8::MAX } else { (1u8 << width) - 1 }
@@ -248,6 +381,11 @@ struct Walk<'a> {
     /// Its bytes not yet overwritten.
     mask: u8,
     steps: usize,
+    /// What each call can touch through the frame addresses it is handed.
+    frames: &'a Frames<'a>,
+    /// The values computed from the frame pointer, when the frame is kept;
+    /// `None` makes every call stop the walk.
+    kept: Option<&'a HashSet<ValueId>>,
 }
 
 impl<'a> Walk<'a> {
@@ -280,13 +418,22 @@ impl<'a> Walk<'a> {
                             Some(at) if self.mask & covered(self.start, at, width.bytes()) == 0 => {}
                             _ => return Some(false),
                         }
-                    } else if !self.func.params.contains(&base) {
+                    } else if !self.func.params.contains(&base) && !self.frameless(&binding.expr) {
+                        return Some(false);
+                    }
+                }
+                Expr::Call { args, .. } if self.kept.is_some() => {
+                    if !self.call_misses(id, args) {
                         return Some(false);
                     }
                 }
                 Expr::Semantic(SemanticOp::Known(
                     KnownOp::VecNew { elements: Some(_), .. } | KnownOp::MapNew { entries: Some(_), .. },
                 )) => {}
+                // In a kept frame, an operation handed no frame address
+                // reaches none of it: the string a `Symbol::new` reads sits
+                // in the data section.
+                other if self.frameless(other) => {}
                 // A host operation that touches linear memory at all is
                 // taken as reading it: the effect table records some by
                 // their write alone (`map_unpack_to_linear_memory` also
@@ -305,6 +452,32 @@ impl<'a> Walk<'a> {
             }
         }
         None
+    }
+
+    /// Whether, in a function that keeps its frame, `expr` is handed no
+    /// value computed from the frame pointer — and so, by the frame being
+    /// kept, no address of the frame at all.
+    fn frameless(&self, expr: &Expr) -> bool {
+        let Some(tainted) = self.kept else { return false };
+        let mut framed = false;
+        expr.for_each_value_use(|u| framed |= tainted.contains(&u) || tainted.contains(&resolve_use(self.func, u)));
+        !framed
+    }
+
+    /// Whether the direct call at `id`, in a function that keeps its frame,
+    /// reads none of the bytes still unwritten: every frame address it is
+    /// handed is the frame pointer plus a constant, and what it reads
+    /// through each is known and misses them.
+    fn call_misses(&self, id: ValueId, args: &[ValueId]) -> bool {
+        let Some(tainted) = self.kept else { return false };
+        let framed = |v: ValueId| tainted.contains(&v) || tainted.contains(&resolve_use(self.func, v));
+        if args.iter().any(|a| framed(*a) && canon_addr(self.func, *a).0 != self.fp) {
+            return false;
+        }
+        let Some(touched) = self.frames.touches(self.func, id, self.fp) else { return false };
+        touched
+            .iter()
+            .all(|(slot, write)| *write || self.mask & covered(self.start, slot.offset, slot.bytes) == 0)
     }
 
     /// Whether the store is dead on every path through the continuation
@@ -522,6 +695,89 @@ mod tests {
         // An arm that falls through to the overwrite clears it as well.
         let f = run(branching(vec![load(v(0), 0)], vec![store(v(3), v(5), 8)], false));
         assert!(elided(&f, 8));
+    }
+
+    /// func_9: loads 8 bytes at +0 of its pointer, and nothing else.
+    fn reader() -> HighFunction {
+        let mut f = func_with(vec![Expr::Phi { incoming: vec![] }, load(v(0), 0)], vec![v(0)], vec![1]);
+        f.id = FuncId::from_index(9);
+        f
+    }
+
+    fn run_with_reader(func: HighFunction) -> HighFunction {
+        let mut m = module(vec![func, reader()]);
+        OverwrittenFrameStorePass.run(&mut m);
+        m.functions.remove(0)
+    }
+
+    /// `framed` with the store at fp+8 (v8), then `fp + at` (v9 the
+    /// constant, v10 the address) handed to the reader (v11).
+    fn store_then_read_at(at: i32) -> HighFunction {
+        one_block(framed(vec![
+            store(v(3), v(5), 8),                                     // v8
+            Expr::Literal(Literal::I32(at)),                          // v9
+            Expr::Binary { op: BinaryOp::Add, lhs: v(3), rhs: v(9) }, // v10
+            call(v(10)),                                              // v11
+        ]))
+    }
+
+    /// A call whose reach into the frame is known and misses the store does
+    /// not read it: the store goes. One that reaches it keeps it.
+    #[test]
+    fn a_call_that_reads_other_bytes_of_a_kept_frame_does_not_keep_it() {
+        assert!(elided(&run_with_reader(store_then_read_at(16)), 8), "reads fp+16..24 only");
+        assert!(!elided(&run_with_reader(store_then_read_at(8)), 8), "reads the stored bytes");
+        // With the callee's reach unknown, the call stops the walk as before.
+        assert!(!elided(&run(store_then_read_at(16)), 8));
+    }
+
+    /// In a kept frame, a load from an address not computed from the frame
+    /// pointer reads none of it; one from `fp | 8` may, and so may a host
+    /// function handed the frame as an encoded position.
+    #[test]
+    fn in_a_kept_frame_only_frame_addresses_reach_it() {
+        let elsewhere = one_block(framed(vec![store(v(3), v(5), 8), load(v(5), 0)]));
+        assert!(elided(&run_with_reader(elsewhere), 8));
+        let disguised = one_block(framed(vec![
+            store(v(3), v(5), 8),                                       // v8
+            Expr::Binary { op: BinaryOp::BitOr, lhs: v(3), rhs: v(6) }, // v9: fp | 8
+            load(v(9), 0),                                              // v10
+        ]));
+        assert!(!elided(&run_with_reader(disguised), 8));
+        let encoded = one_block(framed(vec![
+            store(v(3), v(5), 8), // v8
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v(3) })), // v9
+            Expr::Semantic(SemanticOp::Known(KnownOp::MapOp {
+                kind: sordec_ir::MapOpKind::UnpackToLinearMemory,
+                args: vec![v(5), v(5), v(9), v(5)],
+            })), // v10: touches memory at fp, handed it encoded
+        ]));
+        assert!(!elided(&run_with_reader(encoded), 8));
+    }
+
+    /// The frame not kept: a frame address stored as a value, or handed to
+    /// a call other than as the frame pointer plus a constant. Every call
+    /// then stops the walk.
+    #[test]
+    fn a_frame_address_stored_or_disguised_makes_every_call_a_reader() {
+        // fp itself stored into the frame, where a callee could load it.
+        let mut stashed = store_then_read_at(16);
+        stashed.bindings.push(sordec_ir::Binding::new(
+            v(12),
+            IrType::Unknown(UnknownReason::InsufficientEvidence),
+            store(v(3), v(3), 24),
+            sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+        ));
+        let entry = &mut stashed.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings;
+        let at = entry.iter().position(|b| *b == v(8)).unwrap();
+        entry.insert(at, v(12));
+        assert!(!elided(&run_with_reader(stashed), 8));
+
+        // `(fp + 16) | 0` handed to the reader: a frame address the walk
+        // cannot place.
+        let mut disguised = store_then_read_at(16);
+        disguised.bindings.get_mut(v(10)).unwrap().expr = Expr::Binary { op: BinaryOp::BitOr, lhs: v(3), rhs: v(9) };
+        assert!(!elided(&run_with_reader(disguised), 8));
     }
 
     /// A loop is not entered: the store before it stays.

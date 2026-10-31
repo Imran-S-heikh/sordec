@@ -1248,6 +1248,16 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 parse_quote!(#value.unwrap().#field)
             }
         }
+        Expr::IsErr { value } => {
+            let value = ctx.value_ref(*value);
+            parse_quote!(#value.is_err())
+        }
+        // An error is proven present where this sits; by value like
+        // `unwrap`. The error is a `#[repr(u32)]` enum: its discriminant.
+        Expr::ErrCode { value } => {
+            let value = ctx.arg_ref(*value);
+            parse_quote!((#value.unwrap_err() as u32))
+        }
         // By value like `unwrap`; a constant fallback is spelled against
         // the payload's type, as the source wrote it (`unwrap_or(0)`).
         Expr::UnwrapOr { value, default } => {

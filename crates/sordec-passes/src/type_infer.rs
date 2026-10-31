@@ -1249,7 +1249,9 @@ fn infer_expr(expr: &Expr, types: &HashMap<ValueId, IrType>) -> Option<IrType> {
                 })
                 .collect(),
         ))),
-        Expr::IsSome { .. } => Some(IrType::Known(KnownType::Bool)),
+        Expr::IsSome { .. } | Expr::IsErr { .. } => Some(IrType::Known(KnownType::Bool)),
+        // `as u32` of the error's discriminant: the spelling fixes the type.
+        Expr::ErrCode { .. } => Some(IrType::Known(KnownType::U32)),
         Expr::Unwrap { value, index, arity } => {
             let KnownType::Option(payload) = base_of(types.get(value))? else {
                 return None;
