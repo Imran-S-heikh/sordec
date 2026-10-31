@@ -964,3 +964,17 @@ mean 0.7890. The treasury (our authored test contract): 19 errors, 537 gaps, 2,4
 
 **Day totals (2026-10-31):** holes 9,591 → 5,737 (−3,854); errors 11 → 9; SDK 26 39/39;
 reference aggregate 0.9389 → 0.9359 (the deliberate `select` change); held-out mean 0.7865 → 0.7890.
+
+## 2026-10-31 — commit a0922d0 (treasury round 2: map and Option typing, Result converters, vec search results)
+
+The measured sets are unchanged apart from atomic_multiswap (16 → 14 gaps: its `remove(j)` now
+prints as `remove_unchecked`); holes 5,737 → 5,735; errors 9. General rules found on the
+authored treasury contract:
+- a map a put or del hands back is that map, and an untyped `Map<?, ?>` yields to the declared
+  `Map<K, V>`;
+- an `unwrap()` names the `Option` it came from;
+- the run-time error-code rewrite covers a helper every caller returns, and a `Result`
+  converter handed its pair in registers becomes each path's `Ok`/`Err`;
+- a vec search's result is the `Option<u32>` the SDK makes of it.
+
+The treasury goes from 19 to 10 `cargo check` errors (535 gaps, 2,464 lines).
