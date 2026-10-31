@@ -42,6 +42,10 @@
 //!   pair is not what it looks like, and the rewrite is abandoned.
 //! - **One partner each**, so a run cannot produce two merges naming the
 //!   same half.
+//! - **The merge's type** is the 128-bit type every value it carries
+//!   already has — a merge of `u128` struct fields is a `u128` — and
+//!   `Known` only when each of them is. Halves alone say only "128 bits",
+//!   so with no such agreement it is `i128`, inferred.
 
 use std::collections::{HashMap, HashSet};
 
@@ -74,12 +78,8 @@ impl Pass<HighIr> for WidePhiPass {
                     "the value whose halves these two merges carried",
                 );
                 let whole = ValueId::from_index(func.bindings.len() as u32);
-                func.bindings.push(Binding::new(
-                    whole,
-                    IrType::Inferred(KnownType::I128),
-                    Expr::Phi { incoming },
-                    note.clone(),
-                ));
+                let ty = merged_type(func, &incoming);
+                func.bindings.push(Binding::new(whole, ty, Expr::Phi { incoming }, note.clone()));
                 // Move the assignments before touching the parameters: if
                 // any transfer does not pair cleanly the whole rewrite is
                 // off, and nothing has changed yet.
@@ -202,6 +202,28 @@ fn walk(
     }
 }
 
+/// The type of the merge of `incoming`: the 128-bit type every value it
+/// carries already has — `Known` when each is proven, else `Inferred` —
+/// so a merge of `u128`s stays a `u128`. With no such agreement, the
+/// halves alone say only "128 bits", read as `i128`, inferred.
+fn merged_type(func: &HighFunction, incoming: &[(BlockId, ValueId)]) -> IrType {
+    let types: Vec<&IrType> =
+        incoming.iter().filter_map(|(_, v)| func.bindings.get(resolve_use(func, *v)).map(|b| &b.ty)).collect();
+    let known = |t: &IrType| match t {
+        IrType::Known(k) | IrType::Inferred(k) => Some(k.clone()),
+        _ => None,
+    };
+    let fallback = IrType::Inferred(KnownType::I128);
+    if types.len() != incoming.len() {
+        return fallback;
+    }
+    let Some(first) = types.first().and_then(|t| known(t)) else { return fallback };
+    if !matches!(first, KnownType::I128 | KnownType::U128) || types.iter().any(|t| known(t).as_ref() != Some(&first)) {
+        return fallback;
+    }
+    if types.iter().all(|t| matches!(t, IrType::Known(_))) { IrType::Known(first) } else { IrType::Inferred(first) }
+}
+
 /// One pair of half-merges and the values they carry, per edge.
 struct Pair {
     lo: ValueId,
@@ -268,5 +290,35 @@ fn half(func: &HighFunction, value: ValueId, want: UnaryOp) -> Option<ValueId> {
     match &func.bindings.get(resolve_use(func, value))?.expr {
         Expr::Unary { op, value } if *op == want => Some(resolve_use(func, *value)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::marshalling::test_support::{func_with, v};
+
+    /// Two values typed `a` and `b`, and the incoming list of their merge.
+    fn merge_of(a: IrType, b: IrType) -> IrType {
+        let mut f = func_with(vec![Expr::Phi { incoming: vec![] }, Expr::Phi { incoming: vec![] }], vec![], vec![]);
+        f.bindings.get_mut(v(0)).unwrap().ty = a;
+        f.bindings.get_mut(v(1)).unwrap().ty = b;
+        merged_type(&f, &[(BlockId::from_index(0), v(0)), (BlockId::from_index(1), v(1))])
+    }
+
+    #[test]
+    fn a_merge_of_u128s_is_a_u128() {
+        let u = IrType::Known(KnownType::U128);
+        assert_eq!(merge_of(u.clone(), u.clone()), u);
+        assert_eq!(merge_of(u, IrType::Inferred(KnownType::U128)), IrType::Inferred(KnownType::U128));
+    }
+
+    #[test]
+    fn a_merge_whose_values_disagree_is_an_inferred_i128() {
+        let fallback = IrType::Inferred(KnownType::I128);
+        assert_eq!(merge_of(IrType::Known(KnownType::U128), IrType::Known(KnownType::I128)), fallback);
+        assert_eq!(merge_of(IrType::Known(KnownType::I64), IrType::Known(KnownType::I64)), fallback);
+        let unknown = IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence);
+        assert_eq!(merge_of(IrType::Known(KnownType::U128), unknown), fallback);
     }
 }
