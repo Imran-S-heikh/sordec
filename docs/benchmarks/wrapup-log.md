@@ -986,3 +986,26 @@ The IR gains a fixed byte-array value (`[u8; N]`): the host copy that fills one
 (`from_le_bytes` over a slice, or indexing), and `Bytes::from_array`; a helper handing its array
 back through an out-parameter returns it. privacy_pools 727 → 660 gaps (its `take::<N>` reads);
 no other output changes. Holes 5,735 → 5,668 (summed); errors unchanged at 9.
+
+## 2026-10-31 — commit c7d75eb (account auth contexts, vector iteration and events)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 84 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,230 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 1,296 |
+| third-party | 2 | 1/2 | 8 | 513 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 405 |
+
+- **Account contexts:** an enum decoded inline is now taken inside a loop too, including
+  `__check_auth`'s `Vec<Context>`, which prints as `match context { Context::Contract(c) => … }`
+  (account 116 → 66 gaps).
+- **Vector iteration:** typed iteration through outlined iterator helpers is a counter loop over
+  `get_unchecked` (modular_account 38 → 2).
+- **Events:** an `Option<u64>` event field and a muxed `address()` fold into the event literal
+  (sdk26/events 35 → 2, score 0.7059 → 1.0000).
+- **Event data maps:** maps used only as event data carry their entries.
+- **Serialisation:** `serialize_to_bytes` prints as `to_xdr`.
+
+Holes 5,668 → 5,528 (summed); errors unchanged at 9; corpus byte-identical; held-out mean
+0.7890 → 0.7911.
