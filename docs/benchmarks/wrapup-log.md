@@ -978,3 +978,11 @@ authored treasury contract:
 - a vec search's result is the `Option<u32>` the SDK makes of it.
 
 The treasury goes from 19 to 10 `cargo check` errors (535 gaps, 2,464 lines).
+
+## 2026-10-31 — commit df5f821 (a host-filled buffer is the `[u8; N]` it fills)
+
+The IR gains a fixed byte-array value (`[u8; N]`): the host copy that fills one
+(`b.to_array()`, or `copy_into_slice` behind the `len == N` check the binary makes), reads of it
+(`from_le_bytes` over a slice, or indexing), and `Bytes::from_array`; a helper handing its array
+back through an out-parameter returns it. privacy_pools 727 → 660 gaps (its `take::<N>` reads);
+no other output changes. Holes 5,735 → 5,668 (summed); errors unchanged at 9.
