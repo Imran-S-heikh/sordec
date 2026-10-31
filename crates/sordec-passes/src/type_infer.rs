@@ -256,30 +256,30 @@
 //!
 //! ## An unwrapped payload is the `Option`'s
 //!
-//! `x = o.unwrap()` and `o = Some(x)` say one thing in both directions:
-//! the value inside the `Option` and the value outside it are the same
-//! value. The forward direction was always read (an `Option<T>`'s unwrap
-//! is a `T`); the backward one was not, so a vec iterator's outlined
-//! `next` — `if tag == 2 { None } else { Some(word) }`, the word read
-//! back from the iterator's frame — stayed `Option<Val>` while every
-//! caller handed its unwrap to a helper taking an `Address`.
+//! `x = o.unwrap()` says the value inside the `Option` and the value
+//! outside it are the same value. The forward direction was always read
+//! (an `Option<T>`'s unwrap is a `T`); the backward one was not, so a
+//! vec iterator's outlined `next` — `if tag == 2 { None } else {
+//! Some(word) }`, the word read back from the iterator's frame — stayed
+//! `Option<Val>` while every caller handed its unwrap to a helper taking
+//! an `Address`.
 //!
-//! So an `unwrap` typed `T` names the `Option<?>` it unwraps `Option<T>`,
-//! and a `Some(x)` typed `Option<T>` names `x` a `T` (`Inferred`). With
-//! the call's result named, the helper's return slot takes the callers'
-//! `Option<T>` ([`result_uses`]); the merge it returns, and so its
-//! `Option<?>` arms, as a merge's `Vec<?>` arm takes the merge's `Vec<T>`;
-//! and its `Some` arm's payload the `T`.
+//! So an `unwrap` typed `T` names the `Option<?>` it unwraps `Option<T>`
+//! (`Inferred`). With the call's result named, the helper's return slot
+//! takes the callers' `Option<T>` ([`result_uses`]), and the merge it
+//! returns, and so its `Option<?>` arms, as a merge's `Vec<?>` arm takes
+//! the merge's `Vec<T>`.
 //!
 //! Why it is exact: an `Option<T>`'s payload is a `T` by the definition of
 //! the type, and `unwrap` hands back that payload unchanged. Gates: one
 //! payload (a tuple payload is left); the `Option` only while its payload
-//! is untyped, and `x` only while it is untyped — a named type on either
-//! side stands, or conflicts on its own evidence; `T` never the `Val` that
-//! says nothing. Not an `x` typed `Val`: a fallible decode builds
-//! `Some(v)` of the `Val` it checked, and the emitter converts that `Val`
-//! to the payload type there — the `Val` is the value before the
-//! conversion, not the payload.
+//! is untyped — a named payload stands, or conflicts on its own evidence;
+//! `T` never the `Val` that says nothing.
+//!
+//! Not the other way, from a `Some(x)` to its `x`: a fallible decode
+//! builds `Some` of the `Val` it checked, and the emitter converts that
+//! `Val` to the payload type there, so `x` is the value before the
+//! conversion, not the payload (account's `BytesN<32>` decode helper).
 //!
 //! ## A loop counter is the number it counts to
 //!
@@ -1090,15 +1090,6 @@ fn backward(
                 {
                     let named = KnownType::Option(Box::new(IrType::Inferred(base)));
                     changed |= improve(types, ev, *value, IrType::Inferred(named));
-                }
-            }
-            Expr::Optional { payload: Some(values) } => {
-                if let [only] = values.as_slice()
-                    && let Some(KnownType::Option(payload)) = base_of(types.get(&id))
-                    && let Some(base) = base_of(Some(payload.as_ref())).filter(|b| *b != KnownType::Val)
-                    && base_of(types.get(only)).is_none()
-                {
-                    changed |= improve(types, ev, *only, IrType::Inferred(base));
                 }
             }
             _ => {}
@@ -4570,12 +4561,13 @@ mod tests {
     }
 
     #[test]
-    fn a_named_option_names_its_untyped_payload() {
+    fn a_named_option_does_not_name_what_its_some_holds() {
+        // A decode's `Some(val)` is converted by the emitter: the `Val`,
+        // or an untyped word, stays what it is.
         let option = IrType::Known(KnownType::Option(Box::new(IrType::Known(KnownType::Address))));
         let mut ir = some_of(unknown(), option.clone());
         TypeInferPass.run(&mut ir);
-        assert_eq!(base_of(Some(&ty_of(&ir, 0, 0))), Some(KnownType::Address));
-        // A `Val` a decode checked is the value before the conversion.
+        assert!(!matches!(base_of(Some(&ty_of(&ir, 0, 0))), Some(KnownType::Address)));
         let mut ir = some_of(IrType::Inferred(KnownType::Val), option);
         TypeInferPass.run(&mut ir);
         assert_eq!(base_of(Some(&ty_of(&ir, 0, 0))), Some(KnownType::Val));
