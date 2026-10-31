@@ -525,6 +525,65 @@ impl<'a> FnCtx<'a> {
         )
     }
 
+    /// A hole the IR has typed as a 128-bit integer, read only as one: by
+    /// its limbs (`wide_lo`/`wide_hi`), or by arithmetic and comparisons
+    /// whose other operand is the same 128-bit type or a literal.
+    ///
+    /// An `i128` is two words at the machine level, so it is not among the
+    /// machine types above; but these readers are what the wide passes
+    /// print *for* an `i128` (`(v as i64)`, `((v >> 64) as i64)`, `v <= 0`),
+    /// never a word masked as one. Left bare, the cast `v as i64` has no
+    /// type to cast from: "type annotations needed". The type printed is
+    /// the one the IR holds, and every reader the annotation constrains is
+    /// one that takes it; a region read (a return, a condition, a merge's
+    /// input) or any other reader leaves the hole to inference.
+    fn read_as_wide_integer(&self, vid: ValueId) -> bool {
+        let wide = |v: ValueId| {
+            matches!(
+                self.func.bindings.get(self.fold_target(v)).map(|b| &b.ty),
+                Some(IrType::Known(KnownType::I128 | KnownType::U128) | IrType::Inferred(KnownType::I128 | KnownType::U128))
+            )
+        };
+        if !wide(vid) {
+            return false;
+        }
+        let literal = |v: ValueId| {
+            matches!(self.func.bindings.get(self.fold_target(v)).map(|b| &b.expr), Some(Expr::Literal(_)))
+        };
+        let (readers, other) = self.emitted_readers(vid);
+        !other
+            && !readers.is_empty()
+            && readers.iter().all(|r| match self.func.bindings.get(*r).map(|b| &b.expr) {
+                Some(Expr::Unary { op: sordec_ir::UnaryOp::WideLo | sordec_ir::UnaryOp::WideHi, value }) => {
+                    self.fold.reads(*value) == Some(vid)
+                }
+                // A comparison with a literal prints the literal bare
+                // (`v <= 0`); arithmetic may print its suffix, so it needs
+                // a 128-bit operand on the other side.
+                Some(Expr::Binary { op, lhs, rhs })
+                    if op.is_comparison()
+                        || matches!(
+                            op,
+                            BinaryOp::Add
+                                | BinaryOp::Sub
+                                | BinaryOp::Mul
+                                | BinaryOp::Div
+                                | BinaryOp::Rem
+                                | BinaryOp::MulOverflows
+                        ) =>
+                {
+                    let other_ok = |o: ValueId| wide(o) || (op.is_comparison() && literal(o));
+                    match (self.fold.reads(*lhs) == Some(vid), self.fold.reads(*rhs) == Some(vid)) {
+                        (true, true) => true,
+                        (true, false) => other_ok(*rhs),
+                        (false, true) => other_ok(*lhs),
+                        (false, false) => false,
+                    }
+                }
+                _ => false,
+            })
+    }
+
     fn has_machine_type(&self, vid: ValueId) -> bool {
         matches!(
             self.func.bindings.get(vid).map(|b| &b.ty),
@@ -832,7 +891,9 @@ impl<'a> FnCtx<'a> {
                     let ty = self.value_type(vid);
                     out.push(parse_quote!(let #name: #ty = #value;));
                 } else if Self::is_hole_expr(&value)
-                    && (self.converted_to_val_only(vid) || self.read_as_declared_struct(vid))
+                    && (self.converted_to_val_only(vid)
+                        || self.read_as_declared_struct(vid)
+                        || self.read_as_wide_integer(vid))
                 {
                     // Annotated for what reads it, not for being a hole:
                     // a reader that cannot infer the type — a conversion
@@ -2402,6 +2463,33 @@ mod tests {
         // and the `!` would fall back to `()`.
         let body = emitted(vec![(untyped(), wide_load()), (IrType::Known(KnownType::Unit), stored(1))], vec![], &TypeRegistry::default());
         assert!(body.contains("let v1 : soroban_sdk :: Val = todo !"), "{body}");
+    }
+
+    /// `v1: i128 = vec::Get` (a hole), then the readers `exprs` add.
+    fn wide_hole_read_by(readers: Vec<(IrType, Expr)>, returned: Vec<u32>) -> String {
+        let get = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::Get, args: vec![v(0), v(0)] });
+        let mut exprs = vec![(IrType::Known(KnownType::I128), get)];
+        exprs.extend(readers);
+        let tail = vec![Region::Return { values: returned.into_iter().map(v).collect() }];
+        emitted(exprs, tail, &TypeRegistry::default())
+    }
+
+    #[test]
+    fn a_wide_hole_read_by_its_limbs_is_annotated() {
+        let lo = Expr::Unary { op: sordec_ir::UnaryOp::WideLo, value: v(1) };
+        let le = Expr::Binary { op: BinaryOp::Le, lhs: v(1), rhs: v(3) };
+        let body = wide_hole_read_by(vec![
+            (IrType::Inferred(KnownType::I64), lo),
+            i64_lit(0),
+            (IrType::Inferred(KnownType::Bool), le),
+        ], vec![2, 4]);
+        assert!(body.contains("let v1 : i128 = todo !"), "{body}");
+    }
+
+    #[test]
+    fn a_wide_hole_masked_as_a_word_is_left_to_inference() {
+        let body = wide_hole_read_by(vec![i64_lit(255), (IrType::Inferred(KnownType::I64), mask(1, 2))], vec![3]);
+        assert!(!body.contains("let v1 : i128"), "{body}");
     }
 
     #[test]
