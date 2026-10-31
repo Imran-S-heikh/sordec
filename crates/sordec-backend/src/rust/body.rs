@@ -1887,6 +1887,17 @@ mod tests {
         reg: &TypeRegistry,
         returns: Vec<Vec<ValueId>>,
     ) -> String {
+        emitted_with_facts(exprs, tail, reg, returns, None)
+    }
+
+    /// [`emitted_returning`], from a contract whose metadata is `facts`.
+    fn emitted_with_facts(
+        exprs: Vec<(IrType, Expr)>,
+        tail: Vec<Region>,
+        reg: &TypeRegistry,
+        returns: Vec<Vec<ValueId>>,
+        facts: Option<sordec_ir::SorobanFacts>,
+    ) -> String {
         use quote::ToTokens;
         use sordec_common::{Arena, FuncId, Provenance, ProvenanceSource};
         use sordec_ir::{HighBlock, MemoryImage, WasmFacts};
@@ -1926,7 +1937,7 @@ mod tests {
                 table_functions: None,
                 custom_sections: vec![],
             },
-            soroban_facts: None,
+            soroban_facts: facts,
             functions: vec![func],
             memory: MemoryImage::empty(),
         };
@@ -2221,6 +2232,82 @@ mod tests {
             &TypeRegistry::default(),
         ));
         assert!(out.contains("Vec::<soroban_sdk::Val>::from_array(e,[v1,v2])") || out.contains("Vec::<Val>::from_array(e,[v1,v2])"), "{out}");
+    }
+
+    /// A curve host op `kind` over two operands typed `a` and `b`, its
+    /// result typed `result` and returned, in a contract built with
+    /// soroban-sdk `sdk` (`None`: no version recorded).
+    fn curve_op(kind: sordec_ir::CryptoOpKind, a: KnownType, b: KnownType, result: KnownType, sdk: Option<&str>) -> String {
+        let facts = sdk.map(|version| {
+            let mut facts = sordec_ir::SorobanFacts::default();
+            facts.contract_meta.insert("rssdkver".to_string(), format!("{version}#0123abcd"));
+            facts
+        });
+        packed(&emitted_with_facts(
+            vec![
+                (IrType::Known(a), Expr::Use(v(0))),
+                (IrType::Known(b), Expr::Use(v(0))),
+                (IrType::Known(result), known(KnownOp::CryptoOp { kind, args: vec![v(1), v(2)] })),
+            ],
+            vec![ret(3)],
+            &TypeRegistry::default(),
+            vec![],
+            facts,
+        ))
+    }
+
+    #[test]
+    fn a_bn254_point_sum_is_the_sdk_method_over_the_points_it_wraps() {
+        let p = KnownType::BytesN(64);
+        let out = curve_op(sordec_ir::CryptoOpKind::Bn254G1Add, p.clone(), p.clone(), p, Some("27.0.6"));
+        assert!(
+            out.contains(
+                "e.crypto().bn254().g1_add(&soroban_sdk::crypto::bn254::Bn254G1Affine::from_bytes(v1),\
+                 &soroban_sdk::crypto::bn254::Bn254G1Affine::from_bytes(v2)).to_bytes()"
+            ),
+            "{out}"
+        );
+    }
+
+    /// The point type's name moved between majors; each spells its own.
+    #[test]
+    fn a_bls_point_is_named_as_its_sdk_major_names_it() {
+        let p = KnownType::BytesN(96);
+        let old = curve_op(sordec_ir::CryptoOpKind::Bls12381G1Add, p.clone(), p.clone(), p.clone(), Some("22.0.11"));
+        assert!(old.contains("bls12_381().g1_add(&soroban_sdk::crypto::bls12_381::G1Affine::from_bytes(v1)"), "{old}");
+        let new = curve_op(sordec_ir::CryptoOpKind::Bls12381G1Add, p.clone(), p.clone(), p, Some("26.0.1"));
+        assert!(new.contains("bls12_381().g1_add(&soroban_sdk::crypto::bls12_381::Bls12381G1Affine::from_bytes(v1)"), "{new}");
+    }
+
+    #[test]
+    fn a_hash_to_g2_takes_its_inputs_as_bytes() {
+        let out = curve_op(
+            sordec_ir::CryptoOpKind::Bls12381HashToG2,
+            KnownType::BytesN(32),
+            KnownType::Bytes,
+            KnownType::BytesN(192),
+            Some("27.0.6"),
+        );
+        assert!(out.contains("e.crypto().bls12_381().hash_to_g2(&v1.into(),&v2).to_bytes()"), "{out}");
+    }
+
+    /// Each gate, refused: an operand that is not a point of the op's own
+    /// length, an SDK major whose source was not read or not recorded, and
+    /// a scalar multiplication, whose `Fr` no exact constructor reaches.
+    #[test]
+    fn a_curve_op_outside_its_gates_stays_a_hole() {
+        use sordec_ir::CryptoOpKind as K;
+        let bn = KnownType::BytesN(64);
+        let cases = [
+            curve_op(K::Bn254G1Add, KnownType::Bytes, bn.clone(), bn.clone(), Some("27.0.6")),
+            curve_op(K::Bls12381G1Add, bn.clone(), bn.clone(), KnownType::BytesN(96), Some("27.0.6")),
+            curve_op(K::Bn254G1Add, bn.clone(), bn.clone(), bn.clone(), Some("25.0.0")),
+            curve_op(K::Bn254G1Add, bn.clone(), bn.clone(), bn.clone(), None),
+            curve_op(K::Bn254G1Mul, bn.clone(), KnownType::U256, bn, Some("27.0.6")),
+        ];
+        for out in cases {
+            assert!(out.contains("todo!(\"crypto::") && !out.contains("crypto()"), "{out}");
+        }
     }
 
     /// `U256::from_be_bytes(&e, &b)` / `u.to_be_bytes()` over an operand

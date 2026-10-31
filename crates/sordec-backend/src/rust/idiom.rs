@@ -579,6 +579,8 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                 Some(parse_quote!(#e.crypto().ed25519_verify(&#key, &#msg, &#sig)))
             }
         }
+        // The BLS12-381 and BN254 point operations; see [`curve_chain`].
+        KnownOp::CryptoOp { kind, args } => curve_chain(ctx, *kind, args),
 
         // ---- Comparison ----
         // `obj_cmp` is the host's total order on two objects, as -1/0/1.
@@ -893,6 +895,135 @@ fn has_type(
         func.bindings.get(value).map(|b| &b.ty),
         Some(IrType::Known(t) | IrType::Inferred(t)) if want(t)
     )
+}
+
+/// A curve point type of the SDK's `crypto` module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Point {
+    /// BLS12-381 G1, 96 bytes uncompressed.
+    BlsG1,
+    /// BLS12-381 G2, 192 bytes uncompressed.
+    BlsG2,
+    /// BN254 G1, 64 bytes uncompressed.
+    BnG1,
+}
+
+impl Point {
+    /// The length of the `BytesN` the point wraps.
+    fn len(self) -> u32 {
+        match self {
+            Self::BlsG1 => 96,
+            Self::BlsG2 => 192,
+            Self::BnG1 => 64,
+        }
+    }
+
+    /// The point's type in the SDK `major` the contract was built with, for
+    /// the majors whose source was read: BLS12-381 arrived in 22 as
+    /// `G1Affine`/`G2Affine`, renamed `Bls12381*Affine` by 26 (the old names
+    /// then deprecated aliases); BN254 is in 26 and 27. Any other major —
+    /// 24, 25, one not yet released — stays a hole rather than name a type
+    /// it may not have.
+    fn path(self, major: u32) -> Option<syn::Path> {
+        Some(match (self, major) {
+            (Self::BlsG1, 22 | 23) => parse_quote!(soroban_sdk::crypto::bls12_381::G1Affine),
+            (Self::BlsG2, 22 | 23) => parse_quote!(soroban_sdk::crypto::bls12_381::G2Affine),
+            (Self::BlsG1, 26 | 27) => parse_quote!(soroban_sdk::crypto::bls12_381::Bls12381G1Affine),
+            (Self::BlsG2, 26 | 27) => parse_quote!(soroban_sdk::crypto::bls12_381::Bls12381G2Affine),
+            (Self::BnG1, 26 | 27) => parse_quote!(soroban_sdk::crypto::bn254::Bn254G1Affine),
+            _ => return None,
+        })
+    }
+}
+
+/// A curve host operation as the SDK method that makes exactly that call.
+///
+/// Each method below is, in every SDK major [`Point::path`] names, the
+/// host function with its operands unchanged: `p.to_object()` for a point,
+/// `msg.into()` / `dst.to_object()` for the hash inputs, and the result
+/// wrapped back with `from_bytes(BytesN::unchecked_new(..))` or converted
+/// to `bool` from the host's `Bool`. So the chain is the call.
+///
+/// **Why the wrapping is exact.** The IR types a point as the `BytesN<N>`
+/// the spec declares, and the methods take the SDK's point type. That type
+/// is `#[repr(transparent)]` over `BytesN<N>`, and its `from_bytes` is
+/// `Self(bytes)` — no validation, no host call — in each of those majors,
+/// so `from_bytes(p)` hands the host the same object `p` is. The result's
+/// `to_bytes()` is the inner `BytesN<N>` again (a clone of the handle, no
+/// host call). `bls_signature`'s own source writes the same constructor,
+/// `G1Affine::from_bytes(agg_pk)`.
+///
+/// **Gates.** The SDK major is recovered (never the guessed rung), every
+/// point operand is typed `BytesN<N>` at the point's own length, and a hash
+/// input is typed `Bytes` or `BytesN<_>` (the latter converted with the
+/// SDK's `From<BytesN<N>> for Bytes`, the same object, as the ed25519 arm
+/// does). Left as holes: the scalar operations — `Fr` has no constructor
+/// that leaves a `U256` as it is (`From<U256>` reduces modulo `r`) — the
+/// field-to-point maps, whose `Fp::from_bytes` validates, and the vector
+/// operations (`pairing_check`, `msm`), whose `Vec<Point>` no recovered
+/// type spells.
+fn curve_chain(ctx: &FnCtx, kind: CryptoOpKind, args: &[sordec_common::ValueId]) -> Option<syn::Expr> {
+    use CryptoOpKind as K;
+    let major = super::scaffold::sdk_major(ctx.high)?;
+    let e = ctx.env();
+    // A point operand, wrapped in the SDK's type, by reference.
+    let point = |p: Point, v: sordec_common::ValueId| -> Option<syn::Expr> {
+        let ty = p.path(major)?;
+        if !has_type(ctx.func, v, |t| *t == KnownType::BytesN(p.len())) {
+            return None;
+        }
+        let v = ctx.arg_ref(v);
+        Some(parse_quote!(&#ty::from_bytes(#v)))
+    };
+    // A hash input: the SDK takes `&Bytes`.
+    let bytes = |v: sordec_common::ValueId| -> Option<syn::Expr> {
+        if has_type(ctx.func, v, |t| *t == KnownType::Bytes) {
+            let v = ctx.value_ref(v);
+            return Some(parse_quote!(&#v));
+        }
+        if has_type(ctx.func, v, |t| matches!(t, KnownType::BytesN(_))) {
+            let v = ctx.value_ref(v);
+            return Some(parse_quote!(&#v.into()));
+        }
+        None
+    };
+    let bls = |method: &str, operands: Vec<syn::Expr>| -> syn::Expr {
+        let m = ident(method);
+        parse_quote!(#e.crypto().bls12_381().#m(#(#operands),*))
+    };
+    match (kind, args) {
+        (K::Bls12381G1Add, [a, b]) => {
+            let (a, b) = (point(Point::BlsG1, *a)?, point(Point::BlsG1, *b)?);
+            let call = bls("g1_add", vec![a, b]);
+            Some(parse_quote!(#call.to_bytes()))
+        }
+        (K::Bls12381G2Add, [a, b]) => {
+            let (a, b) = (point(Point::BlsG2, *a)?, point(Point::BlsG2, *b)?);
+            let call = bls("g2_add", vec![a, b]);
+            Some(parse_quote!(#call.to_bytes()))
+        }
+        (K::Bls12381CheckG1IsInSubgroup, [p]) => Some(bls("g1_is_in_subgroup", vec![point(Point::BlsG1, *p)?])),
+        (K::Bls12381CheckG2IsInSubgroup, [p]) => Some(bls("g2_is_in_subgroup", vec![point(Point::BlsG2, *p)?])),
+        // `is_on_curve` is new in 26.
+        (K::Bls12381G1IsOnCurve, [p]) if major >= 26 => Some(bls("g1_is_on_curve", vec![point(Point::BlsG1, *p)?])),
+        (K::Bls12381G2IsOnCurve, [p]) if major >= 26 => Some(bls("g2_is_on_curve", vec![point(Point::BlsG2, *p)?])),
+        (K::Bls12381HashToG1 | K::Bls12381HashToG2, [msg, dst]) => {
+            // The point type only names the major's API generation.
+            Point::BlsG1.path(major)?;
+            let method = if kind == K::Bls12381HashToG1 { "hash_to_g1" } else { "hash_to_g2" };
+            let call = bls(method, vec![bytes(*msg)?, bytes(*dst)?]);
+            Some(parse_quote!(#call.to_bytes()))
+        }
+        (K::Bn254G1Add, [a, b]) => {
+            let (a, b) = (point(Point::BnG1, *a)?, point(Point::BnG1, *b)?);
+            Some(parse_quote!(#e.crypto().bn254().g1_add(#a, #b).to_bytes()))
+        }
+        (K::Bn254G1IsOnCurve, [p]) => {
+            let p = point(Point::BnG1, *p)?;
+            Some(parse_quote!(#e.crypto().bn254().g1_is_on_curve(#p)))
+        }
+        _ => None,
+    }
 }
 
 /// `create_contract_with_constructor`'s four operands each carry the type

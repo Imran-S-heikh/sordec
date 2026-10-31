@@ -140,6 +140,17 @@ fn sdk_requirement(high: &HighIr) -> SdkRequirement {
     SdkRequirement::Unrecoverable
 }
 
+/// The soroban-sdk major the contract was built with, from the first two
+/// rungs of [`sdk_requirement`]'s ladder. `None` at the third, guessed rung:
+/// a spelling that differs between majors is never chosen on a guess.
+pub(crate) fn sdk_major(high: &HighIr) -> Option<u32> {
+    match sdk_requirement(high) {
+        SdkRequirement::Exact(version) => version.split('.').next()?.parse().ok(),
+        SdkRequirement::Major(major) => Some(major),
+        SdkRequirement::Unrecoverable => None,
+    }
+}
+
 /// A recovered — or, at the last rung, guessed — soroban-sdk version.
 #[derive(Debug, PartialEq, Eq)]
 enum SdkRequirement {
