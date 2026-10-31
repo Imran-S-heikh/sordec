@@ -288,7 +288,7 @@ impl Pass<HighIr> for OptionalOutParamPass {
         let mut plans: HashMap<FuncId, Vec<(usize, SitePlan)>> = HashMap::new();
         let mut refused: HashSet<FuncId> = HashSet::new();
         {
-            let frames = Frames { ir, helpers: &helpers, extents: RefCell::new(HashMap::new()) };
+            let frames = Frames { ir, helpers: Some(&helpers), extents: RefCell::new(HashMap::new()) };
             for (index, caller) in ir.functions.iter().enumerate() {
                 let order = emission_order(caller);
                 for &id in &order {
@@ -381,13 +381,13 @@ const NOT_A_CANDIDATE: &str = "no tag store";
 
 /// One slot of the out-parameter, as an offset and a width in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct Slot {
-    offset: u32,
-    bytes: u32,
+pub(super) struct Slot {
+    pub(super) offset: u32,
+    pub(super) bytes: u32,
 }
 
 impl Slot {
-    fn overlaps(self, other: Slot) -> bool {
+    pub(super) fn overlaps(self, other: Slot) -> bool {
         self.offset < other.offset + other.bytes && other.offset < self.offset + self.bytes
     }
 
@@ -1387,9 +1387,11 @@ fn rewrite_ty(func: &mut HighFunction, id: ValueId, note: &str) {
 
 /// Module-wide context for the call-site gates: the classified helpers,
 /// and a memo of what each function can touch through each parameter.
-struct Frames<'ir> {
+pub(super) struct Frames<'ir> {
     ir: &'ir HighIr,
-    helpers: &'ir HashMap<FuncId, Helper>,
+    /// Absent where only what calls touch is asked, not where a helper's
+    /// result lands ([`super::dead_store`]).
+    helpers: Option<&'ir HashMap<FuncId, Helper>>,
     /// `(function, parameter) -> bytes read and bytes written through it`,
     /// relative to the parameter; `None` when unknown. An in-progress entry
     /// is `None`, which is what makes recursion answer "unknown" rather than
@@ -1398,7 +1400,7 @@ struct Frames<'ir> {
 }
 
 /// One access range a call has into a frame, and whether it only writes.
-type Touch = (Slot, bool);
+pub(super) type Touch = (Slot, bool);
 
 /// What a function does through one pointer parameter: the bytes it reads
 /// and the bytes it writes, each `None` when it does neither.
@@ -1480,11 +1482,17 @@ fn definite_write(func: &HighFunction, id: ValueId, base: ValueId) -> Option<Slo
     }
 }
 
-impl Frames<'_> {
+impl<'ir> Frames<'ir> {
+    /// The context with no helpers classified: what each call touches
+    /// through the pointers it is handed, and nothing about results.
+    pub(super) fn new(ir: &'ir HighIr) -> Self {
+        Frames { ir, helpers: None, extents: RefCell::new(HashMap::new()) }
+    }
+
     /// What the call at `binding` can touch in the frame at `base`, or
     /// `None` when it is handed a pointer into it and the extent is not
     /// known. Empty for a call handed nothing of the frame.
-    fn touches(&self, func: &HighFunction, binding: ValueId, base: ValueId) -> Option<Vec<Touch>> {
+    pub(super) fn touches(&self, func: &HighFunction, binding: ValueId, base: ValueId) -> Option<Vec<Touch>> {
         let (target, args) = match func.bindings.get(binding).map(|b| &b.expr) {
             Some(Expr::Call { target, args }) => (Some(*target), args),
             Some(
@@ -1509,7 +1517,7 @@ impl Frames<'_> {
                 continue;
             }
             let target = target?;
-            if let Some(h) = self.helpers.get(&target)
+            if let Some(h) = self.helpers.and_then(|hs| hs.get(&target))
                 && h.out == i
             {
                 for slot in h.slots() {
@@ -2572,7 +2580,7 @@ mod tests {
         let ir = module(vec![own, helper(false)]);
         let helpers: HashMap<FuncId, Helper> =
             ir.functions.iter().filter_map(|f| classify(f).ok().map(|h| (f.id, h))).collect();
-        let frames = Frames { ir: &ir, helpers: &helpers, extents: RefCell::new(HashMap::new()) };
+        let frames = Frames { ir: &ir, helpers: Some(&helpers), extents: RefCell::new(HashMap::new()) };
         let f = &ir.functions[0];
         let Some(Expr::Call { args, .. }) = f.bindings.get(v(2)).map(|b| &b.expr) else { panic!("the call") };
         let planned = site(&frames, f, &emission_order(f), v(2), args, &helpers[&FuncId::from_index(1)]);
@@ -2601,7 +2609,7 @@ mod tests {
             .iter()
             .filter_map(|f| classify(f).ok().map(|h| (f.id, h)))
             .collect();
-        let frames = Frames { ir: &ir, helpers: &helpers, extents: RefCell::new(HashMap::new()) };
+        let frames = Frames { ir: &ir, helpers: Some(&helpers), extents: RefCell::new(HashMap::new()) };
         let f = &ir.functions[0];
         let order = emission_order(f);
         let Some(Expr::Call { args, .. }) = f.bindings.get(v(2)).map(|b| &b.expr) else {
