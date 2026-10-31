@@ -34,9 +34,9 @@
 //!
 //! It walks the argument top-down, typing each node by what its parent
 //! declares, and rewrites the whole tree at once: each map to the struct
-//! literal ([`super::udt_encode::rebuild_as`]), each variant vec to the
+//! literal (`udt_encode::rebuild_as`), each variant vec to the
 //! variant, each vec of entries to a typed vec. The types come from a fixed
-//! table of the SDK's `auth` module ([`AUTH`]), registered in the module's
+//! table of the SDK's `auth` module (`AUTH`), registered in the module's
 //! type registry as *imported* ([`sordec_ir::TypeRegistry::imported`]): the
 //! reconstruction says `use soroban_sdk::auth::{..}` instead of declaring
 //! them.
@@ -47,7 +47,7 @@
 //! host function's argument is, by the protocol, a vector of
 //! `InvokerContractAuthEntry`; the SDK version the contract was built with
 //! (`rssdkver`, or the protocol number) fixes that type's declaration, which
-//! [`AUTH`] transcribes from the SDK's source. From there each node's type
+//! `AUTH` transcribes from the SDK's source. From there each node's type
 //! is its parent's declaration:
 //!
 //! - an element of the entries vec is an entry. The derive encodes an enum
@@ -429,11 +429,11 @@ impl Planner<'_> {
     /// empty, or with an element that is (or may be) a `Val`.
     fn val_vec(&self, value: ValueId) -> bool {
         let at = resolve_use(self.func, value);
-        let is_val = |t: Option<&IrType>| match t {
-            Some(IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val) | IrType::Unknown(_)) | None => {
-                true
-            }
-            _ => false,
+        let is_val = |t: Option<&IrType>| {
+            matches!(
+                t,
+                Some(IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val) | IrType::Unknown(_)) | None
+            )
         };
         if let Some(KnownType::Vec(inner)) = self.known(at) {
             return is_val(Some(&inner));
