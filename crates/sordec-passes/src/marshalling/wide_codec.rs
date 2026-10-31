@@ -108,6 +108,43 @@ struct WideDecoder {
     tags: Vec<u8>,
 }
 
+/// The 128-bit decoders of a module, for what their calls certainly write.
+pub(super) struct WideDecoders(HashMap<FuncId, WideDecoder>);
+
+impl WideDecoders {
+    /// Every helper of `ir` proven a 128-bit decoder.
+    pub(super) fn of(ir: &HighIr) -> Self {
+        Self(ir.functions.iter().filter_map(|f| classify_decoder(f).map(|d| (f.id, d))).collect())
+    }
+
+    /// The bytes each call to one of the decoders in `func` certainly
+    /// writes, as `(call, base, [(offset from base, width)])`: its
+    /// discriminant and both limbs, where the value it decodes carries the
+    /// evidence the collapse above relies on ([`value_evidence`]). The
+    /// decode then takes its `Ok` path, which stores all three (each `Ok`
+    /// path writes the limbs itself), and the out-pointer is only ever a
+    /// store address, so the call reads nothing through it.
+    pub(super) fn certain_writes(&self, func: &HighFunction) -> Vec<super::udt_decode::CertainWrite> {
+        if self.0.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for id in sret::emission_order(func) {
+            let Some(Expr::Call { target, args }) = func.bindings.get(id).map(|b| &b.expr) else { continue };
+            let (Some(dec), [ptr, val]) = (self.0.get(target), args.as_slice()) else { continue };
+            if value_evidence(func, resolve_use(func, *val), &dec.ty, &dec.tags).is_none() {
+                continue;
+            }
+            let (base, start) = canon_addr(func, *ptr);
+            let at = |rel: u32| start.checked_add(rel).map(|o| (o, 8));
+            if let (Some(d), Some(l), Some(h)) = (at(dec.disc), at(dec.lo), at(dec.hi)) {
+                out.push((id, base, vec![d, l, h]));
+            }
+        }
+        out
+    }
+}
+
 /// A helper proven to be `<T as IntoVal<Env, Val>>` for a 128-bit `T`,
 /// results returned as `(status, Val)`.
 #[derive(Debug, Clone)]
@@ -1120,6 +1157,19 @@ mod tests {
             probe: false,
         }));
         assert!(classify_decoder(&f).is_none());
+    }
+
+    /// A call decoding a proven `i128` writes its discriminant and both
+    /// limbs for certain, at the frame offsets it is handed; one decoding a
+    /// value of another declared type proves nothing.
+    #[test]
+    fn a_decode_of_a_proven_value_certainly_writes_its_slots() {
+        let m = module(vec![i128_decoder(0), caller(1, 0, PrimitiveType::I128)]);
+        let decoders = WideDecoders::of(&m);
+        let writes = decoders.certain_writes(m.function(FuncId::from_index(1)).unwrap());
+        assert_eq!(writes, vec![(v(4), v(1), vec![(8, 8), (24, 8), (32, 8)])]);
+        let m = module(vec![i128_decoder(0), caller(1, 0, PrimitiveType::U64)]);
+        assert!(WideDecoders::of(&m).certain_writes(m.function(FuncId::from_index(1)).unwrap()).is_empty());
     }
 
     #[test]

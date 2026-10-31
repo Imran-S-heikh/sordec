@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, ByteArrayPass, BytesNConvertPass,
-    AuthEntryPass, BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, TupleStructEncodePass, EnumSelectPass, IndexOfPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    AuthEntryPass, BoolCodecPass, ClientArgVecPass, MapEntriesPass, VecElementsPass, VecIterPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, TupleStructEncodePass, EnumSelectPass, IndexOfPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideInlineDecodePass, WideReturnPass,
     EncodeByRefPass, FromArrayLoopPass, OverwrittenFrameStorePass,
 };
@@ -297,6 +297,10 @@ pub const UDT_DECODE_AFTER_ENUM_ITER: &str = "udt-decode-after-enum-iter";
 /// value parameter (every caller now hands it a proven struct), and only
 /// a typed helper is read as that struct's decode at its call sites.
 pub const UDT_DECODE_AFTER_HELPER_TYPES: &str = "udt-decode-after-helper-types";
+/// [`ArgGuardElisionPass`] once more, after those runs: a field they read
+/// out of a variant's payload is typed by its struct, and the derived tag
+/// check on it is a guard the group's own run never saw.
+pub const ARG_GUARD_AFTER_ENUM_ITER: &str = "arg-guard-after-enum-iter";
 /// [`ValDecodeCollapsePass`] re-run once the `Option`-shaped decoders exist.
 pub const VAL_DECODE_AFTER_OPTIONAL: &str = "val-decode-after-optional";
 /// [`OptionReturnPass`] re-run once the type pass has typed the arms.
@@ -772,8 +776,13 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // out-pointer pass, which would otherwise turn the iterator's
             // `next` into an `Option` at some call sites and not others.
             Box::new(EnumIterPass),
+            // And a typed vector's outlined iterator (`for x in v.iter()`),
+            // as the indexed loop it drives — before the out-pointer pass
+            // turns its helpers into `Option`s.
+            Box::new(VecIterPass),
             Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_ENUM_ITER, &[])),
             Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_HELPER_TYPES, &[])),
+            Box::new(pass::Rerun::new(ArgGuardElisionPass, ARG_GUARD_AFTER_ENUM_ITER, &[])),
             // Any other `Option` a helper hands back through its caller's
             // frame. After the group, not in it: the group's own
             // `get(..).unwrap()` collapse is the better recovery wherever it
@@ -941,6 +950,9 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // is often built through one.
             Box::new(pass::Rerun::new(SymbolEncoderPass, SYMBOL_ENCODER_AFTER_ELISION, &[])),
             Box::new(ContractEventPass),
+            // A map built only to be published, whose event no spec names:
+            // its entries, after the event folds have read the buffer.
+            Box::new(MapEntriesPass),
             Box::new(MuxedAddressPass),
             // A `Result` an entrypoint builds in its own frame and hands a
             // converter helper: each path's `Ok`/`Err`, merged. Ahead of the

@@ -2745,6 +2745,11 @@ mod tests {
     /// `vec_get(v, val_encode::<u32>(i))`: the index is `i`, when `i` is a
     /// `u32`; typed otherwise, the encode is not known to hold it.
     fn get_at_encoded(index_ty: KnownType) -> String {
+        get_at_encoded_as(index_ty, KnownType::Val)
+    }
+
+    /// The same, the element read as `element`.
+    fn get_at_encoded_as(index_ty: KnownType, element: KnownType) -> String {
         let new = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::New, args: vec![] });
         let index = Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(0) };
         let encode = known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v(2) });
@@ -2754,7 +2759,7 @@ mod tests {
                 (IrType::Known(KnownType::Vec(Box::new(IrType::Known(KnownType::Val)))), new),
                 (IrType::Known(index_ty), index),
                 (IrType::Known(KnownType::Val), encode),
-                (IrType::Known(KnownType::Val), get),
+                (IrType::Known(element), get),
             ],
             vec![ret(4)],
             &TypeRegistry::default(),
@@ -2819,6 +2824,52 @@ mod tests {
         assert!(!body.contains("todo !"), "{body}");
         // Generic in its key and value, it is annotated as a hole was.
         assert!(body.contains("let v1 : soroban_sdk :: Map <"), "{body}");
+    }
+
+    /// `serialize_to_bytes(x)` is the SDK's `x.to_xdr(&e)`.
+    #[test]
+    fn serialize_to_bytes_is_to_xdr() {
+        let x = Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(0) };
+        let ser = known(KnownOp::BufOp { kind: sordec_ir::BufOpKind::SerializeToBytes, args: vec![v(1)] });
+        let body = emitted(
+            vec![(IrType::Known(KnownType::U32), x), (IrType::Known(KnownType::Bytes), ser)],
+            vec![ret(2)],
+            &TypeRegistry::default(),
+        );
+        assert!(body.contains("ToXdr :: to_xdr (v1"), "{body}");
+        assert!(!body.contains("todo !"), "{body}");
+    }
+
+    /// A map whose entries were recovered is built from them: each key's
+    /// symbol, each value's `Val`.
+    #[test]
+    fn a_map_with_recovered_entries_is_built_from_them() {
+        let x = Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(0) };
+        let map = known(KnownOp::MapNew {
+            keys_pos: v(0),
+            vals_pos: v(0),
+            len: v(0),
+            entries: Some(vec![("root".to_string(), v(1))]),
+        });
+        let symbol_to_val = IrType::Known(KnownType::Map(
+            Box::new(IrType::Known(KnownType::Symbol)),
+            Box::new(IrType::Known(KnownType::Val)),
+        ));
+        let body = emitted(vec![(IrType::Known(KnownType::U32), x), (symbol_to_val, map)], vec![ret(2)], &TypeRegistry::default());
+        assert!(body.contains("from_array"), "{body}");
+        assert!(body.contains("Symbol :: new (& e , \"root\")") || body.contains("Symbol :: new (e , \"root\")"), "{body}");
+        assert!(!body.contains("todo !"), "{body}");
+    }
+
+    /// A `Vec<Val>`'s element the IR reads as an `i128` is converted to
+    /// it; read as the `Val` it is, it is not.
+    #[test]
+    fn a_typed_read_of_a_val_vectors_element_is_converted() {
+        let body = get_at_encoded_as(KnownType::U32, KnownType::I128);
+        assert!(body.contains("into_val (& v1 . get_unchecked (v2)"), "{body}");
+        assert!(body.contains("i128"), "{body}");
+        let plain = get_at_encoded(KnownType::U32);
+        assert!(!plain.contains("into_val"), "{plain}");
     }
 
     #[test]

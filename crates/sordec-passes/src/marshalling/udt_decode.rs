@@ -164,9 +164,11 @@
 //!   a store at the same base and a constant offset covering it, another
 //!   decode into the same place (an unpack writes all its slots; a helper
 //!   on a proven value writes every field and discriminant slot), a host
-//!   unpack into linear memory, or a call to a helper that stores it on
-//!   every path it returns by. Anything that may write it only ends the
-//!   `must` side.
+//!   unpack into linear memory, a call to a helper that stores it on
+//!   every path it returns by, or a 128-bit decode of a value its codec
+//!   proves (`wide_codec`): that decode takes its `Ok` path, which stores
+//!   the discriminant and both limbs, as the codec's own collapse holds.
+//!   Anything that may write it only ends the `must` side.
 //! - A call to a helper that uses a parameter only as a load or store
 //!   address touches what it is handed there at exactly those offsets.
 //!   Any other call or memory operation is taken to read and write from
@@ -258,8 +260,11 @@ impl Pass<HighIr> for UdtDecodePass {
         // handed: a call touches a decode's slots only there.
         let access: HashMap<FuncId, Vec<Option<ParamAccess>>> =
             ir.functions.iter().map(|f| (f.id, param_accesses(f))).collect();
+        // A 128-bit decode of a proven value writes its limbs for certain.
+        let wide = super::wide_codec::WideDecoders::of(ir);
         for func in &mut ir.functions {
-            let planned = plan(func, &memory, &structs, &unions, &param_types, &helpers, &access);
+            let wide_writes = wide.certain_writes(func);
+            let planned = plan(func, &memory, &structs, &unions, &param_types, &helpers, &access, &wide_writes);
             for key in &planned.declines {
                 result.metrics.increment(key, 1);
             }
@@ -551,6 +556,7 @@ pub(super) fn udt_of(func: &HighFunction, value: ValueId) -> Option<TypeId> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan<'a>(
     func: &HighFunction,
     memory: &sordec_ir::MemoryImage,
@@ -559,6 +565,7 @@ fn plan<'a>(
     param_types: &HashMap<(FuncId, usize), Option<TypeId>>,
     helpers: &HashMap<FuncId, DecoderHelper>,
     access: &HashMap<FuncId, Vec<Option<ParamAccess>>>,
+    wide_writes: &[CertainWrite],
 ) -> Planned {
     let mut elisions = Vec::new();
     let mut declines: Vec<&'static str> = Vec::new();
@@ -670,8 +677,9 @@ fn plan<'a>(
 
     // Each decode's reads, or why the site is refused. The other decodes
     // are certain overwrites of what they write.
-    let certain: Vec<CertainWrite> =
+    let mut certain: Vec<CertainWrite> =
         candidates.iter().map(|c| (c.producer, c.base, c.certain_writes())).collect();
+    certain.extend(wide_writes.iter().cloned());
     let mut accepted: Vec<(usize, Vec<(ValueId, usize)>)> = Vec::new();
     // The derived per-field tag checks each accepted decode carries, as
     // `(decode, load, guard conditions, field, tag)`.
@@ -1623,7 +1631,7 @@ pub(super) mod reach {
     const DERIVE_BUDGET: usize = 64;
 
     /// A forward analysis the walk drives.
-    pub(super) trait Flow {
+    pub(in crate::marshalling) trait Flow {
         type State: Clone + PartialEq;
         /// Meet two paths' states where they join.
         fn join(into: &mut Self::State, other: &Self::State);
@@ -1640,12 +1648,12 @@ pub(super) mod reach {
     /// included), and whether the whole tree was walked: an unstructured
     /// remnant, a missing block or a loop that did not settle leaves it
     /// incomplete, and nothing it says can be relied on.
-    pub(super) struct Walked<S> {
+    pub(in crate::marshalling) struct Walked<S> {
         pub returned: Option<S>,
         pub complete: bool,
     }
 
-    pub(super) fn walk<F: Flow>(func: &HighFunction, flow: &mut F, entry: F::State) -> Walked<F::State> {
+    pub(in crate::marshalling) fn walk<F: Flow>(func: &HighFunction, flow: &mut F, entry: F::State) -> Walked<F::State> {
         let mut walker = Walker { func, flow, breaks: HashMap::new(), continues: HashMap::new(), returned: None, complete: true };
         let end = walker.region(&func.region, Some(entry));
         walker.returned = merge::<F>(walker.returned.take(), end);

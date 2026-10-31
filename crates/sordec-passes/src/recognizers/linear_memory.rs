@@ -217,6 +217,7 @@ fn classify(
                 keys_pos: args[0],
                 vals_pos: args[1],
                 len: args[2],
+                entries: None,
             },
             ty: KnownType::Map(
                 Box::new(IrType::Unknown(UnknownReason::InsufficientEvidence)),
@@ -441,6 +442,7 @@ mod tests {
                 keys_pos,
                 vals_pos,
                 len,
+                ..
             })) => {
                 assert_eq!(*keys_pos, v(0));
                 assert_eq!(*vals_pos, v(1));

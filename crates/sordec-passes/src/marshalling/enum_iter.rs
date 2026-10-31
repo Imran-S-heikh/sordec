@@ -50,11 +50,23 @@
 //! # Why it is exact
 //!
 //! The value is proven to be the enum: an entrypoint parameter the spec
-//! declares with it, or a value an earlier decode typed (`udt_of`). Its
-//! `Val` is then a vector holding the variant's name and its payload's
-//! `Val`s, one each — and the code that reads it is the derived decode,
-//! which the re-emitted `#[contracttype]` regenerates in the entrypoint
-//! wrapper, as every marshalling elision relocates its decode:
+//! declares with it, a value an earlier decode typed (`udt_of`), or an
+//! element `vec_get` reads from a vector of the enum — a parameter the spec
+//! declares `Vec<E>`, a vector an earlier pass proved one, or
+//! `__check_auth`'s `Vec<Context>`, which the custom account interface
+//! fixes. Its `Val` is then a vector holding the variant's name and its
+//! payload's `Val`s, one each — and the code that reads it is the derived
+//! decode, which the re-emitted `#[contracttype]` regenerates where the
+//! value enters: in the entrypoint wrapper, or, for an element, in the
+//! typed vector's own read (`get_unchecked`, `iter`), as every marshalling
+//! elision relocates its decode. The element is then typed as the enum.
+//!
+//! `Context` is the SDK's (`soroban_sdk::auth`, `export = false`), so no
+//! spec declares it; its declaration is the auth table's
+//! (`auth_entries`), as the SDK version the contract was built with has it,
+//! registered as imported from the SDK only when a match names it.
+//!
+//! Each step the rewrite takes away is that decode's:
 //!
 //! - **The iterator is the SDK's.** `next` reads the state it is handed
 //!   (vector at +0, index at +8, length at +12), and on the paths that
@@ -63,12 +75,18 @@
 //!   `2` only. The state is set from the value (`v`, `0`, `vec_len(v)`)
 //!   and nothing but these calls and loads of the index and length touches
 //!   those 16 bytes, so the state is the iterator's own.
-//! - **The k-th call reads element k.** The first call is the one whose
-//!   element the lookup reads: no other call can run before the switch on
-//!   that lookup, so it is the first on every path, and reads element 0.
-//!   Every other call sits in exactly one arm of the switch, at most one
-//!   per arm, and none in a loop: on that arm's path it is the second
-//!   call, and reads element 1. A variant has at most one payload
+//! - **The k-th call reads element k.** The state's three stores sit in
+//!   one block with no call between them, so after the first a call sees
+//!   all three. A forward walk of the region tree counts, on every path,
+//!   the calls made since the state was last set, round loops included
+//!   (`udt_decode::reach::walk`): a call reads element `k` when that count
+//!   is `k` on every path reaching it, and is refused otherwise — a call
+//!   the state's setting does not precede, or one two paths reach with two
+//!   counts. Inside a loop each iteration sets the state afresh from that
+//!   iteration's value before its calls, so the count restarts. The first
+//!   call is the one whose element the lookup reads, with count `0`; every
+//!   other call sits in exactly one arm of the switch, at most one per arm,
+//!   with count `1`. A variant has at most one payload
 //!   component (larger ones are refused), so every call reads an index
 //!   below the vector's length and returns `Some`: its element slot holds
 //!   that element. A read of the slot is that element where the reach
@@ -113,6 +131,19 @@
 //! control falls out of the switch, which only the default does — and that
 //! arm names the variant: no other position is left for it to take.
 //!
+//! The same when the default arm is a bare `break` out of a scope around
+//! the switch, the scope's body never falls out of it, and that `break` is
+//! the only one to the scope: the code after the scope in its sequence is
+//! then reached only through the default, and moves into it in place of
+//! the `break`. Breaks and continues in it still name constructs around
+//! it. If it can fall off the end of its sequence, that sequence must be a
+//! scope's body, and a `break` to that scope ends the moved code — where
+//! falling off went.
+//!
+//! The value's own check that it is a vector (the first step of its
+//! derived conversion, `Vec<Val>::try_from_val`) is a check of the decode
+//! like the others, and goes with it.
+//!
 //! # Gates
 //!
 //! - `next`: no spec, `(out, state)`; `out` only stored at +0 (8 bytes,
@@ -122,36 +153,42 @@
 //!   element `vec_get(load +0, U32Val(load +8))`, the index that load
 //!   plus one.
 //! - The value proven to be a declared enum every variant of which has at
-//!   most one payload component.
-//! - The state: three stores of the value, `0` and its `vec_len`; nothing
-//!   else touches its 16 bytes but `next` calls handed it and loads of the
-//!   index and length.
+//!   most one payload component (`Context` declared by the auth table, for
+//!   an SDK major it covers, and only when the contract declares no type
+//!   of its name).
+//! - The state: three stores of the value, `0` and its `vec_len`, in one
+//!   block with no call between them; nothing else touches its 16 bytes
+//!   but `next` calls handed it and loads of the index and length.
 //! - One lookup over the enum's variant names, on an element of the first
 //!   call; one switch on its position; every other call in a single-case
-//!   arm (or the default) of that switch whose variant has a payload, one
-//!   per arm, none in a loop.
+//!   arm (or the default, or the code its bare `break` alone reaches) of
+//!   that switch whose variant has a payload, one per arm.
+//! - Every call's count from the state's setting the same on every path:
+//!   `0` for the first, `1` for an arm's; the whole region walked.
 //! - Each call: the reach check accepts its slot; its element read whole.
 //! - A payload's uses: in its arm; `decode` only for a `u32` or unit enum;
 //!   a unit enum's checked code only as the select chain above, its codes
 //!   exactly the declared ones; other non-check uses only for a type
 //!   carried as its own `Val`.
 //!
+//! - Every removed value's uses removed with it; each condition is a trap
+//!   guard, an inverted trap guard, or a branch left empty.
+//!
 //! Not taken yet: a variant of several components (`X(a, b)`), a payload
 //! of a numeric type other than `u32` (`i64`, `i128`: their two-form
 //! decodes), a tuple payload, a payload carried out of its arm by a merge,
-//! and a frame slot two decodes reuse for their iterators (the check of
-//! the state is flow-insensitive).
-//! - Every removed value's uses removed with it; each condition is a trap
-//!   guard, an inverted trap guard, or a branch left empty.
+//! and a frame slot two decodes reuse for their iterators (the check that
+//! nothing else touches the state is flow-insensitive).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use sordec_common::{BlockId, FuncId, Provenance, ProvenanceSource, TypeId, ValueId};
 use sordec_ir::{
-    BinaryOp, BufOpKind, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MemWidth, Region,
-    SemanticOp, StructDef, SwitchArm, TypeRegistry, UnaryOp, UnionDef, VecOpKind,
+    BinaryOp, BufOpKind, CompositeType, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MemWidth,
+    Region, SdkType, SemanticOp, StructDef, SwitchArm, TypeRef, TypeRegistry, UnaryOp, UnionDef, VecOpKind,
 };
 
+use super::auth_entries::SdkTypes;
 use super::enum_match::{blocks_in, expr_of, falls_through, gated_summary, open_arm, scheduled};
 use super::udt_decode::reach::{self, Gated};
 use super::udt_decode::{param_accesses, raw_address, read_keys, udt_of, Candidate, CertainWrite, ParamAccess, Role, Slot};
@@ -178,7 +215,20 @@ impl Pass<HighIr> for EnumIterPass {
         let Some(facts) = ir.soroban_facts.as_ref() else {
             return result;
         };
-        let types = facts.types.clone();
+        let mut types = facts.types.clone();
+        // `__check_auth`'s contexts are the SDK's `Context`, which no spec
+        // declares: its declaration comes from the auth table, as the SDK
+        // version the contract was built with has it.
+        let sdk = if ir.functions.iter().any(takes_auth_contexts) {
+            super::auth_entries::sdk_major(facts)
+                .and_then(|major| SdkTypes::register(&types, major, super::auth_entries::CONTEXT))
+        } else {
+            None
+        };
+        let context = sdk.as_ref().and_then(|s| s.id(super::auth_entries::CONTEXT));
+        if let Some(s) = sdk {
+            types = s.types;
+        }
         if types.unions.is_empty() {
             return result;
         }
@@ -194,20 +244,76 @@ impl Pass<HighIr> for EnumIterPass {
         let gated: HashMap<FuncId, Vec<Option<Gated>>> =
             ir.functions.iter().map(|f| (f.id, gated_summary(ir, f, access.get(&f.id)))).collect();
         let memory = ir.memory.clone();
+        let mut sdk_used = false;
         for func in &mut ir.functions {
             let mut tried: HashSet<ValueId> = HashSet::new();
             // A site rewrites the region, so the next is planned afresh.
             for _ in 0..16 {
-                let (site, refused) = plan(func, &memory, &types, &nexts, &access, &gated, &mut tried);
+                let (site, refused) = plan(func, &memory, &types, context, &nexts, &access, &gated, &mut tried);
                 result.metrics.increment(mc::MARSHALLING_ENUM_ITER_REFUSED, refused);
                 let Some(site) = site else { break };
+                sdk_used |= types.sdk_module(site.union).is_some();
                 let payloads = apply(func, site);
                 result.metrics.increment(mc::MARSHALLING_ENUM_ITER_SITES, 1);
                 result.metrics.increment(mc::MARSHALLING_ENUM_ITER_PAYLOADS, payloads);
                 result.changed = true;
             }
         }
+        // The SDK's types join the registry only when a match names them.
+        if sdk_used && let Some(facts) = ir.soroban_facts.as_mut() {
+            facts.types = types;
+        }
         result
+    }
+}
+
+/// Whether `f` is handed `Vec<Context>`: the custom account interface's
+/// `__check_auth`, whose contexts the protocol fixes.
+fn takes_auth_contexts(f: &HighFunction) -> bool {
+    f.signature.as_ref().is_some_and(|s| {
+        s.inputs.iter().any(|p| {
+            matches!(&p.ty, TypeRef::Composite(CompositeType::Vec(e)) if matches!(**e, TypeRef::Sdk(SdkType::AuthContext)))
+        })
+    })
+}
+
+/// The declared enum the elements of `vec` are: a `Vec` of it by the spec
+/// (an entrypoint parameter, or `__check_auth`'s `Vec<Context>`, which the
+/// protocol fixes) or by a type an earlier pass proved.
+fn element_union(func: &HighFunction, vec: ValueId, context: Option<TypeId>) -> Option<TypeId> {
+    let vec = resolve_use(func, vec);
+    if let Some(index) = func.params.iter().position(|p| *p == vec)
+        && let Some(sig) = func.signature.as_ref()
+        && let TypeRef::Composite(CompositeType::Vec(e)) = &sig.inputs.get(index)?.ty
+    {
+        return match &**e {
+            TypeRef::UserDefined(id) => Some(*id),
+            TypeRef::Sdk(SdkType::AuthContext) => context,
+            _ => None,
+        };
+    }
+    match &func.bindings.get(vec)?.ty {
+        IrType::Known(KnownType::Vec(e)) => match &**e {
+            IrType::Known(KnownType::UserDefined(id)) => Some(*id),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The enum `value` is proven to be, and whether that proof is the vector
+/// it was read from (the value is then typed with the match): a value
+/// already typed (`udt_of`), or an element `vec_get` reads from a vector of
+/// the enum.
+fn proven_union(func: &HighFunction, value: ValueId, context: Option<TypeId>) -> Option<(TypeId, bool)> {
+    if let Some(id) = udt_of(func, value) {
+        return Some((id, false));
+    }
+    match func.bindings.get(value).map(|b| &b.expr)? {
+        Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::Get, args })) if args.len() == 2 => {
+            element_union(func, args[0], context).map(|id| (id, true))
+        }
+        _ => None,
     }
 }
 
@@ -297,6 +403,14 @@ fn is_next(ir: &HighIr, f: &HighFunction, access: Option<&Vec<Option<ParamAccess
 #[derive(Debug)]
 struct Site {
     value: ValueId,
+    /// The enum the value is.
+    union: TypeId,
+    /// The value is an element read from a vector of the enum, typed with
+    /// the match.
+    element: bool,
+    /// The default arm is `break` to an enclosing scope, the code after
+    /// which runs only through it: that code moves into the arm.
+    hoist: Option<Hoist>,
     /// The bindings that go, with every use.
     removed: HashSet<ValueId>,
     /// `decode(x)` of a payload element: `(binding, arm key)`.
@@ -319,6 +433,16 @@ struct Site {
     explicit_default: Option<(u32, bool)>,
 }
 
+/// The default arm's continuation: the default is `break 'inner`, and the
+/// items after scope `'inner` in its sequence are reached only through it.
+/// They end in a `break 'outer` when they fall off the end of the sequence,
+/// which is `'outer`'s body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Hoist {
+    inner: BlockId,
+    outer: Option<BlockId>,
+}
+
 /// An explicit arm by its index among the switch's arms, or the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ArmKey {
@@ -334,15 +458,135 @@ struct ArmPayload {
     loads: Vec<ValueId>,
 }
 
-/// The regions' loop-enclosed blocks.
-fn loop_blocks(region: &Region) -> HashSet<BlockId> {
-    let mut out = HashSet::new();
-    region.for_each_node(|node| {
-        if let Region::Loop { body, .. } = node {
-            out.extend(blocks_in(body));
+/// Where the iterator stands on a path: how many `next` calls ran since its
+/// state was last set, or no one count (never set, or two paths that
+/// disagree).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pos {
+    Unset,
+    At(u32),
+    Mixed,
+}
+
+/// The forward walk counting `next` calls from the state's last setting, on
+/// every path, round loops included: what each call saw on every visit,
+/// met.
+struct Counting<'a> {
+    resets: &'a HashSet<ValueId>,
+    calls: &'a HashSet<ValueId>,
+    seen: HashMap<ValueId, Pos>,
+}
+
+impl reach::Flow for Counting<'_> {
+    type State = Pos;
+
+    fn join(into: &mut Pos, other: &Pos) {
+        if into != other {
+            *into = Pos::Mixed;
         }
-    });
-    out
+    }
+
+    fn step(&mut self, id: ValueId, state: &mut Pos) {
+        if self.resets.contains(&id) {
+            *state = Pos::At(0);
+        } else if self.calls.contains(&id) {
+            let at = self.seen.entry(id).or_insert(*state);
+            if *at != *state {
+                *at = Pos::Mixed;
+            }
+            *state = match *state {
+                Pos::At(k) => Pos::At(k + 1),
+                _ => Pos::Mixed,
+            };
+        }
+    }
+}
+
+/// How many calls ran since the state was set, for each call, on every
+/// path that reaches it — `None` when the walk could not see the whole
+/// function.
+fn call_positions(func: &HighFunction, resets: &HashSet<ValueId>, calls: &HashSet<ValueId>) -> Option<HashMap<ValueId, Pos>> {
+    let mut flow = Counting { resets, calls, seen: HashMap::new() };
+    let walked = reach::walk(func, &mut flow, Pos::Unset);
+    walked.complete.then_some(flow.seen)
+}
+
+/// The scope labelled `out` in `region`, with the sequence holding it, its
+/// place there, and the scope whose body that sequence is (if one is).
+fn scope_in(region: &Region, out: BlockId, parent: Option<BlockId>) -> Option<(&[Region], usize, Option<BlockId>)> {
+    match region {
+        Region::Sequence(items) => {
+            for (i, item) in items.iter().enumerate() {
+                if matches!(item, Region::Scope { out: o, .. } if *o == out) {
+                    return Some((items.as_slice(), i, parent));
+                }
+                // Only the sequence itself is the scope's body.
+                if let Some(found) = scope_in(item, out, None) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Region::Scope { out: o, body } => scope_in(body, out, Some(*o)),
+        Region::Loop { body, .. } => scope_in(body, out, None),
+        Region::If { then_region, else_region, .. } => {
+            scope_in(then_region, out, None).or_else(|| else_region.as_deref().and_then(|e| scope_in(e, out, None)))
+        }
+        Region::Switch { arms, default, .. } => {
+            arms.iter().find_map(|a| scope_in(&a.body, out, None)).or_else(|| scope_in(default, out, None))
+        }
+        _ => None,
+    }
+}
+
+/// The `break`s to `out` in `region`.
+fn breaks_to(region: &Region, out: BlockId) -> usize {
+    let mut n = 0;
+    region.for_each_node(|node| n += usize::from(matches!(node, Region::Break { target, .. } if *target == out)));
+    n
+}
+
+/// The scope a default arm leaves by a bare `break`: the arm is that break
+/// and nothing else that does work.
+fn default_break(func: &HighFunction, default: &Region) -> Option<BlockId> {
+    let empty = |r: &Region| match r {
+        Region::Basic(b) => func.blocks.get(*b).is_some_and(|blk| blk.bindings.is_empty()),
+        Region::Sequence(items) => items.is_empty(),
+        _ => false,
+    };
+    let last = match default {
+        Region::Sequence(items) => {
+            let (last, before) = items.split_last()?;
+            if !before.iter().all(empty) {
+                return None;
+            }
+            last
+        }
+        other => other,
+    };
+    match last {
+        Region::Break { target, transfer } if transfer.is_empty() => Some(*target),
+        _ => None,
+    }
+}
+
+/// The default arm's continuation, when its arm is a bare `break 'inner`
+/// out of a scope enclosing the switch (see [`Hoist`]): the scope's body
+/// never falls out of it and breaks to it only from that arm, so the code
+/// after it runs exactly when the default is taken. It must not fall out
+/// of its own sequence either, unless that sequence is a scope's body,
+/// which falling out of leaves. Its blocks, with the hoist.
+fn continuation(func: &HighFunction, switch: &Region, default: &Region) -> Option<(Hoist, HashSet<BlockId>)> {
+    let inner = default_break(func, default)?;
+    let (items, at, parent) = scope_in(&func.region, inner, None)?;
+    let Region::Scope { body, .. } = &items[at] else { return None };
+    if falls_through(body) || breaks_to(body, inner) != 1 || !blocks_in(body).is_superset(&blocks_in(switch)) {
+        return None;
+    }
+    let rest = &items[at + 1..];
+    let falls = rest.iter().all(falls_through);
+    let outer = if falls { Some(parent?) } else { None };
+    Some((Hoist { inner, outer }, rest.iter().flat_map(blocks_in).collect()))
 }
 
 /// A switch found, with the sequence holding it and its position there.
@@ -585,11 +829,12 @@ fn empty_after(func: &HighFunction, r: &Region, removed: &HashSet<ValueId>, empt
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn plan(
     func: &HighFunction,
     memory: &sordec_ir::MemoryImage,
     types: &TypeRegistry,
+    context: Option<TypeId>,
     nexts: &HashSet<FuncId>,
     access: &HashMap<FuncId, Vec<Option<ParamAccess>>>,
     gated: &HashMap<FuncId, Vec<Option<Gated>>>,
@@ -605,13 +850,16 @@ fn plan(
         };
         let [arg] = args.as_slice() else { continue };
         let value = resolve_use(func, *arg);
-        let Some(uid) = udt_of(func, value) else { continue };
+        let Some((uid, element)) = proven_union(func, value, context) else { continue };
         let Some(union) = types.unions.iter().find(|u| u.id == uid) else { continue };
         if !tried.insert(*len) {
             continue;
         }
         match site(func, memory, types, nexts, access, gated, &order, *len, value, union) {
-            Ok(s) => return (Some(s), refused),
+            Ok(mut s) => {
+                s.element = element;
+                return (Some(s), refused);
+            }
             Err(why) => {
                 refused += 1;
                 trace(func, &format!("decode of {value:?} refused: {why}"));
@@ -638,7 +886,6 @@ fn site(
         return Err("a variant with several payload components".into());
     }
     let block_of: HashMap<ValueId, BlockId> = order.iter().map(|(b, v)| (*v, *b)).collect();
-    let in_loop = loop_blocks(&func.region);
     let store = |v: ValueId| match func.bindings.get(v).map(|b| &b.expr) {
         Some(Expr::Store { addr: a, value: x, offset, width }) => {
             let (b, k) = canon_addr(func, *a);
@@ -672,16 +919,16 @@ fn site(
     };
     let s_idx = find(at + 8, &|x| trace_int(func, x) == Some(0)).ok_or("no single zero index store")?;
     let s_len = find(at + 12, &|x| x == len).ok_or("no single length store")?;
-    for s in [*s_vec, s_idx, s_len] {
-        if block_of.get(&s).is_some_and(|b| in_loop.contains(b)) {
-            return Err("the state is set in a loop".into());
-        }
+    // The state is set at once: its three stores in one block.
+    let state_block = block_of.get(s_vec).ok_or("the state is not scheduled")?;
+    if [s_idx, s_len].iter().any(|s| block_of.get(s) != Some(state_block)) {
+        return Err("the state's stores are in different blocks".into());
     }
 
     // The `next` calls on it, and the loads of its index and length.
     let mut calls: Vec<(ValueId, u32)> = Vec::new();
     let mut state_loads: Vec<ValueId> = Vec::new();
-    for (b, v) in order {
+    for (_, v) in order {
         match func.bindings.get(*v).map(|b| &b.expr) {
             Some(Expr::Call { target, args }) if nexts.contains(target) && args.len() == 2 => {
                 if addr(func, args[1]) != (base, at) {
@@ -690,9 +937,6 @@ fn site(
                 let (ob, r) = addr(func, args[0]);
                 if ob != base || (r < at + 16 && at < r + 16) {
                     return Err("a next call's out-pointer is not a frame slot of its own".into());
-                }
-                if in_loop.contains(b) {
-                    return Err("a next call in a loop".into());
                 }
                 calls.push((*v, r));
             }
@@ -708,6 +952,25 @@ fn site(
     if calls.is_empty() {
         return Err("no next call on the state".into());
     }
+    // No call between the state's stores: once the first is made, the next
+    // call sees all three.
+    let in_block: Vec<ValueId> = func.blocks.get(*state_block).map(|blk| blk.bindings.clone()).unwrap_or_default();
+    let place = |v: ValueId| in_block.iter().position(|x| *x == v);
+    let placed: Vec<usize> = [*s_vec, s_idx, s_len].iter().filter_map(|s| place(*s)).collect();
+    let (lo, hi) = (placed.iter().min().copied().unwrap_or(0), placed.iter().max().copied().unwrap_or(0));
+    if calls.iter().any(|(c, _)| place(*c).is_some_and(|p| lo < p && p < hi)) {
+        return Err("a next call between the state's stores".into());
+    }
+    // What each call reads: the count of calls since the state was set, the
+    // same on every path to it — loops included, where each iteration sets
+    // the state afresh before its calls.
+    let resets: HashSet<ValueId> = [*s_vec, s_idx, s_len].into_iter().collect();
+    let call_ids: HashSet<ValueId> = calls.iter().map(|(c, _)| *c).collect();
+    let positions = call_positions(func, &resets, &call_ids).ok_or("the region could not be walked")?;
+    let position = |c: ValueId| match positions.get(&c) {
+        Some(Pos::At(k)) => Some(*k),
+        _ => None,
+    };
     let mut allowed: HashSet<ValueId> = [*s_vec, s_idx, s_len].into_iter().collect();
     allowed.extend(calls.iter().map(|(c, _)| *c));
     allowed.extend(state_loads.iter().copied());
@@ -808,10 +1071,23 @@ fn site(
         _ => HashSet::new(),
     };
     default_blocks.extend(rest_blocks.iter().copied());
+    // A default that leaves by `break` to a scope whose continuation only it
+    // reaches: that continuation is the default's.
+    let hoist = match rest_blocks.is_empty() {
+        true => continuation(func, switch, default),
+        false => None,
+    };
+    if let Some((_, blocks)) = &hoist {
+        default_blocks.extend(blocks.iter().copied());
+    }
+    let hoist = hoist.map(|(h, _)| h);
     arm_blocks.push((ArmKey::Default, default_blocks));
     let first_block = *block_of.get(&first).ok_or("the first call is not scheduled")?;
     if arm_blocks.iter().any(|(_, bs)| bs.contains(&first_block)) || blocks_in(switch).contains(&first_block) {
         return Err("the first call is inside the switch".into());
+    }
+    if position(first) != Some(0) {
+        return Err("the first call does not read element 0 on every path".into());
     }
 
     // Every other call: in one arm of a variant with a payload, one each.
@@ -826,6 +1102,9 @@ fn site(
         };
         if by_arm.insert(*key, *c).is_some() {
             return Err("two next calls in one arm".into());
+        }
+        if position(*c) != Some(1) {
+            return Err(format!("{c:?} does not read element 1 on every path"));
         }
     }
     let case_of = |key: ArmKey| -> Option<u32> {
@@ -883,6 +1162,17 @@ fn site(
     removed.extend(state_loads.iter().copied());
     removed.extend(elements.values().flatten().copied());
     removed.insert(lookup);
+    // The decode's first step, the value's conversion to the vector it is
+    // carried as: a test of its tag against the vector's.
+    for (_, v) in order {
+        if let Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value: x, tag, .. }))) =
+            func.bindings.get(*v).map(|b| &b.expr)
+            && *tag == crate::val_abi::TAG_VEC_OBJECT
+            && resolve_use(func, *x) == value
+        {
+            removed.insert(*v);
+        }
+    }
     // A `Use` alias of the length (the decoded `u32`) goes with it.
     for (_, v) in order {
         if resolve_use(func, *v) == len {
@@ -1155,6 +1445,11 @@ fn site(
         }
         None => None,
     };
+    // The continuation moves only for the payload it reads.
+    let in_default = blocks_in(default);
+    let hoist = hoist.filter(|_| {
+        by_arm.get(&ArmKey::Default).and_then(|c| block_of.get(c)).is_some_and(|b| !in_default.contains(b))
+    });
     // Every payload read sits in its arm.
     for p in &payloads {
         let bs = &arm_blocks.iter().find(|(k, _)| *k == p.arm).expect("an arm").1;
@@ -1176,6 +1471,9 @@ fn site(
     );
     Ok(Site {
         value,
+        union: union.id,
+        element: false,
+        hoist,
         removed,
         decodes,
         codes,
@@ -1195,6 +1493,22 @@ fn site(
 
 fn apply(func: &mut HighFunction, site: Site) -> i64 {
     let prov = |note: String| Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note);
+    // An element read from a vector of the enum is the enum: the decode
+    // just taken apart is its derived conversion, which reading it from the
+    // typed vector regenerates.
+    if site.element
+        && let Some(b) = func.bindings.get_mut(site.value)
+    {
+        b.ty = IrType::Known(KnownType::UserDefined(site.union));
+        b.add_provenance(prov(
+            "an element of a vector the declaration types, decoded inline as that enum: the element".into(),
+        ));
+    }
+    // The default's continuation moves into it, in place of its `break`.
+    if let Some(h) = site.hoist {
+        let region = std::mem::replace(&mut func.region, Region::Unreachable);
+        func.region = hoist(region, h, site.selector);
+    }
     // The payloads, one per arm that reads one.
     let mut opening: HashMap<ArmKey, (ValueId, HashMap<ValueId, ValueId>)> = HashMap::new();
     for p in &site.payloads {
@@ -1249,6 +1563,82 @@ fn apply(func: &mut HighFunction, site: Site) -> i64 {
     let region = drop_checks(region, &site, &empty);
     func.region = rewrite_switch(func, region, &site, &opening);
     site.payloads.len() as i64
+}
+
+/// `region` with the items after scope `h.inner` moved into the default
+/// arm of the switch on `selector`, in place of its `break 'inner`, ending
+/// in `break 'outer` when they fell out of `'outer`'s body.
+fn hoist(region: Region, h: Hoist, selector: ValueId) -> Region {
+    fn take(region: Region, h: Hoist, moved: &mut Option<Vec<Region>>) -> Region {
+        match region {
+            Region::Sequence(items) => {
+                let mut out = Vec::with_capacity(items.len());
+                let mut it = items.into_iter();
+                while let Some(item) = it.next() {
+                    let ours = matches!(&item, Region::Scope { out, .. } if *out == h.inner);
+                    out.push(take(item, h, moved));
+                    if ours && moved.is_none() {
+                        let mut rest: Vec<Region> = it.by_ref().collect();
+                        if let Some(outer) = h.outer {
+                            rest.push(Region::Break { target: outer, transfer: Vec::new() });
+                        }
+                        *moved = Some(rest);
+                    }
+                }
+                Region::Sequence(out)
+            }
+            Region::Scope { out, body } => Region::Scope { out, body: Box::new(take(*body, h, moved)) },
+            Region::Loop { header, body, kind } => Region::Loop { header, body: Box::new(take(*body, h, moved)), kind },
+            Region::If { cond, then_region, else_region } => Region::If {
+                cond,
+                then_region: Box::new(take(*then_region, h, moved)),
+                else_region: else_region.map(|e| Box::new(take(*e, h, moved))),
+            },
+            Region::Switch { index, arms, default, dispatch } => Region::Switch {
+                index,
+                arms: arms.into_iter().map(|a| SwitchArm { cases: a.cases, body: take(a.body, h, moved) }).collect(),
+                default: Box::new(take(*default, h, moved)),
+                dispatch,
+            },
+            leaf => leaf,
+        }
+    }
+    fn place(region: Region, selector: ValueId, moved: &mut Option<Vec<Region>>) -> Region {
+        match region {
+            Region::Sequence(items) => Region::Sequence(items.into_iter().map(|r| place(r, selector, moved)).collect()),
+            Region::Scope { out, body } => Region::Scope { out, body: Box::new(place(*body, selector, moved)) },
+            Region::Loop { header, body, kind } => {
+                Region::Loop { header, body: Box::new(place(*body, selector, moved)), kind }
+            }
+            Region::If { cond, then_region, else_region } => Region::If {
+                cond,
+                then_region: Box::new(place(*then_region, selector, moved)),
+                else_region: else_region.map(|e| Box::new(place(*e, selector, moved))),
+            },
+            Region::Switch { index, arms, default, dispatch } => {
+                let arms = arms.into_iter().map(|a| SwitchArm { cases: a.cases, body: place(a.body, selector, moved) });
+                let arms: Vec<SwitchArm> = arms.collect();
+                let default = if index == selector && let Some(rest) = moved.take() {
+                    // The arm's `break` gives way to where it went.
+                    let kept: Vec<Region> = match *default {
+                        Region::Sequence(items) => {
+                            items.into_iter().filter(|r| !matches!(r, Region::Break { .. })).collect()
+                        }
+                        Region::Break { .. } => Vec::new(),
+                        other => vec![other],
+                    };
+                    Region::Sequence(kept.into_iter().chain(rest).collect())
+                } else {
+                    place(*default, selector, moved)
+                };
+                Region::Switch { index, arms, default: Box::new(default), dispatch }
+            }
+            leaf => leaf,
+        }
+    }
+    let mut moved = None;
+    let region = take(region, h, &mut moved);
+    place(region, selector, &mut moved)
 }
 
 /// The site's conditions, dropped: a trap guard goes, an inverted one
@@ -1428,9 +1818,28 @@ mod tests {
         /// The payload's code checked by a select chain whose fallback is
         /// this constant (`B(U)` with `enum U { X = 1, Y = 2 }`).
         code: Option<i32>,
+        /// The decode is the body of a loop, which goes round after the
+        /// match.
+        looped: bool,
+        /// The first call is made before the state is set.
+        stale_first: bool,
+        /// The value is an element `vec_get` reads from a `Vec<E>`.
+        element: bool,
+        /// `B`'s arm is the default, `break 'scope`, and its work follows
+        /// the scope; with `true` twice, a second break to that scope.
+        hoisted: Option<bool>,
     }
 
-    const PLAIN: Shape = Shape { twice: false, reads_position: false, foreign_store: false, code: None };
+    const PLAIN: Shape = Shape {
+        twice: false,
+        reads_position: false,
+        foreign_store: false,
+        code: None,
+        looped: false,
+        stale_first: false,
+        element: false,
+        hoisted: None,
+    };
 
     struct Builder {
         b: Arena<ValueId, Binding>,
@@ -1494,8 +1903,20 @@ mod tests {
     /// `match position { 1 => { remaining check; next; x + x }, _ => {} }`.
     fn entry(shape: &Shape) -> HighFunction {
         let mut f = Builder { b: Arena::new() };
-        let e = f.seed(IrType::Known(KnownType::UserDefined(TypeId::new(0))), Expr::Phi { incoming: vec![] });
+        let enum_ty = IrType::Known(KnownType::UserDefined(TypeId::new(0)));
+        let param_ty = if shape.element { IrType::Known(KnownType::Vec(Box::new(enum_ty))) } else { enum_ty };
+        let param = f.seed(param_ty, Expr::Phi { incoming: vec![] });
         let fp = f.seed(IrType::Known(KnownType::I32), Expr::Phi { incoming: vec![] });
+        let mut prologue = Vec::new();
+        let e = if shape.element {
+            let at = f.lit64(4);
+            let got = f.known(KnownOp::VecOp { kind: VecOpKind::Get, args: vec![v(param), v(at)] });
+            let not_vec = f.known(KnownOp::ValTagCheck { value: v(got), tag: crate::val_abi::TAG_VEC_OBJECT, negated: true });
+            prologue.extend([at, got, not_vec]);
+            got
+        } else {
+            param
+        };
         let len = f.known(KnownOp::VecOp { kind: VecOpKind::Len, args: vec![v(e)] });
         let zero = f.lit32(0);
         let s0 = f.store(fp, e, 0, MemWidth::W8);
@@ -1559,8 +1980,14 @@ mod tests {
             let k = f.lit32(7);
             default_block.extend([k, f.store(fp, k, 8, MemWidth::W4)]);
         }
+        let first_block = if shape.stale_first {
+            vec![len, zero, sixteen, out, c0, s0, s1, s2, t0, z64, t0_bad]
+        } else {
+            vec![len, zero, s0, s1, s2, sixteen, out, c0, t0, z64, t0_bad]
+        };
         let blocks = vec![
-            vec![len, zero, s0, s1, s2, sixteen, out, c0, t0, z64, t0_bad],
+            prologue,
+            first_block,
             vec![sym, pos, n, lookup, decoded, one64, bound, sel],
             vec![idx, end, left, one32, too_many],
             vec![c1, t1, t1_bad],
@@ -1568,29 +1995,67 @@ mod tests {
             arm_tail,
             default_block,
         ];
-        let arm = Region::Sequence(vec![
-            Region::Basic(bb(2)),
-            guard(too_many),
+        let arm_items = vec![
             Region::Basic(bb(3)),
-            guard(t1_bad),
+            guard(too_many),
             Region::Basic(bb(4)),
-            guard(not_u32),
+            guard(t1_bad),
             Region::Basic(bb(5)),
+            guard(not_u32),
+            Region::Basic(bb(6)),
             Region::Return { values: vec![v(user)] },
-        ]);
-        let region = Region::Sequence(vec![
-            Region::Basic(bb(0)),
-            guard(t0_bad),
-            Region::Basic(bb(1)),
-            guard(bound),
-            Region::Switch {
-                index: v(sel),
-                arms: vec![SwitchArm { cases: vec![1], body: arm }],
-                default: Box::new(Region::Basic(bb(6))),
-                dispatch: Some(v(lookup)),
-            },
-            Region::Return { values: vec![] },
-        ]);
+        ];
+        let mut items = vec![Region::Basic(bb(0))];
+        if shape.element {
+            // The element's check that it is a vector, a trap guard.
+            let check = blocks[0][2];
+            items.push(guard(check));
+        }
+        items.extend([Region::Basic(bb(1)), guard(t0_bad), Region::Basic(bb(2)), guard(bound)]);
+        let after = if shape.looped {
+            Region::Continue { target: bb(0), transfer: vec![] }
+        } else {
+            Region::Return { values: vec![] }
+        };
+        match shape.hoisted {
+            None => {
+                items.push(Region::Switch {
+                    index: v(sel),
+                    arms: vec![SwitchArm { cases: vec![1], body: Region::Sequence(arm_items) }],
+                    default: Box::new(Region::Basic(bb(7))),
+                    dispatch: Some(v(lookup)),
+                });
+                items.push(after);
+            }
+            Some(twice) => {
+                // `A` (case 0) falls out to the rest; the default (`B`)
+                // leaves the scope and its work follows it.
+                let scope = bb(9);
+                let mut body = vec![Region::Switch {
+                    index: v(sel),
+                    arms: vec![SwitchArm { cases: vec![0], body: Region::Basic(bb(7)) }],
+                    default: Box::new(Region::Break { target: scope, transfer: vec![] }),
+                    dispatch: Some(v(lookup)),
+                }];
+                if twice {
+                    body.push(Region::If {
+                        cond: v(fp),
+                        then_region: Box::new(Region::Break { target: scope, transfer: vec![] }),
+                        else_region: None,
+                    });
+                }
+                body.push(after);
+                items.push(Region::Scope { out: scope, body: Box::new(Region::Sequence(body)) });
+                items.extend(arm_items);
+            }
+        }
+        let region = if shape.looped {
+            Region::Sequence(vec![
+                Region::Loop { header: bb(0), body: Box::new(Region::Sequence(items)), kind: sordec_ir::LoopKind::Infinite },
+            ])
+        } else {
+            Region::Sequence(items)
+        };
         f.func(0, blocks, region)
     }
 
@@ -1602,7 +2067,7 @@ mod tests {
         let (access, gated) = summaries();
         let nexts = HashSet::from([FuncId::from_index(NEXT)]);
         let mut tried = HashSet::new();
-        let (site, _) = plan(func, &MemoryImage::empty(), types, &nexts, &access, &gated, &mut tried);
+        let (site, _) = plan(func, &MemoryImage::empty(), types, None, &nexts, &access, &gated, &mut tried);
         site.map(|s| apply(func, s)).ok_or(())
     }
 
@@ -1685,6 +2150,99 @@ mod tests {
     #[test]
     fn another_write_to_the_iterator_state_keeps_the_decode() {
         let mut func = entry(&Shape { foreign_store: true, ..PLAIN });
+        assert_eq!(run(&mut func, PrimitiveType::U32), Err(()));
+    }
+
+    /// The switch the rewrite left, wherever it sits.
+    fn the_switch(func: &HighFunction) -> (ValueId, Vec<SwitchArm>, Region) {
+        let mut found = None;
+        func.region.for_each_node(|n| {
+            if let Region::Switch { index, arms, default, .. } = n {
+                found = Some((*index, arms.clone(), (**default).clone()));
+            }
+        });
+        found.expect("a switch")
+    }
+
+    /// The payload a match arm opens with.
+    fn opens_with_payload(func: &HighFunction, body: &Region, variant: &str) -> bool {
+        let first = match body {
+            Region::Basic(b) => Some(*b),
+            Region::Sequence(items) => match items.first() {
+                Some(Region::Basic(b)) => Some(*b),
+                _ => None,
+            },
+            _ => None,
+        };
+        first.and_then(|b| func.blocks.get(b)).and_then(|blk| blk.bindings.first()).is_some_and(
+            |p| matches!(expr(func, *p), Expr::VariantPayload { variant: name, .. } if name == variant),
+        )
+    }
+
+    /// Each iteration sets the state afresh before its calls, so its first
+    /// call reads element 0 and the arm's element 1, round after round.
+    #[test]
+    fn a_decode_in_a_loop_body_is_taken_per_iteration() {
+        let mut func = entry(&Shape { looped: true, ..PLAIN });
+        assert_eq!(run(&mut func, PrimitiveType::U32), Ok(1));
+        let (index, arms, _) = the_switch(&func);
+        assert_eq!(index, v(0));
+        assert!(opens_with_payload(&func, &arms[0].body, "B"));
+    }
+
+    /// A call made before the state is set reads what the last iteration
+    /// left — or nothing at all, the first time round.
+    #[test]
+    fn a_call_before_the_state_is_set_keeps_the_decode() {
+        for looped in [false, true] {
+            let mut func = entry(&Shape { stale_first: true, looped, ..PLAIN });
+            assert_eq!(run(&mut func, PrimitiveType::U32), Err(()), "looped: {looped}");
+        }
+    }
+
+    /// An element read from a vector of the enum is decoded as it: typed
+    /// with the match, and its own check that it is a vector goes with the
+    /// decode.
+    #[test]
+    fn an_element_of_a_vector_of_the_enum_is_the_enum() {
+        let mut func = entry(&Shape { element: true, looped: true, ..PLAIN });
+        assert_eq!(run(&mut func, PrimitiveType::U32), Ok(1));
+        let (index, _, _) = the_switch(&func);
+        let got = func.bindings.get(index).expect("the element");
+        assert!(matches!(got.expr, Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::Get, .. }))));
+        assert_eq!(got.ty, IrType::Known(KnownType::UserDefined(TypeId::new(0))));
+        let mut ifs = 0;
+        func.region.for_each_node(|n| ifs += usize::from(matches!(n, Region::If { .. })));
+        assert_eq!(ifs, 0, "the vector check goes with the decode");
+    }
+
+    /// A vector of something else says nothing about its elements.
+    #[test]
+    fn an_element_of_a_vector_of_another_type_keeps_the_decode() {
+        let mut func = entry(&Shape { element: true, ..PLAIN });
+        func.bindings.get_mut(v(0)).unwrap().ty = IrType::Known(KnownType::Vec(Box::new(IrType::Known(KnownType::Val))));
+        assert_eq!(run(&mut func, PrimitiveType::U32), Err(()));
+    }
+
+    /// The default arm leaves a scope whose rest only it reaches: that rest
+    /// is the default's variant's arm, and moves into it.
+    #[test]
+    fn a_default_arm_that_breaks_to_its_continuation_takes_it() {
+        let mut func = entry(&Shape { hoisted: Some(false), ..PLAIN });
+        assert_eq!(run(&mut func, PrimitiveType::U32), Ok(1));
+        let (_, arms, default) = the_switch(&func);
+        let b = arms.iter().find(|a| a.cases == [1]).expect("`B` named");
+        assert!(opens_with_payload(&func, &b.body, "B"));
+        let mut returns = 0;
+        b.body.for_each_node(|n| returns += usize::from(matches!(n, Region::Return { values } if values.len() == 1)));
+        assert_eq!(returns, 1, "the continuation moved into the arm");
+        assert!(matches!(default, Region::Unreachable));
+    }
+
+    /// A second way into the continuation: it is not the default's alone.
+    #[test]
+    fn a_continuation_reached_another_way_keeps_the_decode() {
+        let mut func = entry(&Shape { hoisted: Some(true), ..PLAIN });
         assert_eq!(run(&mut func, PrimitiveType::U32), Err(()));
     }
 

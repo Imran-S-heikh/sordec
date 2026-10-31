@@ -38,6 +38,13 @@
 //!   shape occurs once: two data fields of one shape cannot be told apart
 //!   by shape, and that event is left alone.
 //!
+//!   A discriminant read narrower than its word marks itself. Read whole,
+//!   it is a word like a `u64` field's, so it is one only where nothing
+//!   else could be: the event declares one `Option<u64>` and no other
+//!   one-word data field, exactly two whole words are left, 8 bytes apart,
+//!   and the first is only ever tested against `0` or `1` — a field's own
+//!   word is encoded or handed on, never compared with a small constant.
+//!
 //! The struct's layout is rustc's choice (it reorders fields), so it is
 //! read off the helper rather than computed.
 //!
@@ -102,6 +109,13 @@
 //! when the discriminant stored is the constant `0`, and `to_muxed.id()`
 //! when the pair is the inlined `MuxedAddress::id()` — which is then
 //! removed with its branch, being the same call.
+//!
+//! rustc may build `to_muxed.address()` on that branch too: a merge of
+//! `to_muxed` itself (the plain arm) and the host's extraction of the
+//! address (the muxed arms), which is what `MuxedAddress::address()` is
+//! defined as. Such a merge goes with the branch; the field it was stored
+//! for — the only reader it may have — takes a fresh `to_muxed.address()`
+//! placed before the publish, where the branch's arms had all run.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -376,6 +390,8 @@ fn layout_for(
     }
     let rest: Vec<(u32, MemWidth)> =
         loads.iter().filter(|(o, _)| !claimed.contains(o)).map(|(o, (_, w))| (*o, *w)).collect();
+    let data_params: Vec<_> =
+        event.params.iter().filter(|p| p.location == EventParamLocation::Data).collect();
     let mut taken: HashSet<u32> = HashSet::new();
     for &(o, w) in &rest {
         if taken.contains(&o) {
@@ -386,6 +402,22 @@ fn layout_for(
             taken.insert(o + 8);
             shapes.push((o, Shape::OptionWord));
         }
+    }
+    // A discriminant read whole is a word like any other by its width. It
+    // is one only where the event leaves no doubt: one `Option` and no
+    // other one-word data field, two whole words left at `o` and `o + 8`,
+    // and the first read only to be tested against `0` or `1`.
+    let declared = |want: Shape| data_params.iter().filter(|p| shape_of(&p.ty) == Some(want)).count();
+    if declared(Shape::OptionWord) == 1
+        && declared(Shape::Word) == 0
+        && !shapes.iter().any(|(_, s)| *s == Shape::OptionWord)
+        && let [(o, MemWidth::W8), (o2, MemWidth::W8)] = rest.as_slice()
+        && *o2 == *o + 8
+        && loads.get(o).is_some_and(|(disc, _)| tested_as_discriminant(h, *disc))
+    {
+        taken.insert(*o);
+        taken.insert(*o2);
+        shapes.push((*o, Shape::OptionWord));
     }
     for &(o, w) in &rest {
         if taken.contains(&o) {
@@ -398,8 +430,6 @@ fn layout_for(
     }
 
     // Data fields by shape, each shape at most once.
-    let data_params: Vec<_> =
-        event.params.iter().filter(|p| p.location == EventParamLocation::Data).collect();
     if data_params.len() != shapes.len() {
         return None;
     }
@@ -418,6 +448,26 @@ fn layout_for(
         .map(|p| at.get(&p.name).map(|&(o, s)| (p.name.clone(), o, s)))
         .collect::<Option<Vec<_>>>()?;
     Some(Layout { event: event.name.clone(), fields })
+}
+
+/// Whether every use of `disc` tests it against `0` or `1`: a
+/// discriminant's reads, never a value's (a field's word is encoded or
+/// handed on, not compared with a small constant).
+fn tested_as_discriminant(h: &HighFunction, disc: ValueId) -> bool {
+    let uses = crate::dataflow::HighUseIndex::build(h);
+    let sites = uses.uses_of(disc);
+    !sites.is_empty()
+        && sites.iter().all(|site| {
+            let crate::dataflow::HighUseSite::Binding { user } = site else { return false };
+            match h.bindings.get(*user).map(|b| &b.expr) {
+                Some(Expr::Binary { op: sordec_ir::BinaryOp::Eq | sordec_ir::BinaryOp::Ne, lhs, rhs }) => {
+                    let other = if resolve_use(h, *lhs) == disc { *rhs } else { *lhs };
+                    matches!(int_literal(h, other), Some(0 | 1))
+                }
+                Some(Expr::Unary { op: UnaryOp::Eqz, .. }) => true,
+                _ => false,
+            }
+        })
 }
 
 /// The offset of the struct read `value` is, if it is one.
@@ -558,7 +608,7 @@ fn inline_site(
     use crate::dataflow::{canon_addr, facts_at, trace_u32val};
     // The data: a map built from the frame, keyed by a rodata table.
     let map = resolve_use(func, data);
-    let Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos, vals_pos, len })) =
+    let Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos, vals_pos, len, .. })) =
         &func.bindings.get(map)?.expr
     else {
         return None;
@@ -846,6 +896,12 @@ struct MuxedId {
     branch_cond: ValueId,
     /// The branch's two merges, which nothing reads once the stores go.
     phis: [ValueId; 2],
+    /// The branch's merges of `muxed` and its address extraction —
+    /// `muxed.address()`, built on the same branch — which go with it too.
+    addresses: Vec<ValueId>,
+    /// The fields such a merge is, by index: each becomes a fresh
+    /// `muxed.address()`.
+    address_fields: Vec<usize>,
 }
 
 fn plan_site(func: &HighFunction, call: ValueId, layout: &Layout) -> Option<SitePlan> {
@@ -916,11 +972,20 @@ fn plan_site(func: &HighFunction, call: ValueId, layout: &Layout) -> Option<Site
         return None;
     }
     // The id branch goes with the read that replaces it, so its merges
-    // must feed nothing but the struct.
-    if let Some(id) = &muxed
-        && !id.phis.iter().all(|phi| only_read_by(func, &order, *phi, &spent))
-    {
-        return None;
+    // must feed nothing but the struct; an address merge must be a field,
+    // which takes a fresh `address()` in its place.
+    if let Some(id) = &mut muxed {
+        if !id.phis.iter().chain(&id.addresses).all(|phi| only_read_by(func, &order, *phi, &spent)) {
+            return None;
+        }
+        for merge in &id.addresses {
+            let fields: Vec<usize> =
+                values.iter().enumerate().filter(|(_, v)| **v == Some(*merge)).map(|(i, _)| i).collect();
+            if fields.is_empty() {
+                return None;
+            }
+            id.address_fields.extend(fields);
+        }
     }
     Some(SitePlan { values, stores: spent, muxed })
 }
@@ -1026,21 +1091,57 @@ fn muxed_id(func: &HighFunction, disc: ValueId, payload: ValueId) -> Option<Muxe
             }
             all
         };
+        let mut merges = vec![disc, payload];
+        merges.extend(address_merges(func, node, m));
         if resolve_use(func, *cond) == flag
             && under(then_region, &some_blocks)
             && under(else_region, &none_blocks)
-            && self_contained(func, node, [disc, payload])
+            && self_contained(func, node, &merges)
         {
-            found = Some(*cond);
+            found = Some((*cond, merges[2..].to_vec()));
         }
     });
-    Some(MuxedId { muxed: m, field: 0, branch_cond: found?, phis: [disc, payload] })
+    let (branch_cond, addresses) = found?;
+    Some(MuxedId { muxed: m, field: 0, branch_cond, phis: [disc, payload], addresses, address_fields: Vec::new() })
+}
+
+/// The branch's merges whose every arm is `m` or the host's extraction of
+/// its address: `m.address()`, which `MuxedAddress::address()` is defined
+/// as — a plain address is itself, a muxed one the address inside it.
+fn address_merges(func: &HighFunction, branch: &Region, m: ValueId) -> Vec<ValueId> {
+    let mut sources: Vec<(ValueId, ValueId)> = Vec::new();
+    branch.for_each_node(|n| {
+        if let Region::Transfer { transfer, .. } | Region::Break { transfer, .. } = n {
+            sources.extend(transfer.iter().copied());
+        }
+    });
+    let extraction = |v: ValueId| {
+        matches!(func.bindings.get(resolve_use(func, v)).map(|b| &b.expr),
+            Some(Expr::Semantic(SemanticOp::Known(KnownOp::AddressConversion {
+                kind: AddressOpKind::GetAddressFromMuxedAddress,
+                args,
+            }))) if args.first().is_some_and(|a| resolve_use(func, *a) == m))
+    };
+    let mut merges: Vec<ValueId> = sources.iter().map(|(phi, _)| *phi).collect();
+    merges.sort_unstable();
+    merges.dedup();
+    merges
+        .into_iter()
+        .filter(|phi| {
+            let Some(Expr::Phi { incoming }) = func.bindings.get(*phi).map(|b| &b.expr) else { return false };
+            let plain = incoming.iter().any(|(_, x)| resolve_use(func, *x) == m);
+            let extracted = incoming.iter().any(|(_, x)| extraction(*x));
+            plain
+                && extracted
+                && incoming.iter().all(|(_, x)| resolve_use(func, *x) == m || extraction(*x))
+        })
+        .collect()
 }
 
 /// Whether every value the branch computes is read only inside it or by
 /// its two merges, and nothing in it but the id read touches the host —
 /// so removing it removes nothing anyone else sees.
-fn self_contained(func: &HighFunction, branch: &Region, merges: [ValueId; 2]) -> bool {
+fn self_contained(func: &HighFunction, branch: &Region, merges: &[ValueId]) -> bool {
     let mut blocks = HashSet::new();
     branch.for_each_node(|n| {
         if let Region::Basic(b) = n {
@@ -1134,6 +1235,30 @@ fn apply(func: &mut HighFunction, call: ValueId, layout: &Layout, mut plan: Site
             }
         }
         plan.values[id.field] = Some(read);
+        for field in &id.address_fields {
+            let address = ValueId::from_index(func.bindings.len() as u32);
+            func.bindings.push(Binding::new(
+                address,
+                IrType::Known(KnownType::Address),
+                Expr::Semantic(SemanticOp::Known(KnownOp::AddressConversion {
+                    kind: AddressOpKind::GetAddressFromMuxedAddress,
+                    args: vec![id.muxed],
+                })),
+                Provenance::new(
+                    PASS_NAME,
+                    ProvenanceSource::SdkPattern,
+                    "`MuxedAddress::address()`: the merge of the address and its extraction, on the branch \
+                     the id was read on",
+                ),
+            ));
+            for (_, block) in func.blocks.iter_mut() {
+                if let Some(pos) = block.bindings.iter().position(|v| *v == call) {
+                    block.bindings.insert(pos, address);
+                    break;
+                }
+            }
+            plan.values[*field] = Some(address);
+        }
         remove_branch(&mut func.region, id.branch_cond);
     }
     for store in &plan.stores {
@@ -1366,7 +1491,7 @@ mod tests {
                 store(1, 0),                                     // v5
                 Expr::Literal(Literal::U32(2000)),               // v6 keys
                 Expr::Literal(Literal::U32(1)),                  // v7 len
-                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(6), vals_pos: v(2), len: v(7) })), // v8
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(6), vals_pos: v(2), len: v(7), entries: None })), // v8
                 Expr::Use(v(8)),                                 // v9 a rename
                 Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics: v(4), data: v(9) })), // v10
             ],
@@ -1470,10 +1595,10 @@ mod tests {
                 Expr::Literal(Literal::U32(1)),                  // v7 len
                 Expr::Literal(Literal::I32(16)),                 // v8
                 Expr::Binary { op: sordec_ir::BinaryOp::Add, lhs: v(1), rhs: v(8) }, // v9
-                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(6), vals_pos: v(9), len: v(7) })), // v10
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(6), vals_pos: v(9), len: v(7), entries: None })), // v10
                 st(1, 10, 0),                                    // v11 the data slot
                 Expr::Literal(Literal::U32(2000)),               // v12 data keys
-                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(12), vals_pos: v(1), len: v(7) })), // v13
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(12), vals_pos: v(1), len: v(7), entries: None })), // v13
                 Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics: v(3), data: v(13) })), // v14
             ],
             vec![v(0)],
@@ -1576,5 +1701,195 @@ mod tests {
         }
         let mut ir = with_event(module(vec![caller(false), h]));
         assert!(!ContractEventPass.run(&mut ir).changed);
+    }
+
+    /// `#[contractevent] struct Ev { #[topic] to: Address, id: Option<u64> }`.
+    fn option_event() -> EventDef {
+        EventDef {
+            id: TypeId::from_index(0),
+            name: "Ev".into(),
+            prefix_topics: vec!["ev".into()],
+            params: vec![
+                EventParam {
+                    name: "to".into(),
+                    ty: TypeRef::Primitive(PrimitiveType::Address),
+                    location: EventParamLocation::Topic,
+                },
+                EventParam {
+                    name: "id".into(),
+                    ty: TypeRef::Composite(sordec_ir::CompositeType::Option(Box::new(TypeRef::Primitive(
+                        PrimitiveType::U64,
+                    )))),
+                    location: EventParamLocation::Data,
+                },
+            ],
+            data_format: "map".into(),
+        }
+    }
+
+    /// The helper: `to` read at +16 into the topics, the id's
+    /// discriminant read whole at +0 — `compared` against 1, or added to —
+    /// and its payload at +8.
+    fn option_helper(compared: bool) -> HighFunction {
+        let test = if compared {
+            Expr::Binary { op: sordec_ir::BinaryOp::Ne, lhs: v(4), rhs: v(6) }
+        } else {
+            Expr::Binary { op: sordec_ir::BinaryOp::Add, lhs: v(4), rhs: v(6) }
+        };
+        let mut h = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },              // v0 the struct
+                Expr::Literal(Literal::Symbol("ev".into())), // v1
+                load(16),                                    // v2 to
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
+                    vals_pos: v(1),
+                    len: v(1),
+                    elements: Some(vec![v(1), v(2)]),
+                })), // v3 topics
+                load(0),                                     // v4 the discriminant, whole
+                load(8),                                     // v5 the payload
+                Expr::Literal(Literal::I64(1)),              // v6
+                test,                                        // v7
+                Expr::Phi { incoming: vec![] },              // v8 the data
+                Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics: v(3), data: v(8) })), // v9
+            ],
+            vec![v(0)],
+            vec![1, 2, 3, 4, 5, 6, 7, 9],
+        );
+        h.id = FuncId::from_index(1);
+        h
+    }
+
+    /// A discriminant read as a whole word is the `Option`'s where the event
+    /// has no other one-word data field and the word is only tested.
+    #[test]
+    fn a_whole_word_discriminant_tested_against_one_is_the_option() {
+        let h = option_helper(true);
+        let ir = module(vec![h.clone()]);
+        let layout = helper_layout(&ir, &h, &[option_event()]).expect("a layout");
+        assert_eq!(
+            layout.fields,
+            vec![("to".to_string(), 16, Shape::Word), ("id".to_string(), 0, Shape::OptionWord)]
+        );
+    }
+
+    /// The same two words, the first used as a number: no discriminant.
+    #[test]
+    fn a_whole_word_used_as_a_number_is_no_discriminant() {
+        let h = option_helper(false);
+        let ir = module(vec![h.clone()]);
+        assert!(helper_layout(&ir, &h, &[option_event()]).is_none());
+    }
+
+    /// A caller building `Ev { to: m.address(), id: m.id() }` the way rustc
+    /// merges the two: one branch on the muxed flag sets the address, the
+    /// id's tag and its payload. `leak` reads the address merge elsewhere.
+    fn muxed_caller(leak: bool) -> HighFunction {
+        use sordec_ir::{BinaryOp, SwitchArm};
+        let bb = sordec_common::BlockId::from_index;
+        let mut exprs = vec![
+            Expr::Phi { incoming: vec![] },                                // v0 m
+            Expr::Unary { op: UnaryOp::Wrap32, value: v(0) },              // v1
+            Expr::Literal(Literal::I32(255)),                              // v2
+            Expr::Binary { op: BinaryOp::BitAnd, lhs: v(1), rhs: v(2) },   // v3
+            Expr::Literal(Literal::I32(-77)),                              // v4
+            Expr::Binary { op: BinaryOp::Add, lhs: v(3), rhs: v(4) },      // v5 the dispatch
+            Expr::Literal(Literal::I32(0)),                                // v6
+            Expr::Literal(Literal::I32(1)),                                // v7
+            Expr::Phi { incoming: vec![] },                                // v8 the flag
+            Expr::Semantic(SemanticOp::Known(KnownOp::AddressConversion {
+                kind: AddressOpKind::GetAddressFromMuxedAddress,
+                args: vec![v(0)],
+            })), // v9
+            Expr::Semantic(SemanticOp::Known(KnownOp::AddressConversion {
+                kind: AddressOpKind::GetIdFromMuxedAddress,
+                args: vec![v(0)],
+            })), // v10
+            Expr::Literal(Literal::I64(1)),                                // v11
+            Expr::Literal(Literal::I64(0)),                                // v12
+            Expr::Phi { incoming: vec![(bb(1), v(11)), (bb(2), v(12))] },  // v13 the id's tag
+            Expr::Phi { incoming: vec![(bb(1), v(10)), (bb(2), v(12))] },  // v14 the id
+            Expr::Phi { incoming: vec![(bb(1), v(9)), (bb(2), v(0))] },    // v15 the address
+            Expr::Literal(Literal::I32(1024)),                             // v16 the frame
+            Expr::Store { addr: v(16), value: v(13), offset: 0, width: MemWidth::W8 }, // v17
+            Expr::Store { addr: v(16), value: v(14), offset: 8, width: MemWidth::W8 }, // v18
+            Expr::Store { addr: v(16), value: v(15), offset: 16, width: MemWidth::W8 }, // v19
+            Expr::Call { target: FuncId::from_index(1), args: vec![v(16)] }, // v20
+        ];
+        let mut tail = vec![16, 17, 18, 19, 20];
+        if leak {
+            exprs.push(Expr::Use(v(15))); // v21
+            tail.push(21);
+        }
+        let mut f = func_with(exprs, vec![v(0)], vec![1, 2, 3, 4, 5, 6, 7]);
+        f.blocks.push(sordec_ir::HighBlock { id: bb(1), bindings: vec![v(9), v(10), v(11)] });
+        f.blocks.push(sordec_ir::HighBlock { id: bb(2), bindings: vec![v(12)] });
+        f.blocks.push(sordec_ir::HighBlock { id: bb(3), bindings: tail.into_iter().map(v).collect() });
+        let transfer = |pairs: &[(u32, u32)]| Region::Transfer {
+            target: bb(3),
+            transfer: pairs.iter().map(|(d, s)| (v(*d), v(*s))).collect(),
+        };
+        f.region = Region::Sequence(vec![
+            Region::Basic(bb(0)),
+            Region::Switch {
+                index: v(5),
+                arms: vec![
+                    SwitchArm { cases: vec![0], body: transfer(&[(8, 6)]) },
+                    SwitchArm { cases: vec![1], body: transfer(&[(8, 7)]) },
+                ],
+                default: Box::new(Region::Unreachable),
+                dispatch: None,
+            },
+            Region::If {
+                cond: v(8),
+                then_region: Box::new(Region::Sequence(vec![
+                    Region::Basic(bb(1)),
+                    transfer(&[(13, 11), (14, 10), (15, 9)]),
+                ])),
+                else_region: Some(Box::new(Region::Sequence(vec![
+                    Region::Basic(bb(2)),
+                    transfer(&[(13, 12), (14, 12), (15, 0)]),
+                ]))),
+            },
+            Region::Basic(bb(3)),
+        ]);
+        f
+    }
+
+    fn muxed_layout() -> Layout {
+        Layout { event: "Ev".into(), fields: vec![("to".into(), 16, Shape::Word), ("id".into(), 0, Shape::OptionWord)] }
+    }
+
+    /// The branch that reads the id also merges the address: `m.address()`,
+    /// which the field takes fresh once the branch goes with the id read.
+    #[test]
+    fn an_address_merged_on_the_id_branch_is_a_fresh_address() {
+        let mut f = muxed_caller(false);
+        let plan = plan_site(&f, v(20), &muxed_layout()).expect("the site");
+        apply(&mut f, v(20), &muxed_layout(), plan);
+        let Expr::Semantic(SemanticOp::Known(KnownOp::PublishContractEvent { fields, .. })) =
+            &f.bindings.get(v(20)).expect("the call").expr
+        else {
+            panic!("published");
+        };
+        let to = fields[0].1.expect("the address");
+        assert!(matches!(
+            &f.bindings.get(to).unwrap().expr,
+            Expr::Semantic(SemanticOp::Known(KnownOp::AddressConversion {
+                kind: AddressOpKind::GetAddressFromMuxedAddress,
+                args,
+            })) if *args == vec![v(0)]
+        ));
+        let mut ifs = 0;
+        f.region.for_each_node(|n| ifs += usize::from(matches!(n, Region::If { .. })));
+        assert_eq!(ifs, 0, "the branch went with the id read");
+    }
+
+    /// The address merge read anywhere else would lose its arms with the
+    /// branch: the site is left.
+    #[test]
+    fn an_address_merge_read_elsewhere_leaves_the_site() {
+        let f = muxed_caller(true);
+        assert!(plan_site(&f, v(20), &muxed_layout()).is_none());
     }
 }

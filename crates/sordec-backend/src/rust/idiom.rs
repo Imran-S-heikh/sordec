@@ -151,7 +151,38 @@ pub(crate) fn vec_get_at_literal(
     let eb = ctx.env_borrow();
     let v = ctx.value_ref(*recv);
     if converted_to_val(ctx, op).is_none() {
-        return Some(parse_quote!(#v.get_unchecked(#n)));
+        let got: syn::Expr = parse_quote!(#v.get_unchecked(#n));
+        // A `Vec<Val>`'s element the IR reads as a typed value: the
+        // conversion the source made (`try_into_val`), spelled. A parameter
+        // is the vector its signature declares; any other value's element
+        // type nothing recovered is emitted as `Val` too.
+        let at = ctx.fold_target(*recv);
+        let declared = ctx
+            .func
+            .params
+            .iter()
+            .position(|p| *p == at)
+            .and_then(|i| ctx.func.signature.as_ref()?.inputs.get(i).map(|p| &p.ty));
+        let of_vals = match declared {
+            Some(sordec_ir::TypeRef::Composite(sordec_ir::CompositeType::Vec(e))) => {
+                matches!(**e, sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::Val))
+            }
+            Some(_) => false,
+            None => matches!(
+                ctx.func.bindings.get(at).map(|b| &b.ty),
+                Some(IrType::Known(KnownType::Vec(e)) | IrType::Inferred(KnownType::Vec(e)))
+                    if matches!(**e, IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val) | IrType::Unknown(_))
+            ),
+        };
+        let typed = matches!(
+            ctx.func.bindings.get(result).map(|b| &b.ty),
+            Some(IrType::Known(k) | IrType::Inferred(k)) if *k != KnownType::Val
+        );
+        if of_vals && typed {
+            let ty = ctx.value_type(result);
+            return Some(parse_quote!(soroban_sdk::IntoVal::<soroban_sdk::Env, #ty>::into_val(&#got, #eb)));
+        }
+        return Some(got);
     }
     let element: syn::Expr = parse_quote!(
         soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Vec<soroban_sdk::Val>>::into_val(
@@ -328,6 +359,21 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             } else {
                 Some(parse_quote!(soroban_sdk::vec![#e, #(#items),*]))
             }
+        }
+        // A map built from a key table and a buffer, its entries recovered:
+        // the same map from the same symbols and `Val`s.
+        KnownOp::MapNew { entries: Some(entries), .. } => {
+            let e = ctx.env_borrow();
+            let items = entries.iter().map(|(key, value)| -> syn::Expr {
+                let x = ctx.arg_ref(*value);
+                parse_quote!((
+                    soroban_sdk::Symbol::new(#e, #key),
+                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#x, #e),
+                ))
+            });
+            Some(parse_quote!(
+                soroban_sdk::Map::<soroban_sdk::Symbol, soroban_sdk::Val>::from_array(#e, [#(#items),*])
+            ))
         }
         // `Vec::new(&e)` is the SDK's one call of the bare `vec_new`; the
         // element type is the binding's, which the `let` spells.
@@ -820,6 +866,18 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                 ));
             }
             Some(parse_quote!(#bytes.len()))
+        }
+
+        // `x.to_xdr(&e)`: the SDK's `ToXdr`, for any `IntoVal<Env, Val>`, is
+        // `serialize_to_bytes(x.into_val(env))` and nothing else — the same
+        // host call on the same `Val`.
+        KnownOp::BufOp {
+            kind: BufOpKind::SerializeToBytes,
+            args,
+        } => {
+            let [operand] = args[..] else { return None };
+            let x = ctx.arg_ref(operand);
+            Some(parse_quote!(soroban_sdk::xdr::ToXdr::to_xdr(#x, #eb)))
         }
 
         // ---- Fixed-size byte arrays ----

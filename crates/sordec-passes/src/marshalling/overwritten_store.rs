@@ -284,7 +284,9 @@ impl<'a> Walk<'a> {
                         return Some(false);
                     }
                 }
-                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { elements: Some(_), .. })) => {}
+                Expr::Semantic(SemanticOp::Known(
+                    KnownOp::VecNew { elements: Some(_), .. } | KnownOp::MapNew { entries: Some(_), .. },
+                )) => {}
                 // A host operation that touches linear memory at all is
                 // taken as reading it: the effect table records some by
                 // their write alone (`map_unpack_to_linear_memory` also

@@ -460,7 +460,7 @@ fn literal_at(
     declared: &HashMap<ValueId, TypeId>,
     id: ValueId,
 ) -> Option<Literal> {
-    let Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos, vals_pos, len })) =
+    let Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos, vals_pos, len, .. })) =
         &func.bindings.get(id)?.expr
     else {
         return None;
@@ -648,6 +648,7 @@ mod tests {
                     keys_pos: v(7),
                     vals_pos: v(0),
                     len: v(8),
+                    entries: None,
                 })), // v9
             ],
             vec![v(0), v(1), v(2)],
@@ -760,7 +761,7 @@ mod tests {
                 Expr::Store { addr: v(0), value: v(6), offset: 8, width: MemWidth::W8 }, // v7
                 Expr::Literal(Literal::U32(2000)),                              // v8 keys
                 Expr::Literal(Literal::U32(2)),                                 // v9 len
-                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(8), vals_pos: v(0), len: v(9) })), // v10
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(8), vals_pos: v(0), len: v(9), entries: None })), // v10
             ],
             vec![v(0), v(1), v(2)],
             vec![5, 6, 3, 4, 7, 8, 9, 10],

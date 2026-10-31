@@ -43,6 +43,13 @@
 //! name this way from every caller, so no sibling exists to witness it, and
 //! the literal reached the vector as an `i64` and published as a number.
 //!
+//! **The callee testing its tag.** A tag test reads the low byte of a
+//! `Val`; a helper handed a number gets the number's own bits and never
+//! tests them so. So a parameter the callee tag-tests, unconverted, holds
+//! a `Val`, and a tag-14 literal there is a `SymbolSmall` — the SDK's
+//! symbol comparison takes `fn_name != symbol_short!("transfer")`'s
+//! constant this way, every caller passing a literal.
+//!
 //! **The callee's own parameter type.** The same two facts, read off the
 //! parameter instead of its uses: a parameter the pipeline has typed
 //! `Symbol` is a symbol position, and one typed `Val` holds tagged bits,
@@ -91,6 +98,7 @@ impl Pass<HighIr> for SymbolArgsPass {
         let mut result = PassResult::default();
         let witnessed = witnessed_positions(ir);
         let stored_as_val = val_positions(ir);
+        let tag_tested = tag_tested_positions(ir);
         let typed = typed_positions(ir);
         // Collected over an immutable view: the rewrite is per function,
         // but the evidence spans the module.
@@ -110,6 +118,9 @@ impl Pass<HighIr> for SymbolArgsPass {
                     } else if stored_as_val.contains(&(*target, index)) {
                         "the callee stores this parameter unconverted into a host vector, so \
                          its bits are a `Val`, and this one is tagged `SymbolSmall`"
+                    } else if tag_tested.contains(&(*target, index)) {
+                        "the callee tests this parameter's tag, so its bits are a `Val`, and this \
+                         one is tagged `SymbolSmall`"
                     } else if typed.get(&(*target, index)) == Some(&KnownType::Symbol) {
                         "the callee's parameter is typed `Symbol`, so the position is a symbol"
                     } else if typed.get(&(*target, index)) == Some(&KnownType::Val) {
@@ -190,6 +201,29 @@ fn val_positions(ir: &HighIr) -> HashSet<(FuncId, usize)> {
                 if let Some(&index) = params.get(&resolve_use(func, *element)) {
                     out.insert((func.id, index));
                 }
+            }
+        }
+    }
+    out
+}
+
+/// `(callee, parameter index)` pairs where the callee tests the
+/// parameter's tag, unconverted — which, as storing it into a host vector
+/// does, makes its bits a `Val`: a number a helper is handed arrives as
+/// its own bits, and no tag test reads those. Live bindings only.
+fn tag_tested_positions(ir: &HighIr) -> HashSet<(FuncId, usize)> {
+    let mut out = HashSet::new();
+    for func in &ir.functions {
+        let params: HashMap<ValueId, usize> =
+            func.params.iter().enumerate().map(|(index, p)| (*p, index)).collect();
+        for id in emission_order(func) {
+            let Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { value, .. }))) =
+                func.bindings.get(id).map(|b| &b.expr)
+            else {
+                continue;
+            };
+            if let Some(&index) = params.get(&resolve_use(func, *value)) {
+                out.insert((func.id, index));
             }
         }
     }
@@ -412,6 +446,49 @@ mod tests {
             "read back as its symbol, got {:?}",
             f.bindings.get(v(0)).map(|b| &b.expr)
         );
+    }
+
+    /// Every caller passes the literal, and the callee tests the
+    /// parameter's tag (the SDK's symbol comparison): its bits are a `Val`,
+    /// so the literal is the symbol it is tagged as. With the test on the
+    /// callee's other parameter instead, nothing is proven.
+    #[test]
+    fn a_parameter_whose_tag_the_callee_tests_is_a_val() {
+        for tested in [0, 1] {
+            let caller = func_with(
+                vec![
+                    Expr::Literal(Literal::I64(TRANSFER)), // v0
+                    Expr::Phi { incoming: vec![] },         // v1
+                    call(1, vec![v(0), v(1)]),              // v2
+                ],
+                vec![v(1)],
+                vec![0, 2],
+            );
+            let callee = at(
+                1,
+                func_with(
+                    vec![
+                        Expr::Phi { incoming: vec![] }, // v0, the literal's parameter
+                        Expr::Phi { incoming: vec![] }, // v1, the other
+                        Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                            value: v(tested),
+                            tag: crate::val_abi::TAG_SYMBOL_SMALL,
+                            negated: true,
+                        })), // v2
+                    ],
+                    vec![v(0), v(1)],
+                    vec![2],
+                ),
+            );
+            let mut ir = module(vec![caller, callee]);
+            let changed = SymbolArgsPass.run(&mut ir).changed;
+            assert_eq!(changed, tested == 0, "tag tested on parameter {tested}");
+            let decoded = matches!(
+                &ir.functions[0].bindings.get(v(0)).expect("the constant").expr,
+                Expr::Literal(Literal::Symbol(s)) if s == "transfer"
+            );
+            assert_eq!(decoded, tested == 0);
+        }
     }
 
     /// A second run finds nothing: the decoded literal is no longer a
