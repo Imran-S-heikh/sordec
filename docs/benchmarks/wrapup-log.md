@@ -853,3 +853,15 @@ against each installed toolchain's compiler-builtins library, print as one line
 gaps; a copy's returned value reads as its destination. `memcpy` prints as `copy`, not
 `copy_nonoverlapping`, because LLVM's memcpy admits identical regions. Holes 8,610 → 7,988
 (summed); errors unchanged at 9; corpus byte-identical; held-out mean 0.7865 → 0.7882.
+
+## 2026-10-31 — commit b61e010 (run-time error codes, tuple-struct encodes, integer-enum selects, vec parameter types)
+
+The five sets are byte-identical to fa19876 (7,988 holes, 9 errors). Seven general rules
+found on a fresh contract we wrote to test ordinary use (a community treasury, soroban-sdk
+23.0.1; `~/.cache/sordec-ultimate/`): an `Err` whose code is known only at run time is the
+declared error; an outlined tuple-struct encode is the struct of its arguments; a select
+between two integer-enum encodings is the choice of variants; a parameter's own `Vec<?>`
+yields to the type its callers agree on; a shifted comparison prints as the integer it
+shifts; a gap read only by a storage set or publish is a `Val`, and an i128 gap keeps its
+type. The treasury: `cargo check` errors 34 → 19, gaps 686 → 627, lines 2,949 → 2,588
+(with fa19876's builtins); it does not build yet.
