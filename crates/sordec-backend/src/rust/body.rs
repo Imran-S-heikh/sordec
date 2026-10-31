@@ -2826,6 +2826,20 @@ mod tests {
         assert!(body.contains("let v1 : soroban_sdk :: Map <"), "{body}");
     }
 
+    /// `serialize_to_bytes(x)` is the SDK's `x.to_xdr(&e)`.
+    #[test]
+    fn serialize_to_bytes_is_to_xdr() {
+        let x = Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(0) };
+        let ser = known(KnownOp::BufOp { kind: sordec_ir::BufOpKind::SerializeToBytes, args: vec![v(1)] });
+        let body = emitted(
+            vec![(IrType::Known(KnownType::U32), x), (IrType::Known(KnownType::Bytes), ser)],
+            vec![ret(2)],
+            &TypeRegistry::default(),
+        );
+        assert!(body.contains("ToXdr :: to_xdr (v1"), "{body}");
+        assert!(!body.contains("todo !"), "{body}");
+    }
+
     /// A map whose entries were recovered is built from them: each key's
     /// symbol, each value's `Val`.
     #[test]

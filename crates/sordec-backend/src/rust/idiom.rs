@@ -853,6 +853,18 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             Some(parse_quote!(#bytes.len()))
         }
 
+        // `x.to_xdr(&e)`: the SDK's `ToXdr`, for any `IntoVal<Env, Val>`, is
+        // `serialize_to_bytes(x.into_val(env))` and nothing else — the same
+        // host call on the same `Val`.
+        KnownOp::BufOp {
+            kind: BufOpKind::SerializeToBytes,
+            args,
+        } => {
+            let [operand] = args[..] else { return None };
+            let x = ctx.arg_ref(operand);
+            Some(parse_quote!(soroban_sdk::xdr::ToXdr::to_xdr(#x, #eb)))
+        }
+
         // ---- Fixed-size byte arrays ----
         // The host copy into a fresh array, as the SDK spells it. Both forms
         // compile to `bytes_copy_to_linear_memory(b, 0, &mut a, N)`; the pass
