@@ -823,6 +823,36 @@ pub enum KnownOp {
         args: Vec<ValueId>,
     },
 
+    // ---- Guest memory routines (recognized by the mem-builtins pass) ----
+    /// The whole body of the `compiler_builtins` `memcpy` or `memmove`:
+    /// `len` bytes from `src` to `dst`, as
+    /// `core::ptr::copy_nonoverlapping(src, dst, len)` — or `core::ptr::copy`
+    /// when the regions may overlap. Every operand is a 32-bit linear-memory
+    /// address or byte count. Placed only as the body of a function the
+    /// signature table identified; no host interaction.
+    MemCopy {
+        /// Destination address.
+        dst: ValueId,
+        /// Source address.
+        src: ValueId,
+        /// Number of bytes.
+        len: ValueId,
+        /// `memmove`'s contract: the two regions may overlap.
+        may_overlap: bool,
+    },
+
+    /// The whole body of the `compiler_builtins` `memset`: `len` bytes at
+    /// `dst` set to `byte as u8`, as `core::ptr::write_bytes(dst, byte, len)`.
+    /// Same placement as [`MemCopy`](KnownOp::MemCopy).
+    MemFill {
+        /// Destination address.
+        dst: ValueId,
+        /// The fill value; only its low byte is written.
+        byte: ValueId,
+        /// Number of bytes.
+        len: ValueId,
+    },
+
     // ---- Enum dispatch (recognized by the dispatcher pass) ----
     /// `(b, m) symbol_index_in_linear_memory`, refined by the `dispatcher`
     /// pass into the SDK's `#[contracttype]` enum-from-`Val` decoder.
@@ -1118,6 +1148,16 @@ impl KnownOp {
                 f(*table_pos);
                 f(*len);
             }
+            KnownOp::MemCopy { dst, src, len, may_overlap: _ } => {
+                f(*dst);
+                f(*src);
+                f(*len);
+            }
+            KnownOp::MemFill { dst, byte, len } => {
+                f(*dst);
+                f(*byte);
+                f(*len);
+            }
             // A recovered Error constant reads no values (its code is data).
             KnownOp::MakeError { code: _, resolved: _ } => {}
             // Nullary context accessors: no operands.
@@ -1382,6 +1422,16 @@ impl KnownOp {
             } => {
                 f(sym);
                 f(table_pos);
+                f(len);
+            }
+            KnownOp::MemCopy { dst, src, len, may_overlap: _ } => {
+                f(dst);
+                f(src);
+                f(len);
+            }
+            KnownOp::MemFill { dst, byte, len } => {
+                f(dst);
+                f(byte);
                 f(len);
             }
             // A recovered Error constant reads no values (its code is data).

@@ -33,6 +33,9 @@
 //! - [`cross_contract`] — the `d`-module `call` / `try_call` pair
 //!   (`env.invoke_contract` / `env.try_invoke_contract`).
 //! - [`const_prop`] — the inter-procedural upgrade pass (see above).
+//! - [`mem_builtins`] — the `compiler_builtins` `memcpy`/`memmove`/`memset`
+//!   bodies, identified by fingerprint and reduced to the `core` primitive.
+//!   Last of the rewriting passes; see its module docs for why.
 //! - [`val_packed_compare`] — comparisons rustc compiled against a
 //!   `U32Val`'s bits rather than its payload. Last in the chain: it needs
 //!   the host-call families named and the constants folded, and the
@@ -52,6 +55,7 @@ pub mod dispatcher;
 pub mod enum_key;
 pub mod error_const;
 pub mod linear_memory;
+pub mod mem_builtins;
 pub mod storage;
 pub(crate) mod symbols;
 pub mod ttl;
@@ -73,6 +77,7 @@ pub use dispatcher::DispatcherPass;
 pub use enum_key::{EnumKeyAfterInlinePass, EnumKeyPass};
 pub use error_const::ErrorConstPass;
 pub use linear_memory::LinearMemoryPass;
+pub use mem_builtins::MemBuiltinPass;
 pub use storage::StoragePass;
 pub use ttl::TtlPass;
 pub use unrecognized::UnrecognizedScanPass;

@@ -22,8 +22,9 @@
 // The workspace warns on `eprintln!` because library crates must report
 // through the diagnostic infrastructure rather than write to a stream. This
 // is a standalone developer binary whose entire output *is* that stream, so
-// the rule does not apply to it.
-#![allow(clippy::print_stderr)]
+// the rule does not apply to it. `builtins` prints its table to stdout so it
+// can be piped and filtered, for the same reason.
+#![allow(clippy::print_stderr, clippy::print_stdout)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -48,13 +49,16 @@ fn main() -> ExitCode {
 const USAGE: &str = "\
 usage:
   siggen generate --out <file.rs> <labelled.wasm>...
-  siggen validate --train <labelled.wasm>... -- <held-out.wasm>...\n  siggen identify <contract.wasm>...";
+  siggen validate --train <labelled.wasm>... -- <held-out.wasm>...
+  siggen identify <contract.wasm>...
+  siggen builtins <compiler_builtins object.o>...";
 
 fn run(args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("generate") => generate(&args[1..]),
         Some("validate") => validate(&args[1..]),
         Some("identify") => identify(&args[1..]),
+        Some("builtins") => builtins(&args[1..]),
         Some(other) => Err(format!("unknown command `{other}`")),
         None => Err("no command given".into()),
     }
@@ -88,6 +92,94 @@ fn identify(args: &[String]) -> Result<(), String> {
             eprintln!("  func{i:<4} {}", entry.path);
         }
         eprintln!();
+    }
+    Ok(())
+}
+
+/// Print the fingerprint of every function an object file defines, named by
+/// its symbol.
+///
+/// The input is the members of a toolchain's
+/// `lib/rustlib/<target>/lib/libcompiler_builtins-*.rlib` (`ar x` it): wasm
+/// *object* files, which carry no `name` section but do carry the linker's
+/// symbol table in their `linking` section. That table is what names each
+/// body, and it is the toolchain's own — which is the point: the entries of
+/// [`sordec_sigs::builtins`] are read from what rustc links, not inferred
+/// from a contract.
+///
+/// One line per defined function symbol: fingerprint, instruction count,
+/// symbol, object. A body under the size gates prints `-`.
+fn builtins(args: &[String]) -> Result<(), String> {
+    use wasmparser::{KnownCustom, Linking, Parser, Payload, SymbolInfo, TypeRef};
+
+    if args.is_empty() {
+        return Err("no object given".into());
+    }
+    for path in args {
+        let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
+        // An archive can hold members that are not wasm at all (older
+        // toolchains ship the C intrinsics as bitcode); say so and go on.
+        if !bytes.starts_with(b"\0asm") {
+            eprintln!("siggen: {path}: not a wasm object, skipped");
+            continue;
+        }
+        let mut hosts = Vec::new();
+        let mut bodies = Vec::new();
+        let mut symbols = Vec::new();
+        for payload in Parser::new(0).parse_all(&bytes) {
+            match payload.map_err(|e| format!("{path}: {e}"))? {
+                Payload::ImportSection(reader) => {
+                    for import in reader {
+                        let import = import.map_err(|e| format!("{path}: {e}"))?;
+                        if matches!(import.ty, TypeRef::Func(_)) {
+                            hosts.push(format!("{}.{}", import.module, import.name));
+                        }
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    let r = body.range();
+                    bodies.push((r.start, r.end));
+                }
+                Payload::CustomSection(custom) => {
+                    let KnownCustom::Linking(reader) = custom.as_known() else {
+                        continue;
+                    };
+                    for sub in reader.subsections() {
+                        let Linking::SymbolTable(table) = sub.map_err(|e| format!("{path}: {e}"))?
+                        else {
+                            continue;
+                        };
+                        for sym in table {
+                            if let SymbolInfo::Func { flags, index, name: Some(name) } =
+                                sym.map_err(|e| format!("{path}: {e}"))?
+                                && !flags.contains(wasmparser::SymbolFlags::UNDEFINED)
+                            {
+                                symbols.push((index, name.to_owned()));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let imports = hosts.len();
+        let hosts = sordec_sigs::HostImports::new(hosts);
+        for (index, name) in symbols {
+            let Some(&(start, end)) = (index as usize).checked_sub(imports).and_then(|i| bodies.get(i)) else {
+                continue;
+            };
+            let body = bytes.get(start..end).unwrap_or_default();
+            let fp = sordec_sigs::fingerprint(body, &hosts).map_err(|e| format!("{path}: {e}"))?;
+            let insns = wasmparser::FunctionBody::new(wasmparser::BinaryReader::new(body, 0))
+                .get_operators_reader()
+                .map_err(|e| format!("{path}: {e}"))?
+                .into_iter()
+                .count();
+            match fp {
+                Some(fp) => println!("{fp} {insns:>5} {name} {path}"),
+                None => println!("{:<32} {insns:>5} {name} {path}", "-"),
+            }
+        }
     }
     Ok(())
 }

@@ -54,9 +54,12 @@
 //!   verbatim between catalogue generation and lookup so the two cannot
 //!   drift.
 //! - [`catalogue`] — the generated table and its lookup.
+//! - [`builtins`] — the `compiler_builtins` memory routines, read from the
+//!   toolchains' own rlibs rather than from contracts.
 
 #![forbid(unsafe_code)]
 
+pub mod builtins;
 pub mod catalogue;
 pub mod fingerprint;
 mod generated;
@@ -75,6 +78,7 @@ pub fn shipped_catalogue() -> Catalogue {
     Catalogue::new(generated::ENTRIES)
 }
 
+pub use builtins::{BuiltinEntry, MemRoutine, mem_routine};
 pub use catalogue::{Catalogue, CatalogueBuilder, CrateOrigin, OwnedEntry, SigEntry};
 pub use fingerprint::{
     Fingerprint, HostImports, MIN_INSTRUCTIONS, MIN_UNMASKED_INSTRUCTIONS, fingerprint,
