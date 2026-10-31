@@ -450,22 +450,40 @@ impl<'a> FnCtx<'a> {
     /// may be a host handle, which the width says nothing about, and is
     /// left to inference.
     fn raw_load_word(&self, vid: ValueId) -> Option<syn::Type> {
+        Some(match self.raw_load_kind(vid)? {
+            KnownType::I32 => parse_quote!(i32),
+            _ => parse_quote!(i64),
+        })
+    }
+
+    /// The integer type a gap's `let` is annotated with by [`Self::raw_load_word`]
+    /// — `i32` or `i64` — when it is printed with one, so an operator reading it
+    /// knows the type Rust will see. A hoisted (escaping) declaration is
+    /// typed elsewhere and answers `None`.
+    pub(crate) fn hole_word_type(&self, vid: ValueId) -> Option<KnownType> {
+        if self.escaping.contains(&vid) {
+            return None;
+        }
+        self.raw_load_kind(vid)
+    }
+
+    fn raw_load_kind(&self, vid: ValueId) -> Option<KnownType> {
         let b = self.func.bindings.get(vid)?;
         if !matches!(b.ty, IrType::Unknown(_)) {
             return None;
         }
-        let ty: syn::Type = match &b.expr {
+        let ty = match &b.expr {
             // The word the opcode produced, recorded at lowering; failing
             // that, what the width alone settles.
             Expr::Load { width, signed, ty, .. } => match (ty, width, signed) {
-                (IrType::Known(KnownType::I32), ..) => parse_quote!(i32),
-                (IrType::Known(KnownType::I64), ..) => parse_quote!(i64),
-                (_, sordec_ir::MemWidth::W8, _) => parse_quote!(i64),
-                (_, sordec_ir::MemWidth::W4, None) => parse_quote!(i32),
+                (IrType::Known(KnownType::I32), ..) => KnownType::I32,
+                (IrType::Known(KnownType::I64), ..) => KnownType::I64,
+                (_, sordec_ir::MemWidth::W8, _) => KnownType::I64,
+                (_, sordec_ir::MemWidth::W4, None) => KnownType::I32,
                 _ => return None,
             },
             // An unrecovered small-value decode is the word the shift leaves.
-            Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { .. })) => parse_quote!(i64),
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { .. })) => KnownType::I64,
             _ => return None,
         };
         // Live readers only: a rename a rewrite left unscheduled is read by
@@ -2252,15 +2270,33 @@ mod tests {
         assert!(!unsigned.contains("asi32"), "{unsigned}");
     }
 
-    /// With no operand's printed type known there is nothing to disagree
-    /// with, and the operator is printed bare as before.
+    /// A memory-read gap read only by arithmetic is printed `let v1: i64 =
+    /// todo!(..)`, so to Rust it is an `i64`: `i64.shr_u` on it rereads it
+    /// as the `u64` the opcode sees, and a signed `>>` would be wrong for
+    /// values with the top bit set.
     #[test]
-    fn a_sign_bearing_operator_on_untyped_operands_is_printed_bare() {
+    fn a_logical_shift_on_an_annotated_load_gap_is_reread_unsigned() {
         let out = packed(&emitted(
             vec![(untyped(), wide_load()), lit_i32(8), (untyped(), Expr::Binary { op: BinaryOp::ShrU, lhs: v(1), rhs: v(2) })],
             vec![ret(3)],
             &TypeRegistry::default(),
         ));
+        assert!(out.contains("letv1:i64=todo!"), "{out}");
+        assert!(out.contains("((v1asu64)>>8i32)asi64"), "{out}");
+    }
+
+    /// With no operand's printed type known there is nothing to disagree
+    /// with, and the operator is printed bare as before: the gap here is
+    /// also returned as it is, so it is not annotated and takes its type
+    /// from use.
+    #[test]
+    fn a_sign_bearing_operator_on_untyped_operands_is_printed_bare() {
+        let out = packed(&emitted(
+            vec![(untyped(), wide_load()), lit_i32(8), (untyped(), Expr::Binary { op: BinaryOp::ShrU, lhs: v(1), rhs: v(2) })],
+            vec![Region::Return { values: vec![v(3), v(1)] }],
+            &TypeRegistry::default(),
+        ));
+        assert!(!out.contains("letv1:i64"), "{out}");
         assert!(out.contains("v1>>8"), "{out}");
         assert!(!out.contains("asu"), "{out}");
     }
@@ -2280,15 +2316,31 @@ mod tests {
     }
 
     /// An unannotated placeholder takes the other side's type by itself:
-    /// the typed operand is reread, the placeholder is left as it is.
+    /// the typed operand is reread, the placeholder is left as it is. (The
+    /// placeholder is also returned as it is, so nothing annotates it.)
     #[test]
     fn a_placeholder_operand_is_not_cast() {
         let out = packed(&emitted(
             vec![(untyped(), wide_load()), (untyped(), Expr::Binary { op: BinaryOp::LtU, lhs: v(0), rhs: v(1) })],
+            vec![Region::Return { values: vec![v(2), v(1)] }],
+            &TypeRegistry::default(),
+        ));
+        assert!(!out.contains("letv1:i64"), "{out}");
+        assert!(out.contains("(arg0asu32)<v1"), "{out}");
+    }
+
+    /// An annotated 4-byte gap is an `i32` to Rust: an unsigned ordering
+    /// against an `i32` rereads both sides.
+    #[test]
+    fn an_unsigned_ordering_against_an_annotated_word_gap_rereads_both() {
+        let word = Expr::Load { addr: v(0), offset: 0, width: sordec_ir::MemWidth::W4, signed: None, ty: untyped() };
+        let out = packed(&emitted(
+            vec![(untyped(), word), (untyped(), Expr::Binary { op: BinaryOp::LtU, lhs: v(0), rhs: v(1) })],
             vec![ret(2)],
             &TypeRegistry::default(),
         ));
-        assert!(out.contains("(arg0asu32)<v1"), "{out}");
+        assert!(out.contains("letv1:i32=todo!"), "{out}");
+        assert!(out.contains("(arg0asu32)<(v1asu32)"), "{out}");
     }
 
     /// Two constants pin no type between them, so both carry the suffix.
