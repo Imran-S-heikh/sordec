@@ -90,6 +90,7 @@ pub mod storage_value_type;
 pub mod tuple_param;
 pub mod tuple_return;
 pub mod dead_store;
+pub mod overwritten_store;
 pub mod folded_encode;
 pub mod forward;
 pub mod from_array;
@@ -107,6 +108,7 @@ pub use bytesn_convert::BytesNConvertPass;
 pub use client_args::ClientArgVecPass;
 pub use contract_event::ContractEventPass;
 pub use dead_store::DeadFrameStorePass;
+pub use overwritten_store::OverwrittenFrameStorePass;
 pub use decode::ValDecodeCollapsePass;
 pub use enum_discriminant::EnumDiscriminantPass;
 pub use enum_encode::EnumEncodePass;
@@ -221,6 +223,7 @@ pub(crate) fn apply_elisions(
 pub(crate) mod metrics {
     pub(crate) use crate::metrics_catalog::{
         MARSHALLING_DEAD_FRAME_STORES as DEAD_FRAME_STORES,
+        MARSHALLING_OVERWRITTEN_FRAME_STORES as OVERWRITTEN_FRAME_STORES,
         MARSHALLING_DECODE_CALLS_ELIDED as DECODE_CALLS_ELIDED,
         MARSHALLING_DECODE_COLLAPSED as DECODE_COLLAPSED,
         MARSHALLING_DECODE_OPTION_TYPED as DECODE_OPTION_TYPED,
