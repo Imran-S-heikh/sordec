@@ -347,6 +347,10 @@ pub(crate) fn printed_int_type(ctx: &FnCtx, v: sordec_common::ValueId) -> Option
         (Some(k), ..) => Some(k),
         (None, IrType::Known(k) | IrType::Inferred(k), _) if machine(k) => Some(k.clone()),
         (None, IrType::Unknown(_), Expr::Unary { op: UnaryOp::Wrap32, .. }) => Some(KnownType::I32),
+        // A gap the body annotates as a machine word (`let v: i64 =
+        // todo!(..)`) is that type to Rust, so an unsigned operator on it
+        // must reread it, not print bare.
+        (None, IrType::Unknown(_), _) if renders_as_hole(ctx, v) => ctx.hole_word_type(ctx.fold_target(v)),
         _ => None,
     }
 }
