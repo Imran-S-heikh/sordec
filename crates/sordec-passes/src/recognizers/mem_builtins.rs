@@ -44,11 +44,15 @@
 //! The printed primitive moves the same `n` bytes from the same addresses
 //! and the function returns the same word:
 //!
-//! - `memcpy` has exactly `copy_nonoverlapping`'s contract — the regions
-//!   must not overlap — and it is reached only through `llvm.memcpy`,
-//!   which is what `copy_nonoverlapping` and rustc's own moves lower to and
-//!   which carries that same precondition. On every call that meets it the
-//!   forward copy and the primitive write the same bytes.
+//! - `memcpy` is C's `memcpy`, whose contract is `copy_nonoverlapping`'s:
+//!   the regions must not overlap. It is reached only through
+//!   `llvm.memcpy`, which `copy_nonoverlapping` and rustc's own moves lower
+//!   to. On every call that meets the contract, the forward copy and the
+//!   primitive write the same bytes. One edge is stated rather than hidden:
+//!   LLVM's `llvm.memcpy` also admits two *identical* regions, where the
+//!   routine copies each byte onto itself and `copy_nonoverlapping` is
+//!   undefined; `core::ptr::copy` is defined there too, and is the spelling
+//!   to switch to if that case is ever seen to matter.
 //! - `memmove` is defined for any overlap, as `core::ptr::copy` is.
 //! - `memset` writes `c as u8`, which is the `as u8` printed.
 //! - `memcmp` walks `i` from 0 and returns `a[i] as c_int - b[i] as c_int`

@@ -16,7 +16,7 @@
 //!
 //! The entries below are not inferred from contracts. They are read from the
 //! toolchains' own rlibs: `ar x` the archive, and `siggen builtins` on its
-//! members prints each function's [`crate::fingerprint`] together with the
+//! members prints each function's [`fingerprint`](mod@crate::fingerprint) together with the
 //! name the object's `linking` section gives it — the linker's own symbol
 //! table, so the label is the toolchain's, not ours.
 //!
