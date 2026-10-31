@@ -33,6 +33,22 @@
 //! helper's result written into its caller's frame, and pasted it writes
 //! the same bytes there. It may return one value or none.
 //!
+//! And except a load through a pointer parameter whose word only host
+//! operations read — `U256::from_be_bytes(&e, &bytes)` outlined with
+//! `&bytes` as its pointer. Pasted, the load reads the same bytes of the
+//! caller's frame at the same point in the run, so it is the same word;
+//! the caller's frame forwarding then reads it as the value stored there.
+//! So it is pasted only at a call where the caller holds a stored value at
+//! exactly those bytes ([`crate::dataflow::facts_at`], the facts that
+//! forwarding reads), already typed as what the host operation takes there
+//! (`&Bytes` for `U256::from_be_bytes`, an `Address` for `require_auth`):
+//! elsewhere the load would be a read nothing explains, or a value the
+//! operation's spelling does not accept, where the call was at least a
+//! named helper.
+//! Only into host operations, whose operand types the ABI fixes: a helper
+//! that returns or stores the word it loads is as often a type conversion
+//! (`Val` in, `Address` out) as a copy, and pasting it would erase that.
+//!
 //! Or the same behind one argument check that traps when it fails —
 //! `map_unpack_to_linear_memory`'s wrapper tests `keys.len() ==
 //! vals.len()` first. Such a wrapper is pasted only where the call's own
@@ -197,6 +213,12 @@ struct Wrapper {
     /// The check a guarded wrapper traps on when it fails; inlined only
     /// where the call's own constants make it hold.
     guard: Option<Guard>,
+    /// Each load through a pointer parameter: the parameter's position,
+    /// the byte offset from it, the width, and what the host operation
+    /// reading it takes. Inlined only where the caller holds a stored value
+    /// at exactly those bytes, already typed as that, so the pasted load is
+    /// one its frame forwarding reads as that value.
+    param_reads: Vec<(usize, u32, sordec_ir::MemWidth, Operand)>,
 }
 
 /// A comparison of two parameters or constants: the SDK's argument check
@@ -333,11 +355,18 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
     let params: HashSet<ValueId> = func.params.iter().copied().collect();
     let mut known: HashSet<ValueId> = params.clone();
     let mut items: Vec<(ValueId, IrType, Expr)> = Vec::new();
+    let mut param_reads: Vec<(usize, u32, sordec_ir::MemWidth, Operand)> = Vec::new();
 
     for id in scheduled {
         let binding = func.bindings.get(id)?;
         if !copyable(&binding.expr, func.id) && !writes_through_a_param(func, &binding.expr) {
-            return None;
+            let operand = reads_through_a_param_into_the_host(func, id, &binding.expr)?;
+            let Expr::Load { addr, offset, width, .. } = &binding.expr else {
+                return None;
+            };
+            let (base, delta) = crate::dataflow::canon_addr(func, *addr);
+            let position = func.params.iter().position(|p| *p == base)?;
+            param_reads.push((position, delta.checked_add(*offset)?, *width, operand));
         }
         // Every value the expression reads must be a parameter, an
         // earlier body binding, or an unscheduled literal — which is
@@ -381,7 +410,7 @@ fn classify(func: &HighFunction) -> Option<Wrapper> {
     {
         return None;
     }
-    Some(Wrapper { id: func.id, params: func.params.clone(), items, ret, guard })
+    Some(Wrapper { id: func.id, params: func.params.clone(), items, ret, guard, param_reads })
 }
 
 /// A store through a pointer the caller handed in: the helper's result,
@@ -394,6 +423,95 @@ fn writes_through_a_param(func: &HighFunction, expr: &Expr) -> bool {
     };
     let (base, _) = crate::dataflow::canon_addr(func, *addr);
     func.params.contains(&base)
+}
+
+/// A load through a pointer the caller handed in, whose word the body only
+/// hands to host operations: `U256::from_be_bytes(&e, &bytes)` outlined
+/// with `&bytes` as its pointer, the bytes' handle read and given to the
+/// host. Pasted, the load reads the same bytes of the caller's frame at the
+/// same point in the run — every binding before it is pasted before it, in
+/// the same order — and the caller's frame forwarding then reads the word
+/// back as the value it stored there.
+///
+/// Only into host operations, whose operand types the ABI fixes, and only
+/// those whose operand type is named here: the word must be what the
+/// operation takes, which the call site checks against the value stored
+/// there. A word the body returned, stored or passed on would become, at
+/// the call site, whatever the caller stored behind the pointer — and a
+/// helper that returns the word it loads is a type conversion as often as
+/// a copy (`Val` in, `Address` out), which the copy would erase.
+///
+/// The type the host operation takes for the loaded word, when this is one.
+fn reads_through_a_param_into_the_host(func: &HighFunction, id: ValueId, expr: &Expr) -> Option<Operand> {
+    use sordec_ir::SemanticOp;
+    let Expr::Load { addr, .. } = expr else {
+        return None;
+    };
+    let (base, _) = crate::dataflow::canon_addr(func, *addr);
+    if !func.params.contains(&base) {
+        return None;
+    }
+    let mut wanted: Option<Operand> = None;
+    for (_, b) in func.bindings.iter() {
+        let mut reads_it = false;
+        b.expr.for_each_value_use(|u| reads_it |= u == id);
+        if !reads_it {
+            continue;
+        }
+        let Expr::Semantic(SemanticOp::Known(op)) = &b.expr else {
+            return None;
+        };
+        let operand = host_operand(op, id)?;
+        if wanted.is_some_and(|w| w != operand) {
+            return None;
+        }
+        wanted = Some(operand);
+    }
+    let mut elsewhere = false;
+    func.region.for_each_value_use(|u| elsewhere |= u == id);
+    func.returns.iter().flatten().for_each(|u| elsewhere |= *u == id);
+    if elsewhere {
+        return None;
+    }
+    wanted
+}
+
+/// What a host operation takes in an operand position, for the operations
+/// whose pasted read is checked against it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Operand {
+    /// `&Bytes` — a `Bytes`, or a `BytesN` borrowed as one.
+    Bytes,
+    U256,
+    I256,
+    Address,
+}
+
+impl Operand {
+    fn accepts(self, ty: &sordec_ir::KnownType) -> bool {
+        use sordec_ir::KnownType as T;
+        match self {
+            Operand::Bytes => matches!(ty, T::Bytes | T::BytesN(_)),
+            Operand::U256 => *ty == T::U256,
+            Operand::I256 => *ty == T::I256,
+            Operand::Address => *ty == T::Address,
+        }
+    }
+}
+
+/// The type `op` takes for `value`, among the operations whose operand the
+/// ABI names and a pasted read is checked against.
+fn host_operand(op: &sordec_ir::KnownOp, value: ValueId) -> Option<Operand> {
+    use sordec_ir::{KnownOp as K, ValObjectKind as V};
+    match op {
+        K::ValObject { kind: V::U256ValFromBeBytes | V::I256ValFromBeBytes, args } if args == &[value] => {
+            Some(Operand::Bytes)
+        }
+        K::ValObject { kind: V::U256ValToBeBytes, args } if args == &[value] => Some(Operand::U256),
+        K::ValObject { kind: V::I256ValToBeBytes, args } if args == &[value] => Some(Operand::I256),
+        K::RequireAuth { address } if *address == value => Some(Operand::Address),
+        _ => None,
+    }
 }
 
 /// Whether `func` is a body worth keeping shared: one the source wrote
@@ -570,6 +688,26 @@ fn inline_site(
         return false;
     }
     if w.guard.as_ref().is_some_and(|g| !g.holds(func, &args)) {
+        return false;
+    }
+    // A read through a pointer is pasted only where the caller stored the
+    // word it reads: anywhere else the pasted load is a read of memory
+    // nothing explains, where the call was at least a named helper.
+    let stored = |&(position, offset, width, operand): &(usize, u32, sordec_ir::MemWidth, Operand)| {
+        let Some(arg) = args.get(position) else { return false };
+        let (base, delta) = crate::dataflow::canon_addr(func, *arg);
+        let Some(value) = delta
+            .checked_add(offset)
+            .and_then(|at| crate::dataflow::frame_facts::facts_at(func, call, base).value_at(at, width))
+        else {
+            return false;
+        };
+        matches!(
+            func.bindings.get(crate::dataflow::resolve_use(func, value)).map(|b| &b.ty),
+            Some(IrType::Known(t) | IrType::Inferred(t)) if operand.accepts(t)
+        )
+    };
+    if !w.param_reads.iter().all(stored) {
         return false;
     }
     // A multi-value reader of a single-value wrapper is a shape this
@@ -767,11 +905,117 @@ mod tests {
         assert!(classify(&f).is_none());
     }
 
+    /// A read of the helper's own frame is state the caller cannot see.
     #[test]
     fn a_body_with_frame_traffic_is_not_a_wrapper() {
         let mut f = has_wrapper(0);
-        f.bindings.get_mut(v(1)).unwrap().expr = load(v(0), 0);
+        f.bindings.push(Binding::new(
+            v(4),
+            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            Expr::GlobalGet { index: 0 },
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        f.bindings.get_mut(v(1)).unwrap().expr = load(v(4), 0);
+        f.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings.insert(0, v(4));
         assert!(classify(&f).is_none());
+    }
+
+    /// `U256::from_be_bytes(&e, &b)` outlined with `&b` its pointer: the
+    /// word behind the pointer, handed to the host.
+    fn from_be_bytes_wrapper(id: u32) -> HighFunction {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0 pointer
+                load(v(0), 0),                  // v1
+                Expr::Semantic(SemanticOp::Known(KnownOp::ValObject {
+                    kind: sordec_ir::ValObjectKind::U256ValFromBeBytes,
+                    args: vec![v(1)],
+                })), // v2
+            ],
+            vec![v(0)],
+            vec![1, 2],
+        );
+        f.id = FuncId::from_index(id);
+        f.region = Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::Return { values: vec![v(2)] },
+        ]);
+        f.returns = vec![vec![v(2)]];
+        f
+    }
+
+    /// A caller that stores a value typed `stored` at `fp` (when `stores`)
+    /// and then hands `fp` to `func_{target}`.
+    fn storing_caller(id: u32, target: u32, stores: bool, stored: sordec_ir::KnownType) -> HighFunction {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                   // v0 fp
+                Expr::Phi { incoming: vec![] },                                   // v1 the value
+                crate::marshalling::test_support::store(v(0), v(1), 0),           // v2
+                Expr::Call { target: FuncId::from_index(target), args: vec![v(0)] }, // v3
+            ],
+            vec![v(0), v(1)],
+            if stores { vec![2, 3] } else { vec![3] },
+        );
+        f.bindings.get_mut(v(1)).unwrap().ty = IrType::Known(stored);
+        f.id = FuncId::from_index(id);
+        f
+    }
+
+    /// Pasted, the load reads the caller's frame where the helper did, and
+    /// the host operation takes that word.
+    #[test]
+    fn a_word_read_through_the_pointer_into_the_host_is_inlined() {
+        let mut m = module(vec![from_be_bytes_wrapper(0), storing_caller(1, 0, true, sordec_ir::KnownType::Bytes)]);
+        assert!(WrapperInlinePass.run(&mut m).changed);
+        let caller = m.function(FuncId::from_index(1)).unwrap();
+        let loaded = caller
+            .bindings
+            .iter()
+            .find_map(|(id, b)| matches!(&b.expr, Expr::Load { addr, .. } if *addr == v(0)).then_some(id))
+            .expect("the load lands in the caller, through its argument");
+        let converted = caller.bindings.iter().any(|(_, b)| {
+            matches!(&b.expr, Expr::Semantic(SemanticOp::Known(KnownOp::ValObject { args, .. })) if args == &vec![loaded])
+        });
+        assert!(converted, "the host operation reads the pasted load");
+    }
+
+    /// Where the caller stored nothing at those bytes, the pasted load
+    /// would be a read nothing explains: the call stays.
+    #[test]
+    fn a_word_read_through_the_pointer_is_not_pasted_where_nothing_was_stored() {
+        let mut m = module(vec![from_be_bytes_wrapper(0), storing_caller(1, 0, false, sordec_ir::KnownType::Bytes)]);
+        assert!(!WrapperInlinePass.run(&mut m).changed);
+        assert!(matches!(expr_at(&m, 1, 3), Expr::Call { .. }));
+    }
+
+    /// Where the stored value is not typed as what the host operation takes
+    /// — a `Val` handed to `from_be_bytes`'s `&Bytes` — the call stays.
+    #[test]
+    fn a_word_read_through_the_pointer_is_not_pasted_over_another_type() {
+        let mut m = module(vec![from_be_bytes_wrapper(0), storing_caller(1, 0, true, sordec_ir::KnownType::Val)]);
+        assert!(!WrapperInlinePass.run(&mut m).changed);
+        assert!(matches!(expr_at(&m, 1, 3), Expr::Call { .. }));
+    }
+
+    /// A helper that hands the word back, or stores it, is a conversion
+    /// the copy would erase: not a wrapper.
+    #[test]
+    fn a_word_read_through_the_pointer_and_returned_is_not_a_wrapper() {
+        let mut returned = from_be_bytes_wrapper(0);
+        returned.region = Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::Return { values: vec![v(1)] },
+        ]);
+        returned.returns = vec![vec![v(1)]];
+        assert!(classify(&returned).is_none());
+
+        let mut stored = from_be_bytes_wrapper(0);
+        stored.bindings.get_mut(v(2)).unwrap().expr =
+            Expr::Store { addr: v(0), value: v(1), offset: 8, width: sordec_ir::MemWidth::W8 };
+        stored.region = Region::Basic(BlockId::from_index(0));
+        stored.returns = vec![];
+        assert!(classify(&stored).is_none());
     }
 
     #[test]

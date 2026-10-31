@@ -119,29 +119,33 @@ fn find_unused_frame(func: &HighFunction) -> Option<Frame> {
         return None;
     }
 
-    // The two `global.set`s, and the epilogue's restore arithmetic.
+    // The two `global.set`s, and the epilogue's restore arithmetic: an
+    // `fp + size` a `global.set` restores. Only that one — the body may
+    // compute the same address for its own use (the end of an array that
+    // ends the frame), and that one is a read like any other.
+    let restores = |v: ValueId| {
+        matches!(
+            func.bindings.get(v).map(|b| &b.expr),
+            Some(Expr::Binary { op: BinaryOp::Add, lhs, rhs })
+                if resolve_use(func, *lhs) == fp && trace_int(func, *rhs) == Some(size)
+        )
+    };
     let mut prologue_set = None;
     let mut epilogue_add = None;
     for (id, binding) in func.bindings.iter() {
-        match &binding.expr {
-            Expr::Unknown {
-                op_kind: WasmOpcodeKind::GlobalSet,
-                args,
-                ..
-            } if args.len() == 1 => {
-                let arg = resolve_use(func, args[0]);
-                if arg == fp {
-                    prologue_set = Some(id);
-                }
+        if let Expr::Unknown {
+            op_kind: WasmOpcodeKind::GlobalSet,
+            args,
+            ..
+        } = &binding.expr
+            && args.len() == 1
+        {
+            let arg = resolve_use(func, args[0]);
+            if arg == fp {
+                prologue_set = Some(id);
+            } else if restores(arg) {
+                epilogue_add = Some(arg);
             }
-            Expr::Binary {
-                op: BinaryOp::Add,
-                lhs,
-                rhs,
-            } if resolve_use(func, *lhs) == fp && trace_int(func, *rhs) == Some(size) => {
-                epilogue_add = Some(id);
-            }
-            _ => {}
         }
     }
     let (prologue_set, epilogue_add) = (prologue_set?, epilogue_add?);
@@ -259,6 +263,23 @@ mod tests {
             find_unused_frame(&func).is_none(),
             "a live frame reader must block elision"
         );
+    }
+
+    /// The body computing `fp + size` for itself — the end of an array
+    /// that ends the frame — and reading it nowhere: the epilogue is the
+    /// add a `global.set` restores, not that one.
+    #[test]
+    fn an_unread_end_of_frame_address_is_not_the_epilogue() {
+        let mut func = bare_frame();
+        let id = func.bindings.push(sordec_ir::Binding::new(
+            v(7),
+            IrType::Unknown(UnknownReason::InsufficientEvidence),
+            Expr::Binary { op: BinaryOp::Add, lhs: v(2), rhs: v(4) },
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        func.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings.insert(4, id);
+        let frame = find_unused_frame(&func).expect("the bracket is still bare");
+        assert_eq!(frame.bindings, vec![v(0), v(2), v(3), v(5), v(6)]);
     }
 
     #[test]

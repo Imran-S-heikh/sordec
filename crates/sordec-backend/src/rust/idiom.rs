@@ -35,7 +35,7 @@ use syn::parse_quote;
 
 use sordec_ir::{
     BufOpKind, ClientInterface, CryptoOpKind, DeployOpKind, EnumKey, KnownOp, KnownTier, PrngOpKind,
-    StorageTier, VecOpKind, KnownType, IrType};
+    StorageTier, ValObjectKind, VecOpKind, KnownType, IrType};
 
 use crate::rust::body::FnCtx;
 use crate::rust::ty::ident;
@@ -208,6 +208,22 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         } => {
             let (items, converted) = vec_items(ctx, values);
             let e = ctx.env_borrow();
+            // Elements none of which has a recovered type, each bound as an
+            // unannotated hole (an unrecovered load or operator), leave rustc
+            // nothing to type the vec by: a macro over them falls back on
+            // `()` for the element type. The hole policy names an
+            // unrecovered type `Val`, so that is said outright. Anything
+            // else — a merge, a parameter, a call's result — already has a
+            // type in the emitted Rust.
+            let untyped = !values.is_empty()
+                && values.iter().all(|v| {
+                    let Some(b) = ctx.func.bindings.get(ctx.fold_target(*v)) else { return false };
+                    !matches!(b.ty, IrType::Known(_) | IrType::Inferred(_))
+                        && matches!(b.expr, sordec_ir::Expr::Load { .. } | sordec_ir::Expr::Unknown { .. })
+                });
+            if untyped {
+                return Some(parse_quote!(soroban_sdk::Vec::<soroban_sdk::Val>::from_array(#e, [#(#items),*])));
+            }
             if converted {
                 // `Vec::from_array`, not the macro: a macro's tokens are
                 // opaque to `imports::collapse`, so a qualified path
@@ -591,6 +607,53 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             }
             let (a, b) = (ctx.value_ref(*a), ctx.value_ref(*b));
             Some(parse_quote!((#a.cmp(&#b) as i64)))
+        }
+
+        // ---- 256-bit numbers and their bytes ----
+        // `U256::from_be_bytes(&e, &bytes)` is `u256_val_from_be_bytes` and
+        // nothing else, and `to_be_bytes` is `u256_val_to_be_bytes` (the
+        // same for `I256`). Spelled only when the operand is already typed
+        // as the SDK's parameter: a `Bytes`, or a `BytesN` whose borrow
+        // converts to one, for the constructor; the number itself for
+        // `to_be_bytes`. An untyped operand stays a hole rather than claim
+        // a conversion nothing proved.
+        //
+        // The host returns the number's `U256Val`, and that `Val` is what
+        // the binding holds (`val_abi::obj_kind_result_type`): `to_val`
+        // hands back exactly that word, so the spelling is the value the
+        // IR names, not a conversion of it.
+        KnownOp::ValObject { kind: kind @ (ValObjectKind::U256ValFromBeBytes | ValObjectKind::I256ValFromBeBytes), args } => {
+            let [bytes] = args[..] else { return None };
+            let number: syn::Path = match kind {
+                ValObjectKind::U256ValFromBeBytes => parse_quote!(soroban_sdk::U256),
+                _ => parse_quote!(soroban_sdk::I256),
+            };
+            let b = ctx.value_ref(bytes);
+            match ctx.func.bindings.get(ctx.fold_target(bytes)).map(|b| &b.ty) {
+                Some(IrType::Known(KnownType::Bytes) | IrType::Inferred(KnownType::Bytes)) => {
+                    Some(parse_quote!(#number::from_be_bytes(#eb, &#b).to_val()))
+                }
+                Some(IrType::Known(KnownType::BytesN(_)) | IrType::Inferred(KnownType::BytesN(_))) => {
+                    Some(parse_quote!(#number::from_be_bytes(#eb, &soroban_sdk::Bytes::from(&#b)).to_val()))
+                }
+                _ => None,
+            }
+        }
+        KnownOp::ValObject { kind: kind @ (ValObjectKind::U256ValToBeBytes | ValObjectKind::I256ValToBeBytes), args } => {
+            let [number] = args[..] else { return None };
+            let want = match kind {
+                ValObjectKind::U256ValToBeBytes => KnownType::U256,
+                _ => KnownType::I256,
+            };
+            let typed = matches!(
+                ctx.func.bindings.get(ctx.fold_target(number)).map(|b| &b.ty),
+                Some(IrType::Known(t) | IrType::Inferred(t)) if *t == want
+            );
+            if !typed {
+                return None;
+            }
+            let n = ctx.value_ref(number);
+            Some(parse_quote!(#n.to_be_bytes()))
         }
 
         // ---- PRNG ----

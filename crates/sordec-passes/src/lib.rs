@@ -100,7 +100,7 @@ pub use marshalling::{
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
     AuthEntryPass, BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, TupleStructEncodePass, EnumSelectPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideInlineDecodePass, WideReturnPass,
-    EncodeByRefPass,
+    EncodeByRefPass, FromArrayLoopPass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
@@ -269,6 +269,8 @@ pub const DEAD_FRAME_STORE_AFTER_EVENTS: &str = "dead-frame-store-after-events";
 pub const SYMBOL_ENCODER_AFTER_ELISION: &str = "symbol-encoder-after-elision";
 /// [`FrameElisionPass`] re-run after the event and muxed-address folds.
 pub const FRAME_ELISION_AFTER_EVENTS: &str = "frame-elision-after-events";
+/// [`FrameForwardPass`] re-run on the loads a run `Vec::from_array` loop leaves.
+pub const FRAME_FORWARD_AFTER_FROM_ARRAY: &str = "frame-forward-after-from-array";
 /// [`FrameForwardPass`] re-run on the reads a by-reference encode leaves.
 pub const FRAME_FORWARD_AFTER_BY_REF: &str = "frame-forward-after-by-ref";
 /// [`DeadFrameStorePass`] re-run on the slots those forwarded reads free.
@@ -815,6 +817,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // author's `if let`, and only now is it final — both folds
             // above have had their chance at it.
             Box::new(OptionIfLetPass),
+            // `Vec::from_array`'s fill and copy loops, where rustc left them
+            // rolled: run to their end, they are the stores the element
+            // recovery below reads, and the copy's loads are read back as
+            // the values stored into the array it copies.
+            Box::new(FromArrayLoopPass),
+            Box::new(pass::Rerun::new(FrameForwardPass, FRAME_FORWARD_AFTER_FROM_ARRAY, &[])),
             Box::new(VecElementsPass),
             // The tree of auth entries a contract hands
             // `authorize_as_current_contract`, in the SDK's own types, once

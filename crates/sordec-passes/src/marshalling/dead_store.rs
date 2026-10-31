@@ -28,6 +28,16 @@
 //!
 //! Loads are matched by byte range, not exact slot: a wider load covering
 //! part of the store keeps it.
+//!
+//! One store of the pointer itself does not end the frame's privacy: a
+//! frame address written into the frame's own slots, where no load reads
+//! those bytes back. An address in memory is observable only by reading
+//! that memory; the frame is otherwise private, so only this function's
+//! own loads could, and none covers those bytes. Such a store is dead
+//! like any other — it is what a helper's out-pointer result leaves in
+//! the frame once its readers have been forwarded (a slice iterator's
+//! `ptr` and `end`, stored back after the call that built it). A load
+//! that does overlap one, and the frame is not private, as before.
 
 use std::collections::{HashMap, HashSet};
 
@@ -86,18 +96,25 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
     let dead = crate::dataflow::dead_residue(func, &order);
     let mut loads: Vec<(u32, u32)> = Vec::new();
     let mut stores: Vec<(ValueId, u32, u32)> = Vec::new();
+    let mut addresses: Vec<(u32, u32)> = Vec::new();
     for &id in &order {
         let Some(binding) = func.bindings.get(id) else {
             continue;
         };
         match &binding.expr {
             Expr::Store { addr, value, offset, width } => {
-                if derived.contains(&resolve_use(func, *value)) {
-                    return Vec::new();
-                }
                 let (base, off) = canon_addr(func, *addr);
+                let start = off.checked_add(*offset);
+                if derived.contains(&resolve_use(func, *value)) {
+                    // A frame address written into the frame itself: not
+                    // an escape while nothing reads it back — checked below.
+                    match start {
+                        Some(start) if base == fp => addresses.push((start, width.bytes())),
+                        _ => return Vec::new(),
+                    }
+                }
                 if base == fp
-                    && let Some(start) = off.checked_add(*offset)
+                    && let Some(start) = start
                 {
                     stores.push((id, start, width.bytes()));
                 }
@@ -115,6 +132,10 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
             // and the `global.set`s consume `fp` and that add.
             Expr::Unknown { op_kind: sordec_ir::WasmOpcodeKind::GlobalSet, .. } => {}
             Expr::Binary { op: BinaryOp::Add, .. } if derived.contains(&id) => {}
+            // A rename of a frame address: its own readers are judged as
+            // readers of the address, through `resolve_use`, like every
+            // other use above.
+            Expr::Use(_) if derived.contains(&resolve_use(func, id)) => {}
             // Residue an elision left behind — the operands of a collapsed
             // unpack, say. None of it is emitted, so it cannot carry the
             // pointer anywhere.
@@ -139,6 +160,10 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
         }
     });
     if region_reads {
+        return Vec::new();
+    }
+    let overlaps = |(start, width): (u32, u32)| loads.iter().any(|(ls, lw)| *ls < start + width && start < ls + lw);
+    if addresses.iter().any(|a| overlaps(*a)) {
         return Vec::new();
     }
 
@@ -231,6 +256,48 @@ mod tests {
     #[test]
     fn an_escaping_frame_is_left_alone() {
         let mut m = module(vec![framed(false, true)]);
+        assert!(!DeadFrameStorePass.run(&mut m).changed);
+    }
+
+    /// The frame's own address written into one of its slots: with no
+    /// load of that slot it is a dead store, not an escape; read back, it
+    /// is an escape and nothing is touched.
+    fn address_stored(read_back: bool) -> HighIr {
+        let mut f = framed(false, false);
+        let id = ValueId::from_index(f.bindings.len() as u32);
+        f.bindings.push(sordec_ir::Binding::new(
+            id,
+            IrType::Unknown(UnknownReason::InsufficientEvidence),
+            store(v(2), v(2), 8),
+            sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+        ));
+        let block = f.blocks.iter().next().map(|(b, _)| b).unwrap();
+        f.blocks.get_mut(block).unwrap().bindings.insert(6, id);
+        if read_back {
+            let l = ValueId::from_index(f.bindings.len() as u32);
+            f.bindings.push(sordec_ir::Binding::new(
+                l,
+                IrType::Unknown(UnknownReason::InsufficientEvidence),
+                load(v(2), 8),
+                sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+            ));
+            f.blocks.get_mut(block).unwrap().bindings.insert(7, l);
+        }
+        module(vec![f])
+    }
+
+    #[test]
+    fn a_frame_address_stored_in_an_unread_slot_is_dead() {
+        let mut m = address_stored(false);
+        assert!(DeadFrameStorePass.run(&mut m).changed);
+        let f = &m.functions[0];
+        assert!(matches!(f.bindings.get(v(5)).unwrap().expr, Expr::Literal(Literal::Unit)));
+        assert!(matches!(f.bindings.get(v(8)).unwrap().expr, Expr::Literal(Literal::Unit)));
+    }
+
+    #[test]
+    fn a_frame_address_read_back_is_an_escape() {
+        let mut m = address_stored(true);
         assert!(!DeadFrameStorePass.run(&mut m).changed);
     }
 
