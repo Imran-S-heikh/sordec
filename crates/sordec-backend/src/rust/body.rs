@@ -525,6 +525,65 @@ impl<'a> FnCtx<'a> {
         )
     }
 
+    /// A hole the IR has typed as a 128-bit integer, read only as one: by
+    /// its limbs (`wide_lo`/`wide_hi`), or by arithmetic and comparisons
+    /// whose other operand is the same 128-bit type or a literal.
+    ///
+    /// An `i128` is two words at the machine level, so it is not among the
+    /// machine types above; but these readers are what the wide passes
+    /// print *for* an `i128` (`(v as i64)`, `((v >> 64) as i64)`, `v <= 0`),
+    /// never a word masked as one. Left bare, the cast `v as i64` has no
+    /// type to cast from: "type annotations needed". The type printed is
+    /// the one the IR holds, and every reader the annotation constrains is
+    /// one that takes it; a region read (a return, a condition, a merge's
+    /// input) or any other reader leaves the hole to inference.
+    fn read_as_wide_integer(&self, vid: ValueId) -> bool {
+        let wide = |v: ValueId| {
+            matches!(
+                self.func.bindings.get(self.fold_target(v)).map(|b| &b.ty),
+                Some(IrType::Known(KnownType::I128 | KnownType::U128) | IrType::Inferred(KnownType::I128 | KnownType::U128))
+            )
+        };
+        if !wide(vid) {
+            return false;
+        }
+        let literal = |v: ValueId| {
+            matches!(self.func.bindings.get(self.fold_target(v)).map(|b| &b.expr), Some(Expr::Literal(_)))
+        };
+        let (readers, other) = self.emitted_readers(vid);
+        !other
+            && !readers.is_empty()
+            && readers.iter().all(|r| match self.func.bindings.get(*r).map(|b| &b.expr) {
+                Some(Expr::Unary { op: sordec_ir::UnaryOp::WideLo | sordec_ir::UnaryOp::WideHi, value }) => {
+                    self.fold.reads(*value) == Some(vid)
+                }
+                // A comparison with a literal prints the literal bare
+                // (`v <= 0`); arithmetic may print its suffix, so it needs
+                // a 128-bit operand on the other side.
+                Some(Expr::Binary { op, lhs, rhs })
+                    if op.is_comparison()
+                        || matches!(
+                            op,
+                            BinaryOp::Add
+                                | BinaryOp::Sub
+                                | BinaryOp::Mul
+                                | BinaryOp::Div
+                                | BinaryOp::Rem
+                                | BinaryOp::MulOverflows
+                        ) =>
+                {
+                    let other_ok = |o: ValueId| wide(o) || (op.is_comparison() && literal(o));
+                    match (self.fold.reads(*lhs) == Some(vid), self.fold.reads(*rhs) == Some(vid)) {
+                        (true, true) => true,
+                        (true, false) => other_ok(*rhs),
+                        (false, true) => other_ok(*lhs),
+                        (false, false) => false,
+                    }
+                }
+                _ => false,
+            })
+    }
+
     fn has_machine_type(&self, vid: ValueId) -> bool {
         matches!(
             self.func.bindings.get(vid).map(|b| &b.ty),
@@ -832,7 +891,9 @@ impl<'a> FnCtx<'a> {
                     let ty = self.value_type(vid);
                     out.push(parse_quote!(let #name: #ty = #value;));
                 } else if Self::is_hole_expr(&value)
-                    && (self.converted_to_val_only(vid) || self.read_as_declared_struct(vid))
+                    && (self.converted_to_val_only(vid)
+                        || self.read_as_declared_struct(vid)
+                        || self.read_as_wide_integer(vid))
                 {
                     // Annotated for what reads it, not for being a hole:
                     // a reader that cannot infer the type — a conversion
@@ -914,6 +975,10 @@ impl<'a> FnCtx<'a> {
     /// reader already treats it as the `Val` the host call was handed, and
     /// `into_val` of a `Val` into a `Val` is the identity.
     ///
+    /// The same holds for a reader that hands the hole straight to a method
+    /// generic in `IntoVal<Env, Val>` — the value `storage().set` stores,
+    /// the data `events().publish` publishes ([`idiom::generic_val_operand`]).
+    ///
     /// Keyed on the reader, not on the hole — annotating holes as such was
     /// measured to cost errors (see the comment in the machine-type branch
     /// of `basic_block_stmts`). Any other reader that prints it, or a read
@@ -934,6 +999,7 @@ impl<'a> FnCtx<'a> {
             && readers.iter().all(|r| match self.func.bindings.get(*r).map(|b| &b.expr) {
                 Some(Expr::Semantic(SemanticOp::Known(op))) => {
                     idiom::converted_to_val(self, op).and_then(|x| self.fold.reads(x)) == Some(vid)
+                        || idiom::generic_val_operand(op).and_then(|x| self.fold.reads(x)) == Some(vid)
                 }
                 _ => false,
             })
@@ -1256,6 +1322,20 @@ impl<'a> FnCtx<'a> {
     /// value, collected from several paths before one `return`. An error
     /// goes in as `Err(e)`; the `Void` a `Result<(), E>` encodes `Ok` as
     /// goes in as `Ok(())`. Anything else is left to the other rules.
+    /// An error value: the SDK's `Error`, or one of the contract's own
+    /// `#[contracterror]` enums. Neither is ever a `Result`'s `Ok` payload
+    /// — the spec has no way to declare an error enum as a value type — so
+    /// in a function returning a `Result`, a value of either is its `Err`.
+    fn is_error_type(&self, ty: &IrType) -> bool {
+        match ty {
+            IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error) => true,
+            IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => {
+                self.reg.errors.iter().any(|d| d.id == *id)
+            }
+            _ => false,
+        }
+    }
+
     fn result_wrapped(&self, source: ValueId, merge_ty: &IrType) -> Option<syn::Expr> {
         if !matches!(merge_ty, IrType::Known(KnownType::Result(..)) | IrType::Inferred(KnownType::Result(..))) {
             return None;
@@ -1263,7 +1343,7 @@ impl<'a> FnCtx<'a> {
         let ok_ty = sig::result_ok_type(self.func)?;
         let binding = self.func.bindings.get(source)?;
         match &binding.ty {
-            IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error) => {
+            ty if self.is_error_type(ty) => {
                 let v = self.value_ref(source);
                 Some(parse_quote!(Err(#v)))
             }
@@ -1446,9 +1526,7 @@ impl<'a> FnCtx<'a> {
             return v; // not a Result-returning entrypoint
         };
         match self.func.bindings.get(vid).map(|b| &b.ty) {
-            Some(IrType::Known(KnownType::Error) | IrType::Inferred(KnownType::Error)) => {
-                parse_quote!(Err(#v))
-            }
+            Some(ty) if self.is_error_type(ty) => parse_quote!(Err(#v)),
             Some(IrType::Known(KnownType::Result(..)) | IrType::Inferred(KnownType::Result(..)))
             | Some(IrType::Unknown(_))
             | None => v,
@@ -2270,6 +2348,30 @@ mod tests {
         }
     }
 
+    /// `(x == 2) << 1` and `1 << (x == 2)`: the test is the `0` or `1` the
+    /// opcode shifts, in the other operand's type, and the order is kept.
+    #[test]
+    fn a_shifted_test_is_cast_to_the_shift_s_width() {
+        let shifted = |lhs: u32, rhs: u32| {
+            emitted(
+                vec![
+                    (IrType::Known(KnownType::I32), Expr::Phi { incoming: vec![] }), // v1 x
+                    (IrType::Known(KnownType::I32), Expr::Literal(sordec_ir::Literal::I32(2))), // v2
+                    (IrType::Inferred(KnownType::Bool), Expr::Binary { op: BinaryOp::Eq, lhs: v(1), rhs: v(2) }), // v3
+                    (IrType::Known(KnownType::I32), Expr::Literal(sordec_ir::Literal::I32(1))), // v4
+                    (IrType::Inferred(KnownType::I32), Expr::Binary { op: BinaryOp::Shl, lhs: v(lhs), rhs: v(rhs) }), // v5
+                    (untyped(), store(5)),
+                ],
+                vec![],
+                &TypeRegistry::default(),
+            )
+        };
+        let out = shifted(3, 4);
+        assert!(out.contains("as i32) << 1i32"), "{out}");
+        let out = shifted(4, 3);
+        assert!(out.contains("1i32 << (") && out.trim_end().contains("as i32)"), "{out}");
+    }
+
     /// `i + (i < n)` and `i * flag`, with `i: u32`: the test is the `0` or
     /// `1` the wasm added, in `i`'s type. Two integers stay as they were.
     #[test]
@@ -2353,6 +2455,69 @@ mod tests {
         );
         assert!(body.contains("let v1 : soroban_sdk :: Val = todo !"), "{body}");
         assert!(body.contains("into_val (& v1"), "the reader converts it:\n{body}");
+    }
+
+    /// `storage().persistent().set(&v0, &v1)`, with `v1` an unread-elsewhere
+    /// 8-byte load.
+    fn stored(value: u32) -> Expr {
+        known(KnownOp::StorageSet {
+            tier: sordec_ir::StorageTier::Known(sordec_ir::KnownTier::Persistent),
+            durability: v(0),
+            key: v(0),
+            resolved_key: None,
+            value: v(value),
+        })
+    }
+
+    #[test]
+    fn a_hole_only_stored_is_annotated_val() {
+        // `set` is generic in `IntoVal<Env, Val>`: nothing pins the hole,
+        // and the `!` would fall back to `()`.
+        let body = emitted(vec![(untyped(), wide_load()), (IrType::Known(KnownType::Unit), stored(1))], vec![], &TypeRegistry::default());
+        assert!(body.contains("let v1 : soroban_sdk :: Val = todo !"), "{body}");
+    }
+
+    /// `v1: i128 = vec::Get` (a hole), then the readers `exprs` add.
+    fn wide_hole_read_by(readers: Vec<(IrType, Expr)>, returned: Vec<u32>) -> String {
+        let get = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::Get, args: vec![v(0), v(0)] });
+        let mut exprs = vec![(IrType::Known(KnownType::I128), get)];
+        exprs.extend(readers);
+        let tail = vec![Region::Return { values: returned.into_iter().map(v).collect() }];
+        emitted(exprs, tail, &TypeRegistry::default())
+    }
+
+    #[test]
+    fn a_wide_hole_read_by_its_limbs_is_annotated() {
+        let lo = Expr::Unary { op: sordec_ir::UnaryOp::WideLo, value: v(1) };
+        let le = Expr::Binary { op: BinaryOp::Le, lhs: v(1), rhs: v(3) };
+        let body = wide_hole_read_by(vec![
+            (IrType::Inferred(KnownType::I64), lo),
+            i64_lit(0),
+            (IrType::Inferred(KnownType::Bool), le),
+        ], vec![2, 4]);
+        assert!(body.contains("let v1 : i128 = todo !"), "{body}");
+    }
+
+    #[test]
+    fn a_wide_hole_masked_as_a_word_is_left_to_inference() {
+        let body = wide_hole_read_by(vec![i64_lit(255), (IrType::Inferred(KnownType::I64), mask(1, 2))], vec![3]);
+        assert!(!body.contains("let v1 : i128"), "{body}");
+    }
+
+    #[test]
+    fn a_hole_stored_and_read_otherwise_is_left_to_inference() {
+        // A second reader, arithmetic, may pin a type of its own.
+        let body = emitted(
+            vec![
+                (untyped(), wide_load()),
+                (IrType::Known(KnownType::Unit), stored(1)),
+                i64_lit(255),
+                (IrType::Known(KnownType::I64), mask(1, 3)),
+            ],
+            vec![ret(4)],
+            &TypeRegistry::default(),
+        );
+        assert!(!body.contains("let v1 : soroban_sdk :: Val"), "{body}");
     }
 
     /// The body of `func0(v0: arg)`, which calls `func1(v0)`, a helper
@@ -2500,25 +2665,20 @@ mod tests {
 
     #[test]
     fn a_hole_a_recovered_call_reads_is_left_to_inference() {
-        // A storage write of it: a recovered chain, but not a conversion.
-        let set = known(KnownOp::StorageSet {
-            tier: sordec_ir::StorageTier::Known(sordec_ir::KnownTier::Persistent),
-            durability: v(0),
-            key: v(0),
-            resolved_key: None,
-            value: v(1),
-        });
+        // An auth check on it: a recovered chain, but one that takes it as
+        // a type of its own, not as a `Val`.
+        let auth = known(KnownOp::RequireAuth { address: v(1) });
         let body = emitted(
             vec![
                 (untyped(), wide_load()),
                 (IrType::Known(KnownType::U32), vec_len(1)),
                 (untyped(), store(2)),
-                (IrType::Known(KnownType::Unit), set),
+                (IrType::Known(KnownType::Unit), auth),
             ],
             vec![],
             &TypeRegistry::default(),
         );
-        assert!(body.contains(". set (& arg0 , & v1)"), "{body}");
+        assert!(body.contains("v1 . require_auth ()"), "{body}");
         assert!(body.contains("let v1 = todo !"), "{body}");
     }
 

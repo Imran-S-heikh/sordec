@@ -165,6 +165,27 @@ pub(crate) fn converted_to_val(ctx: &FnCtx, op: &KnownOp) -> Option<sordec_commo
     }
 }
 
+/// The operand an op's chain hands to an SDK method generic in
+/// `IntoVal<Env, Val>` as it is: the value `storage().set(&k, &v)` stores,
+/// the data `events().publish(t, d)` publishes.
+///
+/// Nothing at such a position pins the operand's type, so an untyped hole
+/// read only there falls back to `()` — "depends on never type fallback".
+/// The host receives the operand as a `Val`, the `Val` the wasm passed:
+/// [`converted_to_val`]'s reasoning, without a conversion in the chain,
+/// since `IntoVal<Env, Val>` of a `Val` is the identity.
+///
+/// The key is left out: [`key_expr`] may print a resolved key that does
+/// not read the operand, and a topic list goes through `Topics`, not
+/// `IntoVal`.
+pub(crate) fn generic_val_operand(op: &KnownOp) -> Option<sordec_common::ValueId> {
+    match op {
+        KnownOp::StorageSet { value, .. } => Some(*value),
+        KnownOp::PublishEvent { data, .. } => Some(*data),
+        _ => None,
+    }
+}
+
 /// The method chain for a recovered op, or `None` when it cannot be
 /// rendered honestly (an unmapped op, or an `Unknown` storage tier).
 pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {

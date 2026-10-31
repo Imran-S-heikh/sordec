@@ -2115,16 +2115,18 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable, w
         entry.declared = declared_return(func);
     }
 
-    // Parameters: one pass over every call in the module.
-    let mut evidence: HashMap<FuncId, Vec<Slot>> = ir
+    // Parameters: one pass over every call in the module. The callers'
+    // arguments are joined first, on their own; what the callee's own body
+    // proved joins them afterwards ([`join_own`]).
+    let own: HashMap<FuncId, Vec<Slot>> = ir
         .functions
         .iter()
         .filter(|f| f.signature.is_none())
         .map(|f| {
-            // Seeded from what the callee's own body proved, not `Bottom`.
-            // A helper that calls `require_auth` on its first parameter has
-            // proven it an `Address`, and no caller can supply that — they
-            // hold the `Val` the host gave them.
+            // What the callee's own body proved, not `Bottom`. A helper that
+            // calls `require_auth` on its first parameter has proven it an
+            // `Address`, and no caller can supply that — they hold the `Val`
+            // the host gave them.
             let own: Vec<Slot> = f
                 .params
                 .iter()
@@ -2133,6 +2135,8 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable, w
             (f.id, own)
         })
         .collect();
+    let mut evidence: HashMap<FuncId, Vec<Slot>> =
+        own.iter().map(|(id, slots)| (*id, vec![Slot::Bottom; slots.len()])).collect();
     // Positions some caller hands a value that can only cross a call as a
     // `Val` — see the conflict rule below.
     let mut val_only: HashSet<(FuncId, usize)> = HashSet::new();
@@ -2166,6 +2170,12 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable, w
                 let witness = Slot::witness(ty);
                 *slot = std::mem::replace(slot, Slot::Bottom).join_with(witness, true);
             }
+        }
+    }
+    for (id, slots) in &mut evidence {
+        let Some(own) = own.get(id) else { continue };
+        for (slot, own) in slots.iter_mut().zip(own) {
+            *slot = join_own(own.clone(), std::mem::replace(slot, Slot::Bottom));
         }
     }
     // A constant agrees with the type the other callers settled on when it
@@ -2212,6 +2222,32 @@ fn recompute_signatures(ir: &HighIr, seed: &SigTable, encoders: &EncoderTable, w
         }
     }
     table
+}
+
+/// A parameter's own type, from the callee's body, joined with what its
+/// callers agree they pass.
+///
+/// Separate callers pass separate vecs, so across callers a `Vec<?>` and a
+/// `Vec<T>` conflict ([`Slot::join_with`]). The callee's own type is not
+/// another caller: it is the parameter itself, the one variable every
+/// caller's argument becomes. So once the callers agree on `Vec<T>`, the
+/// parameter's own `Vec<?>` is less said about that same type — a
+/// helper whose body only hands the parameter to the host, typed from a
+/// round in which a caller's vec was still `Vec<?>`, and kept there by
+/// every later round, as the callers' `Vec<T>` conflicted with it.
+///
+/// Why it is exact: the merged type is the callers' own, named by every
+/// one of them; the callee's side adds only that the value is a vec. Gates:
+/// both sides one agreed type, and the merge a `Vec` (only an unknown
+/// element type gives way, [`merge_partial`]); everything else joins as
+/// before.
+fn join_own(own: Slot, callers: Slot) -> Slot {
+    if let (Slot::Agreed(a @ KnownType::Vec(_)), Slot::Agreed(b @ KnownType::Vec(_))) = (&own, &callers)
+        && let Some(merged) = merge_partial(a, b)
+    {
+        return Slot::Agreed(merged);
+    }
+    own.join_with(callers, true)
 }
 
 /// `value` when it is an integer constant.
@@ -4164,6 +4200,53 @@ mod tests {
             "got {:?}",
             ty_of(&ir, 1, 0)
         );
+    }
+
+    /// fn1(p), its parameter typed `own`, called by fn0 and fn2 with a vec
+    /// typed `first` and `second`.
+    fn vec_param(own: KnownType, first: KnownType, second: KnownType) -> HighIr {
+        let mut callee = func_at(1, vec![Expr::Phi { incoming: vec![] }], vec![ValueId::from_index(0)], vec![], vec![]);
+        callee.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = IrType::Inferred(own);
+        let caller = |id: u32, ty: KnownType| {
+            let mut f = func_at(
+                id,
+                vec![
+                    Expr::Phi { incoming: vec![] },
+                    Expr::Call { target: FuncId::from_index(1), args: vec![ValueId::from_index(0)] },
+                ],
+                vec![],
+                vec![1],
+                vec![],
+            );
+            f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = IrType::Inferred(ty);
+            f
+        };
+        crate::marshalling::test_support::module(vec![caller(0, first), callee, caller(2, second)])
+    }
+
+    #[test]
+    fn a_parameter_s_own_untyped_vec_takes_the_vec_its_callers_agree_on() {
+        // The parameter was typed `Vec<?>` in an earlier round; every caller
+        // now passes a `Vec<Address>`.
+        let addresses = vec_of(IrType::Known(KnownType::Address));
+        let mut ir = vec_param(vec_of(unknown()), addresses.clone(), addresses.clone());
+        TypeInferPass.run(&mut ir);
+        assert_eq!(base_of(Some(&ty_of(&ir, 1, 0))), Some(addresses));
+    }
+
+    #[test]
+    fn a_parameter_s_own_vec_does_not_settle_callers_that_disagree() {
+        // One caller passes a `Vec<?>`, the other a `Vec<Address>`: the
+        // parameter's own `Vec<?>` does not make them one vec.
+        let mut ir = vec_param(vec_of(unknown()), vec_of(unknown()), vec_of(IrType::Known(KnownType::Address)));
+        TypeInferPass.run(&mut ir);
+        assert_ne!(base_of(Some(&ty_of(&ir, 1, 0))), Some(vec_of(IrType::Known(KnownType::Address))));
+        // Nor does a named element type of its own give way to another.
+        let symbols = vec_of(IrType::Known(KnownType::Symbol));
+        let addresses = vec_of(IrType::Known(KnownType::Address));
+        let mut ir = vec_param(symbols.clone(), addresses.clone(), addresses.clone());
+        TypeInferPass.run(&mut ir);
+        assert_ne!(base_of(Some(&ty_of(&ir, 1, 0))), Some(addresses));
     }
 
     /// fn`id`(v0) { fn`target`(v0) }, with `v0` typed `ty` (a parameter
