@@ -334,6 +334,12 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         KnownOp::VecOp { kind: VecOpKind::New, args } if args.is_empty() => {
             Some(parse_quote!(soroban_sdk::Vec::new(#eb)))
         }
+        // `Map::new(&e)` is likewise the SDK's one call of the bare
+        // `map_new`, which takes nothing and hands back an empty map; the
+        // key and value types are the binding's.
+        KnownOp::MapOp { kind: sordec_ir::MapOpKind::New, args } if args.is_empty() => {
+            Some(parse_quote!(soroban_sdk::Map::new(#eb)))
+        }
         KnownOp::VecOp { kind, args } => {
             let v = ctx.value_ref(*args.first()?);
             let arg = |i: usize| args.get(i).map(|a| ctx.value_ref(*a));

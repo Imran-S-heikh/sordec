@@ -1219,14 +1219,15 @@ impl<'a> FnCtx<'a> {
     }
 
     /// `Vec::new(&e)`: generic in its element as a hole is in its whole
-    /// type, so it is annotated on the same terms one was.
+    /// type, so it is annotated on the same terms one was. `Map::new(&e)`
+    /// likewise, in its key and value.
     fn is_empty_vec(binding: &sordec_ir::Binding) -> bool {
         matches!(
             &binding.expr,
-            Expr::Semantic(sordec_ir::SemanticOp::Known(sordec_ir::KnownOp::VecOp {
-                kind: sordec_ir::VecOpKind::New,
-                args,
-            })) if args.is_empty()
+            Expr::Semantic(sordec_ir::SemanticOp::Known(
+                sordec_ir::KnownOp::VecOp { kind: sordec_ir::VecOpKind::New, args }
+                    | sordec_ir::KnownOp::MapOp { kind: sordec_ir::MapOpKind::New, args },
+            )) if args.is_empty()
         )
     }
 
@@ -2769,6 +2770,20 @@ mod tests {
         assert!(pushed(IrType::Known(KnownType::I64)).contains("todo !"));
         // Nor is an untyped sum, whose Rust type is not a `Val`.
         assert!(pushed(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)).contains("todo !"));
+    }
+
+    #[test]
+    fn a_bare_map_new_is_an_empty_map() {
+        let map = IrType::Known(KnownType::Map(
+            Box::new(IrType::Known(KnownType::Val)),
+            Box::new(IrType::Known(KnownType::Val)),
+        ));
+        let new = known(KnownOp::MapOp { kind: sordec_ir::MapOpKind::New, args: vec![] });
+        let body = emitted(vec![(map, new)], vec![ret(1)], &TypeRegistry::default());
+        assert!(body.contains("Map :: new (e)") || body.contains("Map :: new (& e)"), "{body}");
+        assert!(!body.contains("todo !"), "{body}");
+        // Generic in its key and value, it is annotated as a hole was.
+        assert!(body.contains("let v1 : soroban_sdk :: Map <"), "{body}");
     }
 
     #[test]
