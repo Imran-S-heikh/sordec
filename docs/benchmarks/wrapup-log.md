@@ -1009,3 +1009,26 @@ no other output changes. Holes 5,735 → 5,668 (summed); errors unchanged at 9.
 
 Holes 5,668 → 5,528 (summed); errors unchanged at 9; corpus byte-identical; held-out mean
 0.7890 → 0.7911.
+
+## 2026-10-31 — commits b28e536 + 682339b (per-pass IR check; treasury round 3)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 80 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,195 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 1,294 |
+| third-party | 2 | 1/2 | 8 | 505 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 405 |
+
+- **b28e536:** debug builds can validate the IR after every pass (`SORDEC_VALIDATE_EACH`); it located a
+  pre-existing invariant break on atomic_swap (a non-live caller left stale by the 128-bit
+  parameter join, since 2026-10-04; release output unaffected), recorded as a known issue.
+- **682339b:**
+  - a `Result` a helper returns as a (tag, payload) pair is taken as a `Result` when its
+    callers only test it (`is_err()`) or read the error code under that test;
+  - stale merge inputs no longer block an out-parameter's `Option`;
+  - a frame store before a call that reads only known frame bytes is dead when nothing else
+    reads it.
+
+Holes 5,528 → 5,479; errors 9; corpus bands pass (timelock and token-v23-stripped each −2 gaps);
+held-out mean 0.7911. The treasury: 6 errors, 482 gaps, 2,401 lines.
