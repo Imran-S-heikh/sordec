@@ -804,3 +804,19 @@ The argument of `authorize_as_current_contract` is, by protocol, a vector of
 the declared fields and every leaf already has its declared type (deep_contract_auth `call_b`
 36 → 1 gaps). An empty vec prints as `Vec::new(&e)`. Holes 8,899 → 8,847 (summed); errors
 unchanged at 9; corpus byte-identical; held-out mean 0.7865.
+
+## 2026-10-31 — commit 10a2813 (contract upgrade and deploy-with-constructor print as the deployer calls)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,780 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 3,415 |
+| third-party | 2 | 1/2 | 8 | 641 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 922 |
+
+`update_current_contract_wasm` and `create_contract_with_constructor` printed as gaps; they
+now print as `e.deployer().update_current_contract_wasm(hash)` and
+`e.deployer().with_current_contract(salt).deploy_v2(hash, args)` (or `with_address`) once
+every operand already has the type the method takes. Holes 8,847 → 8,843 (summed); errors
+unchanged at 9; corpus and held-out byte-identical.
