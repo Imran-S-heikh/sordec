@@ -88,7 +88,12 @@
 //!   `Ok` code, 0. A read at the slot's address no wider than the slot is
 //!   that 0 in its own width (the low bytes of zero are zero). The helper
 //!   must write the slot on every path it returns by; a constant slot it
-//!   writes on some paths only explains no read.
+//!   writes on some paths only explains no read. Where rustc folds the
+//!   discriminant into a field's spare values instead (a unit enum's code
+//!   past its last variant, a `bool`'s 2), the caller's test of the field
+//!   against that value is false for every value of the field's type: the
+//!   derived `Result` test, which goes with the decode when it guards a
+//!   trap.
 //! - **A field's tag byte, read only to trap on a mismatch, is the derived
 //!   check.** Where a field's value is never used, rustc keeps only the
 //!   check its conversion makes: `if load8(slot) != 4 { trap }` for a
@@ -141,6 +146,16 @@
 //! rest of the conversion. A slot stored from the tag, or from a decoder
 //! of another type than the field's, explains no read.
 //!
+//! **A helper its callers disagree on.** A decoder helper some callers hand
+//! a proven struct and others a value nothing has typed yet cannot have
+//! its own body read as that struct's decode (nor can one whose callers
+//! have only just come to agree, until the next run). A call still runs the body
+//! on what it is handed, so at a call site whose value is proven to be `T`
+//! the call computes what the body computes on a `T`: a copy of the body
+//! with its value parameter typed `T`, decoded by the rules above, is read
+//! for that site alone (`specialise`). The copy is never emitted; the
+//! helper keeps its body for its other callers.
+//!
 //! # Gates
 //!
 //! - The key table reads out of rodata as identifiers, and exactly one
@@ -155,7 +170,10 @@
 //!   scalar decoder (`enum_match::two_form_decoder`: `i64` or `u64`),
 //!   handed one field of `val` that the struct declares at that type; a
 //!   slot stored from such a call is its value component `.1`, never its
-//!   tag, and nothing else the call returns reaches a slot.
+//!   tag, and nothing else the call returns reaches a slot. Read per call
+//!   site: the helper's own body is not a decoder helper, it unpacks a
+//!   map, this site's value is proven to be `T`, and the copy typed `T`
+//!   passes every gate here.
 //! - Every read the decode may reach is an exact read of a field, half of
 //!   a wide field, or a discriminant written on every path; nothing else
 //!   that may read memory is handed the decode's bytes while they may still
@@ -165,7 +183,10 @@
 //!   decode into the same place (an unpack writes all its slots; a helper
 //!   on a proven value writes every field and discriminant slot), a host
 //!   unpack into linear memory, a call to a helper that stores it on
-//!   every path it returns by, or a 128-bit decode of a value its codec
+//!   every path it returns by, a helper's store that the tag word it
+//!   leaves gates (the vector iterator's `next` writes its element only
+//!   when its tag is not `None`), on the side of a test of that tag where
+//!   it is not the `none` constant (`reach::check_gated`), or a 128-bit decode of a value its codec
 //!   proves (`wide_codec`): that decode takes its `Ok` path, which stores
 //!   the discriminant and both limbs, as the codec's own collapse holds.
 //!   Anything that may write it only ends the `must` side.
@@ -178,7 +199,10 @@
 //!   conversion's `[Val; N]`, or the `Result` a helper returns into), and
 //!   two locals share memory only when one of them is dead, when what it
 //!   held can no longer be read through the other. It may still have
-//!   written there, so the `must` side ends.
+//!   written there, so the `must` side ends. A host constructor from
+//!   linear memory (`vec_new_from_linear_memory`,
+//!   `map_new_from_linear_memory`) with a constant count reads exactly
+//!   that many `Val`s at each array it is handed and writes nothing.
 //!
 //! What it does not see: memory is matched by address, as the frame base
 //! plus a constant or anything computed from the base (a run-time offset,
@@ -200,7 +224,7 @@ use sordec_ir::{
 
 use super::{apply_elisions, metrics, sret, Elision};
 use crate::dataflow::{canon_addr, resolve_use, trace_int, trace_u32val, CallIndex};
-use crate::pass::{Pass, PassResult};
+use crate::pass::{Pass, PassMetrics, PassResult};
 use crate::type_infer::known_of_type_ref;
 
 /// Pass name — also the provenance `pass` field for every elision.
@@ -262,52 +286,168 @@ impl Pass<HighIr> for UdtDecodePass {
             ir.functions.iter().map(|f| (f.id, param_accesses(f))).collect();
         // A 128-bit decode of a proven value writes its limbs for certain.
         let wide = super::wide_codec::WideDecoders::of(ir);
+        // A decoder helper its callers disagree on, read at the call sites
+        // that hand it a proven struct (see `specialise`).
+        // A helper whose writes through a pointer its tag word gates (the
+        // vector iterator's `next`): on the side of a test where the tag is
+        // not its `none`, the writes were made.
+        let gated: HashMap<FuncId, Vec<Option<reach::Gated>>> = ir
+            .functions
+            .iter()
+            .map(|f| (f.id, super::enum_match::gated_summary(ir, f, access.get(&f.id))))
+            .collect();
+        let by_site =
+            specialise(ir, &memory, &structs, &unions, &param_types, &helpers, &scalars, &access, &gated, &wide);
         for func in &mut ir.functions {
             let wide_writes = wide.certain_writes(func);
-            let planned = plan(func, &memory, &structs, &unions, &param_types, &helpers, &access, &wide_writes);
+            let planned = plan(
+                func, &memory, &structs, &unions, &param_types, &helpers, &by_site, &access, &gated, &wide_writes,
+            );
             for key in &planned.declines {
                 result.metrics.increment(key, 1);
             }
-            if planned.elisions.is_empty() && planned.limbs.is_empty() {
-                continue;
-            }
-            result.changed = true;
-            for el in &planned.elisions {
-                result.metrics.increment(el.metric, 1);
-            }
-            // The derived `Result` test on a niche-carrying field, first:
-            // `strip` rewrites the region tree and must see the
-            // condition bindings as they are.
-            if !planned.guards.is_empty() {
-                let empty = super::guard::empty_blocks(func);
-                let region = std::mem::replace(&mut func.region, sordec_ir::Region::Unreachable);
-                let mut stripped = 0_i64;
-                func.region = super::guard::strip(region, &planned.guards, &empty, &mut stripped);
-                result.metrics.increment(metrics::GUARDS_ELIDED, stripped);
-            }
-            if !planned.inverted.is_empty() {
-                let empty = super::guard::empty_blocks(func);
-                let region = std::mem::replace(&mut func.region, sordec_ir::Region::Unreachable);
-                let mut stripped = 0_i64;
-                func.region = strip_inverted(region, &planned.inverted, &empty, &mut stripped);
-                result.metrics.increment(metrics::GUARDS_ELIDED, stripped);
-            }
-            apply_elisions(func, PASS_NAME, planned.elisions);
-            let mut shared: HashMap<(ValueId, String), ValueId> = HashMap::new();
-            for (load, base, field, ty, half) in planned.limbs {
-                result.metrics.increment(metrics::UDT_FIELDS_RECOVERED, 1);
-                apply_limb(func, &mut shared, load, base, field, ty, half);
-            }
-            // Type-only: the value's own latest note stays the recognizer
-            // that produced it.
-            for (v, ty) in planned.typed {
-                if let Some(b) = func.bindings.get_mut(v) {
-                    b.ty = ty;
-                }
+            if apply_planned(func, planned, &mut result.metrics) {
+                result.changed = true;
             }
         }
         result
     }
+}
+
+/// Apply one function's plan: the guards it strips, its elisions, the
+/// limbs it binds and the types it puts on values. Whether anything
+/// changed.
+fn apply_planned(func: &mut HighFunction, planned: Planned, metrics_out: &mut PassMetrics) -> bool {
+    if planned.elisions.is_empty() && planned.limbs.is_empty() {
+        return false;
+    }
+    for el in &planned.elisions {
+        metrics_out.increment(el.metric, 1);
+    }
+    // The derived `Result` test on a niche-carrying field, first:
+    // `strip` rewrites the region tree and must see the
+    // condition bindings as they are.
+    if !planned.guards.is_empty() {
+        let empty = super::guard::empty_blocks(func);
+        let region = std::mem::replace(&mut func.region, sordec_ir::Region::Unreachable);
+        let mut stripped = 0_i64;
+        func.region = super::guard::strip(region, &planned.guards, &empty, &mut stripped);
+        metrics_out.increment(metrics::GUARDS_ELIDED, stripped);
+    }
+    if !planned.inverted.is_empty() {
+        let empty = super::guard::empty_blocks(func);
+        let region = std::mem::replace(&mut func.region, sordec_ir::Region::Unreachable);
+        let mut stripped = 0_i64;
+        func.region = strip_inverted(region, &planned.inverted, &empty, &mut stripped);
+        metrics_out.increment(metrics::GUARDS_ELIDED, stripped);
+    }
+    apply_elisions(func, PASS_NAME, planned.elisions);
+    let mut shared: HashMap<(ValueId, String), ValueId> = HashMap::new();
+    for (load, base, field, ty, half) in planned.limbs {
+        metrics_out.increment(metrics::UDT_FIELDS_RECOVERED, 1);
+        apply_limb(func, &mut shared, load, base, field, ty, half);
+    }
+    // Type-only: the value's own latest note stays the recognizer
+    // that produced it.
+    for (v, ty) in planned.typed {
+        if let Some(b) = func.bindings.get_mut(v) {
+            b.ty = ty;
+        }
+    }
+    true
+}
+
+/// Decoder helpers read per call site: `(helper, struct)` for a helper
+/// `(out, val)` whose own body is not (yet) read as a decoder — its callers
+/// do not agree on what `val` is (some hand it a value proven to be the
+/// struct, others a `Val` an unfinished decode still holds), or they have
+/// only just come to agree, and the body typed by that agreement is read
+/// as a decoder only on the next run.
+///
+/// # Why it is exact
+///
+/// A call runs the helper's body on the arguments it is handed. Where the
+/// caller hands a value proven to be struct `T`, the call computes what
+/// the body computes on a `T`: the body with `val` typed `T`. That body is
+/// decoded here exactly as the helper's own would be were every caller to
+/// agree on `T` (`plan` with the binding's type as the evidence, then
+/// `classify_helper` on the result), on a copy that only this reading
+/// sees. The copy is never emitted; the helper keeps its body for the
+/// other callers. A call site whose value is not proven to be `T` is not
+/// read this way.
+///
+/// A key table several structs share (`[a, b]` for two structs) is named
+/// by `T`, the caller's declaration, as for any decode (`declared_struct`):
+/// the table must still match `T` field for field.
+///
+/// # Gates
+///
+/// - The helper has no spec and two parameters, is not already a decoder
+///   helper, and unpacks a map.
+/// - `T` is the struct some caller's argument is proven to be (`udt_of`).
+/// - The copy with `val` typed `T` is decoded by the same rules, and is
+///   then a decoder helper of `T` (`classify_helper`); any refusal there
+///   leaves the call sites alone.
+#[allow(clippy::too_many_arguments)]
+fn specialise(
+    ir: &HighIr,
+    memory: &sordec_ir::MemoryImage,
+    structs: &[StructDef],
+    unions: &[UnionDef],
+    param_types: &HashMap<(FuncId, usize), Option<TypeId>>,
+    helpers: &HashMap<FuncId, DecoderHelper>,
+    scalars: &HashMap<FuncId, KnownType>,
+    access: &HashMap<FuncId, Vec<Option<ParamAccess>>>,
+    gated: &HashMap<FuncId, Vec<Option<reach::Gated>>>,
+    wide: &super::wide_codec::WideDecoders,
+) -> HashMap<(FuncId, TypeId), DecoderHelper> {
+    let mut out = HashMap::new();
+    let calls = CallIndex::build(ir);
+    for f in &ir.functions {
+        if f.signature.is_some() || f.params.len() != 2 || helpers.contains_key(&f.id) {
+            continue;
+        }
+        // Only a body that decodes a map: the derived struct decode.
+        let unpacks = f.bindings.iter().any(|(_, b)| {
+            matches!(&b.expr, Expr::Semantic(SemanticOp::Known(KnownOp::MapOp { kind: MapOpKind::UnpackToLinearMemory, .. })))
+        });
+        if !unpacks {
+            continue;
+        }
+        let mut proven: Vec<TypeId> = Vec::new();
+        for site in calls.callers_of(f.id) {
+            let Some(caller) = ir.function(site.caller) else { continue };
+            let Some(Expr::Call { args, .. }) = caller.bindings.get(site.call).map(|b| &b.expr) else { continue };
+            let Some(arg) = args.get(1).map(|a| resolve_use(caller, *a)) else { continue };
+            if let Some(t) = udt_of(caller, arg)
+                && structs.iter().any(|s| s.id == t)
+                && !proven.contains(&t)
+            {
+                proven.push(t);
+            }
+        }
+        for t in proven {
+            let mut copy = f.clone();
+            let val = copy.params[1];
+            let Some(b) = copy.bindings.get_mut(val) else { continue };
+            b.ty = IrType::Known(KnownType::UserDefined(t));
+            let wide_writes = wide.certain_writes(&copy);
+            let planned = plan(
+                &copy, memory, structs, unions, param_types, helpers, &HashMap::new(), access, gated, &wide_writes,
+            );
+            let mut scratch = PassMetrics::default();
+            if !apply_planned(&mut copy, planned, &mut scratch) {
+                continue;
+            }
+            if let Some(h) = classify_helper(&copy, structs, unions, scalars)
+                && h.ty == t
+            {
+                trace(f, &format!("read per call site as the decoder of {t:?}"));
+                out.insert((f.id, t), h);
+            }
+        }
+    }
+    out
 }
 
 /// Everything one caller's walk decided.
@@ -564,7 +704,9 @@ fn plan<'a>(
     unions: &[UnionDef],
     param_types: &HashMap<(FuncId, usize), Option<TypeId>>,
     helpers: &HashMap<FuncId, DecoderHelper>,
+    by_site: &HashMap<(FuncId, TypeId), DecoderHelper>,
     access: &HashMap<FuncId, Vec<Option<ParamAccess>>>,
+    gated: &HashMap<FuncId, Vec<Option<reach::Gated>>>,
     wide_writes: &[CertainWrite],
 ) -> Planned {
     let mut elisions = Vec::new();
@@ -633,7 +775,10 @@ fn plan<'a>(
             // fields, provided the value it was handed is proven to be
             // that struct.
             Expr::Call { target, args } => {
-                let Some(h) = helpers.get(target) else { continue };
+                // A helper its callers disagree on, read at this site by
+                // the struct this caller's value is (see `specialise`).
+                let site = args.get(1).and_then(|a| udt_of(func, resolve_use(func, *a)));
+                let Some(h) = helpers.get(target).or_else(|| by_site.get(&(*target, site?))) else { continue };
                 if args.len() != 2 {
                     trace(func, "helper call arity");
                     continue;
@@ -692,7 +837,7 @@ fn plan<'a>(
     let mut words: Vec<(usize, ValueId, String, u8, WordCheck)> = Vec::new();
     let mut inverted: HashMap<ValueId, String> = HashMap::new();
     for (ci, cand) in candidates.iter().enumerate() {
-        match reach::check(func, cand, &certain, access) {
+        match reach::check_gated(func, cand, &certain, access, gated) {
             Ok(reads) if reads.fields.is_empty() && reads.tags.is_empty() => {}
             Ok(reads) => {
                 let mut found = Vec::new();
@@ -881,13 +1026,21 @@ fn plan<'a>(
     // `Err`. The caller compares the field's code against that constant
     // and traps. With the field recovered the check is the derived
     // `TryFromVal`'s, relocated with the rest.
+    // A `bool` field's spare values carry it the same way: it is 0 or 1,
+    // and `Err` is 2, so `b == 2` is false for every `bool` the decode
+    // reads.
     for (load, known) in &rebound {
-        let KnownType::UserDefined(uid) = known else { continue };
-        let Some(union) = unions.iter().find(|u| u.id == *uid) else { continue };
-        if union.cases.is_empty() || union.cases.iter().any(|c| !c.fields.is_empty()) {
-            continue;
-        }
-        let niche = union.cases.len() as i128;
+        let (niche, name) = match known {
+            KnownType::Bool => (2, "bool"),
+            KnownType::UserDefined(uid) => {
+                let Some(union) = unions.iter().find(|u| u.id == *uid) else { continue };
+                if union.cases.is_empty() || union.cases.iter().any(|c| !c.fields.is_empty()) {
+                    continue;
+                }
+                (union.cases.len() as i128, union.name.as_str())
+            }
+            _ => continue,
+        };
         for (cid, cb) in func.bindings.iter() {
             let Expr::Binary { op: sordec_ir::BinaryOp::Eq, lhs, rhs } = &cb.expr else { continue };
             let (l, r) = (resolve_use(func, *lhs), resolve_use(func, *rhs));
@@ -896,7 +1049,7 @@ fn plan<'a>(
             if hit {
                 guards.insert(
                     cid,
-                    format!("derived `Result` niche test on {}: regenerated by `TryFromVal`", union.name),
+                    format!("derived `Result` niche test on {name}: regenerated by `TryFromVal`"),
                 );
             }
         }
@@ -1902,6 +2055,10 @@ pub(super) mod reach {
     /// the word is `none`, so a side taken on their being different is
     /// one on which the word is not `none` — applies the writes only
     /// while the tag word is still unwritten, so they are that call's.
+    /// The side of a test `word == k` on which it holds, `k` a constant
+    /// other than `none`, is such a side too: the word is `k` there, so not
+    /// `none` (both small and non-negative, so no reading of either's sign
+    /// makes them the same number).
     pub(in crate::marshalling) fn check_gated(
         func: &HighFunction,
         cand: &Candidate<'_>,
@@ -1982,12 +2139,19 @@ pub(super) mod reach {
             else {
                 return;
             };
-            if !matches!((op, taken), (sordec_ir::BinaryOp::Ne, true) | (sordec_ir::BinaryOp::Eq, false)) {
+            // The side where the word differs from `none`, or equals a
+            // constant that is not `none` (both small and non-negative, so
+            // no reading of the constant's sign makes them equal).
+            let differs = matches!((op, taken), (sordec_ir::BinaryOp::Ne, true) | (sordec_ir::BinaryOp::Eq, false));
+            let equals = matches!((op, taken), (sordec_ir::BinaryOp::Eq, true) | (sordec_ir::BinaryOp::Ne, false));
+            if !differs && !equals {
                 return;
             }
+            let small = |k: i128| (0..i128::from(i32::MAX)).contains(&k);
             for (word, other) in [(*lhs, *rhs), (*rhs, *lhs)] {
                 if let Some((at, p)) = self.tag_word(word, live)
-                    && crate::dataflow::trace_int(self.func, other) == Some(p.none)
+                    && let Some(k) = crate::dataflow::trace_int(self.func, other)
+                    && if differs { k == p.none } else { k != p.none && small(k) && small(p.none) }
                 {
                     self.overwrite(live, &p.writes, true);
                     live.pending.remove(&at);
@@ -2269,6 +2433,24 @@ pub(super) mod reach {
                     self.overwrite(live, &[(at, bytes)], true);
                 }
             }
+            // A host vector or map built from linear memory reads exactly
+            // `len` `Val`s at each array it is handed and writes nothing.
+            if let Some((arrays, len)) = build_extent(self.func, expr)
+                && let Some(bytes) = len.checked_mul(8)
+            {
+                for vals in arrays {
+                    let (b, at) = canon_addr(self.func, vals);
+                    if b != self.cand.base {
+                        continue;
+                    }
+                    if self.may_hold(live, u64::from(at), u64::from(at) + u64::from(bytes)) {
+                        self.refuse(format!("{id:?} builds a collection from the decode's bytes at +{at}"));
+                        return;
+                    }
+                    let func = self.func;
+                    pointers.retain(|(k, _)| raw_address(func, operands[*k]) != vals);
+                }
+            }
             // A helper whose parameter is only a load or store address
             // touches what it is handed there at known offsets.
             let summaries = match expr {
@@ -2354,6 +2536,22 @@ pub(super) mod reach {
                 return (0, 0);
             }
             (self.cand.span(0).0, self.cand.span(n - 1).1)
+        }
+    }
+
+    /// The arrays and `Val` count a host constructor reads from linear
+    /// memory: `vec_new_from_linear_memory(vals, len)` and
+    /// `map_new_from_linear_memory(keys, vals, len)`, with `len` a constant.
+    fn build_extent(func: &HighFunction, expr: &Expr) -> Option<(Vec<ValueId>, u32)> {
+        match expr {
+            Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { vals_pos, len, elements: None })) => {
+                Some((vec![raw_address(func, *vals_pos)], trace_u32val(func, *len)?))
+            }
+            Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos, vals_pos, len, entries: None })) => Some((
+                vec![raw_address(func, *keys_pos), raw_address(func, *vals_pos)],
+                trace_u32val(func, *len)?,
+            )),
+            _ => None,
         }
     }
 
@@ -2815,6 +3013,256 @@ mod tests {
             matches!(c.bindings.get(v(1)).unwrap().ty, IrType::Known(KnownType::UserDefined(id)) if id == TypeId::new(7)),
             "the read the helper decodes is the struct"
         );
+    }
+
+    /// A helper whose body is the derived decode itself, not yet typed: it
+    /// unpacks `val` into a frame of its own (v4) and stores the `token`
+    /// slot at `out+0` (or, with `mixed`, the sum of both slots) and a
+    /// discriminant at `out+8`.
+    fn unpacking_helper(id: u32, mixed: bool) -> HighFunction {
+        let stored = if mixed {
+            Expr::Binary { op: sordec_ir::BinaryOp::Add, lhs: v(6), rhs: v(7) }
+        } else {
+            Expr::Use(v(7))
+        };
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] }, // v0 out
+                Expr::Phi { incoming: vec![] }, // v1 val
+                u32val(2000),                   // v2 keys
+                u32val(2),                      // v3 len
+                Expr::Phi { incoming: vec![] }, // v4 the helper's frame
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapOp {
+                    kind: MapOpKind::UnpackToLinearMemory,
+                    args: vec![v(1), v(2), v(4), v(3)],
+                })), // v5
+                load(v(4), 0),                  // v6 amount
+                load(v(4), 8),                  // v7 token
+                stored,                         // v8
+                store(v(0), v(8), 0),           // v9
+                Expr::Literal(Literal::I64(0)), // v10
+                store(v(0), v(10), 8),          // v11
+            ],
+            vec![v(0), v(1)],
+            vec![2, 3, 5, 6, 7, 8, 9, 10, 11],
+        );
+        f.id = FuncId::from_index(id);
+        f
+    }
+
+    /// A caller handing the helper a `Val` nothing has typed.
+    fn raw_caller(id: u32, helper: u32) -> HighFunction {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                            // v0 raw
+                Expr::Phi { incoming: vec![] },                                            // v1 fp
+                Expr::Call { target: FuncId::from_index(helper), args: vec![v(1), v(0)] }, // v2
+                load(v(1), 0),                                                             // v3
+            ],
+            vec![v(0), v(1)],
+            vec![2, 3],
+        );
+        f.id = FuncId::from_index(id);
+        f
+    }
+
+    /// Two callers disagree on the helper's value: the one handing it a
+    /// `Balance` reads the call as that struct's decode; the other keeps
+    /// its call, and the helper keeps its body.
+    #[test]
+    fn a_helper_its_callers_disagree_on_is_read_per_call_site() {
+        let mut m = ir(helper_caller(0, 1));
+        m.functions.push(unpacking_helper(1, false));
+        m.functions.push(raw_caller(2, 1));
+        // The table is shared: the caller's declaration names `Balance`.
+        with_twin(&mut m);
+        assert!(UdtDecodePass.run(&mut m).changed);
+        let caller = m.function(FuncId::from_index(0)).unwrap();
+        assert!(matches!(&caller.bindings.get(v(3)).unwrap().expr, Expr::Field { base, field } if *base == v(0) && field == "token"));
+        assert!(matches!(caller.bindings.get(v(2)).unwrap().expr, Expr::Literal(Literal::Unit)));
+        let raw = m.function(FuncId::from_index(2)).unwrap();
+        assert!(matches!(raw.bindings.get(v(2)).unwrap().expr, Expr::Call { .. }), "the raw caller keeps its call");
+        let helper = m.function(FuncId::from_index(1)).unwrap();
+        assert!(
+            matches!(helper.bindings.get(v(5)).unwrap().expr, Expr::Semantic(SemanticOp::Known(KnownOp::MapOp { .. }))),
+            "the helper keeps its body"
+        );
+    }
+
+    /// A slot computed from two fields is no field: the copy is no
+    /// decoder, and the call stays.
+    #[test]
+    fn a_helper_whose_copy_is_no_decoder_keeps_the_call() {
+        let mut m = ir(helper_caller(0, 1));
+        m.functions.push(unpacking_helper(1, true));
+        m.functions.push(raw_caller(2, 1));
+        UdtDecodePass.run(&mut m);
+        let caller = m.function(FuncId::from_index(0)).unwrap();
+        assert!(matches!(caller.bindings.get(v(2)).unwrap().expr, Expr::Call { .. }));
+        assert!(matches!(caller.bindings.get(v(3)).unwrap().expr, Expr::Load { .. }));
+    }
+
+    /// `decoder` followed by a call to a helper whose 8-byte write at
+    /// `fp+8` its tag word at `fp+0` gates (`none` = 2), the tag tested
+    /// against `test` (`tag == test` when `equals`, else `tag != test`)
+    /// guarding a trap, then a read of `fp+8`.
+    fn gated_overwrite(test: i64, equals: bool) -> (HighIr, HashMap<FuncId, Vec<Option<reach::Gated>>>) {
+        let mut f = decoder();
+        let base = f.bindings.len() as u32;
+        let push = |f: &mut HighFunction, e: Expr| {
+            let id = ValueId::from_index(f.bindings.len() as u32);
+            f.bindings.push(sordec_ir::Binding::new(
+                id,
+                IrType::Unknown(UnknownReason::InsufficientEvidence),
+                e,
+                sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+            ));
+            id
+        };
+        let call = push(&mut f, Expr::Call { target: FuncId::from_index(1), args: vec![v(0), v(1)] });
+        let tag = push(&mut f, load(v(0), 0));
+        let k = push(&mut f, Expr::Literal(Literal::I64(test)));
+        let op = if equals { sordec_ir::BinaryOp::Ne } else { sordec_ir::BinaryOp::Eq };
+        let bad = push(&mut f, Expr::Binary { op, lhs: tag, rhs: k });
+        let read = push(&mut f, load(v(0), 8));
+        assert_eq!(read, v(base + 4));
+        let b1 = f.blocks.push(sordec_ir::HighBlock { id: sordec_common::BlockId::new(1), bindings: vec![call, tag, k, bad] });
+        let b2 = f.blocks.push(sordec_ir::HighBlock { id: sordec_common::BlockId::new(2), bindings: vec![read] });
+        f.region = sordec_ir::Region::Sequence(vec![
+            f.region.clone(),
+            sordec_ir::Region::Basic(b1),
+            sordec_ir::Region::If {
+                cond: bad,
+                then_region: Box::new(sordec_ir::Region::Panic { kind: sordec_ir::PanicKind::Bare }),
+                else_region: None,
+            },
+            sordec_ir::Region::Basic(b2),
+        ]);
+        let gated = HashMap::from([(
+            FuncId::from_index(1),
+            vec![Some(reach::Gated { width: 8, none: 2, writes: vec![(8, 8)] }), None],
+        )]);
+        (ir(f), gated)
+    }
+
+    fn token_read_after_gate(m: &HighIr, gated: &HashMap<FuncId, Vec<Option<reach::Gated>>>) -> Result<Vec<ValueId>, String> {
+        let f = &m.functions[0];
+        let def = &registry()[0];
+        let cand = Candidate {
+            base: v(0),
+            start: 0,
+            producer: v(5),
+            map: v(2),
+            def,
+            slots: vec![
+                Slot { rel: 0, width: 8, role: Role::Field("amount".into()) },
+                Slot { rel: 8, width: 8, role: Role::Field("token".into()) },
+            ],
+            vals: true,
+            payload: false,
+        };
+        let access = HashMap::from([(
+            FuncId::from_index(1),
+            vec![
+                Some(ParamAccess { reads: vec![], writes: vec![(0, 8), (8, 8)], must_writes: vec![(0, 8)] }),
+                None,
+            ],
+        )]);
+        let certain = vec![(cand.producer, cand.base, cand.certain_writes())];
+        reach::check_gated(f, &cand, &certain, &access, gated).map(|r| r.fields.iter().map(|(l, _)| *l).collect())
+    }
+
+    /// Past `if tag != 0 { trap }` the tag is 0, not the helper's `none`
+    /// (2): its gated write over `fp+8` was made, and the read after it is
+    /// not the decode's. Without the summary the write is only possible.
+    #[test]
+    fn a_gated_write_made_where_its_tag_equals_another_constant_overwrites() {
+        let (m, gated) = gated_overwrite(0, true);
+        let reads = token_read_after_gate(&m, &gated).expect("accepted");
+        assert!(!reads.contains(&v(12)), "the read after the gate is the helper's, not the decode's");
+        assert!(token_read_after_gate(&m, &HashMap::new()).is_err(), "without the summary the read may be the decode's");
+    }
+
+    /// `if tag == 0 { trap }` says only that the tag is not 0: it may be
+    /// `none`, and the write may not have been made.
+    #[test]
+    fn a_gated_write_past_a_test_that_leaves_none_possible_is_not_certain() {
+        let (m, gated) = gated_overwrite(0, false);
+        assert!(token_read_after_gate(&m, &gated).is_err());
+        // `tag == 2` false says nothing either way about the others…
+        let (m, gated) = gated_overwrite(2, true);
+        // …but `tag != 2` past `if tag != 2 { trap }` is `tag == 2`: `none`.
+        assert!(token_read_after_gate(&m, &gated).is_err());
+    }
+
+    /// The decode's first slot overwritten, then a vector built from `fp`:
+    /// one `Val` reads only the overwritten slot, and `token` is still the
+    /// decode's; two read `token` too, and the decode stays.
+    #[test]
+    fn a_collection_built_from_linear_memory_reads_only_its_count() {
+        for (count, taken) in [(1_u32, true), (2, false)] {
+            let mut f = decoder();
+            let push = |f: &mut HighFunction, e: Expr| {
+                let id = ValueId::from_index(f.bindings.len() as u32);
+                f.bindings.push(sordec_ir::Binding::new(
+                    id,
+                    IrType::Unknown(UnknownReason::InsufficientEvidence),
+                    e,
+                    sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+                ));
+                id
+            };
+            let k = push(&mut f, Expr::Literal(Literal::I64(5)));
+            let over = push(&mut f, store(v(0), k, 0));
+            let n = push(&mut f, u32val(count));
+            let built = push(
+                &mut f,
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecNew { vals_pos: v(0), len: n, elements: None })),
+            );
+            let block = f.blocks.iter().next().map(|(b, _)| b).unwrap();
+            // After the unpack, before the slot loads.
+            f.blocks.get_mut(block).unwrap().bindings.splice(4..4, [k, over, n, built]);
+            let mut m = ir(f);
+            UdtDecodePass.run(&mut m);
+            assert_eq!(matches!(expr_at(&m, 7), Expr::Field { .. }), taken, "{count} vals");
+        }
+    }
+
+    /// A `bool` field's spare value 2 is the folded `Err`: the caller's
+    /// `b == 2` guard goes with the decode, `b == 1` stays.
+    #[test]
+    fn a_bool_fields_niche_test_goes_with_the_decode() {
+        for (k, stripped) in [(2_i64, true), (1, false)] {
+            let mut f = decoder();
+            let push = |f: &mut HighFunction, e: Expr| {
+                let id = ValueId::from_index(f.bindings.len() as u32);
+                f.bindings.push(sordec_ir::Binding::new(
+                    id,
+                    IrType::Unknown(UnknownReason::InsufficientEvidence),
+                    e,
+                    sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+                ));
+                id
+            };
+            let lit = push(&mut f, Expr::Literal(Literal::I64(k)));
+            let test = push(&mut f, Expr::Binary { op: sordec_ir::BinaryOp::Eq, lhs: v(7), rhs: lit });
+            let block = f.blocks.iter().next().map(|(b, _)| b).unwrap();
+            f.blocks.get_mut(block).unwrap().bindings.extend([lit, test]);
+            f.region = sordec_ir::Region::Sequence(vec![
+                f.region.clone(),
+                sordec_ir::Region::If {
+                    cond: test,
+                    then_region: Box::new(sordec_ir::Region::Panic { kind: sordec_ir::PanicKind::Bare }),
+                    else_region: None,
+                },
+            ]);
+            let mut m = ir(f);
+            m.soroban_facts.as_mut().unwrap().types.structs[0].fields[1].ty = TypeRef::Primitive(PrimitiveType::Bool);
+            assert!(UdtDecodePass.run(&mut m).changed);
+            let mut ifs = 0;
+            m.functions[0].region.for_each_node(|n| ifs += usize::from(matches!(n, sordec_ir::Region::If { .. })));
+            assert_eq!(ifs == 0, stripped, "b == {k}");
+        }
     }
 
     #[test]
