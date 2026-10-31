@@ -31,11 +31,19 @@
 //! that the path does not pass through contributes no facts, and kills
 //! them all if it may write.
 //!
-//! Width is exact with one exception: a narrower load of a slot holding a
+//! Width is exact with two exceptions: a narrower load of a slot holding a
 //! *literal* becomes the truncated literal, because rustc reads a
 //! `Result` discriminant it wrote as `i64` back as `i32` and the value is
-//! known bit-for-bit. A narrower load of a runtime value is declined —
-//! spelling the truncation would need a cast the IR does not carry.
+//! known bit-for-bit. And a 32-bit load (`i32.load`, no extension) of a
+//! slot an 8-byte store of a 64-bit integer filled becomes that integer's
+//! low half, `Wrap32` — the tag of a `(tag, value)` pair a decoder helper
+//! returned, stored by the caller and tested as `i32`. Exact because wasm
+//! memory is little-endian: the four bytes at the store's address are the
+//! value's low 32 bits, which is what `i32.wrap_i64` computes. Gates: the
+//! load's word is `i32`, the reaching fact an 8-byte store at that same
+//! offset, the value typed `i64` or `u64` (a `Val`'s bits are no number to
+//! spell a truncation of). Any other narrower load of a runtime value is
+//! declined.
 //!
 //! Equal width is not enough for a one- or two-byte load either: the
 //! store keeps the value's low bytes and the load extends them to its own
@@ -59,7 +67,7 @@
 use std::collections::HashMap;
 
 use sordec_common::FuncId;
-use sordec_ir::{Expr, HighFunction, HighIr, IrType, KnownType, Literal, MemWidth};
+use sordec_ir::{Expr, HighFunction, HighIr, IrType, KnownType, Literal, MemWidth, UnaryOp};
 
 use super::{apply_elisions, metrics, Elision};
 use crate::dataflow::frame_facts::facts_at;
@@ -182,6 +190,19 @@ fn plan(func: &HighFunction, constants: &ConstantComponents) -> Vec<Elision> {
                     note: "narrow frame load of a stored constant, truncated".to_string(),
                     metric: metrics::FRAME_LOADS_FORWARDED,
                 });
+            } else if *width == MemWidth::W4
+                && matches!(word, IrType::Known(KnownType::I32))
+                && facts.iter().any(|(at, f)| at == total && f.width == MemWidth::W8)
+                && let Some(value) = facts.value_at_trunc(total, *width)
+                && is_word64(func, resolve_use(func, value))
+            {
+                elisions.push(Elision {
+                    id,
+                    expr: Expr::Unary { op: UnaryOp::Wrap32, value: resolve_use(func, value) },
+                    ty: None,
+                    note: "32-bit frame load of a stored 64-bit integer: its low half".to_string(),
+                    metric: metrics::FRAME_LOADS_FORWARDED,
+                });
             }
         }
     }
@@ -253,6 +274,15 @@ fn reads_back_unchanged(
 
 fn is_i32_word(word: &IrType) -> bool {
     matches!(word, IrType::Known(KnownType::I32))
+}
+
+/// Whether `value` is a 64-bit integer (`i64` or `u64`), whose low half
+/// `Wrap32` spells — not a `Val` or a handle, whose bits are no number.
+fn is_word64(func: &HighFunction, value: sordec_common::ValueId) -> bool {
+    matches!(
+        func.bindings.get(value).map(|b| &b.ty),
+        Some(IrType::Known(KnownType::I64 | KnownType::U64) | IrType::Inferred(KnownType::I64 | KnownType::U64))
+    )
 }
 
 /// The literal a narrower load of `value` reads, when `value` is a
@@ -365,6 +395,39 @@ mod tests {
             vec![2, 3],
         );
         let mut m = module(vec![f]);
+        assert!(!FrameForwardPass.run(&mut m).changed);
+    }
+
+    /// `(t, x) = helper(); store fp <- t; i32.load fp`: the tag's low half.
+    fn tag_reread(value_ty: KnownType, word: IrType, store_width: MemWidth) -> HighIr {
+        let mut f = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                         // v0 fp
+                Expr::Phi { incoming: vec![] },                                         // v1 t
+                Expr::Store { addr: v(0), value: v(1), offset: 0, width: store_width }, // v2
+                Expr::Load { addr: v(0), offset: 0, width: MemWidth::W4, signed: None, ty: word }, // v3
+            ],
+            vec![v(0), v(1)],
+            vec![2, 3],
+        );
+        f.bindings.get_mut(v(1)).unwrap().ty = IrType::Known(value_ty);
+        module(vec![f])
+    }
+
+    #[test]
+    fn a_32_bit_load_of_a_stored_i64_is_its_low_half() {
+        let mut m = tag_reread(KnownType::I64, IrType::Known(KnownType::I32), MemWidth::W8);
+        assert!(FrameForwardPass.run(&mut m).changed);
+        assert!(matches!(expr_at(&m, 3), Expr::Unary { op: UnaryOp::Wrap32, value } if *value == v(1)));
+    }
+
+    #[test]
+    fn a_32_bit_load_of_a_stored_val_or_a_widening_load_stays() {
+        // A `Val`'s bits are no number.
+        let mut m = tag_reread(KnownType::Val, IrType::Known(KnownType::I32), MemWidth::W8);
+        assert!(!FrameForwardPass.run(&mut m).changed);
+        // `i64.load32_u` extends into a 64-bit word: not a plain wrap.
+        let mut m = tag_reread(KnownType::I64, IrType::Known(KnownType::I64), MemWidth::W8);
         assert!(!FrameForwardPass.run(&mut m).changed);
     }
 
