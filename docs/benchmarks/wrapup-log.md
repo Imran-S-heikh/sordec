@@ -891,3 +891,23 @@ typed host operation is inlined where the caller stored a value of that type the
 Poseidon round constants print as plain `vec![…]` of constants); groth16 ×2, fuzzing, bls,
 bn254 and events_ref also drop. Holes 7,988 → 6,462 (summed); errors unchanged at 9; corpus
 byte-identical; held-out mean 0.7883.
+
+## 2026-10-31 — commits 5afe24d + band and report (a `select` read only by arithmetic prints as an `if`)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 84 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,459 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 1,684 |
+| third-party | 2 | 1/2 | 8 | 641 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 559 |
+
+wasm `select(a, b, c)` prints as `if c != 0 { a } else { b }` when both arms carry one
+recovered integer type and nothing reads the result but arithmetic or a branch; a select
+returned, stored or passed on keeps its gap. Holes 6,462 → 6,427; errors unchanged at 9.
+**The reference aggregate moves 0.9389 → 0.9359, on purpose:** timelock's time-bound check,
+a gap until now, prints the source's own logic (`if kind == After { ts >= t } else { ts <= t }`,
+the `match` in `check_time_bound`), but rustc inlined that helper into `claim`, so the
+structure category counts it as a branch the source's `claim` lacks (timelock 1.0000 →
+0.9790). Faithful output was kept over the number; the band note in
+`crates/sordec/tests/benchmark.rs` records why. Held-out mean 0.7882.
