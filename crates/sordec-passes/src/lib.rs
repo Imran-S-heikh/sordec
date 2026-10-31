@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
-    AuthEntryPass, BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    AuthEntryPass, BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, TupleStructEncodePass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideInlineDecodePass, WideReturnPass,
     EncodeByRefPass,
 };
@@ -956,6 +956,9 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // error passed on by `?` — built into the `Error` `Val` by
             // arithmetic: the declared error, ahead of the typing.
             Box::new(ErrorCodeReturnPass),
+            // A tuple struct's encode outlined into a helper, where the
+            // struct goes: the struct of the helper's arguments.
+            Box::new(TupleStructEncodePass),
             // A helper returning a `bool` in its word, ahead of the typing
             // that carries the `bool` through its calls and merges.
             Box::new(BoolHelperPass),
