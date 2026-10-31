@@ -471,6 +471,15 @@ pub const MARSHALLING_ENUM_MATCH_PAYLOADS: &str = "marshalling_enum_match_payloa
 /// Calls to a recognised enum decode left in place: a read of its bytes is
 /// not one of the shapes the rewrite explains (see `enum_match`).
 pub const MARSHALLING_ENUM_MATCH_REFUSED: &str = "marshalling_enum_match_refused";
+/// Enums decoded inline through the SDK's vector iterator taken apart: the
+/// switch on the looked-up variant became a `match` on the value, and the
+/// iterator, its state and the lookup went.
+pub const MARSHALLING_ENUM_ITER_SITES: &str = "marshalling_enum_iter_sites";
+/// Variant payloads those `match` arms bind.
+pub const MARSHALLING_ENUM_ITER_PAYLOADS: &str = "marshalling_enum_iter_payloads";
+/// Inline enum decodes left in place: a read or use of the decode is not
+/// one the rewrite explains (see `enum_iter`).
+pub const MARSHALLING_ENUM_ITER_REFUSED: &str = "marshalling_enum_iter_refused";
 /// Proven `Option` probes with a trapping None branch collapsed to
 /// `.unwrap()` on the storage read.
 pub const MARSHALLING_OPTIONS_UNWRAPPED: &str = "marshalling_options_unwrapped";
@@ -1068,6 +1077,9 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_ENUM_MATCH_SITES,
         MARSHALLING_ENUM_MATCH_PAYLOADS,
         MARSHALLING_ENUM_MATCH_REFUSED,
+        MARSHALLING_ENUM_ITER_SITES,
+        MARSHALLING_ENUM_ITER_PAYLOADS,
+        MARSHALLING_ENUM_ITER_REFUSED,
         MARSHALLING_OPTIONS_UNWRAPPED,
         MARSHALLING_OPTION_HELPERS_COLLAPSED,
         MARSHALLING_OPTIONAL_OUT_HELPERS,

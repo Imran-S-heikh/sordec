@@ -227,7 +227,7 @@ fn trace(func: &HighFunction, why: &str) {
 }
 
 /// The bindings the region schedules, by block, in emission order.
-fn scheduled(func: &HighFunction) -> Vec<(BlockId, ValueId)> {
+pub(super) fn scheduled(func: &HighFunction) -> Vec<(BlockId, ValueId)> {
     let mut out = Vec::new();
     func.region.for_each_node(|node| {
         if let Region::Basic(b) = node
@@ -240,7 +240,7 @@ fn scheduled(func: &HighFunction) -> Vec<(BlockId, ValueId)> {
 }
 
 /// Every block in `region`'s subtree.
-fn blocks_in(region: &Region) -> HashSet<BlockId> {
+pub(super) fn blocks_in(region: &Region) -> HashSet<BlockId> {
     let mut out = HashSet::new();
     region.for_each_node(|node| {
         if let Region::Basic(b) = node {
@@ -251,7 +251,7 @@ fn blocks_in(region: &Region) -> HashSet<BlockId> {
 }
 
 /// A binding's expression, through renames.
-fn expr_of(func: &HighFunction, v: ValueId) -> Option<&Expr> {
+pub(super) fn expr_of(func: &HighFunction, v: ValueId) -> Option<&Expr> {
     func.bindings.get(resolve_use(func, v)).map(|b| &b.expr)
 }
 
@@ -469,7 +469,7 @@ fn find_dispatch(
 /// Whether control may fall out of the bottom of `region`. Conservative:
 /// only a region that ends every path in a branch, a return or a trap is
 /// said not to.
-fn falls_through(region: &Region) -> bool {
+pub(super) fn falls_through(region: &Region) -> bool {
     match region {
         Region::Break { .. } | Region::Continue { .. } | Region::Return { .. } | Region::Unreachable | Region::Panic { .. } => {
             false
@@ -634,6 +634,13 @@ fn classify_part(
 /// `w == c1`, else `c2` when `w == c2`, .., else a constant that is none of
 /// them — over one code `w`, the `u32` body of a small value.
 fn code_chain(func: &HighFunction, x: ValueId) -> Option<HashSet<i128>> {
+    code_chain_parts(func, x).map(|(codes, _)| codes)
+}
+
+/// [`code_chain`], with the chain's own bindings (its selects, their
+/// tests, and the code `w`).
+pub(super) fn code_chain_parts(func: &HighFunction, x: ValueId) -> Option<(HashSet<i128>, Vec<ValueId>)> {
+    let mut parts: Vec<ValueId> = Vec::new();
     let mut codes = HashSet::new();
     let mut word: Option<ValueId> = None;
     let mut at = resolve_use(func, x);
@@ -643,10 +650,17 @@ fn code_chain(func: &HighFunction, x: ValueId) -> Option<HashSet<i128>> {
             Expr::Unknown { op_kind: WasmOpcodeKind::Select, args, .. } if args.len() == 3 => (args[0], args[1], args[2]),
             _ => {
                 let rest = trace_int(func, at)?;
-                return (!codes.contains(&rest)).then_some(codes);
+                if codes.contains(&rest) {
+                    return None;
+                }
+                // The code `w` last; the caller checks what it is.
+                parts.extend(word);
+                return Some((codes, parts));
             }
         };
         let c = trace_int(func, if_true)?;
+        parts.push(at);
+        parts.push(resolve_use(func, cond));
         let Some(Expr::Binary { op: BinaryOp::Eq, lhs, rhs }) = expr_of(func, cond) else { return None };
         let w = match (trace_int(func, *lhs), trace_int(func, *rhs)) {
             (None, Some(k)) if k == c => resolve_use(func, *lhs),
@@ -661,8 +675,9 @@ fn code_chain(func: &HighFunction, x: ValueId) -> Option<HashSet<i128>> {
     let w = word?;
     // The code is a small value's 32-bit body.
     let Some(Expr::Unary { op: UnaryOp::Wrap32, value }) = func.bindings.get(w).map(|b| &b.expr) else { return None };
+    parts.push(w);
     matches!(expr_of(func, *value), Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { .. }))))
-        .then_some(codes)
+        .then_some((codes, parts))
 }
 
 /// The derived `i64` decoder: `(x) -> (tag, value)` that returns
@@ -774,7 +789,7 @@ fn constants(ir: &HighIr, func: &HighFunction, v: ValueId) -> Option<HashSet<i12
 /// block that itself stores the gated writes. A path that leaves a tag
 /// other than `none` therefore came through one of those blocks, and
 /// nothing between it and the return writes over what it stored.
-fn gated_summary(ir: &HighIr, func: &HighFunction, access: Option<&Vec<Option<ParamAccess>>>) -> Vec<Option<Gated>> {
+pub(super) fn gated_summary(ir: &HighIr, func: &HighFunction, access: Option<&Vec<Option<ParamAccess>>>) -> Vec<Option<Gated>> {
     let Some(access) = access else { return Vec::new() };
     let mut out = vec![None; func.params.len()];
     // The block the function returns from, at the top level.
@@ -1321,7 +1336,7 @@ fn rewrite_region(
 
 /// An arm reading the payload: its uses of each load read the arm's
 /// value, and it opens with the payload and those values.
-fn open_arm(func: &mut HighFunction, body: Region, opening: &[ValueId], map: &HashMap<ValueId, ValueId>) -> Region {
+pub(super) fn open_arm(func: &mut HighFunction, body: Region, opening: &[ValueId], map: &HashMap<ValueId, ValueId>) -> Region {
     let swap = |v: &mut ValueId| {
         if let Some(to) = map.get(v) {
             *v = *to;
