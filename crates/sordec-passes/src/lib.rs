@@ -271,6 +271,8 @@ pub const SYMBOL_ENCODER_AFTER_ELISION: &str = "symbol-encoder-after-elision";
 pub const FRAME_ELISION_AFTER_EVENTS: &str = "frame-elision-after-events";
 /// [`FrameForwardPass`] re-run on the loads a run `Vec::from_array` loop leaves.
 pub const FRAME_FORWARD_AFTER_FROM_ARRAY: &str = "frame-forward-after-from-array";
+/// [`OptionalOutParamPass`] re-run once the `Vec::from_array` loops are run.
+pub const OPTIONAL_OUT_AFTER_FROM_ARRAY: &str = "optional-out-after-from-array";
 /// [`FrameForwardPass`] re-run on the reads a by-reference encode leaves.
 pub const FRAME_FORWARD_AFTER_BY_REF: &str = "frame-forward-after-by-ref";
 /// [`DeadFrameStorePass`] re-run on the slots those forwarded reads free.
@@ -823,6 +825,13 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // the values stored into the array it copies.
             Box::new(FromArrayLoopPass),
             Box::new(pass::Rerun::new(FrameForwardPass, FRAME_FORWARD_AFTER_FROM_ARRAY, &[])),
+            // The zip constructor a rolled `Vec::from_array` loop calls is
+            // handed pointers into the frame it keeps copies of, so beside
+            // one, what a call touches in that frame is unknown and the
+            // out-pointer pass above refuses the site. Run, the loop and
+            // the call are gone: the sites they alone refused are decided
+            // again.
+            Box::new(pass::Rerun::new(OptionalOutParamPass, OPTIONAL_OUT_AFTER_FROM_ARRAY, &[])),
             Box::new(VecElementsPass),
             // The tree of auth entries a contract hands
             // `authorize_as_current_contract`, in the SDK's own types, once
