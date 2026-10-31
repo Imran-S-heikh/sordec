@@ -48,6 +48,21 @@ fn typed_vec(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
     )
 }
 
+/// Whether `v` is typed as a vec of the SDK's `InvokerContractAuthEntry`,
+/// the type `authorize_as_current_contract` takes.
+fn entries_vec(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
+    let Some(IrType::Known(KnownType::Vec(element)) | IrType::Inferred(KnownType::Vec(element))) =
+        ctx.func.bindings.get(v).map(|b| &b.ty)
+    else {
+        return false;
+    };
+    let (IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id))) = element.as_ref()
+    else {
+        return false;
+    };
+    ctx.reg.sdk_module(*id) == Some("auth") && ctx.reg.name_of(*id) == Some("InvokerContractAuthEntry")
+}
+
 /// `vec_get(v, i)` with `i` a literal `U32Val`, as `v.get_unchecked(n)`.
 ///
 /// The general `Get` stays a hole (see [`known_op_expr`]): its index is an
@@ -183,6 +198,11 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                 Some(parse_quote!(soroban_sdk::vec![#e, #(#items),*]))
             }
         }
+        // `Vec::new(&e)` is the SDK's one call of the bare `vec_new`; the
+        // element type is the binding's, which the `let` spells.
+        KnownOp::VecOp { kind: VecOpKind::New, args } if args.is_empty() => {
+            Some(parse_quote!(soroban_sdk::Vec::new(#eb)))
+        }
         KnownOp::VecOp { kind, args } => {
             let v = ctx.value_ref(*args.first()?);
             let arg = |i: usize| args.get(i).map(|a| ctx.value_ref(*a));
@@ -312,6 +332,11 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         // same `Val` either way.
         KnownOp::AuthorizeAsCurrContract { auth_entries } => {
             let entries = ctx.value_ref(*auth_entries);
+            // Unless the vec was recovered as the entries themselves: then
+            // it is the parameter's type, and goes as it is.
+            if entries_vec(ctx, *auth_entries) {
+                return Some(parse_quote!(#e.authorize_as_current_contract(#entries)));
+            }
             let val: syn::Expr = if converted_to_val(ctx, op).is_some() {
                 parse_quote!(soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#entries, #eb))
             } else if typed_vec(ctx, *auth_entries) {

@@ -67,7 +67,15 @@ const MODULE_NAMES: &[&str] = &["token"];
 /// soroban-sdk items one module down, imported as `module::Name` and
 /// written as the bare `Name`. Each is a type the contract's own item may
 /// also define; `shadowed` keeps that safe, as for the leaf types.
-const NESTED_NAMES: &[(&str, &str)] = &[("auth", "Context")];
+const NESTED_NAMES: &[(&str, &str)] = &[
+    ("auth", "Context"),
+    ("auth", "ContractContext"),
+    ("auth", "ContractExecutable"),
+    ("auth", "CreateContractHostFnContext"),
+    ("auth", "CreateContractWithConstructorHostFnContext"),
+    ("auth", "InvokerContractAuthEntry"),
+    ("auth", "SubContractInvocation"),
+];
 
 /// Rewrite every recognised `soroban_sdk::…` path in `items` to its short
 /// form, returning the names to import. The set is sorted (a `BTreeSet`) so
@@ -295,6 +303,24 @@ mod tests {
         let imports = collapse(&mut items);
         assert!(imports.is_empty(), "{imports:?}");
         assert!(render(&items[1]).contains("soroban_sdk :: auth :: Context"));
+    }
+
+    /// The auth entry types a contract builds, spelled from the SDK, as
+    /// `Context` is.
+    #[test]
+    fn auth_entry_types_collapse_and_import_by_their_module() {
+        let mut items: Vec<syn::Item> = vec![parse_quote!(
+            fn f(e: soroban_sdk::Env, c: soroban_sdk::auth::ContractContext) {
+                let s = soroban_sdk::auth::SubContractInvocation { context: c, sub_invocations: soroban_sdk::Vec::new(&e) };
+                let _ = soroban_sdk::auth::InvokerContractAuthEntry::Contract(s);
+            }
+        )];
+        let imports = collapse(&mut items);
+        for name in ["auth::ContractContext", "auth::SubContractInvocation", "auth::InvokerContractAuthEntry"] {
+            assert!(imports.contains(name), "{name}: {imports:?}");
+        }
+        let out = render(&items[0]);
+        assert!(out.contains("InvokerContractAuthEntry :: Contract (s)") && !out.contains("auth"), "{out}");
     }
 
     #[test]

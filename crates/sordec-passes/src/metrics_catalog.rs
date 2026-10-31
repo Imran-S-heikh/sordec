@@ -648,6 +648,9 @@ pub const INTERPROC_STRUCT_ARGS: &str = "interproc_struct_args";
 pub const MARSHALLING_ENUM_DISCRIMINANTS: &str = "marshalling_enum_discriminants";
 /// Enum decode-and-re-encode round trips folded back to the value.
 pub const MARSHALLING_ENUM_ENCODES: &str = "marshalling_enum_encodes";
+/// `authorize_as_current_contract` arguments rebuilt in the SDK's own auth
+/// types.
+pub const MARSHALLING_AUTH_ENTRIES: &str = "marshalling_auth_entries";
 /// Helpers whose two-register wide parameter was promoted to the value.
 pub const INTERPROC_WIDE_PARAMS: &str = "interproc_wide_params";
 /// Helper parameters nothing read, dropped with their arguments — most of
@@ -1122,6 +1125,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_SPEC_RETURNS,
         MARSHALLING_ENUM_DISCRIMINANTS,
         MARSHALLING_ENUM_ENCODES,
+        MARSHALLING_AUTH_ENTRIES,
         INTERPROC_CONST_RETURNS,
         INTERPROC_WIDE_RETURNS,
         INTERPROC_WIDE_PARAMS,
