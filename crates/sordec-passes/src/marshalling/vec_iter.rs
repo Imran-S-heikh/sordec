@@ -80,6 +80,8 @@
 //!   `tag != 1` whose taken arm never falls through and never continues
 //!   this loop; then a block whose loads of `o2+8` come before anything in
 //!   it writes memory.
+//! - The state and both out-slots three non-overlapping 16-byte places of
+//!   one frame.
 //! - Every touch of the state's and the out-slots' bytes is one of these
 //!   loops' stores, calls and loads; the forward walk agrees.
 //! - What goes is read by nothing that stays: `t` and `x` only by the
@@ -653,8 +655,14 @@ fn site(
     if elements.is_empty() {
         return Err("no element read".into());
     }
-    // The state, set just before the loop.
+    // The state, set just before the loop: in the same frame as both
+    // out-slots, none of the three overlapping, so neither call writes
+    // another's bytes.
     let (sb, sk) = canon_addr(func, *st);
+    let disjoint = |a: u32, b: u32| a.checked_add(16).is_some_and(|e| e <= b) || b.checked_add(16).is_some_and(|e| e <= a);
+    if sb != o1b || sb != o2b || !disjoint(sk, o1k) || !disjoint(sk, o2k) || !disjoint(o1k, o2k) {
+        return Err("the iterator's state and out-slots are not three places of one frame".into());
+    }
     let Region::Basic(set_block) = before else { return Err("the loop does not follow the state's setting".into()) };
     let set_ids = func.blocks.get(*set_block).map(|b| b.bindings.clone()).unwrap_or_default();
     let store_at = |off: u32, w: MemWidth| -> Option<(ValueId, ValueId)> {
