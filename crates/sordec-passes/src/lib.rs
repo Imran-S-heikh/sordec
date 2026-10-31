@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, ByteArrayPass, BytesNConvertPass,
-    AuthEntryPass, BoolCodecPass, ClientArgVecPass, MapEntriesPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, TupleStructEncodePass, EnumSelectPass, IndexOfPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    AuthEntryPass, BoolCodecPass, ClientArgVecPass, MapEntriesPass, VecElementsPass, VecIterPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, TupleStructEncodePass, EnumSelectPass, IndexOfPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideInlineDecodePass, WideReturnPass,
     EncodeByRefPass, FromArrayLoopPass, OverwrittenFrameStorePass,
 };
@@ -776,6 +776,10 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // out-pointer pass, which would otherwise turn the iterator's
             // `next` into an `Option` at some call sites and not others.
             Box::new(EnumIterPass),
+            // And a typed vector's outlined iterator (`for x in v.iter()`),
+            // as the indexed loop it drives — before the out-pointer pass
+            // turns its helpers into `Option`s.
+            Box::new(VecIterPass),
             Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_ENUM_ITER, &[])),
             Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_HELPER_TYPES, &[])),
             Box::new(pass::Rerun::new(ArgGuardElisionPass, ARG_GUARD_AFTER_ENUM_ITER, &[])),

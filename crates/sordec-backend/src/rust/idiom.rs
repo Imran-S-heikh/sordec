@@ -153,12 +153,27 @@ pub(crate) fn vec_get_at_literal(
     if converted_to_val(ctx, op).is_none() {
         let got: syn::Expr = parse_quote!(#v.get_unchecked(#n));
         // A `Vec<Val>`'s element the IR reads as a typed value: the
-        // conversion the source made (`try_into_val`), spelled.
-        let of_vals = matches!(
-            ctx.func.bindings.get(*recv).map(|b| &b.ty),
-            Some(IrType::Known(KnownType::Vec(e)) | IrType::Inferred(KnownType::Vec(e)))
-                if matches!(**e, IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val))
-        );
+        // conversion the source made (`try_into_val`), spelled. A parameter
+        // is the vector its signature declares; any other value's element
+        // type nothing recovered is emitted as `Val` too.
+        let at = ctx.fold_target(*recv);
+        let declared = ctx
+            .func
+            .params
+            .iter()
+            .position(|p| *p == at)
+            .and_then(|i| ctx.func.signature.as_ref()?.inputs.get(i).map(|p| &p.ty));
+        let of_vals = match declared {
+            Some(sordec_ir::TypeRef::Composite(sordec_ir::CompositeType::Vec(e))) => {
+                matches!(**e, sordec_ir::TypeRef::Primitive(sordec_ir::PrimitiveType::Val))
+            }
+            Some(_) => false,
+            None => matches!(
+                ctx.func.bindings.get(at).map(|b| &b.ty),
+                Some(IrType::Known(KnownType::Vec(e)) | IrType::Inferred(KnownType::Vec(e)))
+                    if matches!(**e, IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val) | IrType::Unknown(_))
+            ),
+        };
         let typed = matches!(
             ctx.func.bindings.get(result).map(|b| &b.ty),
             Some(IrType::Known(k) | IrType::Inferred(k)) if *k != KnownType::Val
