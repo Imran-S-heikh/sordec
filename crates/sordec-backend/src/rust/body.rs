@@ -2197,6 +2197,44 @@ mod tests {
         }
     }
 
+    /// `U256::from_be_bytes(&e, &b)` / `u.to_be_bytes()` over an operand
+    /// typed `operand`, the result returned.
+    fn u256_conversion(kind: sordec_ir::ValObjectKind, operand: IrType, result: KnownType) -> String {
+        emitted(
+            vec![
+                (operand, Expr::Use(v(0))),
+                (IrType::Known(result), known(KnownOp::ValObject { kind, args: vec![v(1)] })),
+            ],
+            vec![ret(2)],
+            &TypeRegistry::default(),
+        )
+    }
+
+    #[test]
+    fn a_number_from_typed_bytes_is_the_sdk_constructor() {
+        use sordec_ir::ValObjectKind as K;
+        let out = packed(&u256_conversion(K::U256ValFromBeBytes, IrType::Known(KnownType::Bytes), KnownType::Val));
+        assert!(out.contains("U256::from_be_bytes(e,&v1).to_val()"), "{out}");
+        let out = packed(&u256_conversion(K::I256ValFromBeBytes, IrType::Inferred(KnownType::BytesN(32)), KnownType::Val));
+        assert!(out.contains("I256::from_be_bytes(e,&soroban_sdk::Bytes::from(&v1)).to_val()"), "{out}");
+        let out = packed(&u256_conversion(K::U256ValToBeBytes, IrType::Known(KnownType::U256), KnownType::Bytes));
+        assert!(out.contains("v1.to_be_bytes()"), "{out}");
+    }
+
+    /// An operand nothing typed — or typed as something else — keeps the
+    /// hole: the SDK method takes a `&Bytes` / a `U256`, and nothing says
+    /// this value is one.
+    #[test]
+    fn an_untyped_operand_keeps_the_conversion_a_hole() {
+        use sordec_ir::ValObjectKind as K;
+        for operand in [untyped(), IrType::Known(KnownType::Val)] {
+            let out = packed(&u256_conversion(K::U256ValFromBeBytes, operand.clone(), KnownType::Val));
+            assert!(!out.contains("from_be_bytes") && out.contains("todo!"), "{out}");
+        }
+        let out = packed(&u256_conversion(K::U256ValToBeBytes, IrType::Known(KnownType::I256), KnownType::Bytes));
+        assert!(!out.contains("to_be_bytes()") && out.contains("todo!"), "{out}");
+    }
+
     /// The text with its spaces removed, so a check does not depend on
     /// token spacing.
     fn packed(s: &str) -> String {
