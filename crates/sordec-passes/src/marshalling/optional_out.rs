@@ -2189,7 +2189,7 @@ fn seen(func: &HighFunction, writer: ValueId, base: ValueId, range: Slot) -> Res
 
 /// The write that `load` reads: the last write on every path to it, when
 /// that is one binding. `Err` when it depends on the path.
-fn nearest_writer(
+pub(super) fn nearest_writer(
     frames: &Frames<'_>,
     func: &HighFunction,
     load: ValueId,
