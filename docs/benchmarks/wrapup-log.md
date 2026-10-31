@@ -771,3 +771,19 @@ and its pointer and length kept two more alive; it now reads as the source wrote
 `String::from_str(&e, "Hello")`. hello_world, associated_type and
 associated_type_contracttrait have no gaps left. Holes 9,591 → 9,545 (summed); errors
 unchanged at 9; corpus byte-identical; held-out mean 0.7865.
+
+## 2026-10-31 — commit 80bcb1d (resolved constant bytes print as `Bytes::from_slice`)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,815 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 3,430 |
+| third-party | 2 | 1/2 | 8 | 646 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 923 |
+
+`Bytes` built from constant bytes in the binary printed as a gap, with two more for its
+pointer and length; it now prints as `Bytes::from_slice(&e, &[0x6f, …])`, the call that
+hands the host the same bytes. Most are privacy_pools' Poseidon constants (3,151 → 2,521);
+also the BLS and BN254 examples. Holes 9,545 → 8,899 (summed); errors unchanged at 9;
+corpus byte-identical; held-out mean 0.7865.
