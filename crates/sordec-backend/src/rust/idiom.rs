@@ -208,6 +208,22 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         } => {
             let (items, converted) = vec_items(ctx, values);
             let e = ctx.env_borrow();
+            // Elements none of which has a recovered type, each bound as an
+            // unannotated hole (an unrecovered load or operator), leave rustc
+            // nothing to type the vec by: a macro over them falls back on
+            // `()` for the element type. The hole policy names an
+            // unrecovered type `Val`, so that is said outright. Anything
+            // else — a merge, a parameter, a call's result — already has a
+            // type in the emitted Rust.
+            let untyped = !values.is_empty()
+                && values.iter().all(|v| {
+                    let Some(b) = ctx.func.bindings.get(ctx.fold_target(*v)) else { return false };
+                    !matches!(b.ty, IrType::Known(_) | IrType::Inferred(_))
+                        && matches!(b.expr, sordec_ir::Expr::Load { .. } | sordec_ir::Expr::Unknown { .. })
+                });
+            if untyped {
+                return Some(parse_quote!(soroban_sdk::Vec::<soroban_sdk::Val>::from_array(#e, [#(#items),*])));
+            }
             if converted {
                 // `Vec::from_array`, not the macro: a macro's tokens are
                 // opaque to `imports::collapse`, so a qualified path

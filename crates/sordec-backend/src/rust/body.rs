@@ -2197,6 +2197,25 @@ mod tests {
         }
     }
 
+    /// A vec whose elements nothing typed says it is a `Vec<Val>`: left to
+    /// the macro, rustc would fall back on `()` for the holes' type.
+    #[test]
+    fn a_vec_of_untyped_elements_is_spelled_a_vec_of_vals() {
+        let out = packed(&emitted(
+            vec![
+                (untyped(), Expr::Load { addr: v(0), offset: 0, width: sordec_ir::MemWidth::W8, signed: None, ty: untyped() }),
+                (untyped(), Expr::Load { addr: v(0), offset: 8, width: sordec_ir::MemWidth::W8, signed: None, ty: untyped() }),
+                (
+                    IrType::Inferred(KnownType::Vec(Box::new(untyped()))),
+                    known(KnownOp::VecNew { vals_pos: v(0), len: v(0), elements: Some(vec![v(1), v(2)]) }),
+                ),
+            ],
+            vec![ret(3)],
+            &TypeRegistry::default(),
+        ));
+        assert!(out.contains("Vec::<soroban_sdk::Val>::from_array(e,[v1,v2])") || out.contains("Vec::<Val>::from_array(e,[v1,v2])"), "{out}");
+    }
+
     /// `U256::from_be_bytes(&e, &b)` / `u.to_be_bytes()` over an operand
     /// typed `operand`, the result returned.
     fn u256_conversion(kind: sordec_ir::ValObjectKind, operand: IrType, result: KnownType) -> String {
