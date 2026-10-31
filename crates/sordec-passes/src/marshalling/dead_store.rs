@@ -185,7 +185,7 @@ fn plan(func: &HighFunction) -> Vec<Elision> {
 }
 
 /// The frame pointer `fp = global.get G - size`, when the function has one.
-fn frame_pointer(func: &HighFunction) -> Option<ValueId> {
+pub(super) fn frame_pointer(func: &HighFunction) -> Option<ValueId> {
     let counts: HashMap<ValueId, usize> = HashMap::new();
     let _ = counts;
     func.bindings.iter().find_map(|(id, binding)| {

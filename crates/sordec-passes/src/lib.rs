@@ -100,7 +100,7 @@ pub use marshalling::{
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
     AuthEntryPass, BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, TupleStructEncodePass, EnumSelectPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideInlineDecodePass, WideReturnPass,
-    EncodeByRefPass, FromArrayLoopPass,
+    EncodeByRefPass, FromArrayLoopPass, OverwrittenFrameStorePass,
 };
 pub use pass::{Pass, PassMetrics, PassResult};
 pub use pipeline::{Pipeline, PipelineReport};
@@ -846,6 +846,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // elision then takes the bracket, and neither reads the
             // liveness-sensitive shapes the big group gates on. Worth 78
             // more holes than leaving the buffer behind.
+            // A frame handed to helpers is never private, so the pass
+            // above leaves all of its stores. Those every path overwrites
+            // or leaves before any read can reach them go here: the
+            // buffers of a vec whose elements were just recovered are what
+            // this exposes.
+            Box::new(OverwrittenFrameStorePass),
             Box::new(pass::Rerun::new(
                 DeadFrameStorePass,
                 DEAD_FRAME_STORE_AFTER_VEC,

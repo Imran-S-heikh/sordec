@@ -435,6 +435,9 @@ pub const MARSHALLING_FRAME_LOADS_FORWARDED: &str = "marshalling_frame_loads_for
 pub const INLINE_WRAPPER_CALLS: &str = "inline_wrapper_calls";
 /// Stores into a private shadow-stack frame that no load reads back.
 pub const MARSHALLING_DEAD_FRAME_STORES: &str = "marshalling_dead_frame_stores";
+/// Stores into a frame that is not private which every path overwrites,
+/// returns or traps before anything can read them.
+pub const MARSHALLING_OVERWRITTEN_FRAME_STORES: &str = "marshalling_overwritten_frame_stores";
 /// Branches on a constant condition replaced by the arm they take.
 pub const REFINE_CONST_BRANCHES_FOLDED: &str = "refine_const_branches_folded";
 /// Branches dropped because both ways reach the same exit through pure,
@@ -1088,6 +1091,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_FRAME_LOADS_FORWARDED,
         INLINE_WRAPPER_CALLS,
         MARSHALLING_DEAD_FRAME_STORES,
+        MARSHALLING_OVERWRITTEN_FRAME_STORES,
         REFINE_CONST_BRANCHES_FOLDED,
         REFINE_SAME_EXIT_BRANCHES,
         REFINE_CONST_LOOPS_FOLDED,
