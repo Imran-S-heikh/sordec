@@ -513,7 +513,7 @@ fn call_positions(func: &HighFunction, resets: &HashSet<ValueId>, calls: &HashSe
 
 /// The scope labelled `out` in `region`, with the sequence holding it, its
 /// place there, and the scope whose body that sequence is (if one is).
-fn scope_in<'r>(region: &'r Region, out: BlockId, parent: Option<BlockId>) -> Option<(&'r [Region], usize, Option<BlockId>)> {
+fn scope_in(region: &Region, out: BlockId, parent: Option<BlockId>) -> Option<(&[Region], usize, Option<BlockId>)> {
     match region {
         Region::Sequence(items) => {
             for (i, item) in items.iter().enumerate() {

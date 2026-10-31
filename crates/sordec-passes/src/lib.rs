@@ -297,6 +297,10 @@ pub const UDT_DECODE_AFTER_ENUM_ITER: &str = "udt-decode-after-enum-iter";
 /// value parameter (every caller now hands it a proven struct), and only
 /// a typed helper is read as that struct's decode at its call sites.
 pub const UDT_DECODE_AFTER_HELPER_TYPES: &str = "udt-decode-after-helper-types";
+/// [`ArgGuardElisionPass`] once more, after those runs: a field they read
+/// out of a variant's payload is typed by its struct, and the derived tag
+/// check on it is a guard the group's own run never saw.
+pub const ARG_GUARD_AFTER_ENUM_ITER: &str = "arg-guard-after-enum-iter";
 /// [`ValDecodeCollapsePass`] re-run once the `Option`-shaped decoders exist.
 pub const VAL_DECODE_AFTER_OPTIONAL: &str = "val-decode-after-optional";
 /// [`OptionReturnPass`] re-run once the type pass has typed the arms.
@@ -774,6 +778,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             Box::new(EnumIterPass),
             Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_ENUM_ITER, &[])),
             Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_HELPER_TYPES, &[])),
+            Box::new(pass::Rerun::new(ArgGuardElisionPass, ARG_GUARD_AFTER_ENUM_ITER, &[])),
             // Any other `Option` a helper hands back through its caller's
             // frame. After the group, not in it: the group's own
             // `get(..).unwrap()` collapse is the better recovery wherever it

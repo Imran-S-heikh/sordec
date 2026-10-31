@@ -74,6 +74,11 @@
 //! still typed only `Val` takes that type with the removal — otherwise the
 //! trap would have nowhere to move to.
 //!
+//! A two-tag type's check (`Symbol`: small, else an object) is a branch on
+//! the first tag around a guard on the second. Once that guard goes, the
+//! branch does nothing either way — its arms only compute, purely — and
+//! goes too (`dissolve_inert`).
+//!
 //! The length shape is the second half of one `BytesN<N>::try_from_val`:
 //! the tag check proves it is a `BytesObject`, the length check proves the
 //! width. Both are regenerated together, so both go together — and a
@@ -188,7 +193,20 @@ impl crate::pass::Pass<HighIr> for ArgGuardElisionPass {
                 guards.keys().chain(inverted.keys()).filter_map(|c| guarded_read(func, *c)).collect();
             let region = std::mem::replace(&mut func.region, Region::Unreachable);
             let region = strip(region, &guards, &empty, &mut elided);
-            func.region = strip_inverted(region, &inverted, &empty, &mut elided);
+            let region = strip_inverted(region, &inverted, &empty, &mut elided);
+            // What a two-tag check leaves once its inner guard goes.
+            let mut dissolved = Vec::new();
+            func.region = if elided > before { dissolve_inert(func, region, &mut dissolved) } else { region };
+            for cond in dissolved {
+                if let Some(b) = func.bindings.get_mut(cond) {
+                    b.add_provenance(Provenance::new(
+                        PASS_NAME,
+                        ProvenanceSource::SdkPattern,
+                        "a tag test whose branch did nothing either way once the derived check under it \
+                         went: the branch is dissolved",
+                    ));
+                }
+            }
             type_guarded_reads(func, &reads);
             // One diagnostic per guard actually removed — a reviewer sees
             // every site the unreachability argument was applied to.
@@ -220,6 +238,71 @@ impl crate::pass::Pass<HighIr> for ArgGuardElisionPass {
         }
         debug_validate(ir, PASS_NAME);
         result
+    }
+}
+
+/// `region` with each branch on a tag test that does nothing either way
+/// replaced by its blocks.
+///
+/// A two-tag type's derived check (a `Symbol` is small or an object) is
+/// `if has_tag(x, A) {} else { if !has_tag(x, B) { trap } }`; once the inner
+/// guard is elided the branch is left with arms that only compute: the
+/// constant and the test the guard read. A tag test cannot trap, and
+/// neither can work that is pure and total, so running both arms' blocks
+/// unconditionally — or the test not at all — is the same program:
+/// nothing either way can be observed.
+fn dissolve_inert(func: &HighFunction, region: Region, dissolved: &mut Vec<ValueId>) -> Region {
+    let inert_block = |b: &BlockId| {
+        func.blocks.get(*b).is_some_and(|blk| {
+            blk.bindings.iter().all(|v| {
+                func.bindings.get(*v).is_some_and(|b| {
+                    !matches!(b.expr, Expr::Phi { .. }) && crate::effects::expr_effects(&b.expr).is_pure_total()
+                })
+            })
+        })
+    };
+    fn inert(r: &Region, block: &dyn Fn(&BlockId) -> bool) -> bool {
+        match r {
+            Region::Basic(b) => block(b),
+            Region::Sequence(items) => items.iter().all(|i| inert(i, block)),
+            Region::Transfer { transfer, .. } => transfer.is_empty(),
+            _ => false,
+        }
+    }
+    let mut rec = |r: Region| dissolve_inert(func, r, dissolved);
+    match region {
+        Region::Sequence(items) => seq(items.into_iter().map(&mut rec).collect()),
+        Region::Scope { out, body } => Region::Scope { out, body: Box::new(rec(*body)) },
+        Region::Loop { header, body, kind } => Region::Loop { header, body: Box::new(rec(*body)), kind },
+        Region::Switch { index, arms, default, dispatch } => Region::Switch {
+            index,
+            arms: arms
+                .into_iter()
+                .map(|mut arm| {
+                    arm.body = rec(arm.body);
+                    arm
+                })
+                .collect(),
+            default: Box::new(rec(*default)),
+            dispatch,
+        },
+        Region::If { cond, then_region, else_region } => {
+            let tag_test = matches!(
+                func.bindings.get(resolve_use(func, cond)).map(|b| &b.expr),
+                Some(Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck { .. })))
+            );
+            let then_region = rec(*then_region);
+            let else_region = else_region.map(|e| rec(*e));
+            if tag_test
+                && inert(&then_region, &inert_block)
+                && else_region.as_ref().is_none_or(|e| inert(e, &inert_block))
+            {
+                dissolved.push(cond);
+                return seq(std::iter::once(then_region).chain(else_region).collect());
+            }
+            Region::If { cond, then_region: Box::new(then_region), else_region: else_region.map(Box::new) }
+        }
+        leaf => leaf,
     }
 }
 
@@ -1047,6 +1130,71 @@ mod tests {
         let region = strip(func.region.clone(), &guards, &empty_blocks(&func), &mut elided);
         assert_eq!(elided, 1);
         assert!(matches!(region, Region::Sequence(ref s) if s.is_empty()));
+    }
+
+    /// `s: Symbol`'s two-tag check — `if small(s) {} else { if !object(s)
+    /// { trap } }` — with `work` in the else arm when it does more.
+    fn symbol_check(work: bool) -> HighIr {
+        let mut exprs = vec![
+            Expr::Phi { incoming: vec![] }, // v0 — the parameter
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                value: v(0),
+                tag: val_abi::TAG_SYMBOL_SMALL,
+                negated: false,
+            })), // v1
+            Expr::Literal(Literal::I32(74)), // v2
+            Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
+                value: v(0),
+                tag: val_abi::TAG_SYMBOL_OBJECT,
+                negated: true,
+            })), // v3
+        ];
+        let mut else_block = vec![v(2), v(3)];
+        if work {
+            exprs.push(Expr::Store { addr: v(2), value: v(0), offset: 0, width: sordec_ir::MemWidth::W8 }); // v4
+            else_block.push(v(4));
+        }
+        let mut func = entry(exprs, vec![v(0)], PrimitiveType::Symbol);
+        func.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings = vec![v(1)];
+        func.blocks.push(sordec_ir::HighBlock { id: BlockId::from_index(1), bindings: else_block });
+        func.region = Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::If {
+                cond: v(1),
+                then_region: Box::new(Region::Sequence(vec![])),
+                else_region: Some(Box::new(Region::Sequence(vec![
+                    Region::Basic(BlockId::from_index(1)),
+                    Region::If { cond: v(3), then_region: Box::new(Region::Unreachable), else_region: None },
+                ]))),
+            },
+            Region::Return { values: vec![] },
+        ]);
+        crate::marshalling::test_support::module(vec![func])
+    }
+
+    use crate::pass::Pass;
+
+    fn ifs(func: &HighFunction) -> usize {
+        let mut n = 0;
+        func.region.for_each_node(|r| n += usize::from(matches!(r, Region::If { .. })));
+        n
+    }
+
+    /// Once the inner guard goes, the branch on the other tag does nothing
+    /// either way, and goes with it.
+    #[test]
+    fn a_two_tag_checks_empty_branch_is_dissolved() {
+        let mut ir = symbol_check(false);
+        assert!(ArgGuardElisionPass.run(&mut ir).changed);
+        assert_eq!(ifs(&ir.functions[0]), 0);
+    }
+
+    /// Work in the arm keeps the branch: only the guard goes.
+    #[test]
+    fn a_branch_with_work_left_is_kept() {
+        let mut ir = symbol_check(true);
+        assert!(ArgGuardElisionPass.run(&mut ir).changed);
+        assert_eq!(ifs(&ir.functions[0]), 1);
     }
 
     #[test]

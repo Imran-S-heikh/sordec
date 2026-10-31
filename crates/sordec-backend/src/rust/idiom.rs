@@ -151,7 +151,23 @@ pub(crate) fn vec_get_at_literal(
     let eb = ctx.env_borrow();
     let v = ctx.value_ref(*recv);
     if converted_to_val(ctx, op).is_none() {
-        return Some(parse_quote!(#v.get_unchecked(#n)));
+        let got: syn::Expr = parse_quote!(#v.get_unchecked(#n));
+        // A `Vec<Val>`'s element the IR reads as a typed value: the
+        // conversion the source made (`try_into_val`), spelled.
+        let of_vals = matches!(
+            ctx.func.bindings.get(*recv).map(|b| &b.ty),
+            Some(IrType::Known(KnownType::Vec(e)) | IrType::Inferred(KnownType::Vec(e)))
+                if matches!(**e, IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val))
+        );
+        let typed = matches!(
+            ctx.func.bindings.get(result).map(|b| &b.ty),
+            Some(IrType::Known(k) | IrType::Inferred(k)) if *k != KnownType::Val
+        );
+        if of_vals && typed {
+            let ty = ctx.value_type(result);
+            return Some(parse_quote!(soroban_sdk::IntoVal::<soroban_sdk::Env, #ty>::into_val(&#got, #eb)));
+        }
+        return Some(got);
     }
     let element: syn::Expr = parse_quote!(
         soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Vec<soroban_sdk::Val>>::into_val(
