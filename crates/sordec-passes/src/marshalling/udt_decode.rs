@@ -1623,7 +1623,7 @@ pub(super) mod reach {
     const DERIVE_BUDGET: usize = 64;
 
     /// A forward analysis the walk drives.
-    pub(super) trait Flow {
+    pub(in crate::marshalling) trait Flow {
         type State: Clone + PartialEq;
         /// Meet two paths' states where they join.
         fn join(into: &mut Self::State, other: &Self::State);
@@ -1640,12 +1640,12 @@ pub(super) mod reach {
     /// included), and whether the whole tree was walked: an unstructured
     /// remnant, a missing block or a loop that did not settle leaves it
     /// incomplete, and nothing it says can be relied on.
-    pub(super) struct Walked<S> {
+    pub(in crate::marshalling) struct Walked<S> {
         pub returned: Option<S>,
         pub complete: bool,
     }
 
-    pub(super) fn walk<F: Flow>(func: &HighFunction, flow: &mut F, entry: F::State) -> Walked<F::State> {
+    pub(in crate::marshalling) fn walk<F: Flow>(func: &HighFunction, flow: &mut F, entry: F::State) -> Walked<F::State> {
         let mut walker = Walker { func, flow, breaks: HashMap::new(), continues: HashMap::new(), returned: None, complete: true };
         let end = walker.region(&func.region, Some(entry));
         walker.returned = merge::<F>(walker.returned.take(), end);

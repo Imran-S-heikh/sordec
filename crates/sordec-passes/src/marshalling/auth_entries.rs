@@ -39,7 +39,10 @@
 //! table of the SDK's `auth` module (`AUTH`), registered in the module's
 //! type registry as *imported* ([`sordec_ir::TypeRegistry::imported`]): the
 //! reconstruction says `use soroban_sdk::auth::{..}` instead of declaring
-//! them.
+//! them. A pass registers the type it needs and the types that one names,
+//! transitively — this pass the entry type, `enum_iter` the `Context`
+//! `__check_auth` is handed — so a contract's own type of an unrelated
+//! name stops neither.
 //!
 //! # Why it is exact
 //!
@@ -146,10 +149,23 @@ enum Shape {
     Union(&'static [(&'static str, &'static [Field], u32)]),
 }
 
+/// The enum `__check_auth` is handed a vector of: what each authorized
+/// call or contract creation is.
+pub(super) const CONTEXT: &str = "Context";
+
 /// `soroban_sdk::auth`, as `src/auth.rs` declares it in SDK 21 through 27.
 /// The only change across those versions is SDK 22's constructor-argument
 /// context: the struct and the `CreateContractWithCtorHostFn` variants.
 const AUTH: &[Decl] = &[
+    Decl {
+        name: CONTEXT,
+        since: FIRST_MAJOR,
+        shape: Shape::Union(&[
+            ("Contract", &[Field::Type("ContractContext")], FIRST_MAJOR),
+            ("CreateContractHostFn", &[Field::Type("CreateContractHostFnContext")], FIRST_MAJOR),
+            ("CreateContractWithCtorHostFn", &[Field::Type("CreateContractWithConstructorHostFnContext")], 22),
+        ]),
+    },
     Decl {
         name: "ContractContext",
         since: FIRST_MAJOR,
@@ -210,7 +226,7 @@ impl Pass<HighIr> for AuthEntryPass {
         let Some(major) = sdk_major(facts) else {
             return result;
         };
-        let Some(sdk) = SdkTypes::register(&facts.types, major) else {
+        let Some(sdk) = SdkTypes::register(&facts.types, major, ENTRY) else {
             return result;
         };
         let memory = ir.memory.clone();
@@ -235,7 +251,7 @@ impl Pass<HighIr> for AuthEntryPass {
 
 /// The SDK major the contract was built with: `rssdkver`'s, or the
 /// protocol's, which names the same major.
-fn sdk_major(facts: &SorobanFacts) -> Option<u32> {
+pub(super) fn sdk_major(facts: &SorobanFacts) -> Option<u32> {
     let leading = |s: &str| s.trim().split(['.', '#']).next()?.parse::<u32>().ok();
     let major = facts
         .contract_meta
@@ -245,19 +261,47 @@ fn sdk_major(facts: &SorobanFacts) -> Option<u32> {
     (major >= FIRST_MAJOR).then_some(major)
 }
 
+/// The table's types `root` names, itself included: each field's and
+/// payload's, transitively, as `major` declares them.
+fn reachable(root: &'static str, major: u32) -> Vec<&'static Decl> {
+    let mut out: Vec<&'static Decl> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(name) = stack.pop() {
+        let Some(d) = decl(name).filter(|d| d.since <= major) else { continue };
+        if out.iter().any(|o| o.name == d.name) {
+            continue;
+        }
+        out.push(d);
+        let named = |f: &Field| match f {
+            Field::Type(n) | Field::VecOf(n) => Some(*n),
+            _ => None,
+        };
+        match &d.shape {
+            Shape::Struct(fields) => stack.extend(fields.iter().filter_map(|(_, f)| named(f))),
+            Shape::Union(cases) => stack.extend(
+                cases.iter().filter(|(_, _, since)| *since <= major).flat_map(|(_, p, _)| p.iter().filter_map(named)),
+            ),
+        }
+    }
+    // In the table's order, so ids are numbered the same on every run.
+    out.sort_by_key(|d| AUTH.iter().position(|a| a.name == d.name));
+    out
+}
+
 /// The registry with the table's types in it, and their ids.
-struct SdkTypes {
-    types: TypeRegistry,
+pub(super) struct SdkTypes {
+    pub(super) types: TypeRegistry,
     ids: HashMap<&'static str, TypeId>,
     major: u32,
 }
 
 impl SdkTypes {
-    /// Register the types `major` declares, as imported from the SDK's
-    /// `auth` module, into a copy of `types` — or reuse them, if an earlier
-    /// run did. `None` when the contract declares a type of the same name.
-    fn register(types: &TypeRegistry, major: u32) -> Option<Self> {
-        let declared = AUTH.iter().filter(|d| d.since <= major);
+    /// Register `root` and the types it names, as `major` declares them and
+    /// imported from the SDK's `auth` module, into a copy of `types` — or
+    /// reuse them, if an earlier run did. `None` when the contract declares
+    /// a type of one of those names.
+    pub(super) fn register(types: &TypeRegistry, major: u32, root: &'static str) -> Option<Self> {
+        let declared = reachable(root, major).into_iter();
         let imported = |id: TypeId| types.sdk_module(id) == Some(MODULE);
         let named = |name: &str| -> Vec<TypeId> {
             let structs = types.structs.iter().filter(|d| d.name == name).map(|d| d.id);
@@ -315,7 +359,7 @@ impl SdkTypes {
         Some(Self { types: out, ids, major })
     }
 
-    fn id(&self, name: &str) -> Option<TypeId> {
+    pub(super) fn id(&self, name: &str) -> Option<TypeId> {
         self.ids.get(name).copied()
     }
 }
@@ -745,6 +789,39 @@ mod tests {
         let types = &m.soroban_facts.as_ref().unwrap().types;
         assert_eq!(types.imported.len(), 5);
         assert_eq!(types.unions.iter().find(|u| u.name == ENTRY).unwrap().cases.len(), 2);
+    }
+
+    /// `Context`, registered for itself, brings the payload types it names
+    /// and nothing of the entry tree; its variants follow the version.
+    #[test]
+    fn context_registers_with_what_it_names() {
+        for (major, variants) in [(21, 2), (27, 3)] {
+            let sdk = SdkTypes::register(&TypeRegistry::default(), major, CONTEXT).expect("registered");
+            let names: HashSet<&str> = sdk
+                .types
+                .structs
+                .iter()
+                .map(|d| d.name.as_str())
+                .chain(sdk.types.unions.iter().map(|d| d.name.as_str()))
+                .collect();
+            assert!(names.contains(CONTEXT) && names.contains("ContractContext") && names.contains("ContractExecutable"));
+            assert!(!names.contains(ENTRY) && !names.contains("SubContractInvocation"));
+            let context = sdk.types.unions.iter().find(|u| u.name == CONTEXT).unwrap();
+            assert_eq!(context.cases.len(), variants, "SDK {major}");
+            assert!(sdk.types.imported.iter().all(|t| t.module == MODULE));
+        }
+    }
+
+    /// A contract's own `ContractContext` stops `Context` (which names it),
+    /// but not the entry tree's registration of an unrelated type.
+    #[test]
+    fn a_contract_type_stops_only_what_names_it() {
+        let mut own = TypeRegistry::default();
+        own.structs.push(StructDef { id: TypeId::new(0), name: "ContractExecutable".to_string(), fields: vec![] });
+        assert!(SdkTypes::register(&own, 22, CONTEXT).is_none());
+        let mut own = TypeRegistry::default();
+        own.unions.push(UnionDef { id: TypeId::new(0), name: CONTEXT.to_string(), cases: vec![], exported: true });
+        assert!(SdkTypes::register(&own, 22, ENTRY).is_some(), "the entry tree names no `Context`");
     }
 
     fn unchanged(mut m: HighIr) {
