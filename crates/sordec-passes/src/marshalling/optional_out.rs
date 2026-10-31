@@ -1537,6 +1537,11 @@ impl<'ir> Frames<'ir> {
         Frames { ir, helpers: None, extents: RefCell::new(HashMap::new()) }
     }
 
+    /// The module the extents are read from.
+    pub(super) fn ir(&self) -> &'ir HighIr {
+        self.ir
+    }
+
     /// What the call at `binding` can touch in the frame at `base`, or
     /// `None` when it is handed a pointer into it and the extent is not
     /// known. Empty for a call handed nothing of the frame.
