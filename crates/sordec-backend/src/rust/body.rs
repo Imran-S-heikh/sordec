@@ -486,6 +486,13 @@ impl<'a> FnCtx<'a> {
             Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { .. })) => KnownType::I64,
             _ => return None,
         };
+        self.read_only_as_arithmetic(vid).then_some(ty)
+    }
+
+    /// Whether every live reader of `vid` is integer arithmetic (binary
+    /// ops, a zero test, the width moves) or a branch testing it — the
+    /// readers that take a machine word as it is and pin no other type.
+    pub(crate) fn read_only_as_arithmetic(&self, vid: ValueId) -> bool {
         // Live readers only: a rename a rewrite left unscheduled is read by
         // nothing and is not a reader, but a merge is.
         let scheduled: HashSet<ValueId> =
@@ -527,7 +534,7 @@ impl<'a> FnCtx<'a> {
         // A 4-byte word tested by a branch is tested as one: `cond_ref`
         // writes `!= 0` for it, so the read is integer arithmetic too.
         let region_ok = region_reads == 0 || self.is_word_load(vid);
-        ((readers > 0 || region_reads > 0) && only_arith && region_ok).then_some(ty)
+        (readers > 0 || region_reads > 0) && only_arith && region_ok
     }
 
     /// An untyped full 4-byte memory read: a 32-bit word, which no `Val`
@@ -638,7 +645,7 @@ impl<'a> FnCtx<'a> {
     /// typed `Unknown` renders as `Val`, and `Val != 0` is not true either
     /// — inventing a comparison there would assert a shape we have not
     /// recovered, so it is left alone to fail visibly.
-    fn cond_ref(&self, vid: ValueId) -> syn::Expr {
+    pub(crate) fn cond_ref(&self, vid: ValueId) -> syn::Expr {
         let expr = self.value_ref(vid);
         if self.is_machine_integer(vid) || self.is_untyped_arithmetic(vid) || self.is_word_load(vid) {
             parse_quote!(#expr != 0)
@@ -2341,6 +2348,49 @@ mod tests {
         ));
         assert!(out.contains("letv1:i32=todo!"), "{out}");
         assert!(out.contains("(arg0asu32)<(v1asu32)"), "{out}");
+    }
+
+    /// `select(a, b, c)` with two constants as the arms and a 4-byte load
+    /// as the condition, its result read by `reader` (`v5`) or returned.
+    fn select_over(a: (IrType, Expr), b: (IrType, Expr), add_to_it: bool) -> String {
+        let select = Expr::Unknown {
+            op_kind: sordec_ir::WasmOpcodeKind::Select,
+            args: vec![v(1), v(2), v(3)],
+            reason: sordec_common::UnknownReason::InsufficientEvidence,
+        };
+        let word = Expr::Load { addr: v(0), offset: 0, width: sordec_ir::MemWidth::W4, signed: None, ty: untyped() };
+        let mut bindings = vec![a, b, (untyped(), word), (untyped(), select)];
+        let out = if add_to_it {
+            bindings.push((untyped(), Expr::Binary { op: BinaryOp::Add, lhs: v(4), rhs: v(1) }));
+            5
+        } else {
+            4
+        };
+        packed(&emitted(bindings, vec![ret(out)], &TypeRegistry::default()))
+    }
+
+    /// A `select` whose arms share a type is the `if` that picks one of
+    /// them; the condition is a machine word, tested `!= 0`.
+    #[test]
+    fn a_select_between_arms_of_one_type_prints_as_an_if() {
+        let out = select_over(i64_lit(0), i64_lit(7), true);
+        assert!(out.contains("if"), "{out}");
+        assert!(!out.contains("unrecoveredSelect"), "{out}");
+    }
+
+    /// A select returned as it is has its type decided by the return, not
+    /// its arms (an enum's encoded words, say): it stays a gap.
+    #[test]
+    fn a_select_returned_as_it_is_stays_a_gap() {
+        let out = select_over(i64_lit(0), i64_lit(7), false);
+        assert!(out.contains("unrecoveredSelect"), "{out}");
+    }
+
+    /// Arms of two types are not one Rust value: the select stays a gap.
+    #[test]
+    fn a_select_between_arms_of_two_types_stays_a_gap() {
+        let out = select_over(i64_lit(0), lit_i32(7), true);
+        assert!(out.contains("unrecoveredSelect"), "{out}");
     }
 
     /// Two constants pin no type between them, so both carry the suffix.

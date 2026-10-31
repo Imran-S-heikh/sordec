@@ -196,6 +196,10 @@ pub(crate) fn rendered_reads(
 /// here (compile error otherwise) before the emitter can silently drop it.
 fn is_effectful(expr: &Expr) -> bool {
     match expr {
+        // A `select` picks one of two already-computed values: pure, and
+        // printed as an `if` between them, so an unread one is dropped like
+        // any other pure value.
+        Expr::Unknown { op_kind: sordec_ir::WasmOpcodeKind::Select, .. } => false,
         // Calls and host operations may mutate ledger/auth/event state.
         Expr::Call { .. }
         | Expr::IndirectCall { .. }

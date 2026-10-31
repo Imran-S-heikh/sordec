@@ -1333,6 +1333,20 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
         // that drops its operands tells a reader nothing and orphans the
         // bindings that computed them. `GlobalSet` is the shadow-stack
         // bracket and by far the commonest of these.
+        // wasm `select(a, b, c)` yields `a` when `c` is non-zero and `b`
+        // otherwise, both already computed: `if c != 0 { a } else { b }`
+        // with the two names is the same value. Only when both arms carry
+        // one recovered type: a select between two words of different
+        // types (the `Val` encodings of a `Result`'s two sides, a `bool`
+        // and a byte code) is not one Rust value, and stays a gap.
+        Expr::Unknown { op_kind: sordec_ir::WasmOpcodeKind::Select, args, .. }
+            if args.len() == 3 && select_prints_as_if(ctx, binding.id, args[0], args[1]) =>
+        {
+            // Each arm by move, cloned only where it is read again later:
+            // the wasm copied a handle, which Rust must not move away.
+            let (a, b, c) = (ctx.arg_ref(args[0]), ctx.arg_ref(args[1]), ctx.cond_ref(args[2]));
+            parse_quote!(if #c { #a } else { #b })
+        }
         Expr::Unknown { op_kind, args, .. } => {
             let operands = args
                 .iter()
@@ -1346,6 +1360,22 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             })
         }
     }
+}
+
+/// Whether a `select` prints as the `if` between its arms: both arms carry
+/// one recovered machine-integer type, and nothing reads the result but
+/// integer arithmetic or a branch, which take it as that integer. A select
+/// returned, stored or handed to a call has its type decided there — the
+/// encoded words of an enum's variants, say — and stays a gap.
+fn select_prints_as_if(ctx: &FnCtx, select: sordec_common::ValueId, a: sordec_common::ValueId, b: sordec_common::ValueId) -> bool {
+    let ty = |v| match ctx.func.bindings.get(ctx.fold_target(v)).map(|b| &b.ty) {
+        Some(IrType::Known(t) | IrType::Inferred(t)) => Some(t.clone()),
+        _ => None,
+    };
+    let machine = |t: &KnownType| {
+        matches!(t, KnownType::I32 | KnownType::U32 | KnownType::I64 | KnownType::U64 | KnownType::Bool)
+    };
+    matches!((ty(a), ty(b)), (Some(x), Some(y)) if x == y && machine(&x)) && ctx.read_only_as_arithmetic(select)
 }
 
 /// The declared type of `target`'s parameter at position `index`.
