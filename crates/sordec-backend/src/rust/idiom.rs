@@ -48,6 +48,62 @@ fn typed_vec(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
     )
 }
 
+/// Whether `vec_push_back(v, x)` pushes an element of `v`'s own type: `v`
+/// typed `Vec<T>` with `T` named, and `x` typed `T` — or, for a
+/// `Vec<Val>`, `x` with no recovered type, which prints as the `Val` the
+/// host was handed.
+///
+/// Why it is exact: the host's `vec_push_back` returns a new vec, `v`'s
+/// elements then `x`, and never changes `v`; the SDK's `push_back` makes
+/// that same call on its handle and keeps the result, so on a clone of `v`
+/// it builds the vec the host returned. Gate: the types above, so that
+/// `push_back(item)` takes `x` as it prints, with no conversion.
+fn pushes_an_element(ctx: &FnCtx, args: &[sordec_common::ValueId]) -> bool {
+    let [recv, x] = args else {
+        return false;
+    };
+    let ty = |v: sordec_common::ValueId| ctx.func.bindings.get(v).map(|b| &b.ty);
+    let Some(IrType::Known(KnownType::Vec(element)) | IrType::Inferred(KnownType::Vec(element))) = ty(*recv) else {
+        return false;
+    };
+    // An element nothing has typed prints as `Val` (but a machine word's
+    // as `i32`; see `StrictNoGuess`).
+    let element = match element.as_ref() {
+        IrType::Known(element) | IrType::Inferred(element) => element,
+        IrType::Unknown(sordec_common::UnknownReason::MachineWord32) => return false,
+        IrType::Unknown(_) => &KnownType::Val,
+    };
+    match ty(*x) {
+        Some(IrType::Known(k) | IrType::Inferred(k)) => k == element,
+        // Untyped, only what prints as a `Val`: a helper's result (its
+        // signature says `Val`) or a hole.
+        Some(IrType::Unknown(reason)) if !matches!(reason, sordec_common::UnknownReason::MachineWord32) => {
+            let mut at = *x;
+            for _ in 0..16 {
+                match ctx.func.bindings.get(at).map(|b| &b.expr) {
+                    Some(sordec_ir::Expr::Use(next)) => at = *next,
+                    _ => break,
+                }
+            }
+            let Some(target) = ctx.func.bindings.get(at) else {
+                return false;
+            };
+            let prints_val = match &target.ty {
+                IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val) => true,
+                IrType::Unknown(reason) => !matches!(reason, sordec_common::UnknownReason::MachineWord32),
+                _ => false,
+            };
+            *element == KnownType::Val
+                && prints_val
+                && matches!(
+                    target.expr,
+                    sordec_ir::Expr::Call { .. } | sordec_ir::Expr::Load { .. } | sordec_ir::Expr::Unknown { .. }
+                )
+        }
+        _ => false,
+    }
+}
+
 /// Whether `v` is typed as a vec of the SDK's `InvokerContractAuthEntry`,
 /// the type `authorize_as_current_contract` takes.
 fn entries_vec(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
@@ -70,6 +126,8 @@ fn entries_vec(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
 /// exactly — tag 4 in the low word, the `u32` above it — and the host's
 /// `vec_get` traps out of range just as `get_unchecked` does, so the chain
 /// is the call. `account`'s `args.get(2)` is `vec_get(args, 0x2_0000_0004)`.
+/// So does the recognized `U32Val` encode of a `u32` value
+/// ([`encoded_index`]): `v.get_unchecked(i)`.
 ///
 /// A receiver the IR has not typed as a `Vec` goes through `Val`, as
 /// `len()` does ([`converted_to_val`]), and its element is then a `Val`;
@@ -86,7 +144,10 @@ pub(crate) fn vec_get_at_literal(
     let [recv, index] = args.as_slice() else {
         return None;
     };
-    let n = literal_index(ctx, *index)?;
+    let n: syn::Expr = match literal_index(ctx, *index) {
+        Some(n) => parse_quote!(#n),
+        None => ctx.value_ref(encoded_index(ctx.func, *index)?),
+    };
     let eb = ctx.env_borrow();
     let v = ctx.value_ref(*recv);
     if converted_to_val(ctx, op).is_none() {
@@ -114,6 +175,39 @@ pub(crate) fn vec_get_at_literal(
 fn u32_val_payload(raw: i64) -> Option<u32> {
     (raw & 0xFFFF_FFFF == 4).then_some(())?;
     u32::try_from(raw >> 32).ok()
+}
+
+/// The `u32` an index operand is the `U32Val` encode of, when that value
+/// is itself typed `u32`: `v.get_unchecked(i)` for `vec_get(v,
+/// val_encode::<u32>(i))`.
+///
+/// Why it is exact: the encode is the `U32Val` of `i` (tag 4 in the low
+/// word, `i` above it), and the host's `vec_get` reads the index out of
+/// that word, so it reads `i` — the literal case above, with the number
+/// still a variable. Gate: the encode is the recognized `U32` one and its
+/// payload is typed `u32`, so the method's `u32` parameter takes it as it
+/// prints.
+fn encoded_index(func: &sordec_ir::HighFunction, index: sordec_common::ValueId) -> Option<sordec_common::ValueId> {
+    // Through renames, as the operand prints.
+    let mut at = index;
+    for _ in 0..16 {
+        match &func.bindings.get(at)?.expr {
+            sordec_ir::Expr::Use(next) => at = *next,
+            _ => break,
+        }
+    }
+    let sordec_ir::Expr::Semantic(sordec_ir::SemanticOp::Known(KnownOp::ValEncodeSmall {
+        ty: sordec_ir::KnownType::U32,
+        value,
+    })) = &func.bindings.get(at)?.expr
+    else {
+        return None;
+    };
+    matches!(
+        func.bindings.get(*value).map(|b| &b.ty),
+        Some(IrType::Known(KnownType::U32) | IrType::Inferred(KnownType::U32))
+    )
+    .then_some(*value)
 }
 
 /// The `u32` an index operand carries when it is a literal `U32Val`.
@@ -148,7 +242,7 @@ pub(crate) fn converted_to_val(ctx: &FnCtx, op: &KnownOp) -> Option<sordec_commo
             let [recv, index] = args.as_slice() else {
                 return None;
             };
-            literal_index(ctx, *index)?;
+            literal_index(ctx, *index).map(|_| ()).or_else(|| encoded_index(ctx.func, *index).map(|_| ()))?;
             (!typed_vec(ctx, *recv)).then_some(*recv)
         }
         KnownOp::AuthorizeAsCurrContract { auth_entries } => {
@@ -240,6 +334,12 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         KnownOp::VecOp { kind: VecOpKind::New, args } if args.is_empty() => {
             Some(parse_quote!(soroban_sdk::Vec::new(#eb)))
         }
+        // `Map::new(&e)` is likewise the SDK's one call of the bare
+        // `map_new`, which takes nothing and hands back an empty map; the
+        // key and value types are the binding's.
+        KnownOp::MapOp { kind: sordec_ir::MapOpKind::New, args } if args.is_empty() => {
+            Some(parse_quote!(soroban_sdk::Map::new(#eb)))
+        }
         KnownOp::VecOp { kind, args } => {
             let v = ctx.value_ref(*args.first()?);
             let arg = |i: usize| args.get(i).map(|a| ctx.value_ref(*a));
@@ -264,6 +364,18 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                     ).len()
                 )),
                 VecOpKind::Len => Some(parse_quote!(#v.len())),
+                // `vec_push_back(v, x)` hands back a new vec, `v` with `x`
+                // at the end, and leaves `v` as it was: the SDK's
+                // `push_back` on a copy of the handle. Only where `x` is
+                // what the vec holds (see [`pushes_an_element`]).
+                VecOpKind::PushBack if pushes_an_element(ctx, args) => {
+                    let x = arg(1)?;
+                    Some(parse_quote!({
+                        let (mut pushed, item) = (#v.clone(), #x);
+                        pushed.push_back(item);
+                        pushed
+                    }))
+                }
                 VecOpKind::FirstIndexOf => {
                     let x = arg(1)?;
                     Some(parse_quote!(#v.first_index_of(&#x)))
@@ -830,6 +942,13 @@ pub(crate) fn rendered_operands(
         }
     };
     match op {
+        // `v.get_unchecked(i)` reads `i`, not its encode.
+        KnownOp::VecOp { kind: VecOpKind::Get, args } => {
+            let [recv, index] = args.as_slice() else {
+                return None;
+            };
+            encoded_index(func, *index).map(|i| vec![*recv, i])
+        }
         KnownOp::StorageGet { tier, key, resolved_key, missing, .. } => {
             tier_method(tier)?;
             let mut reads = key_reads(*key, resolved_key);

@@ -1219,14 +1219,15 @@ impl<'a> FnCtx<'a> {
     }
 
     /// `Vec::new(&e)`: generic in its element as a hole is in its whole
-    /// type, so it is annotated on the same terms one was.
+    /// type, so it is annotated on the same terms one was. `Map::new(&e)`
+    /// likewise, in its key and value.
     fn is_empty_vec(binding: &sordec_ir::Binding) -> bool {
         matches!(
             &binding.expr,
-            Expr::Semantic(sordec_ir::SemanticOp::Known(sordec_ir::KnownOp::VecOp {
-                kind: sordec_ir::VecOpKind::New,
-                args,
-            })) if args.is_empty()
+            Expr::Semantic(sordec_ir::SemanticOp::Known(
+                sordec_ir::KnownOp::VecOp { kind: sordec_ir::VecOpKind::New, args }
+                    | sordec_ir::KnownOp::MapOp { kind: sordec_ir::MapOpKind::New, args },
+            )) if args.is_empty()
         )
     }
 
@@ -2730,6 +2731,67 @@ mod tests {
         exprs.extend(readers);
         let tail = vec![Region::Return { values: returned.into_iter().map(v).collect() }];
         emitted(exprs, tail, &TypeRegistry::default())
+    }
+
+    /// `vec_get(v, val_encode::<u32>(i))`: the index is `i`, when `i` is a
+    /// `u32`; typed otherwise, the encode is not known to hold it.
+    fn get_at_encoded(index_ty: KnownType) -> String {
+        let new = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::New, args: vec![] });
+        let index = Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(0) };
+        let encode = known(KnownOp::ValEncodeSmall { ty: KnownType::U32, value: v(2) });
+        let get = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::Get, args: vec![v(1), v(3)] });
+        emitted(
+            vec![
+                (IrType::Known(KnownType::Vec(Box::new(IrType::Known(KnownType::Val)))), new),
+                (IrType::Known(index_ty), index),
+                (IrType::Known(KnownType::Val), encode),
+                (IrType::Known(KnownType::Val), get),
+            ],
+            vec![ret(4)],
+            &TypeRegistry::default(),
+        )
+    }
+
+    /// `vec_push_back(v, x)` with `v: Vec<Val>` and `x` typed `item`.
+    fn pushed(item: IrType) -> String {
+        let vec_val = || IrType::Known(KnownType::Vec(Box::new(IrType::Known(KnownType::Val))));
+        let new = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::New, args: vec![] });
+        let x = Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(0) };
+        let push = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::PushBack, args: vec![v(1), v(2)] });
+        emitted(vec![(vec_val(), new), (item, x), (vec_val(), push)], vec![ret(3)], &TypeRegistry::default())
+    }
+
+    #[test]
+    fn a_push_of_the_vec_s_own_element_type_is_push_back_on_a_copy() {
+        let body = pushed(IrType::Known(KnownType::Val));
+        assert!(body.contains("pushed . push_back (item)"), "{body}");
+        assert!(!body.contains("todo !"), "{body}");
+        // An `i64` is not what a `Vec<Val>` holds: the push stays a hole.
+        assert!(pushed(IrType::Known(KnownType::I64)).contains("todo !"));
+        // Nor is an untyped sum, whose Rust type is not a `Val`.
+        assert!(pushed(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)).contains("todo !"));
+    }
+
+    #[test]
+    fn a_bare_map_new_is_an_empty_map() {
+        let map = IrType::Known(KnownType::Map(
+            Box::new(IrType::Known(KnownType::Val)),
+            Box::new(IrType::Known(KnownType::Val)),
+        ));
+        let new = known(KnownOp::MapOp { kind: sordec_ir::MapOpKind::New, args: vec![] });
+        let body = emitted(vec![(map, new)], vec![ret(1)], &TypeRegistry::default());
+        assert!(body.contains("Map :: new (e)") || body.contains("Map :: new (& e)"), "{body}");
+        assert!(!body.contains("todo !"), "{body}");
+        // Generic in its key and value, it is annotated as a hole was.
+        assert!(body.contains("let v1 : soroban_sdk :: Map <"), "{body}");
+    }
+
+    #[test]
+    fn a_get_at_an_encoded_u32_index_reads_the_index() {
+        let body = get_at_encoded(KnownType::U32);
+        assert!(body.contains("get_unchecked (v2)"), "{body}");
+        assert!(!body.contains("todo !"), "the encode is not read any more: {body}");
+        assert!(get_at_encoded(KnownType::I64).contains("todo !"));
     }
 
     #[test]

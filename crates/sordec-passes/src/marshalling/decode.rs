@@ -116,17 +116,55 @@
 //! Gates: a helper of the `Option` shape whose every `Some` holds the
 //! tested parameter itself (not a decode of it) and that tests exactly one
 //! tag, one of those four; the shift is that tag's, amount and sign.
+//!
+//! ## A `Val` handed over by reference
+//!
+//! Newer SDKs convert an entrypoint's argument from `&Val`, and where the
+//! conversion is not inlined its helper takes a pointer to the word:
+//!
+//! ```text
+//! store fp+8 <- a             fn decode(out, p) {
+//! decode(fp+24, fp+8)             v = load p
+//! load fp+24  ← discriminant      if !has_tag(v, AddressObject) { t = 1 }
+//! load fp+32  ← payload           else { store out+8 <- v; t = 0 }
+//!                                 store out <- t
+//!                             }
+//! ```
+//!
+//! The helper is the by-value decode with its one input read through the
+//! pointer, and is classified the same way with that read standing for the
+//! parameter. At a call site, the word it reads is the one the caller
+//! stored at exactly those bytes; when that is an entrypoint parameter (or
+//! a guaranteed helper parameter) the collapse is the one above.
+//!
+//! Why it is exact: the helper reads the pointer once, eight bytes at the
+//! pointer itself, and does nothing else with it; the caller stored `a` at
+//! those eight bytes on every path to the call with nothing between that
+//! may write them ([`crate::dataflow::facts_at`], the facts the frame
+//! forwarding reads). So the helper decodes `a`, and decoding `a` is what
+//! the by-value argument above is about.
+//!
+//! Gates: the pointer parameter's only use is one emitted 8-byte load at
+//! offset 0 (no offset from it, no second read, no store through it, not
+//! passed on, not read by the control flow), made in the entry block; a
+//! third parameter (the `&Env` the conversion is handed) is allowed only
+//! when nothing reads it; the stored word is found by the frame facts at
+//! the call; every read of the result's bytes sees either this call's
+//! write or another's, never one that depends on the path; everything else
+//! as for the by-value helper.
 
 use std::collections::{HashMap, HashSet};
 
 use sordec_common::{FuncId, ValueId};
 use sordec_ir::{
-    BinaryOp, BufOpKind, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, Region, SemanticOp,
+    BinaryOp, BufOpKind, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MemWidth, Region, SemanticOp,
     ValObjectKind,
 };
 
+use super::optional_out::{nearest_writer, Frames, Slot};
 use super::sret::{self, SretShape};
 use super::{apply_elisions, metrics, Elision};
+use crate::dataflow::frame_facts::facts_at;
 use crate::dataflow::{canon_addr, resolve_use, trace_int, CallIndex};
 use crate::effects::expr_effects;
 use crate::pass::{Pass, PassMetrics, PassResult};
@@ -162,6 +200,10 @@ enum HelperShape {
         disc_offset: u32,
         /// Slot holding the decoded payload.
         payload_offset: u32,
+        /// The `Val` is handed over behind a pointer — `&Val`, which the
+        /// SDK's entrypoint wrapper converts from — rather than by value
+        /// ("A `Val` handed over by reference").
+        by_ref: bool,
     },
     /// Post-conversion: results are the return's components, and the
     /// caller reads them with [`Expr::Project`].
@@ -248,10 +290,21 @@ impl Pass<HighIr> for ValDecodeCollapsePass {
         // once over the whole module before any function changes.
         let guaranteed = guaranteed_params(ir, &helpers);
 
+        // The by-reference decodes, read over the whole module first: which
+        // write a slot read sees is told through what callees touch.
+        let by_ref: Vec<Vec<Elision>> = {
+            let frames = Frames::new(ir);
+            ir.functions.iter().map(|f| by_ref_decodes(&frames, f, &helpers, &guaranteed)).collect()
+        };
+
         // No early return on an empty helper set: an inline decode (SDK 27)
         // needs no helper, and `plan` collapses those too.
-        for func in &mut ir.functions {
-            let (elisions, metrics) = plan(func, &helpers, &guaranteed);
+        for (func, extra) in ir.functions.iter_mut().zip(by_ref) {
+            let (mut elisions, mut metrics) = plan(func, &helpers, &guaranteed);
+            for el in &extra {
+                metrics.increment(el.metric, 1);
+            }
+            elisions.extend(extra);
             if elisions.is_empty() {
                 continue;
             }
@@ -286,13 +339,30 @@ pub(crate) fn classify(func: &HighFunction) -> Option<DecodeHelper> {
 /// The untouched rustc shape: results written through an out-pointer.
 fn classify_out_param(func: &HighFunction) -> Option<DecodeHelper> {
     let shape = sret::analyze(func)?;
-    // Exactly `(out, val)`: a decode reads one Val and writes one Result.
-    if func.params.len() != 2 || shape.slots.len() != 2 {
+    if shape.slots.len() != 2 {
         return None;
     }
-    // The parameter that is not the out-pointer is the Val being decoded.
-    let val_index = 1 - shape.out_index;
-    let val_param = func.params[val_index];
+    // Exactly `(out, val)`: a decode reads one Val and writes one Result.
+    // Or `(out, &env, &val)`: the by-reference conversion is also handed
+    // the environment, which it never reads.
+    let (val_index, val, by_ref) = match func.params.len() {
+        2 => {
+            let val_index = 1 - shape.out_index;
+            let val_param = func.params[val_index];
+            match word_behind(func, val_param) {
+                Some(word) => (val_index, word, true),
+                None => (val_index, val_param, false),
+            }
+        }
+        3 => {
+            let mut read = (0..3).filter(|i| *i != shape.out_index && !unread_param(func, func.params[*i]));
+            let (Some(val_index), None) = (read.next(), read.next()) else {
+                return None;
+            };
+            (val_index, word_behind(func, func.params[val_index])?, true)
+        }
+        _ => return None,
+    };
 
     if !touches_no_host_state(func, &shape.store_bindings) {
         return None;
@@ -302,18 +372,60 @@ fn classify_out_param(func: &HighFunction) -> Option<DecodeHelper> {
     let disc = shape.slot(disc_offset)?;
     let payload = shape.slot(payload_offset)?;
 
-    let tags = decoding_tags(func, val_param, arms(func, disc, payload)?)?;
+    let tags = decoding_tags(func, val, arms(func, disc, payload, val)?)?;
 
     Some(DecodeHelper {
         shape: HelperShape::OutParam {
             out_index: shape.out_index,
             disc_offset,
             payload_offset,
+            by_ref,
         },
         val_index,
-        arity: 2,
+        arity: func.params.len(),
         tags,
     })
+}
+
+/// Whether nothing the function emits, nor its control flow, reads `param`.
+fn unread_param(func: &HighFunction, param: ValueId) -> bool {
+    let mut read = false;
+    for id in sret::emission_order(func) {
+        if let Some(b) = func.bindings.get(id) {
+            b.expr.for_each_value_use(|u| read |= resolve_use(func, u) == param);
+        }
+    }
+    func.region.for_each_value_use(|u| read |= resolve_use(func, u) == param);
+    !read
+}
+
+/// The one word `pointer` is read for, when that is all the function does
+/// with it: a single emitted 8-byte load at the pointer itself, and no
+/// other use — not an offset, not a second read, not a store, not a pass
+/// to anything. The load is then the `Val` the caller stored there.
+fn word_behind(func: &HighFunction, pointer: ValueId) -> Option<ValueId> {
+    let mut word: Option<ValueId> = None;
+    for id in sret::emission_order(func) {
+        let expr = &func.bindings.get(id)?.expr;
+        if let Expr::Load { addr, offset: 0, width: MemWidth::W8, .. } = expr
+            && resolve_use(func, *addr) == pointer
+            && word.is_none()
+        {
+            word = Some(id);
+            continue;
+        }
+        let mut uses = false;
+        expr.for_each_value_use(|u| uses |= resolve_use(func, u) == pointer);
+        if uses {
+            return None;
+        }
+    }
+    let mut region_reads = false;
+    func.region.for_each_value_use(|u| region_reads |= resolve_use(func, u) == pointer);
+    if region_reads {
+        return None;
+    }
+    word
 }
 
 /// The converted shape: results are the components of a multi-value
@@ -677,6 +789,7 @@ fn arms(
     func: &HighFunction,
     disc: ValueId,
     payload: ValueId,
+    val: ValueId,
 ) -> Option<Vec<(ValueId, ValueId)>> {
     let disc_expr = &func.bindings.get(resolve_use(func, disc))?.expr;
     let payload_id = resolve_use(func, payload);
@@ -684,8 +797,9 @@ fn arms(
     // A parameter is one value on every path, though this layer spells it
     // as a phi with no incoming edges. `BytesN<N>::try_from_val` validates
     // its argument and passes it through unchanged, so its payload slot
-    // holds exactly that.
-    if func.params.contains(&payload_id)
+    // holds exactly that. So is the word a by-reference helper reads at its
+    // top, before any branch.
+    if (func.params.contains(&payload_id) || (payload_id == val && val_read_first(func, val)))
         && let Expr::Phi { incoming: d } = disc_expr
     {
         return Some(d.iter().map(|(_, dv)| (*dv, payload_id)).collect());
@@ -704,6 +818,20 @@ fn arms(
         (Expr::Phi { .. }, _) | (_, Expr::Phi { .. }) => None,
         _ => Some(vec![(disc, payload)]),
     }
+}
+
+/// Whether `word` is read in the function's entry block, which every path
+/// runs first: one value on every path, like a parameter.
+fn val_read_first(func: &HighFunction, word: ValueId) -> bool {
+    let entry = match &func.region {
+        Region::Basic(b) => Some(*b),
+        Region::Sequence(items) => match items.first() {
+            Some(Region::Basic(b)) => Some(*b),
+            _ => None,
+        },
+        _ => None,
+    };
+    entry.and_then(|b| func.blocks.get(b)).is_some_and(|block| block.bindings.contains(&word))
 }
 
 /// Does `value` come from `param` through decode operations only?
@@ -1101,6 +1229,10 @@ fn on_call(
     if let HelperShape::Optional { payload, .. } = &helper.shape {
         return (invalidate, optional_call(func, id, target, args, payload.clone(), helper, guaranteed));
     }
+    // A `Val` handed over by reference is [`by_ref_decodes`]' to collapse.
+    if matches!(helper.shape, HelperShape::OutParam { by_ref: true, .. }) {
+        return (invalidate, Claimed::None);
+    }
     let actual = resolve_use(func, args[helper.val_index]);
     let Some(declared) = abi_param_type(func, actual, guaranteed) else {
         return (invalidate, Claimed::None);
@@ -1195,6 +1327,129 @@ fn optional_call(
         note: format!("the `Option` a decoder hands back, typed by the tags it tests ({})", tag_list(&helper.tags)),
         metric: metrics::DECODE_OPTION_TYPED,
     })
+}
+
+/// The collapse of each decode whose `Val` is handed over by reference ("A
+/// `Val` handed over by reference"): at a call whose stored word is a
+/// declared or guaranteed parameter of a type every tested tag carries,
+/// each read of the result whose nearest write is this call becomes its
+/// half, and the call goes once one is.
+///
+/// Every read of the result's bytes is asked which write it sees
+/// ([`super::optional_out`]'s `nearest_writer`, told through what callees
+/// touch): this call's, and it is rebound; another's, and it is left; one
+/// that depends on the path, and the call is left whole. So no read is left
+/// reading bytes the call no longer writes.
+fn by_ref_decodes(
+    frames: &Frames<'_>,
+    func: &HighFunction,
+    helpers: &HashMap<FuncId, DecodeHelper>,
+    guaranteed: &Guaranteed,
+) -> Vec<Elision> {
+    if func.signature.is_none() && !guaranteed.keys().any(|(f, _)| *f == func.id) {
+        return Vec::new();
+    }
+    let order = sret::emission_order(func);
+    let mut out = Vec::new();
+    for &call in &order {
+        let Some(Expr::Call { target, args }) = func.bindings.get(call).map(|b| &b.expr) else {
+            continue;
+        };
+        let Some(helper) = helpers.get(target) else {
+            continue;
+        };
+        let HelperShape::OutParam { out_index, disc_offset, payload_offset, by_ref: true } = helper.shape else {
+            continue;
+        };
+        if args.len() != helper.arity {
+            continue;
+        }
+        let (val_base, val_at) = canon_addr(func, args[helper.val_index]);
+        let Some(stored) = facts_at(func, call, val_base).value_at(val_at, MemWidth::W8) else {
+            trace(func, call, "no word stored behind the pointer");
+            continue;
+        };
+        let actual = resolve_use(func, stored);
+        let Some(declared) = abi_param_type(func, actual, guaranteed) else {
+            trace(func, call, "the stored word is not a declared parameter");
+            continue;
+        };
+        if !helper.tags.iter().all(|t| val_abi::tag_carries(*t, &declared)) {
+            continue;
+        }
+        let (base, at) = canon_addr(func, args[out_index]);
+        let (lo, hi) = (disc_offset.min(payload_offset), disc_offset.max(payload_offset).saturating_add(8));
+        let (Some(disc), Some(payload), Some(start)) =
+            (at.checked_add(disc_offset), at.checked_add(payload_offset), at.checked_add(lo))
+        else {
+            continue;
+        };
+        let range = Slot { offset: start, bytes: hi - lo };
+        let act = Active { call, param: actual, declared, helper: helper.clone(), consumed: false };
+        let mut rebound = Vec::new();
+        let mut whole = true;
+        for &id in &order {
+            let Some(binding) = func.bindings.get(id) else {
+                continue;
+            };
+            let Expr::Load { addr, offset, width, .. } = &binding.expr else {
+                continue;
+            };
+            let (b, o) = canon_addr(func, *addr);
+            let Some(read_at) = o.checked_add(*offset) else {
+                whole = false;
+                break;
+            };
+            let read = Slot { offset: read_at, bytes: width.bytes() };
+            if b != base || !read.overlaps(range) {
+                continue;
+            }
+            match nearest_writer(frames, func, id, base, read) {
+                Ok(Some(w)) if w == call => {
+                    let half = if read_at == disc && read.bytes <= 8 {
+                        Half::Discriminant
+                    } else if read_at == payload && read.bytes == 8 {
+                        Half::Payload
+                    } else {
+                        trace(func, id, "a read of part of the result");
+                        whole = false;
+                        break;
+                    };
+                    rebound.push(rebind(id, &binding.ty, half, &act));
+                }
+                Ok(_) => {}
+                Err(why) => {
+                    trace(func, id, why);
+                    whole = false;
+                    break;
+                }
+            }
+        }
+        if !whole || rebound.is_empty() {
+            trace(func, call, "no read of the result rebound");
+            continue;
+        }
+        out.extend(rebound);
+        out.push(Elision {
+            id: call,
+            expr: Expr::Literal(Literal::Unit),
+            ty: Some(IrType::Known(KnownType::Unit)),
+            note: "call to an argument-decode helper handed the argument by reference, elided with its results"
+                .to_string(),
+            metric: metrics::DECODE_CALLS_ELIDED,
+        });
+    }
+    out
+}
+
+/// Why a by-reference decode was left, printed when
+/// `SORDEC_DECODE_TRACE` is set.
+#[allow(clippy::print_stderr)]
+fn trace(func: &HighFunction, at: ValueId, why: &str) {
+    if std::env::var_os("SORDEC_DECODE_TRACE").is_some() {
+        use sordec_common::IrId as _;
+        eprintln!("decode: func_{} v{}: {why}", func.id.index(), at.index());
+    }
 }
 
 /// What a call claims when it is itself an elidable decode.
@@ -1492,7 +1747,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::marshalling::test_support::{func_with, load, module, store, v};
     use sordec_common::{BlockId, IrId};
-    use sordec_ir::{BinaryOp, FunctionParam, FunctionSignature, PrimitiveType, Region, TypeRef};
+    use sordec_ir::{BinaryOp, Binding, FunctionParam, FunctionSignature, PrimitiveType, Region, TypeRef};
 
     fn tag_check(value: ValueId, tag: u8) -> Expr {
         Expr::Semantic(SemanticOp::Known(KnownOp::ValTagCheck {
@@ -1653,6 +1908,7 @@ pub(crate) mod tests {
             out_index,
             disc_offset,
             payload_offset,
+            by_ref: false,
         } = helper.shape
         else {
             panic!("the untouched rustc shape is an out-parameter");
@@ -1842,6 +2098,124 @@ pub(crate) mod tests {
     /// declared parameters, untouched, to a wrapper, and the wrapper calls
     /// the decoder. The wrapper's parameters carry the entrypoint's
     /// guarantee, so the decodes collapse there.
+    /// [`u64_decode_helper`] reading its `Val` through a pointer: `v1` is
+    /// now the load behind the new parameter `v13`. With `twice`, the
+    /// pointer is read a second time, eight bytes on.
+    fn by_ref_helper(twice: bool) -> HighFunction {
+        let mut f = u64_decode_helper();
+        let pointer = ValueId::from_index(f.bindings.len() as u32);
+        f.bindings.push(Binding::new(
+            pointer,
+            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            Expr::Phi { incoming: vec![] },
+            sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+        ));
+        f.bindings.get_mut(v(1)).unwrap().expr = load(pointer, 0);
+        f.params = vec![v(0), pointer];
+        let block = f.blocks.get_mut(BlockId::from_index(0)).unwrap();
+        block.bindings.insert(0, v(1));
+        if twice {
+            let again = ValueId::from_index(f.bindings.len() as u32);
+            f.bindings.push(Binding::new(
+                again,
+                IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+                load(pointer, 8),
+                sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+            ));
+            f.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings.insert(1, again);
+        }
+        f
+    }
+
+    #[test]
+    fn a_decode_reading_its_val_through_a_pointer_is_classified() {
+        let helper = classify(&by_ref_helper(false)).expect("the by-value decode, read through a pointer");
+        assert_eq!(helper.val_index, 1);
+        assert!(matches!(helper.shape, HelperShape::OutParam { by_ref: true, disc_offset: 0, payload_offset: 8, .. }));
+        assert_eq!(helper.tags, vec![val_abi::TAG_U64_OBJECT, val_abi::TAG_U64_SMALL]);
+        // A pointer read for more than the one word is something else.
+        assert!(classify(&by_ref_helper(true)).is_none());
+        // Handed an environment pointer it never reads, it is the same.
+        let mut with_env = by_ref_helper(false);
+        let env = ValueId::from_index(with_env.bindings.len() as u32);
+        with_env.bindings.push(Binding::new(
+            env,
+            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            Expr::Phi { incoming: vec![] },
+            sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+        ));
+        with_env.params.insert(1, env);
+        let helper = classify(&with_env).expect("an unread environment changes nothing");
+        assert_eq!((helper.val_index, helper.arity), (2, 3));
+        // Read, it is a second input, and the helper is not a decode.
+        let read = ValueId::from_index(with_env.bindings.len() as u32);
+        with_env.bindings.push(Binding::new(
+            read,
+            IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence),
+            load(env, 0),
+            sordec_common::Provenance::new("seed", sordec_common::ProvenanceSource::DataFlow, "seed"),
+        ));
+        with_env.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings.push(read);
+        assert!(classify(&with_env).is_none());
+    }
+
+    /// `add(a: u64)`, as SDK 27 spells its argument conversion: `a` stored
+    /// at `fp+8`, the helper handed `(fp+16, fp+8)`, the result read back
+    /// as `fp` at 16 and 24. With `stored`, the store of `a` is there.
+    fn by_ref_entry(stored: bool) -> HighFunction {
+        let mut func = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                   // v0 fp
+                Expr::Phi { incoming: vec![] },                                   // v1 param `a`
+                Expr::Literal(Literal::I32(8)),                                   // v2
+                Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(2) },         // v3 fp+8
+                Expr::Literal(Literal::I32(16)),                                  // v4
+                Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(4) },         // v5 fp+16
+                store(v(0), v(1), 8),                                             // v6
+                Expr::Call { target: FuncId::from_index(0), args: vec![v(5), v(3)] }, // v7
+                load(v(0), 16),                                                   // v8 disc
+                load(v(0), 24),                                                   // v9 value → a
+            ],
+            vec![v(1)],
+            if stored { vec![2, 3, 4, 5, 6, 7, 8, 9] } else { vec![2, 3, 4, 5, 7, 8, 9] },
+        );
+        func.id = FuncId::from_index(1);
+        func.signature = Some(FunctionSignature {
+            name: "add".to_string(),
+            inputs: vec![FunctionParam { name: "a".to_string(), ty: TypeRef::Primitive(PrimitiveType::U64) }],
+            outputs: vec![],
+        });
+        func
+    }
+
+    fn by_ref_elisions(stored: bool) -> HashMap<ValueId, Expr> {
+        let ir = module(vec![by_ref_helper(false), by_ref_entry(stored)]);
+        let helpers: HashMap<FuncId, DecodeHelper> =
+            ir.functions.iter().filter_map(|f| classify(f).map(|h| (f.id, h))).collect();
+        let frames = Frames::new(&ir);
+        by_ref_decodes(&frames, &ir.functions[1], &helpers, &HashMap::new())
+            .into_iter()
+            .map(|e| (e.id, e.expr))
+            .collect()
+    }
+
+    /// The word the helper reads is the parameter stored there: its
+    /// result's halves are `Ok` and the parameter, and the call goes.
+    #[test]
+    fn a_decode_of_a_stored_parameter_collapses_to_it() {
+        let by_id = by_ref_elisions(true);
+        assert!(matches!(by_id.get(&v(9)), Some(Expr::Use(p)) if *p == v(1)));
+        assert!(matches!(by_id.get(&v(8)), Some(Expr::Literal(_))));
+        assert!(matches!(by_id.get(&v(7)), Some(Expr::Literal(Literal::Unit))));
+    }
+
+    /// With nothing stored behind the pointer, what the helper decodes is
+    /// not known: nothing changes.
+    #[test]
+    fn a_decode_of_a_word_nobody_stored_stays() {
+        assert!(by_ref_elisions(false).is_empty());
+    }
+
     fn entry_calling(wrapper: FuncId, param_ty: PrimitiveType) -> HighFunction {
         let mut func = func_with(
             vec![

@@ -33,6 +33,20 @@
 //! - **Only the exact re-encode.** `and` with the high-word mask, then `or`
 //!   with the `U32Val` tag; any other constant is not this.
 //!
+//! # And the decode spelled out
+//!
+//! Where no decode was recognized, the same decode arrives as its two
+//! instructions: `wrap32(shr_u(n, 32))`. Named `len()`, that printed as
+//! `v.len() >> 32` — a `u32` shifted by its own width, which is not the
+//! length (it panics, or is the length unshifted, depending on the build).
+//! It folds to `n` like the decode.
+//!
+//! Why it is exact: the raw word is `len · 2³² + 4`; shifted right by 32,
+//! unsigned, it is `len`, and `len < 2³²`, so keeping the low 32 bits keeps
+//! all of it. Gates: a collection length (as above) or a `bytes_len`,
+//! whose `U32Val` is the same; an unsigned shift by exactly 32; and the
+//! 32-bit wrap of that shift.
+//!
 //! # And a bound checked on the raw `Val`
 //!
 //! The SDK's `Vec::get(i)` checks `i` against the length without decoding
@@ -67,7 +81,7 @@
 use sordec_common::{IrId, Provenance, ProvenanceSource, ValueId};
 use sordec_ir::{
     BinaryOp, Binding, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal,
-    MapOpKind, SemanticOp, VecOpKind,
+    MapOpKind, SemanticOp, UnaryOp, VecOpKind,
 };
 
 use crate::dataflow::resolve_use;
@@ -146,6 +160,18 @@ fn folds(func: &HighFunction) -> Vec<(ValueId, ValueId, &'static str)> {
         .filter_map(|(id, b)| match &b.expr {
             Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })) => {
                 raw_len(func, *value).map(|len| (id, len, "decoding a host length is the `u32` `len()` returned"))
+            }
+            // The same decode spelled out: the high word shifted down and
+            // the low 32 bits kept ("And the decode spelled out").
+            Expr::Unary { op: UnaryOp::Wrap32, value } => {
+                let Some(Expr::Binary { op: BinaryOp::ShrU, lhs: n, rhs: by }) =
+                    func.bindings.get(resolve_use(func, *value)).map(|b| &b.expr)
+                else {
+                    return None;
+                };
+                let len = raw_len(func, *n).or_else(|| raw_bytes_len(func, *n))?;
+                (literal(func, *by) == Some(32))
+                    .then_some((id, len, "the high word of a host length's `U32Val` is the `u32` `len()` returned"))
             }
             Expr::Binary { op: BinaryOp::BitOr, lhs, rhs } if literal(func, *rhs) == Some(i64::from(TAG_U32_VAL)) => {
                 let Some(Expr::Binary { op: BinaryOp::BitAnd, lhs: n, rhs: mask }) =
@@ -294,6 +320,18 @@ fn raw_len(func: &HighFunction, v: ValueId) -> Option<ValueId> {
     None
 }
 
+/// A `bytes_len`, through renames: a `U32Val` like a collection length.
+/// Only its spelled-out decode is folded here ("And the decode spelled
+/// out"); its bounds and recognized decode are [`super::bytesn_convert`]'s.
+fn raw_bytes_len(func: &HighFunction, v: ValueId) -> Option<ValueId> {
+    let v = resolve_use(func, v);
+    matches!(
+        func.bindings.get(v).map(|b| &b.expr),
+        Some(Expr::Semantic(SemanticOp::Known(KnownOp::BufOp { kind: sordec_ir::BufOpKind::BytesLen, .. })))
+    )
+    .then_some(v)
+}
+
 /// A collection length, which the host returns as a `U32Val`.
 fn is_len(func: &HighFunction, v: ValueId) -> bool {
     matches!(
@@ -343,6 +381,38 @@ mod tests {
             assert!(matches!(f.bindings.get(id).unwrap().expr, Expr::Use(n) if n == v(1)));
             assert_eq!(f.bindings.get(id).unwrap().ty, IrType::Known(KnownType::U32));
         }
+    }
+
+    /// `n = vec_len(v0); w = wrap32(n >>u by)`.
+    fn spelled(op: BinaryOp, by: i64) -> HighIr {
+        module(vec![func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },                                                      // v0
+                Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::Len, args: vec![v(0)] })), // v1
+                Expr::Literal(Literal::I64(by)),                                                     // v2
+                Expr::Binary { op, lhs: v(1), rhs: v(2) },                                           // v3
+                Expr::Unary { op: UnaryOp::Wrap32, value: v(3) },                                    // v4
+            ],
+            vec![v(0)],
+            vec![1, 2, 3, 4],
+        )])
+    }
+
+    #[test]
+    fn a_length_s_high_word_is_the_length() {
+        let mut ir = spelled(BinaryOp::ShrU, 32);
+        assert!(HostLenPass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        assert!(matches!(f.bindings.get(v(4)).unwrap().expr, Expr::Use(n) if n == v(1)));
+        // Another amount, or a signed shift, is not the decode.
+        assert!(!HostLenPass.run(&mut spelled(BinaryOp::ShrU, 31)).changed);
+        assert!(!HostLenPass.run(&mut spelled(BinaryOp::Shr, 32)).changed);
+        // A `bytes_len`'s is the same.
+        let mut ir = spelled(BinaryOp::ShrU, 32);
+        ir.functions[0].bindings.get_mut(v(1)).unwrap().expr =
+            Expr::Semantic(SemanticOp::Known(KnownOp::BufOp { kind: sordec_ir::BufOpKind::BytesLen, args: vec![v(0)] }));
+        assert!(HostLenPass.run(&mut ir).changed);
+        assert!(matches!(ir.functions[0].bindings.get(v(4)).unwrap().expr, Expr::Use(n) if n == v(1)));
     }
 
     /// `vec_len(v0) op c`, the constant on the right or the left.
