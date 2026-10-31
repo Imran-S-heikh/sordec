@@ -57,6 +57,9 @@
 //!   Either way, the other stores through the out-pointer on a path are its
 //!   payload. Arms with a payload are *present*, arms without *absent*; one
 //!   tag constant each, and different.
+//! - In the first form, each arm is one input of the phi, by the block it
+//!   leaves from, and every edge into the merge the region still has is an
+//!   arm. The phi may name more blocks than that: see below.
 //! - Every present arm writes the same slots, and none of the values is a
 //!   raw memory read: inside an `Option` its type would be pinned to a
 //!   storage width the caller did not use. Nor a merge with such a read,
@@ -75,6 +78,26 @@
 //! path's `Option` on the edge that path enters by, which is what the tag
 //! phi of the first form does with its constants; every edge into the
 //! block is such a path, so no path reaches the return without one.
+//!
+//! ## A merge input with no edge left
+//!
+//! The constant-branch fold drops the arm a constant test never takes,
+//! and with it that arm's edge into the merge; it keeps the phi's input
+//! for that edge whenever another edge still carries the same value
+//! (`refine::const_branch`: "the same state a dead predecessor leaves").
+//! A converter that checks a nested conversion's `Result` and gives up
+//! with the same `1` from several places is that shape: `Proposal`'s
+//! encode has five inputs into its tag merge and three edges left.
+//!
+//! Why it is exact: the region tree is the record of which edges remain.
+//! The walk makes an arm of every edge into the merge — one that does not
+//! carry the tag is refused — and the gate counts them, so an input whose
+//! block is no arm's has no edge to arrive by and holds on no run. The
+//! rewrite drops it with the tag constants it replaces, rather than leave
+//! a constant beside the `Option`s for the typing to read.
+//!
+//! Gates: each arm's block is an input exactly once, no two arms leave one
+//! block, and the region's edges into the merge are exactly the arms.
 //!
 //! # What makes a call site
 //!
@@ -526,11 +549,16 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
                 return Err("the tag is not a phi");
             };
             let mut preds: Vec<BlockId> = arms.iter().map(|a| a.pred).collect();
-            let mut inputs: Vec<BlockId> = incoming.iter().map(|(b, _)| *b).collect();
             preds.sort_unstable();
-            inputs.sort_unstable();
-            if preds != inputs || preds.windows(2).any(|w| w[0] == w[1]) {
+            if preds.windows(2).any(|w| w[0] == w[1])
+                || preds.iter().any(|p| incoming.iter().filter(|(b, _)| b == p).count() != 1)
+            {
                 return Err("the merge's inputs do not match its arms");
+            }
+            // The other inputs name blocks with no edge into the merge left:
+            // every edge the region still has is one of the arms.
+            if edges_into(func, join) != arms.len() {
+                return Err("an edge into the merge that is not an arm");
             }
             (Merge::Phi(tag_phi), tag_slot)
         }
@@ -622,13 +650,7 @@ fn classify(func: &HighFunction) -> Result<Helper, &'static str> {
 /// a path that meets the others without writing the tag has no `Option`
 /// to hand back.
 fn per_arm_tags(func: &HighFunction, join: BlockId, arms: &mut [Arm]) -> Result<Slot, &'static str> {
-    let mut edges = 0usize;
-    func.region.for_each_node(|node| {
-        if let Region::Break { target, .. } | Region::Transfer { target, .. } = node {
-            edges += usize::from(*target == join);
-        }
-    });
-    if edges != arms.len() {
+    if edges_into(func, join) != arms.len() {
         return Err("a path reaches the merge without setting the tag");
     }
     let constant = |store: &Store| trace_int(func, store.2).is_some();
@@ -655,6 +677,17 @@ fn per_arm_tags(func: &HighFunction, join: BlockId, arms: &mut [Arm]) -> Result<
         arm.tag = trace_int(func, value).ok_or("the tag is not a constant")?;
     }
     Ok(slot)
+}
+
+/// How many edges in the region tree enter `join`.
+fn edges_into(func: &HighFunction, join: BlockId) -> usize {
+    let mut edges = 0usize;
+    func.region.for_each_node(|node| {
+        if let Region::Break { target, .. } | Region::Transfer { target, .. } = node {
+            edges += usize::from(*target == join);
+        }
+    });
+    edges
 }
 
 /// How many merges deep [`untyped_payload`] looks.
@@ -1076,10 +1109,23 @@ fn rewrite_helper(func: &mut HighFunction, helper: &Helper) {
             if let Some(binding) = func.bindings.get_mut(tag_phi)
                 && let Expr::Phi { incoming } = &mut binding.expr
             {
+                // An input from a block with no edge into the merge carries
+                // nothing on any run: it goes, rather than stay a tag
+                // constant beside the `Option`s (see *Why it is exact*).
+                let before = incoming.len();
+                incoming.retain(|(pred, _)| by_pred.contains_key(pred));
+                let dropped = incoming.len() != before;
                 for (pred, value) in incoming.iter_mut() {
                     if let Some(option) = by_pred.get(pred) {
                         *value = *option;
                     }
+                }
+                if dropped {
+                    binding.add_provenance(Provenance::new(
+                        PASS_NAME,
+                        ProvenanceSource::DataFlow,
+                        "inputs from blocks with no edge into the merge left: no run carries them",
+                    ));
                 }
                 binding.ty = untyped();
                 binding.add_provenance(Provenance::new(
@@ -2705,6 +2751,61 @@ mod tests {
         };
         assert_eq!(classify(&with_payload([9, 1])).err(), Some("a value read raw out of memory"));
         assert!(classify(&with_payload([1, 1])).is_ok(), "a merge of the value with itself still is one");
+    }
+
+    /// `helper(false)` whose tag merge also names `bb(4)`, a block that no
+    /// edge into the merge leaves from: what the constant-branch fold keeps
+    /// of an arm it dropped.
+    fn helper_with_dead_input() -> HighFunction {
+        let mut f = helper(false);
+        let Expr::Phi { incoming } = &mut f.bindings.get_mut(v(6)).unwrap().expr else { panic!("the tag phi") };
+        incoming.push((bb(4), v(2)));
+        f.blocks.push(HighBlock { id: bb(4), bindings: vec![] });
+        f
+    }
+
+    #[test]
+    fn a_merge_input_with_no_edge_left_is_not_an_arm() {
+        let h = classify(&helper_with_dead_input()).expect("the two edges are the two arms");
+        assert_eq!((h.present, h.absent), (0, 1));
+        assert_eq!(h.merge, Merge::Phi(v(6)));
+
+        // The rewrite drops it with the tags: only the arms' `Option`s meet.
+        let mut ir = module(vec![framed(caller(false)), helper_with_dead_input()]);
+        assert!(OptionalOutParamPass.run(&mut ir).changed);
+        let Some(Expr::Phi { incoming }) = ir.functions[1].bindings.get(v(6)).map(|b| &b.expr) else {
+            panic!("the merge")
+        };
+        assert_eq!(incoming.iter().map(|(b, _)| *b).collect::<Vec<_>>(), [bb(1), bb(2)]);
+        assert!(incoming
+            .iter()
+            .all(|(_, o)| matches!(ir.functions[1].bindings.get(*o).unwrap().expr, Expr::Optional { .. })));
+    }
+
+    #[test]
+    fn a_merge_input_with_an_edge_the_walk_did_not_take_is_refused() {
+        // The dead block is still there and still branches to the merge,
+        // carrying no tag: a path the arms do not account for.
+        let mut f = helper_with_dead_input();
+        let Region::Sequence(items) = &mut f.region else { panic!("a sequence") };
+        items.insert(
+            1,
+            Region::Sequence(vec![
+                Region::Basic(bb(4)),
+                Region::If {
+                    cond: v(3),
+                    then_region: Box::new(Region::Break { target: bb(3), transfer: vec![] }),
+                    else_region: None,
+                },
+            ]),
+        );
+        assert!(classify(&f).is_err());
+
+        // An arm whose block the merge does not name is refused too.
+        let mut g = helper(false);
+        let Expr::Phi { incoming } = &mut g.bindings.get_mut(v(6)).unwrap().expr else { panic!("the tag phi") };
+        incoming[0].0 = bb(4);
+        assert_eq!(classify(&g).err(), Some("the merge's inputs do not match its arms"));
     }
 
     #[test]
