@@ -820,3 +820,36 @@ now print as `e.deployer().update_current_contract_wasm(hash)` and
 `e.deployer().with_current_contract(salt).deploy_v2(hash, args)` (or `with_address`) once
 every operand already has the type the method takes. Holes 8,847 → 8,843 (summed); errors
 unchanged at 9; corpus and held-out byte-identical.
+
+## 2026-10-31 — commit 27a05a5 (an enum decoded inline through the vector iterator is a match)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,763 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 3,415 |
+| third-party | 2 | 1/2 | 8 | 641 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 706 |
+
+A `#[contracttype]` enum decoded inside the entrypoint, walking its vector with the SDK's
+iterator, now prints as a `match` binding each variant's one-component payload
+(constructor `get_data`: `match key { DataKey::Persistent(p) => … }`, 55 → 15 gaps;
+contracttrait ×3 92 → 50; spec_shaking v1/v2 50 → 25, 41 → 16). Holes 8,843 → 8,610;
+errors unchanged at 9; corpus byte-identical; held-out mean 0.7865.
+
+## 2026-10-31 — commit fa19876 (compiler-builtins memcpy/memset/memcmp printed as the core primitive)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 85 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,493 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 3,198 |
+| third-party | 2 | 1/2 | 8 | 641 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 571 |
+
+The toolchain's own `memcpy`, `memset` and `memcmp`, proven by an exact masked fingerprint
+against each installed toolchain's compiler-builtins library, print as one line
+(`core::ptr::copy`, `write_bytes`, an iterator compare) instead of a 355-line body with 57
+gaps; a copy's returned value reads as its destination. `memcpy` prints as `copy`, not
+`copy_nonoverlapping`, because LLVM's memcpy admits identical regions. Holes 8,610 → 7,988
+(summed); errors unchanged at 9; corpus byte-identical; held-out mean 0.7865 → 0.7882.
