@@ -424,6 +424,24 @@ pub enum KnownOp {
         auth_entries: ValueId,
     },
 
+    /// `env.custom_account().get_delegated_signers()` — the `Address`es
+    /// the user attached as delegated signers to the auth entry
+    /// `__check_auth` is verifying (SDK 27's `CustomAccount`).
+    ///
+    /// Host import `(a, 9)`, `get_delegated_signers_for_current_auth_check`,
+    /// protocol 27.
+    GetDelegatedSigners,
+
+    /// `env.custom_account().delegate_auth(&address)` — hand the current
+    /// `__check_auth` authorization to `address` (SDK 27's
+    /// `CustomAccount`).
+    ///
+    /// Host import `(a, a)`, `delegate_account_auth`, protocol 27.
+    DelegateAuth {
+        /// The delegate's `AddressObject`.
+        address: ValueId,
+    },
+
     /// An `a`-module address conversion / query (strkey ↔ address,
     /// muxed-address decomposition, executable inspection).
     ///
@@ -1070,6 +1088,7 @@ impl KnownOp {
                 }
             }
             KnownOp::AuthorizeAsCurrContract { auth_entries } => f(*auth_entries),
+            KnownOp::DelegateAuth { address } => f(*address),
             KnownOp::AddressConversion { kind: _, args }
             | KnownOp::CryptoOp { kind: _, args }
             | KnownOp::PrngOp { kind: _, args }
@@ -1225,7 +1244,8 @@ impl KnownOp {
             | KnownOp::GetLedgerTimestamp
             | KnownOp::GetLedgerProtocolVersion
             | KnownOp::GetLedgerNetworkId
-            | KnownOp::GetMaxLiveUntilLedger => {}
+            | KnownOp::GetMaxLiveUntilLedger
+            | KnownOp::GetDelegatedSigners => {}
         }
     }
 
@@ -1369,6 +1389,7 @@ impl KnownOp {
                 }
             }
             KnownOp::AuthorizeAsCurrContract { auth_entries } => f(auth_entries),
+            KnownOp::DelegateAuth { address } => f(address),
             KnownOp::AddressConversion { kind: _, args }
             | KnownOp::CryptoOp { kind: _, args }
             | KnownOp::PrngOp { kind: _, args }
@@ -1518,7 +1539,8 @@ impl KnownOp {
             | KnownOp::GetLedgerTimestamp
             | KnownOp::GetLedgerProtocolVersion
             | KnownOp::GetLedgerNetworkId
-            | KnownOp::GetMaxLiveUntilLedger => {}
+            | KnownOp::GetMaxLiveUntilLedger
+            | KnownOp::GetDelegatedSigners => {}
         }
     }
 }

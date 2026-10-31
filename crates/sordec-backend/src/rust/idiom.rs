@@ -651,6 +651,15 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
         KnownOp::GetLedgerNetworkId => Some(parse_quote!(#e.ledger().network_id())),
         KnownOp::GetMaxLiveUntilLedger => Some(parse_quote!(#e.ledger().max_live_until_ledger())),
         KnownOp::GetCurrentContractAddress => Some(parse_quote!(#e.current_contract_address())),
+        // SDK 27's `CustomAccount` (`soroban_sdk::custom_account`): the
+        // accessor wraps the env, and each method is its one host call —
+        // `get_delegated_signers` converts the host's vec to `Vec<Address>`,
+        // `delegate_auth` hands over `address.to_object()`.
+        KnownOp::GetDelegatedSigners => Some(parse_quote!(#e.custom_account().get_delegated_signers())),
+        KnownOp::DelegateAuth { address } => {
+            let a = ctx.value_ref(*address);
+            Some(parse_quote!(#e.custom_account().delegate_auth(&#a)))
+        }
 
         // ---- Deploy ----
         // The SDK's deployer methods are these host calls with their
