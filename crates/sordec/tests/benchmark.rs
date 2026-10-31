@@ -735,12 +735,23 @@ fn overall_band(name: &str) -> (f64, f64) {
     // identity) and the source-basis extractor, which does exclude them
     // — recorded in `plan/NOTES.md` for the basis negotiation rather
     // than changed here, because changing it raises our own number.
+    // Re-centred 2026-10-31 — a `select` read only by arithmetic or a
+    // branch prints as the `if` between its arms.
+    //
+    // timelock 1.0000 -> 0.9790 (structure 1.0000 -> 0.9286). The output
+    // is more faithful, not less: `claim`'s time-bound check, a gap until
+    // now, reads `if kind == After { ts >= t } else { ts <= t }`, which is
+    // the source's own `match` in `check_time_bound`. rustc inlined that
+    // helper into `claim`, and structure compares `claim` with the
+    // source's `claim`, which has no branch, so the recovered logic counts
+    // as extra structure. Kept on purpose (Imran's decision): faithful
+    // output over the number. Aggregate 0.9389 -> 0.9359.
     match name {
         "hello-add" => (0.99, 1.00),
         "token-v22" => (0.92, 0.96),
         "token-v23" => (0.84, 0.88),
         "token-v23-stripped" => (0.79, 0.83),
-        "timelock" => (0.98, 1.00),
+        "timelock" => (0.96, 1.00),
         "dex-liquidity-pool" => (0.92, 0.96),
         "attestation" => (0.98, 1.0),
         _ => (0.00, 1.00),
