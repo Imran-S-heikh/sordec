@@ -192,6 +192,7 @@ fn classify(
                     lm_pos: args[0],
                     len: args[1],
                     resolved,
+                    array: None,
                 },
                 ty: KnownType::Bytes,
                 metric: M_BYTES_NEW,

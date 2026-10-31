@@ -229,7 +229,8 @@ fn is_effectful(expr: &Expr) -> bool {
         | Expr::Tuple { .. }
         | Expr::IsSome { .. }
         | Expr::Unwrap { .. }
-        | Expr::UnwrapOr { .. } => false,
+        | Expr::UnwrapOr { .. }
+        | Expr::ArrayRead { .. } => false,
     }
 }
 

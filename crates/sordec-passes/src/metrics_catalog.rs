@@ -435,6 +435,10 @@ pub const MARSHALLING_FRAME_LOADS_FORWARDED: &str = "marshalling_frame_loads_for
 pub const INLINE_WRAPPER_CALLS: &str = "inline_wrapper_calls";
 /// Stores into a private shadow-stack frame that no load reads back.
 pub const MARSHALLING_DEAD_FRAME_STORES: &str = "marshalling_dead_frame_stores";
+/// Host copies into a frame buffer read as the `[u8; N]` array they fill.
+pub const MARSHALLING_BYTE_ARRAYS_FILLED: &str = "marshalling_byte_arrays_filled";
+/// Loads and constructors of a host-filled buffer read from its array.
+pub const MARSHALLING_BYTE_ARRAY_READS: &str = "marshalling_byte_array_reads";
 /// Stores into a frame that is not private which every path overwrites,
 /// returns or traps before anything can read them.
 pub const MARSHALLING_OVERWRITTEN_FRAME_STORES: &str = "marshalling_overwritten_frame_stores";
@@ -1093,6 +1097,8 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         MARSHALLING_FRAME_LOADS_FORWARDED,
         INLINE_WRAPPER_CALLS,
         MARSHALLING_DEAD_FRAME_STORES,
+        MARSHALLING_BYTE_ARRAYS_FILLED,
+        MARSHALLING_BYTE_ARRAY_READS,
         MARSHALLING_OVERWRITTEN_FRAME_STORES,
         REFINE_CONST_BRANCHES_FOLDED,
         REFINE_SAME_EXIT_BRANCHES,

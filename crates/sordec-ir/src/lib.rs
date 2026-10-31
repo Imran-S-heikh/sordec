@@ -26,7 +26,7 @@ pub mod validate;
 pub mod wasm_facts;
 
 pub use high::{
-    AddressOpKind, BinaryOp, Binding, BufOpKind, ClientInterface, CryptoOpKind, DeployOpKind,
+    AddressOpKind, ArrayFill, BinaryOp, Binding, BufOpKind, ClientInterface, CryptoOpKind, DeployOpKind,
     DispatchTable, EnumKey, ErrorVariant, Expr, HighBlock, HighFunction, HighIr, IrType, KnownOp,
     KnownTier, KnownType, Literal, LoopKind, MapOpKind, MemWidth, Missing, PanicKind, PhiTransfer,
     PrngOpKind, Region, SemanticOp, Sign, StorageTier, SwitchArm, TestOpKind, UnaryOp, ValObjectKind,

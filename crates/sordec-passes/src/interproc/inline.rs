@@ -618,6 +618,7 @@ fn copyable(expr: &Expr, this: FuncId) -> bool {
         | Expr::Tuple { .. }
         | Expr::IsSome { .. }
         | Expr::UnwrapOr { .. }
+        | Expr::ArrayRead { .. }
         | Expr::Semantic(_) => true,
         Expr::Call { target, .. } => *target != this,
         // A width conversion or a select is a pure operator the lowering

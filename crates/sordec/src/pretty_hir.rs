@@ -759,6 +759,14 @@ fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Resu
             write!(out, "wide({}, {})", ctx.operand(*lo), ctx.operand(*hi))
         }
         Expr::Field { base, field } => write!(out, "{}.{field}", ctx.operand(*base)),
+        Expr::ArrayRead { array, offset, width, signed } => {
+            let ext = match signed {
+                Some(true) => "_s",
+                Some(false) => "_u",
+                None => "",
+            };
+            write!(out, "{}[{offset}..+{}]{ext}", ctx.operand(*array), width.bytes())
+        }
         Expr::Variant { name, payload } if payload.is_empty() => write!(out, "::{name}"),
         Expr::Variant { name, payload } => {
             let items: Vec<String> = payload.iter().map(|v| ctx.operand(*v)).collect();
@@ -1126,10 +1134,17 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io:
                 ctx.operand(*len)
             ),
         },
+        KnownOp::BytesNew { array: Some(array), .. } => {
+            write!(out, "bytes_from_array({})", ctx.operand(*array))
+        }
+        KnownOp::BytesToArray { bytes, len, form } => {
+            write!(out, "bytes_to_array<{len}>({}, {form:?})", ctx.operand(*bytes))
+        }
         KnownOp::BytesNew {
             lm_pos,
             len,
             resolved,
+            array: None,
         } => match resolved {
             Some(bytes) => {
                 write!(out, "bytes_new(0x")?;
@@ -1473,6 +1488,7 @@ fn known_type_str(k: &KnownType) -> String {
         KnownType::String => "String".to_string(),
         KnownType::Bytes => "Bytes".to_string(),
         KnownType::BytesN(n) => format!("BytesN<{n}>"),
+        KnownType::ByteArray(n) => format!("[u8; {n}]"),
         KnownType::Address => "Address".to_string(),
         KnownType::MuxedAddress => "MuxedAddress".to_string(),
         KnownType::Timepoint => "Timepoint".to_string(),
@@ -2066,6 +2082,7 @@ mod tests {
             lm_pos: v(1),
             len: v(2),
             resolved: Some(vec![0xde, 0xad, 0xbe, 0xef]),
+            array: None,
         }));
         let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "bytes_new(0xdeadbeef)");
@@ -2077,6 +2094,7 @@ mod tests {
             lm_pos: v(7),
             len: v(8),
             resolved: None,
+            array: None,
         }));
         let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "bytes_new(v7, v8)");

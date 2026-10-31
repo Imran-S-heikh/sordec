@@ -65,6 +65,10 @@ pub enum KnownType {
     Bytes,
     /// Fixed-length byte array `BytesN<N>`.
     BytesN(u32),
+    /// A plain fixed-size byte array `[u8; N]` in guest memory — not a
+    /// host object. What `BytesN::to_array` and `Bytes::copy_into_slice`
+    /// fill, and what `Bytes::from_array` reads.
+    ByteArray(u32),
     /// Account or contract `Address`.
     Address,
     /// `MuxedAddress`.

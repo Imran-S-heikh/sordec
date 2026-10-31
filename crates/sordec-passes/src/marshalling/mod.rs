@@ -54,6 +54,7 @@
 
 pub mod auth_entries;
 pub mod bool_codec;
+pub mod byte_array;
 pub mod bytesn_convert;
 pub mod client_args;
 pub mod contract_event;
@@ -105,6 +106,7 @@ pub mod wide_return;
 
 pub use auth_entries::AuthEntryPass;
 pub use bool_codec::BoolCodecPass;
+pub use byte_array::ByteArrayPass;
 pub use bytesn_convert::BytesNConvertPass;
 pub use client_args::ClientArgVecPass;
 pub use contract_event::ContractEventPass;

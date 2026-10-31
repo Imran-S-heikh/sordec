@@ -990,6 +990,54 @@ pub(crate) fn val_returned_constant(ctx: &FnCtx, value: sordec_common::ValueId) 
     })
 }
 
+/// `width` bytes of the array `array` at `offset`, read little-endian as
+/// the binding's integer type — what the wasm load of those bytes read.
+///
+/// A read as wide as the binding's word is that word's `from_le_bytes`; a
+/// narrower one is read at its own width, signed or not as the load
+/// extended it, and widened with `as`, which sign- or zero-extends exactly
+/// as the load did. `None` for a binding type that is not a machine word
+/// at least as wide as the read.
+fn array_read(
+    ctx: &FnCtx,
+    array: sordec_common::ValueId,
+    offset: u32,
+    width: sordec_ir::MemWidth,
+    signed: Option<bool>,
+    ty: &IrType,
+) -> Option<syn::Expr> {
+    use sordec_ir::MemWidth;
+    let word = match ty {
+        IrType::Known(k) | IrType::Inferred(k) => k,
+        IrType::Unknown(_) => return None,
+    };
+    let (word_ty, word_bytes): (syn::Type, u32) = match word {
+        KnownType::I32 => (parse_quote!(i32), 4),
+        KnownType::U32 => (parse_quote!(u32), 4),
+        KnownType::I64 => (parse_quote!(i64), 8),
+        KnownType::U64 => (parse_quote!(u64), 8),
+        _ => return None,
+    };
+    let a = ctx.value_ref(array);
+    let bytes = width.bytes();
+    if bytes > word_bytes {
+        return None;
+    }
+    let lo = proc_macro2::Literal::u32_unsuffixed(offset);
+    let hi = proc_macro2::Literal::u32_unsuffixed(offset.checked_add(bytes)?);
+    let sign = signed == Some(true);
+    let read: syn::Expr = match width {
+        MemWidth::W1 if sign => parse_quote!((#a[#lo] as i8)),
+        MemWidth::W1 => parse_quote!(#a[#lo]),
+        _ if bytes == word_bytes => return Some(parse_quote!(#word_ty::from_le_bytes(#a[#lo..#hi].try_into().unwrap()))),
+        MemWidth::W2 if sign => parse_quote!(i16::from_le_bytes(#a[#lo..#hi].try_into().unwrap())),
+        MemWidth::W2 => parse_quote!(u16::from_le_bytes(#a[#lo..#hi].try_into().unwrap())),
+        _ if sign => parse_quote!(i32::from_le_bytes(#a[#lo..#hi].try_into().unwrap())),
+        _ => parse_quote!(u32::from_le_bytes(#a[#lo..#hi].try_into().unwrap())),
+    };
+    Some(parse_quote!((#read as #word_ty)))
+}
+
 /// The right-hand side expression for one binding.
 pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
     match &binding.expr {
@@ -1222,6 +1270,10 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
             let base = ctx.value_ref(*base);
             let field = member(field);
             parse_quote!(#base.#field)
+        }
+        Expr::ArrayRead { array, offset, width, signed } => {
+            array_read(ctx, *array, *offset, *width, *signed, &binding.ty)
+                .unwrap_or_else(|| ctx.policy.unknown_expr(&format!("bytes {offset}..+{} of an array", width.bytes())))
         }
         // The construction side: `Name { field: value, .. }`. The struct is
         // named by the binding's type, so a value whose type the registry

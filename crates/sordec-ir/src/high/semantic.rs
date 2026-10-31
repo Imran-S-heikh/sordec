@@ -753,6 +753,11 @@ pub enum KnownOp {
         /// Recovered byte literal, or `None` when not a locally-provable
         /// constant.
         resolved: Option<Vec<u8>>,
+        /// The `[u8; N]` value the buffer holds, once recovered: the call is
+        /// then `Bytes::from_array(&e, &a)`, and, like a
+        /// [`VecNew`](KnownOp::VecNew) whose elements are known, it no
+        /// longer reads the buffer — its one operand is the array.
+        array: Option<ValueId>,
     },
 
     /// `vec_new_from_linear_memory(vals_pos, len)` — host import `(v, g)`,
@@ -821,6 +826,23 @@ pub enum KnownOp {
         kind: BufOpKind,
         /// Operands in original host-call argument order.
         args: Vec<ValueId>,
+    },
+
+    /// `bytes_copy_to_linear_memory(bytes, 0, &mut a, len)` read as the
+    /// fixed-size array it fills: `bytes.to_array()`, or `bytes`
+    /// copied into a fresh `[0u8; len]` with `copy_into_slice`. Yields the
+    /// `[u8; len]`; it no longer writes guest memory, because every read of
+    /// the bytes it wrote is now an [`Expr::ArrayRead`](crate::Expr::ArrayRead)
+    /// of this value (the pass that builds it proves so). The host call it
+    /// spells is the same one, with the same operands, so it traps exactly
+    /// when the original did: when `bytes` is shorter than `len`.
+    BytesToArray {
+        /// The `Bytes` / `BytesN<len>` copied from.
+        bytes: ValueId,
+        /// The array's length, the call's constant byte count.
+        len: u32,
+        /// Which SDK call the source made.
+        form: ArrayFill,
     },
 
     // ---- Guest memory routines (recognized by the mem-builtins pass) ----
@@ -1115,14 +1137,18 @@ impl KnownOp {
                 len,
                 resolved: _,
             }
-            | KnownOp::BytesNew {
-                lm_pos,
-                len,
-                resolved: _,
-            } => {
+            => {
                 f(*lm_pos);
                 f(*len);
             }
+            KnownOp::BytesNew { lm_pos, len, resolved: _, array } => match array {
+                Some(a) => f(*a),
+                None => {
+                    f(*lm_pos);
+                    f(*len);
+                }
+            },
+            KnownOp::BytesToArray { bytes, len: _, form: _ } => f(*bytes),
             // Once the elements are recovered the constructor no longer
             // reads the buffer: the emitted `vec![..]` names the values
             // directly. Reporting the pointer as a use would keep the
@@ -1401,14 +1427,18 @@ impl KnownOp {
                 len,
                 resolved: _,
             }
-            | KnownOp::BytesNew {
-                lm_pos,
-                len,
-                resolved: _,
-            } => {
+            => {
                 f(lm_pos);
                 f(len);
             }
+            KnownOp::BytesNew { lm_pos, len, resolved: _, array } => match array {
+                Some(a) => f(a),
+                None => {
+                    f(lm_pos);
+                    f(len);
+                }
+            },
+            KnownOp::BytesToArray { bytes, len: _, form: _ } => f(bytes),
             KnownOp::VecNew {
                 vals_pos,
                 len,
@@ -1673,6 +1703,21 @@ pub enum VecOpKind {
     /// `(v, h)` `vec_unpack_to_linear_memory` — write the vec's elements
     /// into a linear-memory `Val` array.
     UnpackToLinearMemory,
+}
+
+/// Which SDK call filled a [`KnownOp::BytesToArray`] array. Both compile to
+/// the same `bytes_copy_to_linear_memory(b, 0, &mut a, N)`; they differ in
+/// what the source type allows and in the check the SDK makes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum ArrayFill {
+    /// `b.to_array()` on a `BytesN<N>`: no length check, the type is the
+    /// proof.
+    ToArray,
+    /// `let mut a = [0u8; N]; b.copy_into_slice(&mut a);` on a `Bytes` (or
+    /// `BytesN<N>`) whose length the code has already proven to be `N`: the
+    /// `Bytes` form's own check (`len() != N` panics) then never fires.
+    CopyIntoSlice,
 }
 
 /// The complete `b`-module (buf: bytes / string / symbol) host-operation

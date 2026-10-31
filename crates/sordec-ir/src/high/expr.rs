@@ -157,6 +157,27 @@ pub enum Expr {
         index: u32,
     },
 
+    /// `width` bytes of a `[u8; N]` value read as one little-endian
+    /// integer, starting at byte `offset` — what a wasm load of those
+    /// bytes reads, once the frame slots it read are known to hold the
+    /// array. Renders `i64::from_le_bytes(a[o..o + 8].try_into().unwrap())`
+    /// for a full word, `a[o]` for one byte, with the load's own sign or
+    /// zero extension to the binding's word.
+    ///
+    /// Pure: the array is a value, and `offset + width` never passes its
+    /// length (the pass that builds this proves the read inside it).
+    ArrayRead {
+        /// The `[u8; N]` value.
+        array: ValueId,
+        /// First byte read.
+        offset: u32,
+        /// How many bytes, as the load that read them.
+        width: MemWidth,
+        /// The load's extension: `Some(true)` sign, `Some(false)` zero,
+        /// `None` for a full-word read.
+        signed: Option<bool>,
+    },
+
     /// Direct call to a local function (not a host call).
     Call {
         /// Target function in the same module.
@@ -382,6 +403,7 @@ impl Expr {
                 }
             }
             Expr::VariantPayload { value, variant: _, index: _ } => f(*value),
+            Expr::ArrayRead { array, offset: _, width: _, signed: _ } => f(*array),
             Expr::IndirectCall {
                 table: _,
                 sig: _,
@@ -463,6 +485,7 @@ impl Expr {
                 }
             }
             Expr::VariantPayload { value, variant: _, index: _ } => f(value),
+            Expr::ArrayRead { array, offset: _, width: _, signed: _ } => f(array),
             Expr::Unary { op: _, value } => f(value),
             Expr::Binary { op: _, lhs, rhs } => {
                 f(lhs);

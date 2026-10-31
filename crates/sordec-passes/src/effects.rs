@@ -752,6 +752,12 @@ pub fn known_op_effects(op: &KnownOp) -> Effects {
         KnownOp::MakeError { .. } => Effects::PURE,
         // Linear-memory constructors (b.j/i/3, v.g, m.9) read guest
         // memory; SymbolDispatch is the recognized (b.m) lookup.
+        // `Bytes::from_array(&e, &a)` hands the host the array's own bytes:
+        // the buffer is no longer read, and the host may still trap.
+        KnownOp::BytesNew { array: Some(_), .. } => TRAP,
+        // The host copy behind `to_array()` traps on a short source; the
+        // array it fills is a value now, so no guest memory is written.
+        KnownOp::BytesToArray { .. } => TRAP,
         KnownOp::SymbolNew { .. }
         | KnownOp::StringNew { .. }
         | KnownOp::BytesNew { .. }
@@ -813,7 +819,9 @@ pub fn expr_effects(expr: &Expr) -> Effects {
         | Expr::Tuple { .. }
         | Expr::IsSome { .. }
         | Expr::Unwrap { .. }
-        | Expr::UnwrapOr { .. } => Effects::PURE,
+        | Expr::UnwrapOr { .. }
+        // Bytes of an array value, inside it by construction.
+        | Expr::ArrayRead { .. } => Effects::PURE,
         // All lowered unary operators are total (the trapping float→int
         // truncations never lower to `Unary`; they stay
         // `Unknown{Conversion}`) — pinned by test.
@@ -1419,7 +1427,7 @@ mod tests {
             (KnownOp::GetCurrentContractAddress, "x", "7"),
             (KnownOp::GetMaxLiveUntilLedger, "x", "8"),
             (
-                KnownOp::BytesNew { lm_pos: v(0), len: v(1), resolved: None },
+                KnownOp::BytesNew { lm_pos: v(0), len: v(1), resolved: None, array: None },
                 "b",
                 "3",
             ),

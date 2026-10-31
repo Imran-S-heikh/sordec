@@ -157,7 +157,7 @@ fn plan(frames: &Frames<'_>, func: &HighFunction) -> Vec<Elision> {
 }
 
 /// `fp` and every `fp + k` derived from it.
-fn frame_addresses(func: &HighFunction, fp: ValueId, order: &[ValueId]) -> HashSet<ValueId> {
+pub(super) fn frame_addresses(func: &HighFunction, fp: ValueId, order: &[ValueId]) -> HashSet<ValueId> {
     let mut derived: HashSet<ValueId> = HashSet::from([fp]);
     for &id in order {
         if let Some(Expr::Binary { op: BinaryOp::Add, lhs, rhs }) = func.bindings.get(id).map(|b| &b.expr)
@@ -339,7 +339,7 @@ fn plan_handed(
         trace(func, fp, "an address read by the control flow");
         return Vec::new();
     }
-    let mut walk = Liveness { frames, func, fp, after: HashMap::new(), breaks: Vec::new(), continues: Vec::new() };
+    let mut walk = Liveness::new(frames, func, fp);
     if walk.region(&func.region, &Live::new()).is_none() {
         trace(func, fp, "the flow or a call's reach could not be followed");
         return Vec::new();
@@ -386,26 +386,54 @@ fn trace(func: &HighFunction, at: ValueId, why: &str) {
 const MAX_ROUNDS: usize = 64;
 
 /// Byte offsets of the frame some later read may still see.
-type Live = BTreeSet<u32>;
+pub(super) type Live = BTreeSet<u32>;
 
 /// The backward liveness walk over the frame's bytes ("Why it is exact").
-struct Liveness<'a, 'ir> {
+pub(super) struct Liveness<'a, 'ir> {
     frames: &'a Frames<'ir>,
     func: &'a HighFunction,
     fp: ValueId,
     /// The bytes live right after each frame store, as the last walk over
     /// its block saw them — at a loop's settled set, for a store inside it.
-    after: HashMap<ValueId, Live>,
+    pub(super) after: HashMap<ValueId, Live>,
     /// What is live where each enclosing scope's `break` lands.
     breaks: Vec<(BlockId, Live)>,
     /// What is live at each enclosing loop's header.
     continues: Vec<(BlockId, Live)>,
+    /// Bindings that are neither stores nor loads but write a known slot of
+    /// the frame whenever they run and return — a host copy into a frame
+    /// buffer, a `memset`, a helper's out-parameter. Each is a definite
+    /// write, like a store; one that is a call still reads what its reach
+    /// says it reads. Empty for this module's own walk.
+    pub(super) writes: HashMap<ValueId, Slot>,
+    /// Bindings that read a known slot of the frame and are neither loads
+    /// nor calls — a host constructor reading a frame buffer.
+    pub(super) reads: HashMap<ValueId, Slot>,
+    /// Reads the walk does not count: loads a caller is about to stop
+    /// reading memory with.
+    pub(super) skip: HashSet<ValueId>,
 }
 
-impl Liveness<'_, '_> {
+impl<'a, 'ir> Liveness<'a, 'ir> {
+    /// A walk over `func`'s frame at `fp` that counts only stores, loads
+    /// and calls.
+    pub(super) fn new(frames: &'a Frames<'ir>, func: &'a HighFunction, fp: ValueId) -> Self {
+        Liveness {
+            frames,
+            func,
+            fp,
+            after: HashMap::new(),
+            breaks: Vec::new(),
+            continues: Vec::new(),
+            writes: HashMap::new(),
+            reads: HashMap::new(),
+            skip: HashSet::new(),
+        }
+    }
+
     /// The bytes live on entry to `region`, given those live where it falls
     /// out; `None` when that cannot be told.
-    fn region(&mut self, region: &Region, out: &Live) -> Option<Live> {
+    pub(super) fn region(&mut self, region: &Region, out: &Live) -> Option<Live> {
         match region {
             Region::Basic(block) => self.block(*block, out),
             Region::Sequence(items) => {
@@ -474,6 +502,27 @@ impl Liveness<'_, '_> {
             let Some(binding) = self.func.bindings.get(id) else {
                 continue;
             };
+            if self.skip.contains(&id) {
+                continue;
+            }
+            if let Some(slot) = self.writes.get(&id) {
+                self.after.insert(id, live.clone());
+                for byte in slot.offset..slot.offset.checked_add(slot.bytes)? {
+                    live.remove(&byte);
+                }
+                if matches!(binding.expr, Expr::Call { .. }) {
+                    for (read, write_only) in self.frames.touches(self.func, id, self.fp)? {
+                        if !write_only {
+                            live.extend(read.offset..read.offset.checked_add(read.bytes)?);
+                        }
+                    }
+                }
+                continue;
+            }
+            if let Some(slot) = self.reads.get(&id) {
+                live.extend(slot.offset..slot.offset.checked_add(slot.bytes)?);
+                continue;
+            }
             match &binding.expr {
                 Expr::Store { addr, offset, width, .. } => {
                     let (base, off) = canon_addr(self.func, *addr);
