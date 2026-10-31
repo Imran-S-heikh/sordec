@@ -77,7 +77,7 @@ pub use dispatcher::DispatcherPass;
 pub use enum_key::{EnumKeyAfterInlinePass, EnumKeyPass};
 pub use error_const::ErrorConstPass;
 pub use linear_memory::LinearMemoryPass;
-pub use mem_builtins::MemBuiltinPass;
+pub use mem_builtins::{MemBuiltinPass, MemBuiltinResultPass};
 pub use storage::StoragePass;
 pub use ttl::TtlPass;
 pub use unrecognized::UnrecognizedScanPass;

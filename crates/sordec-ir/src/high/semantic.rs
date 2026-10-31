@@ -853,6 +853,20 @@ pub enum KnownOp {
         len: ValueId,
     },
 
+    /// The whole body of the `compiler_builtins` `memcmp` (and `bcmp`, the
+    /// same body): the first `len` bytes at `a` and `b` compared in order,
+    /// yielding the difference of the first unequal pair, each read as
+    /// unsigned, or 0 when all are equal. An `i32`. Same placement as
+    /// [`MemCopy`](KnownOp::MemCopy).
+    MemCompare {
+        /// First address.
+        a: ValueId,
+        /// Second address.
+        b: ValueId,
+        /// Number of bytes.
+        len: ValueId,
+    },
+
     // ---- Enum dispatch (recognized by the dispatcher pass) ----
     /// `(b, m) symbol_index_in_linear_memory`, refined by the `dispatcher`
     /// pass into the SDK's `#[contracttype]` enum-from-`Val` decoder.
@@ -1158,6 +1172,11 @@ impl KnownOp {
                 f(*byte);
                 f(*len);
             }
+            KnownOp::MemCompare { a, b, len } => {
+                f(*a);
+                f(*b);
+                f(*len);
+            }
             // A recovered Error constant reads no values (its code is data).
             KnownOp::MakeError { code: _, resolved: _ } => {}
             // Nullary context accessors: no operands.
@@ -1432,6 +1451,11 @@ impl KnownOp {
             KnownOp::MemFill { dst, byte, len } => {
                 f(dst);
                 f(byte);
+                f(len);
+            }
+            KnownOp::MemCompare { a, b, len } => {
+                f(a);
+                f(b);
                 f(len);
             }
             // A recovered Error constant reads no values (its code is data).

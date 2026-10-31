@@ -4,10 +4,10 @@
 //!
 //! rustc lowers `core::ptr::copy_nonoverlapping`, `core::ptr::copy` and
 //! `core::ptr::write_bytes` — and every struct move or zeroing it emits
-//! itself — to LLVM's `llvm.memcpy`, `llvm.memmove` and `llvm.memset`. On
-//! `wasm32v1-none` (and on `wasm32-unknown-unknown` whenever the backend
-//! keeps the call), those become calls to `memcpy`, `memmove` and `memset`,
-//! and the linker resolves them to the bodies in the toolchain's own
+//! itself — to LLVM's `llvm.memcpy`, `llvm.memmove` and `llvm.memset`, and a
+//! byte-slice comparison to `memcmp`/`bcmp`. On `wasm32v1-none` (and on
+//! `wasm32-unknown-unknown` whenever the backend keeps the call), those
+//! become calls to the C symbols, and the linker resolves them to the bodies in the toolchain's own
 //! `libcompiler_builtins` rlib. A contract therefore carries a 500-instruction
 //! byte loop for a line the source never wrote, and the decompiler printed
 //! it as 57 holes, nine times over in the measured sets.
@@ -27,22 +27,22 @@
 //!    calls — so the only masked operand is the one `global.get` that
 //!    `memcpy`/`memmove` use to address the `usize` scratch their unaligned
 //!    path keeps in its own frame (`let mut out = 0usize` in
-//!    `load_aligned_partial`), and `memset` has none. Everything else —
+//!    `load_aligned_partial`); `memset` and `memcmp` have none. Everything else —
 //!    every constant, offset, width, branch and the order of all of them —
 //!    is the rlib's, byte for byte.
 //! 2. **Linking does not change these bodies.** `compiler_builtins` is never
 //!    part of LTO, and a leaf with no data references carries no relocation
-//!    except that global. Measured, not assumed: all 14 copies in the
-//!    measured sets (9 `memcpy`, 5 `memset`, built by rustc 1.95.0 and
-//!    1.98.1) print, with call and global indices masked, exactly as the
-//!    same toolchain's rlib member does.
+//!    except that global. Measured, not assumed: all 19 copies in the
+//!    measured sets (9 `memcpy`, 5 `memset`, 5 `memcmp`, built by rustc
+//!    1.95.0 and 1.98.1) print, with call and global indices masked,
+//!    exactly as the same toolchain's rlib member does.
 //! 3. **No other code has these fingerprints.** None of them is in the
 //!    SDK [`crate::catalogue`] (a unit test pins it), and the routine
 //!    bodies are not generic — one monomorphic body per toolchain, which is
 //!    why several toolchains share one entry.
 //!
 //! The caller still has to hold the masked global to the stack pointer and
-//! the parameter count to three; the fingerprint covers the instruction
+//! the parameter count to three (all four routines take three); the fingerprint covers the instruction
 //! stream, not the function type. That is the decompiler's gate, not this
 //! table's: see the acting pass in `sordec-passes`.
 //!
@@ -52,16 +52,17 @@
 //!   five-instruction forwarder to the mangled body; its one call is masked
 //!   and it carries no identity of its own. The body it forwards to is what
 //!   is listed.
-//! - **`memcmp`/`bcmp`.** Identified the same way, but core has no
-//!   primitive that returns the same `c_int` (the difference of the first
-//!   unequal bytes), so there is nothing one line could print instead.
+//!
+//! `memcmp` and `bcmp` are one body in every toolchain read (`bcmp` is
+//! `memcmp`), listed once as [`MemRoutine::Memcmp`]. Like `memset` it has
+//! no masked operand at all, so a match is the rlib's body byte for byte.
 //!
 //! # Regenerating
 //!
 //! ```text
 //! mkdir objs && cd objs
 //! ar x ~/.rustup/toolchains/<tc>/lib/rustlib/wasm32v1-none/lib/libcompiler_builtins-*.rlib
-//! cargo run -p sordec-sigs --bin siggen -- builtins *.o | grep -E ' (memcpy|memmove|memset)'
+//! cargo run -p sordec-sigs --bin siggen -- builtins *.o | grep -E ' (memcpy|memmove|memset|memcmp|bcmp)'
 //! ```
 //!
 //! Toolchains read: 1.87, 1.89, 1.91, 1.95.0, 1.97 and 1.98.1, both
@@ -80,6 +81,9 @@ pub enum MemRoutine {
     Memmove,
     /// `memset(s, c, n) -> s`: writes `c as u8` to `n` bytes.
     Memset,
+    /// `memcmp(s1, s2, n) -> c_int` (and `bcmp`, the same body): the
+    /// difference of the first unequal bytes as unsigned, or 0.
+    Memcmp,
 }
 
 impl MemRoutine {
@@ -90,6 +94,7 @@ impl MemRoutine {
             Self::Memcpy => "memcpy",
             Self::Memmove => "memmove",
             Self::Memset => "memset",
+            Self::Memcmp => "memcmp",
         }
     }
 }
@@ -141,6 +146,11 @@ pub static MEM_ROUTINES: &[BuiltinEntry] = &[
         fingerprint: Fingerprint(0x7809_ea8e_3d62_e913_ac0d_c92c_2f95_d968),
         routine: MemRoutine::Memcpy,
         toolchains: "1.98.1",
+    },
+    BuiltinEntry {
+        fingerprint: Fingerprint(0x89cc_96e9_f838_0781_85d8_6cb0_5645_8a99),
+        routine: MemRoutine::Memcmp,
+        toolchains: "1.87, 1.89, 1.91, 1.95.0, 1.97, 1.98.1",
     },
     BuiltinEntry {
         fingerprint: Fingerprint(0xad28_58a2_664a_6947_f28a_f05f_bebf_ed47),

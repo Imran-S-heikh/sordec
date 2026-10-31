@@ -208,6 +208,9 @@ pub const I128_BUILTIN_CALLS_REWRITTEN: &str = "i128_builtin_calls_rewritten";
 pub const MEM_BUILTINS_REWRITTEN: &str = "mem_builtins_rewritten";
 /// Bodies the fingerprint named whose function failed a gate.
 pub const MEM_BUILTINS_DECLINED: &str = "mem_builtins_declined";
+/// Bindings that read a `memcpy`/`memmove`/`memset` call's value, now
+/// reading the destination the routine returns.
+pub const MEM_BUILTIN_RESULTS_READ: &str = "mem_builtin_results_read";
 /// Wide joins cancelled against their own limbs (and limbs against their
 /// join) — the identities that let an `i128` flow through as one value.
 pub const WIDE_FOLDED: &str = "wide_folded";
@@ -998,6 +1001,7 @@ pub fn surfaced_keys() -> &'static [&'static str] {
         I128_BUILTIN_CALLS_REWRITTEN,
         MEM_BUILTINS_REWRITTEN,
         MEM_BUILTINS_DECLINED,
+        MEM_BUILTIN_RESULTS_READ,
         WIDE_FOLDED,
         UNRECOGNISED_HOST_CALL,
         // Structuring section — de-cluttering (W3).

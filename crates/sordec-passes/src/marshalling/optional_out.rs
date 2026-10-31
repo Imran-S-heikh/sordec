@@ -164,8 +164,8 @@
 //!   callee's loads and stores are counted under: only addresses built
 //!   from the pointer reach the frame.
 //! - A call to a `compiler_builtins` `memcpy`, `memmove` or `memset`, as
-//!   [`crate::recognizers::mem_builtins::routine`] names it from the body's
-//!   fingerprint, is counted as the bulk operation it is, from the call's
+//!   [`crate::recognizers::mem_builtins::copy_or_fill`] names it from the
+//!   body's fingerprint, is counted as the bulk operation it is, from the call's
 //!   own arguments `[destination, source or byte, length]` — at the call
 //!   site, or inside a callee handed the frame. The routine's whole effect
 //!   on memory is its contract: the destination's bytes for the length
@@ -223,7 +223,7 @@ use crate::metrics_catalog::{
     MARSHALLING_OPTIONAL_OUT_SITES as M_SITES, MARSHALLING_OPTIONAL_OUT_SITES_REFUSED as M_SITES_REFUSED,
 };
 use crate::pass::{Pass, PassResult};
-use crate::recognizers::mem_builtins::routine;
+use crate::recognizers::mem_builtins::copy_or_fill;
 
 /// Pass name — also the provenance `pass` field for every rewrite.
 pub const PASS_NAME: &str = "marshalling-optional-out";
@@ -1498,7 +1498,7 @@ impl Frames<'_> {
         };
         // A call to a memory routine is the bulk operation it performs.
         if let Some(target) = target
-            && routine(self.ir, target).is_some()
+            && copy_or_fill(self.ir, target)
         {
             return bulk_touches(func, args, base);
         }
@@ -1588,7 +1588,7 @@ impl Frames<'_> {
                 | Expr::Call { args, .. }
                     if args.iter().any(|a| is_address(*a))
                         && match expr {
-                            Expr::Call { target, .. } => routine(self.ir, *target).is_some(),
+                            Expr::Call { target, .. } => copy_or_fill(self.ir, *target),
                             _ => true,
                         } =>
                 {

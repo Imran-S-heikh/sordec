@@ -175,6 +175,7 @@ pub(crate) fn label_known_op(op: &KnownOp) -> String {
         KnownOp::MemCopy { may_overlap: false, .. } => "memcpy".to_string(),
         KnownOp::MemCopy { may_overlap: true, .. } => "memmove".to_string(),
         KnownOp::MemFill { .. } => "memset".to_string(),
+        KnownOp::MemCompare { .. } => "memcmp".to_string(),
     }
 }
 

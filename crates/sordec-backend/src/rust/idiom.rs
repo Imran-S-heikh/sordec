@@ -663,6 +663,22 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             let (d, b, n) = (ctx.value_ref(*dst), ctx.value_ref(*byte), ctx.value_ref(*len));
             Some(parse_quote!(unsafe { core::ptr::write_bytes(#d as *mut u8, #b as u8, #n as usize) }))
         }
+        // No `core` primitive returns `memcmp`'s value, so the routine's own
+        // loop, as an iterator: the first unequal pair's difference, each
+        // byte unsigned, or 0. Read through slices, whose one precondition
+        // beyond the routine's — a non-null address — every caller meets:
+        // `memcmp` is reached only from slice comparisons.
+        KnownOp::MemCompare { a, b, len } => {
+            let (a, b, n) = (ctx.value_ref(*a), ctx.value_ref(*b), ctx.value_ref(*len));
+            Some(parse_quote!(unsafe {
+                core::iter::zip(
+                    core::slice::from_raw_parts(#a as *const u8, #n as usize),
+                    core::slice::from_raw_parts(#b as *const u8, #n as usize),
+                )
+                .find(|(x, y)| x != y)
+                .map_or(0i32, |(x, y)| i32::from(*x) - i32::from(*y))
+            }))
+        }
 
         // Everything else stays an honest hole (later waves).
         _ => None,

@@ -4,8 +4,9 @@
 //!
 //! rustc lowers `core::ptr::copy_nonoverlapping`, `core::ptr::copy` and
 //! `core::ptr::write_bytes` — and the struct moves and zeroings it emits on
-//! its own — to `memcpy`, `memmove` and `memset`, and the linker resolves
-//! those to the toolchain's `compiler_builtins` bodies. `memcpy` alone is a
+//! its own — to `memcpy`, `memmove` and `memset`, and byte-slice comparisons
+//! to `memcmp`/`bcmp`; the linker resolves those to the toolchain's
+//! `compiler_builtins` bodies. `memcpy` alone is a
 //! 500-instruction word-and-byte loop, and it decompiled as 57 holes in
 //! every contract that links it: none of it is the author's, and none of it
 //! can be read back as anything but loads and stores.
@@ -19,22 +20,29 @@
 //! # What the rewrite is
 //!
 //! The function keeps its name, parameters and callers. Its body becomes
-//! one operation and the return of its first parameter:
+//! one operation and the return of its first parameter — or, for `memcmp`,
+//! of the operation's value:
 //!
 //! ```text
 //! memcpy(dst, src, n)   →  unsafe { core::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, n as usize) }; dst
 //! memmove(dst, src, n)  →  unsafe { core::ptr::copy(src as *const u8, dst as *mut u8, n as usize) }; dst
 //! memset(dst, c, n)     →  unsafe { core::ptr::write_bytes(dst as *mut u8, c as u8, n as usize) }; dst
+//! memcmp(a, b, n)       →  unsafe { zip(slice(a, n), slice(b, n)).find(|(x, y)| x != y).map_or(0, |(x, y)| x - y) }
 //! ```
+//!
+//! And, earlier in the pipeline ([`MemBuiltinResultPass`]), a call's result
+//! is read as the argument it is: `memcpy`, `memmove` and `memset` return
+//! their destination, so `let p = memcpy(fp, src, 64); p + 8` is `fp + 8`,
+//! an address the frame analyses can place.
 //!
 //! # Why it is exact
 //!
 //! Each routine's source (`compiler_builtins::mem`) is the primitive plus
 //! the return: `memcpy` is `copy_forward(dest, src, n); dest`, `memmove`
 //! picks `copy_forward` or `copy_backward` by overlap and returns `dest`,
-//! `memset` is `set_bytes(s, c as u8, n); s`. The printed primitive moves
-//! the same `n` bytes from the same addresses and the function returns the
-//! same word:
+//! `memset` is `set_bytes(s, c as u8, n); s`, `memcmp` is `compare_bytes`.
+//! The printed primitive moves the same `n` bytes from the same addresses
+//! and the function returns the same word:
 //!
 //! - `memcpy` has exactly `copy_nonoverlapping`'s contract — the regions
 //!   must not overlap — and it is reached only through `llvm.memcpy`,
@@ -43,6 +51,11 @@
 //!   forward copy and the primitive write the same bytes.
 //! - `memmove` is defined for any overlap, as `core::ptr::copy` is.
 //! - `memset` writes `c as u8`, which is the `as u8` printed.
+//! - `memcmp` walks `i` from 0 and returns `a[i] as c_int - b[i] as c_int`
+//!   at the first `a[i] != b[i]`, else 0; the iterator does the same walk
+//!   on the same bytes, `i32::from(u8)` being `c_int::from(u8)`. The slices
+//!   add one precondition, a non-null address, which every caller meets:
+//!   `memcmp` is reached only from comparisons of Rust slices.
 //! - On wasm32 `usize` and pointers are 32 bits, so `n as usize` and the
 //!   address casts keep every bit of the `i32` parameters.
 //!
@@ -65,9 +78,28 @@
 //!   writes none: the fingerprint masks which global the scratch is
 //!   addressed from, and the argument above is about the stack.
 //!
+//! # The result as its argument: why it is exact, and its gates
+//!
+//! The routine's source returns its first parameter unchanged on every
+//! path, and the body is that source (the fingerprint), so the call's value
+//! *is* its first argument. Each binding that reads the call's value reads
+//! the argument instead; the call stays, for its effect. The argument is
+//! defined before the call and the call before every reader, so it is in
+//! scope wherever the value was read.
+//!
+//! - Only `memcpy`, `memmove` and `memset`; `memcmp` returns a comparison.
+//!   A call may reach the body through the `extern "C"` symbol, which from
+//!   rustc 1.89 is a forwarder: one call of the body with its own three
+//!   parameters in order, its value returned, nothing else — so it returns
+//!   what the body returns. One level only.
+//! - The call has three arguments.
+//! - Only readers that are bindings, and not merges: a merge's input, a
+//!   branch condition or a returned value keeps the call's value, which
+//!   leaves the parallel copies on a merge's edges exactly as they were.
+//!
 //! # Placement
 //!
-//! Last of the rewriting passes. Every analysis before it sees the
+//! The body rewrite runs last of the rewriting passes. Every analysis before it sees the
 //! original body, which each already handles — as a callee whose reach
 //! through its pointers it cannot bound — so introducing a new operation
 //! there would mean auditing every pass that looks inside a callee. The
@@ -84,7 +116,10 @@ use sordec_ir::{
 };
 use sordec_sigs::{Fingerprint, MemRoutine};
 
-use crate::metrics_catalog::{MEM_BUILTINS_DECLINED as M_DECLINED, MEM_BUILTINS_REWRITTEN as M_REWRITTEN};
+use crate::metrics_catalog::{
+    MEM_BUILTINS_DECLINED as M_DECLINED, MEM_BUILTINS_REWRITTEN as M_REWRITTEN,
+    MEM_BUILTIN_RESULTS_READ as M_RESULTS_READ,
+};
 use crate::pass::{Pass, PassResult};
 
 /// Pass name, also its provenance `pass` field.
@@ -153,6 +188,84 @@ impl Pass<HighIr> for MemBuiltinPass {
     }
 }
 
+/// Pass name of the call-result reading, also its provenance `pass` field.
+pub const RESULT_PASS_NAME: &str = "mem-builtin-results";
+
+/// Reads a call to `memcpy`, `memmove` or `memset` as returning the
+/// destination it was handed. See the module docs.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MemBuiltinResultPass;
+
+impl Pass<HighIr> for MemBuiltinResultPass {
+    fn name(&self) -> &'static str {
+        RESULT_PASS_NAME
+    }
+
+    fn run(&self, ir: &mut HighIr) -> PassResult {
+        let mut result = PassResult::default();
+        let returns_dst: std::collections::HashSet<FuncId> =
+            ir.functions.iter().map(|f| f.id).filter(|id| copy_or_fill(ir, *id)).collect();
+        if returns_dst.is_empty() {
+            return result;
+        }
+        let mut read = 0_i64;
+        for func in &mut ir.functions {
+            // The call's value -> its destination argument.
+            let dst_of: std::collections::HashMap<ValueId, ValueId> = func
+                .bindings
+                .iter()
+                .filter_map(|(id, b)| match &b.expr {
+                    Expr::Call { target, args } if returns_dst.contains(target) && args.len() == 3 => {
+                        Some((id, args[0]))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if dst_of.is_empty() {
+                continue;
+            }
+            // A destination that is itself such a call's value is that
+            // call's destination; the chain is as long as the calls.
+            let resolve = |mut v: ValueId| {
+                for _ in 0..dst_of.len() {
+                    match dst_of.get(&v) {
+                        Some(next) => v = *next,
+                        None => break,
+                    }
+                }
+                v
+            };
+            let ids: Vec<ValueId> = func.bindings.iter().map(|(id, _)| id).collect();
+            for id in ids {
+                let Some(binding) = func.bindings.get_mut(id) else { continue };
+                if matches!(binding.expr, Expr::Phi { .. }) {
+                    continue;
+                }
+                let mut changed = false;
+                binding.expr.for_each_value_use_mut(|u| {
+                    if dst_of.contains_key(u) {
+                        *u = resolve(*u);
+                        changed = true;
+                    }
+                });
+                if changed {
+                    binding.add_provenance(Provenance::new(
+                        RESULT_PASS_NAME,
+                        ProvenanceSource::SdkPattern,
+                        "a memory routine's value read as the destination it returns",
+                    ));
+                    read += 1;
+                }
+            }
+        }
+        if read > 0 {
+            result.metrics.increment(M_RESULTS_READ, read);
+            result.changed = true;
+        }
+        result
+    }
+}
+
 /// The memory routine `target` is, by the fingerprint of its original body.
 ///
 /// For the call-site analyses: it reads only facts fixed at parse time and
@@ -162,8 +275,49 @@ impl Pass<HighIr> for MemBuiltinPass {
 #[must_use]
 pub(crate) fn routine(ir: &HighIr, target: FuncId) -> Option<MemRoutine> {
     let func = ir.function(target).filter(|f| f.id == target)?;
-    let entry = entry_of(ir, func)?;
-    (func.signature.is_none() && func.params.len() == 3).then_some(entry.routine)
+    if func.signature.is_some() || func.params.len() != 3 {
+        return None;
+    }
+    if let Some(entry) = entry_of(ir, func) {
+        return Some(entry.routine);
+    }
+    // The `extern "C"` symbol rustc's calls are linked to is, from 1.89 on,
+    // a forwarder to the mangled body: it hands its three parameters on in
+    // order and returns what comes back, so it is the routine too. One
+    // level only — that is the whole of the shape.
+    let inner = forwarded(func)?;
+    let body = ir.function(inner).filter(|f| f.id == inner && f.id != target)?;
+    if body.signature.is_some() || body.params.len() != 3 {
+        return None;
+    }
+    entry_of(ir, body).map(|e| e.routine)
+}
+
+/// The function `func` does nothing but call, with its own parameters in
+/// order, returning that call's value: one call, nothing else scheduled but
+/// renames, and a region of blocks and returns only — no branch, no trap.
+fn forwarded(func: &HighFunction) -> Option<FuncId> {
+    use crate::dataflow::resolve_use;
+    let mut call = None;
+    for id in crate::marshalling::sret::emission_order(func) {
+        match &func.bindings.get(id)?.expr {
+            Expr::Phi { .. } | Expr::Use(_) => {}
+            Expr::Call { target, args } if call.is_none() => call = Some((id, *target, args.clone())),
+            _ => return None,
+        }
+    }
+    let (id, target, args) = call?;
+    if !args.iter().map(|a| resolve_use(func, *a)).eq(func.params.iter().copied()) {
+        return None;
+    }
+    if func.returns.is_empty() || !func.returns.iter().all(|r| matches!(r.as_slice(), [v] if resolve_use(func, *v) == id)) {
+        return None;
+    }
+    let mut plain = true;
+    func.region.for_each_node(|node| {
+        plain &= matches!(node, Region::Basic(_) | Region::Sequence(_) | Region::Return { .. });
+    });
+    plain.then_some(target)
 }
 
 /// The table entry for `func`'s original body.
@@ -179,12 +333,22 @@ fn listed(facts: &sordec_ir::WasmFacts, id: FuncId) -> Option<&'static sordec_si
     sordec_sigs::mem_routine(Fingerprint(raw))
 }
 
+/// Whether `target` is a routine that copies or fills: one whose memory
+/// effect is its destination written for the length and, for a copy, its
+/// source read for as long. Not `memcmp`, which writes nothing.
+#[must_use]
+pub(crate) fn copy_or_fill(ir: &HighIr, target: FuncId) -> bool {
+    matches!(routine(ir, target), Some(MemRoutine::Memcpy | MemRoutine::Memmove | MemRoutine::Memset))
+}
+
 /// Whether the body is already the one operation this pass plants.
 fn already_rewritten(func: &HighFunction) -> bool {
     func.bindings.iter().any(|(_, b)| {
         matches!(
             b.expr,
-            Expr::Semantic(SemanticOp::Known(KnownOp::MemCopy { .. } | KnownOp::MemFill { .. }))
+            Expr::Semantic(SemanticOp::Known(
+                KnownOp::MemCopy { .. } | KnownOp::MemFill { .. } | KnownOp::MemCompare { .. }
+            ))
         )
     })
 }
@@ -224,11 +388,20 @@ fn rewrite(func: &mut HighFunction, routine: MemRoutine, toolchains: &str) {
         MemRoutine::Memcpy => KnownOp::MemCopy { dst, src: second, len, may_overlap: false },
         MemRoutine::Memmove => KnownOp::MemCopy { dst, src: second, len, may_overlap: true },
         MemRoutine::Memset => KnownOp::MemFill { dst, byte: second, len },
+        MemRoutine::Memcmp => KnownOp::MemCompare { a: dst, b: second, len },
+    };
+    // `memcmp` returns its comparison, a `c_int`: the wasm function type
+    // says `i32`, so the type is the ABI's, not inferred. The others return
+    // nothing of their own.
+    let (ty, returned) = match routine {
+        MemRoutine::Memcmp => (IrType::Known(KnownType::I32), None),
+        _ => (IrType::Known(KnownType::Unit), Some(dst)),
     };
     let id = ValueId::from_index(func.bindings.len() as u32);
+    let returned = returned.unwrap_or(id);
     func.bindings.push(Binding::new(
         id,
-        IrType::Known(KnownType::Unit),
+        ty,
         Expr::Semantic(SemanticOp::Known(op)),
         Provenance::new(
             PASS_NAME,
@@ -240,8 +413,11 @@ fn rewrite(func: &mut HighFunction, routine: MemRoutine, toolchains: &str) {
         ),
     ));
     let block = func.blocks.push(HighBlock { id: sordec_common::BlockId::from_index(func.blocks.len() as u32), bindings: vec![id] });
-    func.region = Region::Sequence(vec![Region::Basic(block), Region::Return { values: vec![dst] }]);
-    func.returns = vec![vec![dst]];
+    func.region = Region::Sequence(vec![Region::Basic(block), Region::Return { values: vec![returned] }]);
+    func.returns = vec![vec![returned]];
+    if returned != dst {
+        return;
+    }
     if let Some(b) = func.bindings.get_mut(dst) {
         b.add_provenance(Provenance::new(
             PASS_NAME,
@@ -438,5 +614,125 @@ mod tests {
         let mut f = routine_like(3, i32_ty());
         f.returns = vec![vec![v(0), v(1)]];
         assert!(untouched(&mut module_of(f, Some(fp(MemRoutine::Memcpy)))));
+    }
+
+    /// func_1 `fn(a, b, c) -> call(func_0, args)`, the `extern "C"` shape.
+    fn forwarder(args: [u32; 3], extra: bool) -> HighFunction {
+        let mut bindings: Arena<ValueId, Binding> = Arena::new();
+        let seed = || Provenance::new("seed", ProvenanceSource::DataFlow, "seed");
+        for _ in 0..3 {
+            let id = v(bindings.len() as u32);
+            bindings.push(Binding::new(id, i32_ty(), Expr::Phi { incoming: vec![] }, seed()));
+        }
+        let call = Expr::Call { target: FuncId::from_index(0), args: args.iter().map(|a| v(*a)).collect() };
+        bindings.push(Binding::new(v(3), i32_ty(), call, seed()));
+        bindings.push(Binding::new(v(4), i32_ty(), Expr::GlobalGet { index: 0 }, seed()));
+        let scheduled = if extra { vec![v(3), v(4)] } else { vec![v(3)] };
+        let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
+        let b0 = blocks.push(HighBlock { id: BlockId::from_index(0), bindings: scheduled });
+        HighFunction {
+            id: FuncId::from_index(1),
+            name: None,
+            signature: None,
+            aliases: Vec::new(),
+            blocks,
+            bindings,
+            region: Region::Sequence(vec![Region::Basic(b0), Region::Return { values: vec![v(3)] }]),
+            params: vec![v(0), v(1), v(2)],
+            returns: vec![vec![v(3)]],
+        }
+    }
+
+    #[test]
+    fn a_forwarder_to_a_routine_is_the_routine() {
+        let with = |f: HighFunction| {
+            let mut ir = module_of(routine_like(3, i32_ty()), Some(fp(MemRoutine::Memcpy)));
+            ir.functions.push(f);
+            ir.facts.function_fingerprints.push(None);
+            routine(&ir, FuncId::from_index(1))
+        };
+        assert_eq!(with(forwarder([0, 1, 2], false)), Some(MemRoutine::Memcpy));
+        assert_eq!(with(forwarder([1, 0, 2], false)), None, "its parameters out of order");
+        assert_eq!(with(forwarder([0, 1, 2], true)), None, "anything besides the call");
+    }
+
+    /// `memcmp` returns its comparison, not its first operand.
+    #[test]
+    fn a_memcmp_body_becomes_one_compare_it_returns() {
+        let mut ir = module_of(routine_like(3, i32_ty()), Some(fp(MemRoutine::Memcmp)));
+        assert!(MemBuiltinPass.run(&mut ir).changed);
+        let f = &ir.functions[0];
+        let Region::Sequence(parts) = &f.region else { panic!("a sequence") };
+        let [Region::Basic(b), Region::Return { values }] = parts.as_slice() else { panic!("one block and a return") };
+        let [only] = f.blocks.get(*b).expect("the block").bindings.as_slice() else { panic!("one binding") };
+        assert_eq!(values, &vec![*only], "the comparison is what comes back");
+        let op = f.bindings.get(*only).expect("the op");
+        assert!(matches!(
+            op.expr,
+            Expr::Semantic(SemanticOp::Known(KnownOp::MemCompare { a, b, len })) if a == v(0) && b == v(1) && len == v(2)
+        ));
+        assert_eq!(op.ty, IrType::Known(KnownType::I32));
+        assert!(!copy_or_fill(&ir, FuncId::from_index(0)), "a compare writes nothing");
+    }
+
+    /// func_0 the routine; func_1 `p = routine(fp, src, 16); q = p + 8; r = load q`.
+    fn caller_of(routine: MemRoutine) -> HighIr {
+        let mut callee = routine_like(3, i32_ty());
+        callee.id = FuncId::from_index(0);
+        let mut bindings: Arena<ValueId, Binding> = Arena::new();
+        let seed = || Provenance::new("seed", ProvenanceSource::DataFlow, "seed");
+        let exprs = vec![
+            Expr::Phi { incoming: vec![] },                                                         // v0 fp
+            Expr::Phi { incoming: vec![] },                                                         // v1 src
+            Expr::Literal(sordec_ir::Literal::I32(16)),                                             // v2
+            Expr::Call { target: FuncId::from_index(0), args: vec![v(0), v(1), v(2)] },             // v3
+            Expr::Literal(sordec_ir::Literal::I32(8)),                                              // v4
+            Expr::Binary { op: sordec_ir::BinaryOp::Add, lhs: v(3), rhs: v(4) },                    // v5
+            Expr::Load { addr: v(5), offset: 0, width: sordec_ir::MemWidth::W8, signed: None, ty: i32_ty() }, // v6
+        ];
+        for expr in exprs {
+            let id = v(bindings.len() as u32);
+            bindings.push(Binding::new(id, i32_ty(), expr, seed()));
+        }
+        let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
+        let b0 = blocks.push(HighBlock { id: BlockId::from_index(0), bindings: (2..7).map(v).collect() });
+        let caller = HighFunction {
+            id: FuncId::from_index(1),
+            name: None,
+            signature: None,
+            aliases: Vec::new(),
+            blocks,
+            bindings,
+            region: Region::Sequence(vec![Region::Basic(b0), Region::Return { values: vec![v(3)] }]),
+            params: vec![v(0), v(1)],
+            returns: vec![vec![v(3)]],
+        };
+        let mut ir = module_of(callee, Some(fp(routine)));
+        ir.functions.push(caller);
+        ir.facts.function_fingerprints.push(None);
+        ir
+    }
+
+    #[test]
+    fn a_copy_s_value_is_read_as_its_destination() {
+        for routine in [MemRoutine::Memcpy, MemRoutine::Memmove, MemRoutine::Memset] {
+            let mut ir = caller_of(routine);
+            assert!(MemBuiltinResultPass.run(&mut ir).changed);
+            let f = &ir.functions[1];
+            assert!(matches!(f.bindings.get(v(5)).expect("the address").expr, Expr::Binary { lhs, .. } if lhs == v(0)));
+            assert!(matches!(f.bindings.get(v(3)).expect("the call").expr, Expr::Call { .. }), "the call stays");
+            assert_eq!(f.region, Region::Sequence(vec![Region::Basic(BlockId::from_index(0)), Region::Return { values: vec![v(3)] }]), "a returned value is left");
+            assert!(!MemBuiltinResultPass.run(&mut ir).changed, "idempotent");
+        }
+    }
+
+    #[test]
+    fn a_compare_s_value_or_an_unnamed_call_s_is_left() {
+        let mut ir = caller_of(MemRoutine::Memcmp);
+        assert!(!MemBuiltinResultPass.run(&mut ir).changed);
+        let mut ir = caller_of(MemRoutine::Memcpy);
+        ir.facts.function_fingerprints[0] = None;
+        assert!(!MemBuiltinResultPass.run(&mut ir).changed);
+        assert!(matches!(ir.functions[1].bindings.get(v(5)).expect("the address").expr, Expr::Binary { lhs, .. } if lhs == v(3)));
     }
 }

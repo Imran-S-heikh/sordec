@@ -107,7 +107,7 @@ pub use pipeline::{Pipeline, PipelineReport};
 pub use recognizers::{
     AbiSweepPass, AuthFlowPass, AuthPass, CallResultPass, ClientCallPass, CollectionsPass, ConstPropPass,
     ContextPass, CrossContractPass, DispatcherPass, EnumKeyAfterInlinePass, EnumKeyPass, ErrorConstPass, LinearMemoryPass,
-    MemBuiltinPass, StoragePass, TtlPass, UnrecognizedScanPass, ValEncodingPass, ValPackedComparePass,
+    MemBuiltinPass, MemBuiltinResultPass, StoragePass, TtlPass, UnrecognizedScanPass, ValEncodingPass, ValPackedComparePass,
 };
 pub use refine::{
     AndMergePass, ConstBranchFoldPass, ConstLoadPass, ConstLoopFoldPass, DispatchLinkPass, GuardClausePass, LoopClassifyPass, PanicRecoverPass,
@@ -386,6 +386,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // projections, and so the overflow flag it plants is a
             // condition the panic classifier can name.
             Box::new(I128BuiltinPass),
+            // A `memcpy`/`memmove`/`memset` call's value is the destination
+            // it was handed. Read as that, an address built on it is an
+            // offset from the frame, which every frame analysis below can
+            // place. Reads only fingerprints and call arguments.
+            Box::new(MemBuiltinResultPass),
             Box::new(ValEncodingPass),
             Box::new(SpecializePass),
             Box::new(StoragePass),
@@ -1017,7 +1022,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
         // and `scope_exit_pair_shares_the_elision_group` pin those ranges
         // by pass name, so inserting a pass above one fails a test instead
         // of silently shifting the window.
-        vec![1..7, 33..87],
+        vec![1..7, 34..88],
     )
 }
 
