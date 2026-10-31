@@ -1395,7 +1395,9 @@ pub(super) struct Frames<'ir> {
     /// `(function, parameter) -> bytes read and bytes written through it`,
     /// relative to the parameter; `None` when unknown. An in-progress entry
     /// is `None`, which is what makes recursion answer "unknown" rather than
-    /// loop.
+    /// loop — except a function handing the same pointer to itself in the
+    /// same place, which adds nothing to what it touches (see
+    /// `compute_extent`).
     extents: RefCell<HashMap<(FuncId, usize), Option<Extent>>>,
 }
 
@@ -1617,6 +1619,16 @@ impl<'ir> Frames<'ir> {
                             continue;
                         }
                         let (_, o) = canon_addr(func, *arg);
+                        // The function calling itself with this same pointer
+                        // in this same place touches, through it, exactly
+                        // what this function does: the extent `X` solves
+                        // `X = (the rest) ∪ X`, whose least solution is the
+                        // rest. Any other recursion — the pointer moved, or
+                        // in another place, or through another function —
+                        // stays unknown (`param_extent`'s in-progress entry).
+                        if *target == func.id && j == index && o == 0 {
+                            continue;
+                        }
                         let inner = self.param_extent(*target, j)?;
                         if let Some(r) = inner.reads {
                             extent.reads = Some(cover(extent.reads, r.shifted(o)?));
@@ -3100,6 +3112,35 @@ mod tests {
         );
         assert_eq!(
             plan_in(vec![call(), helper(false), copy_routine(), callee]),
+            Err("the frame is handed to a call that may read anything")
+        );
+    }
+
+    /// `func_3(p) { read p + 64; func_3(q) }`, handed the frame. Calling
+    /// itself with `p` in the same place adds nothing to what it touches
+    /// through `p`; handed `p + 64` instead, the recursion reaches further
+    /// each time and what it touches is not known.
+    #[test]
+    fn a_callee_handing_its_own_pointer_to_itself_touches_only_what_it_reads() {
+        let callee = |again: u32| {
+            func(
+                3,
+                vec![
+                    opaque(),
+                    i32c(64),
+                    Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(1) },
+                    load(2, 0, MemWidth::W8),
+                    Expr::Call { target: FuncId::from_index(3), args: vec![v(again)] },
+                ],
+                vec![0],
+                vec![vec![1, 2, 3, 4]],
+                Region::Basic(bb(0)),
+            )
+        };
+        let call = || caller_then(vec![Expr::Call { target: FuncId::from_index(3), args: vec![v(0)] }]);
+        assert_eq!(plan_in(vec![call(), helper(false), callee(0)]), Ok((1, 1)));
+        assert_eq!(
+            plan_in(vec![call(), helper(false), callee(2)]),
             Err("the frame is handed to a call that may read anything")
         );
     }
