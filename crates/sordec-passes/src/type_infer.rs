@@ -254,6 +254,30 @@
 //! guest call through at most [`AWAIT_DEPTH`] steps; in the first settling
 //! only, as the host catalog speaks only in the second.
 //!
+//! ## An unwrapped payload is the `Option`'s
+//!
+//! `x = o.unwrap()` and `o = Some(x)` say one thing in both directions:
+//! the value inside the `Option` and the value outside it are the same
+//! value. The forward direction was always read (an `Option<T>`'s unwrap
+//! is a `T`); the backward one was not, so a vec iterator's outlined
+//! `next` — `if tag == 2 { None } else { Some(word) }`, the word read
+//! back from the iterator's frame — stayed `Option<Val>` while every
+//! caller handed its unwrap to a helper taking an `Address`.
+//!
+//! So an `unwrap` typed `T` names the `Option<?>` it unwraps `Option<T>`,
+//! and a `Some(x)` typed `Option<T>` names `x` a `T` (`Inferred`). With
+//! the call's result named, the helper's return slot takes the callers'
+//! `Option<T>` ([`result_uses`]); the merge it returns, and so its
+//! `Option<?>` arms, as a merge's `Vec<?>` arm takes the merge's `Vec<T>`;
+//! and its `Some` arm's payload the `T`.
+//!
+//! Why it is exact: an `Option<T>`'s payload is a `T` by the definition of
+//! the type, and `unwrap` hands back that payload unchanged. Gates: one
+//! payload (a tuple payload is left); the `Option` only while its payload
+//! is untyped, and `x` only while it is untyped or only a `Val` — a named
+//! type on either side stands, or conflicts on its own evidence; `T` never
+//! the `Val` that says nothing.
+//!
 //! ## A loop counter is the number it counts to
 //!
 //! `for i in 0..n` steps a merge from a constant by a constant until it
@@ -949,15 +973,20 @@ fn backward(
                 }
             }
             // A merge's arm known only as `Vec<?>` is the merge's `Vec<T>`,
-            // and one known only as `Map<?, ?>` the merge's `Map<K, V>`:
-            // the arms are the values of one variable, and an unknown
-            // element type is less said about it, not a different type
+            // one known only as `Map<?, ?>` the merge's `Map<K, V>`, and
+            // one known only as `Option<?>` the merge's `Option<T>`: the
+            // arms are the values of one variable, and an unknown element
+            // type is less said about it, not a different type
             // ([`merge_partial`]). Only that arm: a named element is left
             // to stand or conflict on its own evidence.
             Expr::Phi { incoming } => {
-                if let Some(merged @ (KnownType::Vec(_) | KnownType::Map(..))) = base_of(types.get(&id)) {
+                if let Some(merged @ (KnownType::Vec(_) | KnownType::Map(..) | KnownType::Option(_))) =
+                    base_of(types.get(&id))
+                {
                     for (_, arm) in incoming {
-                        let Some(have @ (KnownType::Vec(_) | KnownType::Map(..))) = base_of(types.get(arm)) else {
+                        let Some(have @ (KnownType::Vec(_) | KnownType::Map(..) | KnownType::Option(_))) =
+                            base_of(types.get(arm))
+                        else {
                             continue;
                         };
                         if have != merged && merge_partial(&have, &merged).as_ref() == Some(&merged) {
@@ -1047,6 +1076,26 @@ fn backward(
                     && let Some(base) = base_of(Some(payload.as_ref()))
                 {
                     changed |= improve(types, ev, *default, IrType::Inferred(base));
+                }
+            }
+            // An `Option`'s payload and the value it is unwrapped to are
+            // one value ("An unwrapped payload is the `Option`'s").
+            Expr::Unwrap { value, arity: 1, .. } => {
+                if let Some(base) = base_of(types.get(&id)).filter(|b| *b != KnownType::Val)
+                    && let Some(KnownType::Option(payload)) = base_of(types.get(value))
+                    && base_of(Some(payload.as_ref())).is_none()
+                {
+                    let named = KnownType::Option(Box::new(IrType::Inferred(base)));
+                    changed |= improve(types, ev, *value, IrType::Inferred(named));
+                }
+            }
+            Expr::Optional { payload: Some(values) } => {
+                if let [only] = values.as_slice()
+                    && let Some(KnownType::Option(payload)) = base_of(types.get(&id))
+                    && let Some(base) = base_of(Some(payload.as_ref())).filter(|b| *b != KnownType::Val)
+                    && base_of(types.get(only)).is_none_or(|have| have == KnownType::Val)
+                {
+                    changed |= improve(types, ev, *only, IrType::Inferred(base));
                 }
             }
             _ => {}
@@ -4455,6 +4504,84 @@ mod tests {
         TypeInferPass.run(&mut ir);
         assert_eq!(base_of(Some(&ty_of(&ir, 0, 2))), Some(roles.clone()));
         assert_eq!(base_of(Some(&ty_of(&ir, 0, 0))), Some(roles), "the empty map is the same map");
+    }
+
+    /// `v1 = unwrap(v0)` with `v0: Option<payload>` and `v1` typed `got`.
+    fn unwrap_of(payload: IrType, got: IrType) -> HighIr {
+        let mut f = func_at(
+            0,
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Unwrap { value: ValueId::from_index(0), index: 0, arity: 1 },
+            ],
+            vec![ValueId::from_index(0)],
+            vec![1],
+            vec![vec![ValueId::from_index(1)]],
+        );
+        f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty =
+            IrType::Inferred(KnownType::Option(Box::new(payload)));
+        f.bindings.get_mut(ValueId::from_index(1)).unwrap().ty = got;
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn an_unwrap_names_the_option_it_unwraps() {
+        let mut ir = unwrap_of(unknown(), IrType::Known(KnownType::Address));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(
+            base_of(Some(&ty_of(&ir, 0, 0))),
+            Some(KnownType::Option(Box::new(IrType::Inferred(KnownType::Address))))
+        );
+    }
+
+    #[test]
+    fn an_unwrap_leaves_a_named_payload_and_says_nothing_as_a_val() {
+        // A payload with a name of its own stands.
+        let mut ir = unwrap_of(IrType::Inferred(KnownType::U32), IrType::Known(KnownType::Address));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(
+            base_of(Some(&ty_of(&ir, 0, 0))),
+            Some(KnownType::Option(Box::new(IrType::Inferred(KnownType::U32))))
+        );
+        // `Val` says nothing of the payload.
+        let mut ir = unwrap_of(unknown(), IrType::Known(KnownType::Val));
+        TypeInferPass.run(&mut ir);
+        assert_eq!(
+            base_of(Some(&ty_of(&ir, 0, 0))),
+            Some(KnownType::Option(Box::new(unknown())))
+        );
+    }
+
+    /// `v1 = Some(v0)` returned, `v1` typed `option`, `v0` typed `inner`.
+    fn some_of(inner: IrType, option: IrType) -> HighIr {
+        let mut f = func_at(
+            0,
+            vec![Expr::Phi { incoming: vec![] }, Expr::Optional { payload: Some(vec![ValueId::from_index(0)]) }],
+            vec![ValueId::from_index(0)],
+            vec![1],
+            vec![vec![ValueId::from_index(1)]],
+        );
+        f.bindings.get_mut(ValueId::from_index(0)).unwrap().ty = inner;
+        f.bindings.get_mut(ValueId::from_index(1)).unwrap().ty = option;
+        crate::marshalling::test_support::module(vec![f])
+    }
+
+    #[test]
+    fn a_named_option_names_its_untyped_payload() {
+        let option = IrType::Known(KnownType::Option(Box::new(IrType::Known(KnownType::Address))));
+        for inner in [unknown(), IrType::Inferred(KnownType::Val)] {
+            let mut ir = some_of(inner, option.clone());
+            TypeInferPass.run(&mut ir);
+            assert_eq!(base_of(Some(&ty_of(&ir, 0, 0))), Some(KnownType::Address));
+        }
+    }
+
+    #[test]
+    fn a_named_option_leaves_a_payload_with_a_type_of_its_own() {
+        let option = IrType::Known(KnownType::Option(Box::new(IrType::Known(KnownType::Address))));
+        let mut ir = some_of(IrType::Known(KnownType::U64), option);
+        TypeInferPass.run(&mut ir);
+        assert_eq!(ty_of(&ir, 0, 0), IrType::Known(KnownType::U64));
     }
 
     #[test]
