@@ -48,6 +48,62 @@ fn typed_vec(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
     )
 }
 
+/// Whether `vec_push_back(v, x)` pushes an element of `v`'s own type: `v`
+/// typed `Vec<T>` with `T` named, and `x` typed `T` — or, for a
+/// `Vec<Val>`, `x` with no recovered type, which prints as the `Val` the
+/// host was handed.
+///
+/// Why it is exact: the host's `vec_push_back` returns a new vec, `v`'s
+/// elements then `x`, and never changes `v`; the SDK's `push_back` makes
+/// that same call on its handle and keeps the result, so on a clone of `v`
+/// it builds the vec the host returned. Gate: the types above, so that
+/// `push_back(item)` takes `x` as it prints, with no conversion.
+fn pushes_an_element(ctx: &FnCtx, args: &[sordec_common::ValueId]) -> bool {
+    let [recv, x] = args else {
+        return false;
+    };
+    let ty = |v: sordec_common::ValueId| ctx.func.bindings.get(v).map(|b| &b.ty);
+    let Some(IrType::Known(KnownType::Vec(element)) | IrType::Inferred(KnownType::Vec(element))) = ty(*recv) else {
+        return false;
+    };
+    // An element nothing has typed prints as `Val` (but a machine word's
+    // as `i32`; see `StrictNoGuess`).
+    let element = match element.as_ref() {
+        IrType::Known(element) | IrType::Inferred(element) => element,
+        IrType::Unknown(sordec_common::UnknownReason::MachineWord32) => return false,
+        IrType::Unknown(_) => &KnownType::Val,
+    };
+    match ty(*x) {
+        Some(IrType::Known(k) | IrType::Inferred(k)) => k == element,
+        // Untyped, only what prints as a `Val`: a helper's result (its
+        // signature says `Val`) or a hole.
+        Some(IrType::Unknown(reason)) if !matches!(reason, sordec_common::UnknownReason::MachineWord32) => {
+            let mut at = *x;
+            for _ in 0..16 {
+                match ctx.func.bindings.get(at).map(|b| &b.expr) {
+                    Some(sordec_ir::Expr::Use(next)) => at = *next,
+                    _ => break,
+                }
+            }
+            let Some(target) = ctx.func.bindings.get(at) else {
+                return false;
+            };
+            let prints_val = match &target.ty {
+                IrType::Known(KnownType::Val) | IrType::Inferred(KnownType::Val) => true,
+                IrType::Unknown(reason) => !matches!(reason, sordec_common::UnknownReason::MachineWord32),
+                _ => false,
+            };
+            *element == KnownType::Val
+                && prints_val
+                && matches!(
+                    target.expr,
+                    sordec_ir::Expr::Call { .. } | sordec_ir::Expr::Load { .. } | sordec_ir::Expr::Unknown { .. }
+                )
+        }
+        _ => false,
+    }
+}
+
 /// Whether `v` is typed as a vec of the SDK's `InvokerContractAuthEntry`,
 /// the type `authorize_as_current_contract` takes.
 fn entries_vec(ctx: &FnCtx, v: sordec_common::ValueId) -> bool {
@@ -302,6 +358,18 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                     ).len()
                 )),
                 VecOpKind::Len => Some(parse_quote!(#v.len())),
+                // `vec_push_back(v, x)` hands back a new vec, `v` with `x`
+                // at the end, and leaves `v` as it was: the SDK's
+                // `push_back` on a copy of the handle. Only where `x` is
+                // what the vec holds (see [`pushes_an_element`]).
+                VecOpKind::PushBack if pushes_an_element(ctx, args) => {
+                    let x = arg(1)?;
+                    Some(parse_quote!({
+                        let (mut pushed, item) = (#v.clone(), #x);
+                        pushed.push_back(item);
+                        pushed
+                    }))
+                }
                 VecOpKind::FirstIndexOf => {
                     let x = arg(1)?;
                     Some(parse_quote!(#v.first_index_of(&#x)))

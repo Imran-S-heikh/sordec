@@ -2751,6 +2751,26 @@ mod tests {
         )
     }
 
+    /// `vec_push_back(v, x)` with `v: Vec<Val>` and `x` typed `item`.
+    fn pushed(item: IrType) -> String {
+        let vec_val = || IrType::Known(KnownType::Vec(Box::new(IrType::Known(KnownType::Val))));
+        let new = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::New, args: vec![] });
+        let x = Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(0) };
+        let push = known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::PushBack, args: vec![v(1), v(2)] });
+        emitted(vec![(vec_val(), new), (item, x), (vec_val(), push)], vec![ret(3)], &TypeRegistry::default())
+    }
+
+    #[test]
+    fn a_push_of_the_vec_s_own_element_type_is_push_back_on_a_copy() {
+        let body = pushed(IrType::Known(KnownType::Val));
+        assert!(body.contains("pushed . push_back (item)"), "{body}");
+        assert!(!body.contains("todo !"), "{body}");
+        // An `i64` is not what a `Vec<Val>` holds: the push stays a hole.
+        assert!(pushed(IrType::Known(KnownType::I64)).contains("todo !"));
+        // Nor is an untyped sum, whose Rust type is not a `Val`.
+        assert!(pushed(IrType::Unknown(sordec_common::UnknownReason::InsufficientEvidence)).contains("todo !"));
+    }
+
     #[test]
     fn a_get_at_an_encoded_u32_index_reads_the_index() {
         let body = get_at_encoded(KnownType::U32);
