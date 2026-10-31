@@ -56,10 +56,32 @@
 //!   enum is `#[repr(u32)]`, and the SDK converts it by that discriminant.
 //!   The read is typed `E`; its value is still the read, unchanged.
 //!
+//! # A helper on the way out
+//!
+//! The same arithmetic sits in the helper rustc outlines the SDK's
+//! `Result` conversion into, when the entrypoint returns what the helper
+//! returns: `func30(p)` reads a `Result<i128, E>` its caller wrote into a
+//! frame — the tag word, the code word, the `i128` — and builds the
+//! `Error` `Val` of the code it reads on one side. The helper's word is
+//! the entrypoint's word, so the helper's `Err` side is rewritten exactly
+//! as an entrypoint's would be, against the `Result<T, E>` the entrypoint
+//! at the top of the chain declares ([`declared_result`]).
+//!
+//! Why it is exact: every caller of the helper does nothing with its
+//! result but return it, up to an entrypoint whose spec declares
+//! `Result<T, E>`; so the helper's returned word reaches the host as that
+//! entrypoint's, and the boundary argument above holds for it word for
+//! word. The helper comes to return the `Result` (its other side is the
+//! `T` the emitter wraps as `Ok`), so its callers must be all of them.
+//!
 //! # Gates
 //!
 //! - **The entrypoint**: a spec signature returning one `Result<T, E>`,
-//!   `E` a declared `#[contracterror]` enum or the SDK's `Error`.
+//!   `E` a declared `#[contracterror]` enum or the SDK's `Error`. Or a
+//!   helper (no spec, not exported) every direct caller of which only
+//!   returns its result, up to [`CHAIN_DEPTH`] calls to such an
+//!   entrypoint, all agreeing on one `Result`; and no indirect call may
+//!   reach it ([`CallIndex::caller_set_complete`]).
 //! - **The value**: the sum above, `k0 + k ≡ 0 (mod 2^32)`, flowing only
 //!   into the return — read by nothing but merges that themselves flow
 //!   only there, and the return.
@@ -78,21 +100,25 @@
 
 use std::collections::{HashMap, HashSet};
 
-use sordec_common::{IrId, Provenance, ProvenanceSource, TypeId, ValueId};
+use sordec_common::{FuncId, IrId, Provenance, ProvenanceSource, TypeId, ValueId};
 use sordec_ir::{
     BinaryOp, Binding, ErrorVariant, Expr, HighFunction, HighIr, IrType, KnownOp, KnownType, Literal, MemWidth, Region,
     SemanticOp, TypeRegistry, UnaryOp,
 };
 
+use super::result_out::declared_result;
 use super::sret::emission_order;
-use crate::dataflow::{resolve_use, trace_int};
+use crate::dataflow::{resolve_use, trace_int, CallIndex};
 use crate::metrics_catalog::MARSHALLING_ERROR_CODES_RETURNED as M_RETURNED;
 use crate::pass::{Pass, PassResult};
-use crate::type_infer::known_of_type_ref;
 use crate::val_abi;
 
 /// Pass name — also the provenance `pass` field for every rewrite.
 pub const PASS_NAME: &str = "marshalling-error-code";
+
+/// How many helper calls a returned value may climb to reach an entrypoint
+/// ([`declared_result`]).
+const CHAIN_DEPTH: usize = 4;
 
 /// Returns the error a run-time code names as the entrypoint's `Err`.
 #[derive(Debug, Default, Clone, Copy)]
@@ -108,8 +134,20 @@ impl Pass<HighIr> for ErrorCodeReturnPass {
         let Some(reg) = ir.soroban_facts.as_ref().map(|f| f.types.clone()) else {
             return result;
         };
+        // Each function's declared `Result`: its own spec's, or — for a
+        // helper whose result every caller only returns — the one the
+        // entrypoint at the top of that chain declares.
+        let calls = CallIndex::build(ir);
+        let declared: HashMap<FuncId, Declared> = ir
+            .functions
+            .iter()
+            .filter_map(|f| {
+                let ty = declared_result(ir, &calls, f.id, CHAIN_DEPTH)?;
+                Some((f.id, declared_error(&ty, &reg)?))
+            })
+            .collect();
         for func in &mut ir.functions {
-            let Some(declared) = declared_error(func, &reg) else {
+            let Some(declared) = declared.get(&func.id).cloned() else {
                 continue;
             };
             let plans = plan(func, &declared);
@@ -148,11 +186,8 @@ impl Declared {
     }
 }
 
-fn declared_error(func: &HighFunction, reg: &TypeRegistry) -> Option<Declared> {
-    let [out] = func.signature.as_ref()?.outputs.as_slice() else {
-        return None;
-    };
-    let KnownType::Result(_, err) = known_of_type_ref(out)? else {
+fn declared_error(result: &KnownType, reg: &TypeRegistry) -> Option<Declared> {
+    let KnownType::Result(_, err) = result else {
         return None;
     };
     let by_id = |id: TypeId| {
@@ -162,7 +197,7 @@ fn declared_error(func: &HighFunction, reg: &TypeRegistry) -> Option<Declared> {
             cases: Some((def.name.clone(), def.cases.iter().map(|c| (c.name.clone(), c.value)).collect())),
         })
     };
-    match *err {
+    match **err {
         IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => by_id(id),
         // The spec erases a `#[contracterror]` enum to `Error`; the
         // reconstruction names it back when the contract declares exactly
@@ -633,6 +668,51 @@ mod tests {
     fn a_helper_is_not_the_boundary() {
         let mut ir = entry(1, sdk_error());
         ir.functions[0].signature = None;
+        ir.functions[0].name = None;
+        assert!(!ErrorCodeReturnPass.run(&mut ir).changed);
+    }
+
+    /// `entry`'s function as a helper (`func_1`), called by an entrypoint
+    /// (`func_0`) declaring `Result<u32, err>` that `returned` decides:
+    /// `r = func_1(p); return r` when true, `r = func_1(p); return 0`
+    /// otherwise.
+    fn helper_under_entry(err: TypeRef, returned: bool) -> HighIr {
+        let mut ir = entry(1, err);
+        let mut helper = ir.functions.remove(0);
+        let sig = helper.signature.take();
+        helper.name = None;
+        helper.id = sordec_common::FuncId::from_index(1);
+        let mut top = func_with(
+            vec![
+                Expr::Phi { incoming: vec![] },
+                Expr::Call { target: helper.id, args: vec![v(0)] },
+                Expr::Literal(Literal::I64(0)),
+            ],
+            vec![v(0)],
+            vec![1, 2],
+        );
+        let out = if returned { v(1) } else { v(2) };
+        top.region = Region::Sequence(vec![Region::Basic(BlockId::from_index(0)), Region::Return { values: vec![out] }]);
+        top.returns = vec![vec![out]];
+        top.name = Some("vote".into());
+        top.signature = sig;
+        ir.functions = vec![top, helper];
+        ir
+    }
+
+    #[test]
+    fn a_helper_every_caller_returns_takes_the_entrypoints_error() {
+        let mut ir = helper_under_entry(sdk_error(), true);
+        assert!(ErrorCodeReturnPass.run(&mut ir).changed);
+        let f = &ir.functions[1];
+        assert!(matches!(&f.bindings.get(v(10)).expect("binding").expr, Expr::Use(c) if *c == v(3)));
+        let mine = KnownType::UserDefined(TypeId::from_index(1));
+        assert_eq!(f.bindings.get(v(2)).expect("binding").ty, IrType::Inferred(mine), "the read is the error");
+    }
+
+    #[test]
+    fn a_helper_whose_result_is_not_returned_is_left() {
+        let mut ir = helper_under_entry(sdk_error(), false);
         assert!(!ErrorCodeReturnPass.run(&mut ir).changed);
     }
 
