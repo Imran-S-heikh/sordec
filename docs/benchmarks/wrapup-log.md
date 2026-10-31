@@ -928,3 +928,39 @@ wrap in every SDK version used; type names follow the recovered SDK major). A st
 frame is dropped when every path from it overwrites those bytes, returns or traps before
 anything may read them — the scratch of `vec!` builds, mostly. Holes 6,427 → 6,110 (summed);
 errors unchanged at 9; corpus byte-identical; held-out mean 0.7889.
+
+## 2026-10-31 — commit 8c9a287 (`map_unpack_to_linear_memory` reads its key array)
+
+A correctness fix to the effects table: the host reads the keys to select from the array at
+`keys_pos`, and the table recorded only the write, so an analysis trusting it could drop a
+store of a key the call reads. Output byte-identical on all 86 contracts.
+
+## 2026-10-31 — commits e47b4fe + 34c303b (custom types round 3; privacy_pools' remaining shapes)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 84 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,317 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 1,365 |
+| third-party | 2 | 1/2 | 8 | 533 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 438 |
+
+- **e47b4fe:**
+  - a merge of two u128 values stays u128 (it became i128);
+  - a struct decoder may hand a field to the i64/u64 decoder rustc splits out, whose number
+    half is the field on a proven struct;
+  - a 32-bit load of a stored i64 is its low half.
+- **34c303b:**
+  - stores in a frame handed to calls of known reach are dropped when no later read can see
+    them;
+  - a helper handing its own pointer to itself has a known reach;
+  - an argument decode handed the `Val` by reference is the parameter the caller stored;
+  - `vec_get` at a u32's encode is `get_unchecked(i)`, a push of the element type is
+    `push_back`, a bare `map_new` is `Map::new`;
+  - `wrap32(len >> 32)` of a length folds to `len()`, fixing a wrong spelling at 47 sites.
+
+Holes 6,110 → 6,007 → 5,737 (summed); errors unchanged at 9; corpus byte-identical; held-out
+mean 0.7890. The treasury (our authored test contract): 19 errors, 537 gaps, 2,461 lines.
+
+**Day totals (2026-10-31):** holes 9,591 → 5,737 (−3,854); errors 11 → 9; SDK 26 39/39;
+reference aggregate 0.9389 → 0.9359 (the deliberate `select` change); held-out mean 0.7865 → 0.7890.
