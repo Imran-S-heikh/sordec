@@ -398,9 +398,35 @@ pub struct TypeRegistry {
     pub errors: Vec<EnumDef>,
     /// `#[contractevent]` event types.
     pub events: Vec<EventDef>,
+    /// The entries above that the SDK declares rather than the contract:
+    /// types a pass proved the contract builds or takes apart although
+    /// its `contractspecv0` cannot list them (the SDK marks them
+    /// `export = false`). The reconstruction imports each from the SDK
+    /// module named here instead of declaring it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub imported: Vec<ImportedType>,
+}
+
+/// A registered type that lives in the SDK, not in the contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ImportedType {
+    /// The registry entry it is.
+    pub id: TypeId,
+    /// The `soroban_sdk` module that declares it (`auth`).
+    // JUSTIFY: SDK module paths are names from the SDK's own source, not
+    // ids this crate assigns.
+    pub module: String,
 }
 
 impl TypeRegistry {
+    /// The `soroban_sdk` module declaring `id`, when the SDK declares it
+    /// rather than the contract (see [`Self::imported`]).
+    #[must_use]
+    pub fn sdk_module(&self, id: TypeId) -> Option<&str> {
+        self.imported.iter().find(|t| t.id == id).map(|t| t.module.as_str())
+    }
+
     /// Resolve a [`TypeId`] to the declared name of the type it identifies,
     /// searching every user-defined category (struct / union / enum / error
     /// / event). Returns `None` when no registered type carries `id`.

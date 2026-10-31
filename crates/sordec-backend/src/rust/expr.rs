@@ -16,6 +16,22 @@ use crate::rust::body::FnCtx;
 use crate::rust::{idiom, sig, ty};
 use crate::wat::annotate;
 
+/// A value placed in a literal of the type `owner`.
+///
+/// A literal of a type the SDK declares (an auth entry the contract builds
+/// from addresses it also passes on) takes each value by move, as every
+/// other by-value position does (`arg_ref`): one read more than once is
+/// cloned. The contract's own types keep the plain reference their output
+/// was measured with — a hole read only by a literal takes its type from
+/// the field, and `.clone()` on it would leave nothing to infer that from.
+fn field_ref(ctx: &FnCtx, owner: Option<sordec_common::TypeId>, value: sordec_common::ValueId) -> syn::Expr {
+    if owner.is_some_and(|id| ctx.reg.sdk_module(id).is_some()) {
+        ctx.arg_ref(value)
+    } else {
+        ctx.value_ref(value)
+    }
+}
+
 /// `Owner::Variant`, when this value is a named variant of a type the
 /// registry can name — or `Ok` / `Err`, the prelude's own constructors,
 /// when it is a variant of a `Result`.
@@ -24,9 +40,9 @@ fn variant_path(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<syn::Path>
     let Expr::Variant { name, .. } = &binding.expr else {
         return None;
     };
-    let owner = match &binding.ty {
+    let mut owner = match &binding.ty {
         IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => {
-            ctx.reg.name_of(*id)?
+            ty::udt_path(ctx.reg, *id)?
         }
         IrType::Known(KnownType::Result(..)) | IrType::Inferred(KnownType::Result(..)) => {
             return match name.as_str() {
@@ -37,9 +53,8 @@ fn variant_path(ctx: &FnCtx, value: sordec_common::ValueId) -> Option<syn::Path>
         }
         _ => return None,
     };
-    let owner = ty::ident(owner);
-    let variant = ty::ident(name);
-    Some(parse_quote!(#owner::#variant))
+    owner.segments.push(ty::ident(name).into());
+    Some(owner)
 }
 
 /// A `bool` compared with, or xor'd by, the `0` or `1` it is in the wasm:
@@ -1208,11 +1223,10 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                 IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => Some(*id),
                 _ => None,
             };
-            let name = id.and_then(|id| ctx.reg.name_of(id));
+            let name = id.and_then(|id| ty::udt_path(ctx.reg, id));
             let declared = id.and_then(|id| ctx.reg.structs.iter().find(|d| d.id == id));
             match name {
-                Some(name) => {
-                    let path = ty::ident(name);
+                Some(path) => {
                     let values: Vec<(&String, syn::Expr)> = fields
                         .iter()
                         .map(|(field, value)| {
@@ -1225,7 +1239,7 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
                             let value = want
                                 .and_then(|w| sign_cast(ctx, *value, &w))
                                 .or_else(|| declared_ty.and_then(|t| bool_from_word(ctx, *value, t)))
-                                .unwrap_or_else(|| ctx.value_ref(*value));
+                                .unwrap_or_else(|| field_ref(ctx, id, *value));
                             (field, value)
                         })
                         .collect();
@@ -1255,7 +1269,11 @@ pub(crate) fn binding_expr(ctx: &FnCtx, binding: &Binding) -> syn::Expr {
         Expr::Variant { name: _, payload } => match variant_path(ctx, binding.id) {
             Some(path) if payload.is_empty() => parse_quote!(#path),
             Some(path) => {
-                let args = payload.iter().map(|v| ctx.value_ref(*v));
+                let owner = match &binding.ty {
+                    IrType::Known(KnownType::UserDefined(id)) | IrType::Inferred(KnownType::UserDefined(id)) => Some(*id),
+                    _ => None,
+                };
+                let args = payload.iter().map(|v| field_ref(ctx, owner, *v));
                 parse_quote!(#path(#(#args),*))
             }
             None => ctx.policy.unknown_expr("variant of an unnamed type"),

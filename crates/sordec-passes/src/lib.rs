@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, BytesNConvertPass,
-    BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    AuthEntryPass, BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideInlineDecodePass, WideReturnPass,
     EncodeByRefPass,
 };
@@ -800,6 +800,12 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // above have had their chance at it.
             Box::new(OptionIfLetPass),
             Box::new(VecElementsPass),
+            // The tree of auth entries a contract hands
+            // `authorize_as_current_contract`, in the SDK's own types, once
+            // the vecs it is made of have their elements. Before the buffer
+            // collection below, which then takes the slot stores its maps
+            // and vecs were built from.
+            Box::new(AuthEntryPass),
             // A returned vec is the tuple or enum variant the spec declares,
             // once its elements are known. Before the buffer collection below,
             // which then takes the encodes of its components with the stores.

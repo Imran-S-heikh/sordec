@@ -26,8 +26,8 @@ pub(crate) fn type_ref(ty: &TypeRef, reg: &TypeRegistry, policy: &dyn HolePolicy
     match ty {
         TypeRef::Primitive(p) => primitive(*p),
         TypeRef::Composite(c) => composite(c, reg, policy),
-        TypeRef::UserDefined(id) => match reg.name_of(*id) {
-            Some(name) => named(name),
+        TypeRef::UserDefined(id) => match udt_path(reg, *id) {
+            Some(path) => parse_quote!(#path),
             // A `UserDefined` id absent from the registry is a degenerate,
             // internally-inconsistent case; degrade honestly rather than panic.
             None => policy.unknown_type(None),
@@ -50,6 +50,21 @@ pub(crate) fn ir_type(ty: &IrType, reg: &TypeRegistry, policy: &dyn HolePolicy) 
         IrType::Known(k) | IrType::Inferred(k) => known(k, reg, policy),
         IrType::Unknown(reason) => policy.unknown_type(Some(reason)),
     }
+}
+
+/// The path naming a registered type: its bare name for the contract's
+/// own (`DataKey`), the full path for one the SDK declares
+/// (`soroban_sdk::auth::ContractContext`), which the import collapse
+/// shortens unless the contract declares the same name.
+pub(crate) fn udt_path(reg: &TypeRegistry, id: sordec_common::TypeId) -> Option<syn::Path> {
+    let name = ident(reg.name_of(id)?);
+    Some(match reg.sdk_module(id) {
+        Some(module) => {
+            let module = ident(module);
+            parse_quote!(soroban_sdk::#module::#name)
+        }
+        None => parse_quote!(#name),
+    })
 }
 
 /// A named user-defined type as a path type (`DataKey`).
@@ -233,8 +248,8 @@ fn known(k: &KnownType, reg: &TypeRegistry, policy: &dyn HolePolicy) -> syn::Typ
             let elems: Vec<syn::Type> = items.iter().map(|t| ir_type(t, reg, policy)).collect();
             tuple(&elems)
         }
-        KnownType::UserDefined(id) => match reg.name_of(*id) {
-            Some(name) => named(name),
+        KnownType::UserDefined(id) => match udt_path(reg, *id) {
+            Some(path) => parse_quote!(#path),
             None => policy.unknown_type(None),
         },
     }

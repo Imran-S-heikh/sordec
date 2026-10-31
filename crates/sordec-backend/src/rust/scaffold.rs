@@ -31,7 +31,10 @@ pub(crate) fn macro_imports(types: Option<&TypeRegistry>, has_impl: bool) -> Vec
         names.push(ident("contractimpl"));
     }
     if let Some(t) = types {
-        if !t.structs.is_empty() || !t.unions.is_empty() || !t.enums.is_empty() {
+        // Only for a type the module declares: one the SDK declares is
+        // imported, not derived here.
+        let own = |id| t.sdk_module(id).is_none();
+        if t.structs.iter().any(|d| own(d.id)) || t.unions.iter().any(|d| own(d.id)) || !t.enums.is_empty() {
             names.push(ident("contracttype"));
         }
         if !t.errors.is_empty() {

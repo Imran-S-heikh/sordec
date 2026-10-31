@@ -459,7 +459,7 @@ fn plan_variant(
 
 /// The text of a constant symbol: one the host builds from a string the
 /// pipeline resolved, a `SymbolSmall` word, or that word already decoded.
-fn symbol_text(func: &HighFunction, value: ValueId) -> Option<String> {
+pub(super) fn symbol_text(func: &HighFunction, value: ValueId) -> Option<String> {
     match &func.bindings.get(resolve_use(func, value))?.expr {
         Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew { resolved: Some(text), .. })) => Some(text.clone()),
         Expr::Literal(Literal::Symbol(text)) => Some(text.clone()),

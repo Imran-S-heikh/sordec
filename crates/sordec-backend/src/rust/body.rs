@@ -810,7 +810,7 @@ impl<'a> FnCtx<'a> {
                     // An untyped memory read nothing reads but arithmetic is
                     // the machine word its width says; see `raw_load_word`.
                     out.push(parse_quote!(let #name: #ty = #value;));
-                } else if Self::is_hole_expr(&value)
+                } else if (Self::is_hole_expr(&value) || Self::is_empty_vec(binding))
                     && (self.has_machine_type(vid) || self.has_handle_type_untouched(vid))
                 {
                     // `todo!(…)` has type `!`, so an unannotated `let` leaves
@@ -1120,6 +1120,18 @@ impl<'a> FnCtx<'a> {
     /// that goes stale.
     fn is_hole_expr(value: &syn::Expr) -> bool {
         matches!(value, syn::Expr::Macro(m) if m.mac.path.is_ident("todo"))
+    }
+
+    /// `Vec::new(&e)`: generic in its element as a hole is in its whole
+    /// type, so it is annotated on the same terms one was.
+    fn is_empty_vec(binding: &sordec_ir::Binding) -> bool {
+        matches!(
+            &binding.expr,
+            Expr::Semantic(sordec_ir::SemanticOp::Known(sordec_ir::KnownOp::VecOp {
+                kind: sordec_ir::VecOpKind::New,
+                args,
+            })) if args.is_empty()
+        )
     }
 
     /// Phi assignments for one edge: `vP = <source>;` per transfer pair.
@@ -2428,6 +2440,37 @@ mod tests {
         );
         assert!(body.contains("let v1 : soroban_sdk :: Val = todo !"), "{body}");
         assert!(body.contains("authorize_as_current_contract"), "{body}");
+    }
+
+    /// A vec recovered as the SDK's auth entries goes to the host call as
+    /// it is, and an empty one is `Vec::new`, annotated as a hole would be.
+    #[test]
+    fn auth_entries_typed_as_the_sdks_go_as_they_are() {
+        let reg = TypeRegistry {
+            unions: vec![sordec_ir::UnionDef {
+                id: sordec_common::TypeId::new(0),
+                name: "InvokerContractAuthEntry".to_string(),
+                cases: vec![],
+                exported: false,
+            }],
+            imported: vec![sordec_ir::ImportedType { id: sordec_common::TypeId::new(0), module: "auth".to_string() }],
+            ..Default::default()
+        };
+        let entries =
+            IrType::Known(KnownType::Vec(Box::new(IrType::Known(KnownType::UserDefined(sordec_common::TypeId::new(0))))));
+        let body = emitted(
+            vec![
+                (entries, known(KnownOp::VecOp { kind: sordec_ir::VecOpKind::New, args: vec![] })),
+                (IrType::Known(KnownType::Unit), known(KnownOp::AuthorizeAsCurrContract { auth_entries: v(1) })),
+            ],
+            vec![],
+            &reg,
+        );
+        assert!(
+            body.contains("let v1 : soroban_sdk :: Vec < soroban_sdk :: auth :: InvokerContractAuthEntry > = soroban_sdk :: Vec :: new"),
+            "{body}"
+        );
+        assert!(body.contains("authorize_as_current_contract (v1)"), "{body}");
     }
 
     #[test]

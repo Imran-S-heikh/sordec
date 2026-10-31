@@ -18,10 +18,14 @@ use crate::rust::ty::{ident, is_tuple_struct, type_ref};
 
 /// All user-defined types as top-level items, in registry order: structs,
 /// payload enums, C-style enums, error enums, then events.
+///
+/// A type the SDK declares ([`TypeRegistry::imported`]) is not declared
+/// again: the reconstruction imports it, as the original did.
 pub(crate) fn contract_types(reg: &TypeRegistry, policy: &dyn HolePolicy) -> Vec<syn::Item> {
     let mut items = Vec::new();
-    items.extend(reg.structs.iter().map(|d| struct_item(d, reg, policy)));
-    items.extend(reg.unions.iter().map(|d| union_item(d, reg, policy)));
+    let own = |id| reg.sdk_module(id).is_none();
+    items.extend(reg.structs.iter().filter(|d| own(d.id)).map(|d| struct_item(d, reg, policy)));
+    items.extend(reg.unions.iter().filter(|d| own(d.id)).map(|d| union_item(d, reg, policy)));
     items.extend(reg.enums.iter().map(enum_item));
     items.extend(reg.errors.iter().map(error_item));
     items.extend(reg.events.iter().map(|d| event_item(d, reg, policy)));
@@ -281,6 +285,26 @@ mod tests {
         assert!(out.contains("pub enum DataKey"), "{out}");
         assert!(out.contains("Balance (soroban_sdk :: Address)"), "{out}");
         assert!(out.contains("Admin ,") || out.ends_with("Admin }"), "{out}");
+    }
+
+    /// A type the SDK declares is imported from it, never declared again,
+    /// and is named by its SDK path.
+    #[test]
+    fn a_type_the_sdk_declares_is_not_declared_here() {
+        let reg = TypeRegistry {
+            structs: vec![
+                StructDef { id: TypeId::new(0), name: "State".to_string(), fields: vec![] },
+                StructDef { id: TypeId::new(1), name: "ContractContext".to_string(), fields: vec![] },
+            ],
+            imported: vec![sordec_ir::ImportedType { id: TypeId::new(1), module: "auth".to_string() }],
+            ..Default::default()
+        };
+        let items = contract_types(&reg, &StrictNoGuess);
+        assert_eq!(items.len(), 1);
+        assert!(render(&items[0]).contains("pub struct State"));
+        let path = |id| crate::rust::ty::udt_path(&reg, TypeId::new(id)).unwrap().to_token_stream().to_string();
+        assert_eq!(path(0), "State");
+        assert_eq!(path(1), "soroban_sdk :: auth :: ContractContext");
     }
 
     #[test]
