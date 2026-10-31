@@ -172,6 +172,134 @@ impl Pass<HighIr> for VecElementsPass {
     }
 }
 
+/// Pass name of [`MapEntriesPass`] — also its provenance `pass` field.
+pub const MAP_PASS_NAME: &str = "marshalling-map-entries";
+
+/// Map constructors whose entries were read back out of the frame.
+const M_MAP_RECOVERED: &str = "map_entries_recovered";
+
+/// The longest text a `Symbol` holds.
+const MAX_SYMBOL: usize = 32;
+
+/// Fills in `MapNew`'s entries for a map built only to be published.
+///
+/// An event published with `e.events().publish(topics, data)` whose data a
+/// `#[contractevent]` built, but which no spec declares (a dependency's
+/// event, dropped from the contract's spec), leaves the map construction
+/// behind: `map_new_from_linear_memory` over a key table in rodata and a
+/// frame buffer of values. Nothing names the event, so it is not one; the
+/// map itself is still exactly recoverable, as a vec's elements are.
+///
+/// # Why it is exact
+///
+/// The host builds the map from `len` key strings, each made a `Symbol`,
+/// and the `len` `Val`s in the buffer: the map `{ key_i: val_i }`.
+/// `Map::<Symbol, Val>::from_array` over the same symbols and the same
+/// `Val`s builds the same map — `Symbol::new` makes the same symbol of the
+/// same text (small when it fits, as the host does). Each value is the
+/// word its slot held on every path to the constructor, read exactly as
+/// [`VecElementsPass`] reads an element, typed so that its `Val` is that
+/// word (a constant word through its decode, likewise).
+///
+/// # Gates
+///
+/// - The count and the key table's address constants; every key an
+///   identifier of at most 32 bytes (`read_keys`).
+/// - Every value slot recovered (as for a vec); every value typed.
+/// - The map read by nothing but a publish's data, so no reader expects a
+///   struct the map might have been the encode of. After the event folds
+///   (`contract_event`), which read the buffer themselves.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MapEntriesPass;
+
+impl Pass<HighIr> for MapEntriesPass {
+    fn name(&self) -> &'static str {
+        MAP_PASS_NAME
+    }
+
+    fn run(&self, ir: &mut HighIr) -> PassResult {
+        let mut result = PassResult::default();
+        let memory = ir.memory.clone();
+        for func in &mut ir.functions {
+            let uses = crate::dataflow::HighUseIndex::build(func);
+            let mut found: Vec<(ValueId, Vec<String>, Vec<ValueId>)> = Vec::new();
+            for (id, binding) in func.bindings.iter() {
+                let Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos, vals_pos, len, entries: None })) =
+                    &binding.expr
+                else {
+                    continue;
+                };
+                if !published_only(func, &uses, id) {
+                    continue;
+                }
+                let Some(keys) = trace_u32val(func, *len).and_then(|n| {
+                    super::udt_decode::read_keys(&memory, trace_u32val(func, *keys_pos)?, n)
+                }) else {
+                    continue;
+                };
+                if keys.iter().any(|k| k.len() > MAX_SYMBOL) {
+                    continue;
+                }
+                let Some(values) = recover(func, id, *vals_pos, *len) else { continue };
+                found.push((id, keys, values));
+            }
+            for (id, keys, values) in found {
+                let values = decode_words(func, id, values);
+                if !values.iter().all(|v| typed(func, *v)) {
+                    continue;
+                }
+                let Some(binding) = func.bindings.get_mut(id) else { continue };
+                let Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { entries, .. })) = &mut binding.expr else {
+                    continue;
+                };
+                let n = keys.len();
+                *entries = Some(keys.into_iter().zip(values).collect());
+                binding.ty = IrType::Known(KnownType::Map(
+                    Box::new(IrType::Known(KnownType::Symbol)),
+                    Box::new(IrType::Known(KnownType::Val)),
+                ));
+                binding.add_provenance(Provenance::new(
+                    MAP_PASS_NAME,
+                    ProvenanceSource::DataFlow,
+                    format!("map entries read back: {n} keys from the rodata table, their values from the frame"),
+                ));
+                result.metrics.increment(M_MAP_RECOVERED, 1);
+                result.changed = true;
+            }
+        }
+        result
+    }
+}
+
+/// Whether `map`, and every rename of it, is read only as a publish's data.
+fn published_only(func: &HighFunction, uses: &crate::dataflow::HighUseIndex, map: ValueId) -> bool {
+    use crate::dataflow::HighUseSite;
+    let sites = uses.uses_of(map);
+    !sites.is_empty()
+        && sites.iter().all(|site| {
+            let HighUseSite::Binding { user } = site else { return false };
+            match func.bindings.get(*user).map(|b| &b.expr) {
+                Some(Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics, data }))) => {
+                    *data == map && *topics != map
+                }
+                Some(Expr::Use(_)) => published_only(func, uses, *user),
+                _ => false,
+            }
+        })
+}
+
+/// Whether `v` has a type the emitted Rust names: its binding's, or the
+/// spec's for an entrypoint parameter.
+fn typed(func: &HighFunction, v: ValueId) -> bool {
+    let v = crate::dataflow::resolve_use(func, v);
+    if let Some(index) = func.params.iter().position(|p| *p == v)
+        && func.signature.as_ref().and_then(|s| s.inputs.get(index)).is_some()
+    {
+        return true;
+    }
+    matches!(func.bindings.get(v).map(|b| &b.ty), Some(IrType::Known(_) | IrType::Inferred(_)))
+}
+
 /// The elements with each constant word replaced by the value it encodes,
 /// as a fresh binding scheduled just before the constructor `at`. See the
 /// module doc.
@@ -386,5 +514,80 @@ mod tests {
             panic!("still a VecNew");
         };
         assert!(elements.is_none(), "no half-filled vector");
+    }
+
+    /// The key table `["root"]` at 2000, its text at 3000.
+    fn key_table() -> sordec_ir::MemoryImage {
+        let mut table = Vec::new();
+        table.extend_from_slice(&3000u32.to_le_bytes());
+        table.extend_from_slice(&4u32.to_le_bytes());
+        sordec_ir::MemoryImage::from_segments(vec![
+            sordec_ir::DataSegment { offset: 2000, bytes: table },
+            sordec_ir::DataSegment { offset: 3000, bytes: b"root".to_vec() },
+        ])
+    }
+
+    /// `publish(topics, map_new(["root"], [root]))`, with `root` typed
+    /// `BytesN<32>` (or not); `returned` also returns the map.
+    fn published_map(typed: bool, returned: bool) -> HighIr {
+        let mut f = func_with(
+            vec![
+                Expr::Literal(Literal::I32(0)),    // v0 base
+                Expr::Phi { incoming: vec![] },    // v1 root
+                store(v(0), v(1), 0),              // v2
+                Expr::Literal(Literal::U32(2000)), // v3 the key table
+                Expr::Literal(Literal::U32(1)),    // v4 count
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew {
+                    keys_pos: v(3),
+                    vals_pos: v(0),
+                    len: v(4),
+                    entries: None,
+                })), // v5
+                Expr::Phi { incoming: vec![] }, // v6 topics
+                Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics: v(6), data: v(5) })), // v7
+            ],
+            vec![v(1), v(6)],
+            vec![0, 2, 3, 4, 5, 7],
+        );
+        if typed {
+            f.bindings.get_mut(v(1)).expect("root").ty = IrType::Known(KnownType::BytesN(32));
+        }
+        if returned {
+            f.returns = vec![vec![v(5)]];
+        }
+        let mut built = module(vec![f]);
+        built.memory = key_table();
+        built
+    }
+
+    fn entries_of(ir: &HighIr) -> Option<Vec<(String, ValueId)>> {
+        match &ir.functions[0].bindings.get(v(5)).expect("the map").expr {
+            Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { entries, .. })) => entries.clone(),
+            _ => None,
+        }
+    }
+
+    /// A map built only to be published is the map of its keys and values.
+    #[test]
+    fn a_published_maps_entries_come_back() {
+        let mut ir = published_map(true, false);
+        assert!(MapEntriesPass.run(&mut ir).changed);
+        assert_eq!(entries_of(&ir), Some(vec![("root".to_string(), v(1))]));
+        let symbol_to_val = IrType::Known(KnownType::Map(
+            Box::new(IrType::Known(KnownType::Symbol)),
+            Box::new(IrType::Known(KnownType::Val)),
+        ));
+        assert_eq!(ir.functions[0].bindings.get(v(5)).expect("the map").ty, symbol_to_val);
+    }
+
+    /// A map read as anything else may be a struct's encode, and an
+    /// untyped value has no `Val` to name: both are left.
+    #[test]
+    fn a_map_read_elsewhere_or_of_an_untyped_value_is_left() {
+        for (typed, returned) in [(true, true), (false, false)] {
+            let mut ir = published_map(typed, returned);
+            assert!(!MapEntriesPass.run(&mut ir).changed, "typed {typed}, returned {returned}");
+            assert_eq!(entries_of(&ir), None);
+        }
     }
 }

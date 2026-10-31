@@ -608,7 +608,7 @@ fn inline_site(
     use crate::dataflow::{canon_addr, facts_at, trace_u32val};
     // The data: a map built from the frame, keyed by a rodata table.
     let map = resolve_use(func, data);
-    let Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos, vals_pos, len })) =
+    let Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos, vals_pos, len, .. })) =
         &func.bindings.get(map)?.expr
     else {
         return None;
@@ -1491,7 +1491,7 @@ mod tests {
                 store(1, 0),                                     // v5
                 Expr::Literal(Literal::U32(2000)),               // v6 keys
                 Expr::Literal(Literal::U32(1)),                  // v7 len
-                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(6), vals_pos: v(2), len: v(7) })), // v8
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(6), vals_pos: v(2), len: v(7), entries: None })), // v8
                 Expr::Use(v(8)),                                 // v9 a rename
                 Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics: v(4), data: v(9) })), // v10
             ],
@@ -1595,10 +1595,10 @@ mod tests {
                 Expr::Literal(Literal::U32(1)),                  // v7 len
                 Expr::Literal(Literal::I32(16)),                 // v8
                 Expr::Binary { op: sordec_ir::BinaryOp::Add, lhs: v(1), rhs: v(8) }, // v9
-                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(6), vals_pos: v(9), len: v(7) })), // v10
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(6), vals_pos: v(9), len: v(7), entries: None })), // v10
                 st(1, 10, 0),                                    // v11 the data slot
                 Expr::Literal(Literal::U32(2000)),               // v12 data keys
-                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(12), vals_pos: v(1), len: v(7) })), // v13
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(12), vals_pos: v(1), len: v(7), entries: None })), // v13
                 Expr::Semantic(SemanticOp::Known(KnownOp::PublishEvent { topics: v(3), data: v(13) })), // v14
             ],
             vec![v(0)],

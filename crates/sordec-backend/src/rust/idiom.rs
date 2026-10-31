@@ -345,6 +345,21 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
                 Some(parse_quote!(soroban_sdk::vec![#e, #(#items),*]))
             }
         }
+        // A map built from a key table and a buffer, its entries recovered:
+        // the same map from the same symbols and `Val`s.
+        KnownOp::MapNew { entries: Some(entries), .. } => {
+            let e = ctx.env_borrow();
+            let items = entries.iter().map(|(key, value)| -> syn::Expr {
+                let x = ctx.arg_ref(*value);
+                parse_quote!((
+                    soroban_sdk::Symbol::new(#e, #key),
+                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&#x, #e),
+                ))
+            });
+            Some(parse_quote!(
+                soroban_sdk::Map::<soroban_sdk::Symbol, soroban_sdk::Val>::from_array(#e, [#(#items),*])
+            ))
+        }
         // `Vec::new(&e)` is the SDK's one call of the bare `vec_new`; the
         // element type is the binding's, which the `let` spells.
         KnownOp::VecOp { kind: VecOpKind::New, args } if args.is_empty() => {

@@ -136,7 +136,7 @@ pub use muxed_address::MuxedAddressPass;
 pub use option_default::OptionDefaultPass;
 pub use option_if_let::OptionIfLetPass;
 pub use option_probe::OptionProbePass;
-pub use vec_elements::VecElementsPass;
+pub use vec_elements::{MapEntriesPass, VecElementsPass};
 pub use tuple_param::TupleParamPass;
 pub use tuple_return::TupleReturnPass;
 pub mod host_len;

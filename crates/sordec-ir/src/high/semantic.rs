@@ -793,6 +793,11 @@ pub enum KnownOp {
         vals_pos: ValueId,
         /// Element count of each array.
         len: ValueId,
+        /// The entries, once recovered: each key's text (the rodata key
+        /// table's) with the value its slot held. Like
+        /// [`VecNew::elements`](KnownOp::VecNew), `None` until a pass reads
+        /// them back, after which the constructor no longer reads memory.
+        entries: Option<Vec<(String, ValueId)>>,
     },
 
     // ---- Collections / bytes (recognized by the collections pass) ----
@@ -1173,11 +1178,20 @@ impl KnownOp {
                 keys_pos,
                 vals_pos,
                 len,
-            } => {
-                f(*keys_pos);
-                f(*vals_pos);
-                f(*len);
-            }
+                entries,
+            } => match entries {
+                // As a recovered `VecNew`: the values, not the buffer.
+                Some(entries) => {
+                    for (_, value) in entries {
+                        f(*value);
+                    }
+                }
+                None => {
+                    f(*keys_pos);
+                    f(*vals_pos);
+                    f(*len);
+                }
+            },
             KnownOp::SymbolDispatch {
                 sym,
                 table_pos,
@@ -1458,11 +1472,19 @@ impl KnownOp {
                 keys_pos,
                 vals_pos,
                 len,
-            } => {
-                f(keys_pos);
-                f(vals_pos);
-                f(len);
-            }
+                entries,
+            } => match entries {
+                Some(entries) => {
+                    for (_, value) in entries {
+                        f(value);
+                    }
+                }
+                None => {
+                    f(keys_pos);
+                    f(vals_pos);
+                    f(len);
+                }
+            },
             KnownOp::SymbolDispatch {
                 sym,
                 table_pos,

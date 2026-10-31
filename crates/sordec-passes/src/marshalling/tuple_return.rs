@@ -722,7 +722,7 @@ mod tests {
             store(v(5), 8),                    // v6
             Expr::Literal(Literal::U32(2000)), // v7 keys
             Expr::Literal(Literal::U32(2)),    // v8 len
-            Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(7), vals_pos: v(0), len: v(8) })), // v9
+            Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(7), vals_pos: v(0), len: v(8), entries: None })), // v9
             Expr::Literal(Literal::I64(word)), // v10
             Expr::Semantic(SemanticOp::Known(KnownOp::VecNew {
                 vals_pos: v(0),

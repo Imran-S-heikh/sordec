@@ -1172,6 +1172,17 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io:
             keys_pos,
             vals_pos,
             len,
+            entries: Some(entries),
+        } => {
+            let _ = (keys_pos, vals_pos, len);
+            let items: Vec<String> = entries.iter().map(|(k, v)| format!("{k}: {}", ctx.operand(*v))).collect();
+            write!(out, "map{{{}}}", items.join(", "))
+        }
+        KnownOp::MapNew {
+            keys_pos,
+            vals_pos,
+            len,
+            entries: None,
         } => write!(
             out,
             "map_new({}, {}, {})",
@@ -2117,6 +2128,7 @@ mod tests {
             keys_pos: v(3),
             vals_pos: v(4),
             len: v(5),
+            entries: None,
         }));
         let s = render_to_string(|w| render_expr(w, &expr, &FoldCtx::plain()));
         assert_eq!(s, "map_new(v3, v4, v5)");

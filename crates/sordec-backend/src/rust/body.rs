@@ -2826,6 +2826,27 @@ mod tests {
         assert!(body.contains("let v1 : soroban_sdk :: Map <"), "{body}");
     }
 
+    /// A map whose entries were recovered is built from them: each key's
+    /// symbol, each value's `Val`.
+    #[test]
+    fn a_map_with_recovered_entries_is_built_from_them() {
+        let x = Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(0) };
+        let map = known(KnownOp::MapNew {
+            keys_pos: v(0),
+            vals_pos: v(0),
+            len: v(0),
+            entries: Some(vec![("root".to_string(), v(1))]),
+        });
+        let symbol_to_val = IrType::Known(KnownType::Map(
+            Box::new(IrType::Known(KnownType::Symbol)),
+            Box::new(IrType::Known(KnownType::Val)),
+        ));
+        let body = emitted(vec![(IrType::Known(KnownType::U32), x), (symbol_to_val, map)], vec![ret(2)], &TypeRegistry::default());
+        assert!(body.contains("from_array"), "{body}");
+        assert!(body.contains("Symbol :: new (& e , \"root\")") || body.contains("Symbol :: new (e , \"root\")"), "{body}");
+        assert!(!body.contains("todo !"), "{body}");
+    }
+
     /// A `Vec<Val>`'s element the IR reads as an `i128` is converted to
     /// it; read as the `Val` it is, it is not.
     #[test]

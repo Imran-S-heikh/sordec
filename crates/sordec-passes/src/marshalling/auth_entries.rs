@@ -704,12 +704,12 @@ mod tests {
                 store(v(0), v(3), 0),           // v5
                 store(v(0), v(1), 8),           // v6
                 store(v(0), v(2), 16),          // v7
-                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(19), vals_pos: v(0), len: v(20) })), // v8
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(19), vals_pos: v(0), len: v(20), entries: None })), // v8
                 Expr::Semantic(SemanticOp::Known(KnownOp::VecOp { kind: VecOpKind::New, args: vec![] })), // v9
                 Expr::Phi { incoming: vec![] }, // v10 the invocation's slots
                 store(v(10), v(8), 0),          // v11
                 store(v(10), v(9), 8),          // v12
-                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(21), vals_pos: v(10), len: v(22) })), // v13
+                Expr::Semantic(SemanticOp::Known(KnownOp::MapNew { keys_pos: v(21), vals_pos: v(10), len: v(22), entries: None })), // v13
                 Expr::Semantic(SemanticOp::Known(KnownOp::SymbolNew {
                     lm_pos: v(0),
                     len: v(0),

@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, ByteArrayPass, BytesNConvertPass,
-    AuthEntryPass, BoolCodecPass, ClientArgVecPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, TupleStructEncodePass, EnumSelectPass, IndexOfPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    AuthEntryPass, BoolCodecPass, ClientArgVecPass, MapEntriesPass, VecElementsPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, TupleStructEncodePass, EnumSelectPass, IndexOfPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideInlineDecodePass, WideReturnPass,
     EncodeByRefPass, FromArrayLoopPass, OverwrittenFrameStorePass,
 };
@@ -946,6 +946,9 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // is often built through one.
             Box::new(pass::Rerun::new(SymbolEncoderPass, SYMBOL_ENCODER_AFTER_ELISION, &[])),
             Box::new(ContractEventPass),
+            // A map built only to be published, whose event no spec names:
+            // its entries, after the event folds have read the buffer.
+            Box::new(MapEntriesPass),
             Box::new(MuxedAddressPass),
             // A `Result` an entrypoint builds in its own frame and hands a
             // converter helper: each path's `Ok`/`Err`, merged. Ahead of the
