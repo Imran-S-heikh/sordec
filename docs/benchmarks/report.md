@@ -10,11 +10,11 @@ Scorer `score-2.2.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 | token-v22 | 0.9415 | 0.9286 | 0.9724 | 0.9286 | 1.0000 |
 | token-v23 | 0.8784 | 0.7500 | 0.9724 | 0.9286 | 1.0000 |
 | token-v23-stripped | 0.8228 | 0.6429 | 0.9119 | 0.9286 | 0.6055 |
-| timelock | 1.0000 | 1.0000 | 1.0000 | 1.0000 | n/a |
+| timelock | 0.9790 | 1.0000 | 0.9286 | 1.0000 | n/a |
 | dex-liquidity-pool | 0.9294 | 1.0000 | 0.7599 | 1.0000 | 1.0000 |
 | attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
-| **aggregate (mean, AST)** | **0.9389** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.9396** | | | | |
+| **aggregate (mean, AST)** | **0.9359** | | | | |
+| **aggregate (mean, incl. behaviour)** | **0.9366** | | | | |
 
 ## Per-fixture detail
 
@@ -49,7 +49,7 @@ Scorer `score-2.2.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored
 ### timelock
 
 - **interface** 1.0000 — entrypoints 1.0000  precision=1.0000 recall=1.0000 (2 original, 2 reconstructed) — types 1.0000  precision=1.0000 recall=1.0000 (4 original, 4 reconstructed)
-- **structure** 1.0000 — 2 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=1.0000 recall=1.0000 (5 original tokens, 5 reconstructed) — bloat 1.0x, dice ceiling ~1.0000
+- **structure** 0.9286 — 2 entrypoints (0 unreconstructed, 0 without control flow) — ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound — control flow: precision=0.8333 recall=1.0000 (5 original tokens, 6 reconstructed) — bloat 1.2x, dice ceiling ~0.9091
 - **semantic** 1.0000 — precision=1.0000 recall=1.0000 (10 original facts, 10 reconstructed)
 - **behavior** n/a — behavior unavailable: both modules ran, but every call was a trivial agreement (both sides failed identically), so nothing was actually compared — 2 of 2 entrypoints drivable
 

@@ -1,6 +1,6 @@
 {
-  "aggregate_overall": 0.9388772335090335,
-  "aggregate_overall_with_behavior": 0.9395921753503063,
+  "aggregate_overall": 0.9358760330288415,
+  "aggregate_overall_with_behavior": 0.9365909748701142,
   "behavior_measured_fixtures": 6,
   "fixtures": {
     "attestation": {
@@ -292,9 +292,9 @@
           "notes": [
             "2 entrypoints (0 unreconstructed, 0 without control flow)",
             "ambiguous names (1 original, 1 reconstructed) — their call edges are dropped, so this is a lower bound",
-            "control flow: precision=1.0000 recall=1.0000 (5 original tokens, 5 reconstructed) — bloat 1.0x, dice ceiling ~1.0000"
+            "control flow: precision=0.8333 recall=1.0000 (5 original tokens, 6 reconstructed) — bloat 1.2x, dice ceiling ~0.9091"
           ],
-          "score": 1.0,
+          "score": 0.9285714285714286,
           "weight": 0.25
         }
       },
@@ -305,7 +305,7 @@
       "notes": [
         "basis: macro-expanded — original ABI: 2 entrypoints, 4 types recovered"
       ],
-      "overall": 1.0,
+      "overall": 0.9789915966386553,
       "passed": true,
       "scorer_version": "score-2.2.0",
       "threshold": 0.9,
