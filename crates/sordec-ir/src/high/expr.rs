@@ -254,6 +254,23 @@ pub enum Expr {
         default: ValueId,
     },
 
+    /// Whether a `Result` holds an error: `r.is_err()`. What a test of the
+    /// tag word rustc keeps for the `Result` says.
+    IsErr {
+        /// The `Result`.
+        value: ValueId,
+    },
+
+    /// The discriminant of a `Result`'s error, proven present:
+    /// `r.unwrap_err() as u32`. The error is a `#[repr(u32)]` enum (a
+    /// `#[contracterror]`), so this is the word rustc keeps beside the tag
+    /// on the `Err` side. Placed only where a test on the same `Result`
+    /// proves it an error, so it never traps.
+    ErrCode {
+        /// The `Result`.
+        value: ValueId,
+    },
+
     /// Indirect call via WASM table.
     IndirectCall {
         /// Function table index.
@@ -377,7 +394,9 @@ impl Expr {
                     f(value);
                 }
             }
-            Expr::IsSome { value } | Expr::Unwrap { value, .. } => f(*value),
+            Expr::IsSome { value } | Expr::Unwrap { value, .. } | Expr::IsErr { value } | Expr::ErrCode { value } => {
+                f(*value)
+            }
             Expr::UnwrapOr { value, default } => {
                 f(*value);
                 f(*default);
@@ -507,7 +526,9 @@ impl Expr {
                     f(value);
                 }
             }
-            Expr::IsSome { value } | Expr::Unwrap { value, .. } => f(value),
+            Expr::IsSome { value } | Expr::Unwrap { value, .. } | Expr::IsErr { value } | Expr::ErrCode { value } => {
+                f(value)
+            }
             Expr::UnwrapOr { value, default } => {
                 f(value);
                 f(default);

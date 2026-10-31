@@ -618,6 +618,7 @@ fn copyable(expr: &Expr, this: FuncId) -> bool {
         | Expr::Tuple { .. }
         | Expr::IsSome { .. }
         | Expr::UnwrapOr { .. }
+        | Expr::IsErr { .. }
         | Expr::ArrayRead { .. }
         | Expr::Semantic(_) => true,
         Expr::Call { target, .. } => *target != this,
@@ -632,10 +633,12 @@ fn copyable(expr: &Expr, this: FuncId) -> bool {
         // phis and other unrecovered operators all reach state the
         // caller cannot see through a copy.
         // An `Unwrap`'s proof of presence is a test in the function it sits
-        // in, which a copy does not take along; a variant's payload is
-        // legal only at the opening of its own `match` arm.
+        // in, which a copy does not take along (an error's code likewise); a
+        // variant's payload is legal only at the opening of its own `match`
+        // arm.
         Expr::Project { .. }
         | Expr::Unwrap { .. }
+        | Expr::ErrCode { .. }
         | Expr::VariantPayload { .. }
         | Expr::IndirectCall { .. }
         | Expr::Phi { .. }

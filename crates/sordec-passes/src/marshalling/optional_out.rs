@@ -1402,7 +1402,7 @@ fn rewrite_site(func: &mut HighFunction, plan: &SitePlan, helper: &Helper) {
 }
 
 /// Whether `value` is read only as the condition of an `if`.
-fn cond_only(func: &HighFunction, value: ValueId) -> bool {
+pub(super) fn cond_only(func: &HighFunction, value: ValueId) -> bool {
     let mut bound = false;
     for id in emission_order(func) {
         if let Some(b) = func.bindings.get(id) {
@@ -2289,7 +2289,7 @@ pub(super) fn nearest_writer(
 /// The chain of regions from `root` down to the `Basic` region of
 /// `block`, each with the index of the child taken (0 for single-child
 /// regions; for an `If`, 0 is `then` and 1 is `else`).
-fn path_to(root: &Region, block: BlockId) -> Option<Vec<(&Region, usize)>> {
+pub(super) fn path_to(root: &Region, block: BlockId) -> Option<Vec<(&Region, usize)>> {
     fn go<'r>(region: &'r Region, block: BlockId, path: &mut Vec<(&'r Region, usize)>) -> bool {
         let children: Vec<&Region> = match region {
             Region::Basic(b) => return *b == block,

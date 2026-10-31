@@ -230,6 +230,8 @@ fn is_effectful(expr: &Expr) -> bool {
         | Expr::IsSome { .. }
         | Expr::Unwrap { .. }
         | Expr::UnwrapOr { .. }
+        | Expr::IsErr { .. }
+        | Expr::ErrCode { .. }
         | Expr::ArrayRead { .. } => false,
     }
 }

@@ -745,6 +745,8 @@ fn render_expr(out: &mut impl Write, expr: &Expr, ctx: &FoldCtx<'_>) -> io::Resu
             write!(out, ")")
         }
         Expr::IsSome { value } => write!(out, "is_some({})", ctx.operand(*value)),
+        Expr::IsErr { value } => write!(out, "is_err({})", ctx.operand(*value)),
+        Expr::ErrCode { value } => write!(out, "err_code({})", ctx.operand(*value)),
         Expr::UnwrapOr { value, default } => {
             write!(out, "unwrap_or({}, {})", ctx.operand(*value), ctx.operand(*default))
         }

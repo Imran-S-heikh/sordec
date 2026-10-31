@@ -820,6 +820,10 @@ pub fn expr_effects(expr: &Expr) -> Effects {
         | Expr::IsSome { .. }
         | Expr::Unwrap { .. }
         | Expr::UnwrapOr { .. }
+        // The same for a `Result`: the test is total, and the error's code
+        // is only placed where a test proves the `Result` an error.
+        | Expr::IsErr { .. }
+        | Expr::ErrCode { .. }
         // Bytes of an array value, inside it by construction.
         | Expr::ArrayRead { .. } => Effects::PURE,
         // All lowered unary operators are total (the trapping float→int

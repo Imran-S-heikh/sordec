@@ -190,6 +190,51 @@
 //! (or `u32`) is refused; one read by nothing but the merge is retyped
 //! `u32`, one other things read keeps its word for the typing to settle.
 //!
+//! # A call that tests the pair
+//!
+//! A writer's other callers need not convert its pair. The treasury's
+//! `enroll` is converted by `add_member`, and also called by the
+//! constructor, `if enroll(..).is_err() { panic }`, and by `execute`,
+//! `enroll(..)?`. rustc compiles both to tests of the tag word, and the
+//! `?` to reading the payload word as the error's code on the side that
+//! test sends errors to:
+//!
+//! ```text
+//! s = func47(who, 1)                     s = func47(who, 1)
+//! if eqz(s.0 & 1) { ..; break ok }   →   if !s.is_err() { ..; break ok }
+//! code = s.1 ; break err                 code = s.unwrap_err() as u32 ; break err
+//! ```
+//!
+//! Once the converting calls have said what each edge builds, such a call
+//! takes the `Result` too: its tag reads become `is_err()` (as the `if`'s
+//! own condition when that is all they are, else the tag word chosen on
+//! it), each condition computed from the tag alone becomes `is_err()` or
+//! its negation, and each read of the payload becomes the error's
+//! discriminant.
+//!
+//! Why it is exact: every pair the writer returns is one an edge hands
+//! over, and the converting calls have read each edge: `Ok` edges all hand
+//! one tag constant, `Err` edges another. So the tag is the `Err` constant
+//! exactly when the `Result` is an error — `if s.is_err() { e } else { o }`
+//! is the tag word on every run — and a condition that is a function of
+//! the tag alone (evaluated at both constants, differing) is `is_err()` or
+//! its negation. A payload read placed where such a test proves the `Err`
+//! tag — inside the arm it sends errors to, or after an `if` whose other
+//! arm leaves — reads the code the edge handed over, which is the
+//! discriminant of the error it built: a declared `#[contracterror]` enum
+//! is `#[repr(u32)]`, so `e as u32` is that code. The read never traps:
+//! `unwrap_err()` runs only where the test proved an error.
+//!
+//! Gates: at least one converting call, all agreeing (the arms, the
+//! `Result` type, which component is the tag); each side's edges hand one
+//! tag constant, the two different. The call's result read only through
+//! its two components; nothing in the control flow reads the call or the
+//! payload; each binding reading the payload on the `Err` side by a test
+//! of this call's tag; the payload read at all only when every `Err` edge
+//! builds a declared error enum's variant (the SDK's `Error` is not a
+//! `u32`). A payload read on the `Ok` side is not taken yet. Every call
+//! site qualifies one way or the other, or the writer keeps its pair.
+//!
 //! # A code read from memory, and the spec's `Error`
 //!
 //! An edge's code need not be a constant. A helper's own `Result`, passed
@@ -215,10 +260,10 @@ use sordec_ir::{
     SemanticOp, TypeRegistry, UnaryOp, WasmOpcodeKind,
 };
 
-use super::optional_out::eval;
+use super::optional_out::{cond_only, eval, leaves, path_to};
 use super::result_out::{branch_value, declared_result, is_frame, only_returned};
 use super::sret::emission_order;
-use crate::dataflow::{canon_addr, resolve_use, trace_int, trace_literal, CallIndex};
+use crate::dataflow::{block_containing, canon_addr, resolve_use, trace_int, trace_literal, CallIndex};
 use crate::effects::expr_effects;
 use crate::metrics_catalog::{
     MARSHALLING_RESULT_PAIR_REWRITTEN as M_REWRITTEN, MARSHALLING_RESULT_PAIR_SITES as M_SITES,
@@ -286,9 +331,11 @@ impl Pass<HighIr> for ResultPairPass {
             })
             .collect();
 
-        // Every scheduled call of every writer, planned or refused.
+        // Every scheduled call of every writer: a conversion planned, or a
+        // call that does not convert the pair, decided below once the
+        // conversions have said what its tag means.
         let mut plans: HashMap<FuncId, Vec<(FuncId, SitePlan)>> = HashMap::new();
-        let mut refused: HashSet<FuncId> = HashSet::new();
+        let mut others: HashMap<FuncId, Vec<(FuncId, ValueId, &'static str)>> = HashMap::new();
         for caller in &ir.functions {
             for id in emission_order(caller) {
                 let Some(Expr::Call { target, .. }) = caller.bindings.get(id).map(|b| &b.expr) else {
@@ -303,23 +350,31 @@ impl Pass<HighIr> for ResultPairPass {
                         result.metrics.increment(M_SITES, 1);
                         plans.entry(*target).or_default().push((caller.id, plan));
                     }
-                    Err(why) => {
-                        trace(caller.id, &format!("site v{} -> func_{}: {why}", id.index(), target.index()));
-                        result.metrics.increment(M_SITES_REFUSED, 1);
-                        refused.insert(*target);
-                    }
+                    Err(why) => others.entry(*target).or_default().push((caller.id, id, why)),
+                }
+            }
+        }
+        // A writer no call converts: nothing says what its pair is.
+        for (target, list) in &others {
+            if !plans.contains_key(target) {
+                for (caller, id, why) in list {
+                    trace(*caller, &format!("site v{} -> func_{}: {why}", id.index(), target.index()));
+                    result.metrics.increment(M_SITES_REFUSED, 1);
                 }
             }
         }
 
-        let mut targets: Vec<FuncId> = plans.keys().copied().filter(|t| !refused.contains(t)).collect();
+        let mut targets: Vec<FuncId> = plans.keys().copied().collect();
         targets.sort_unstable();
         for target in targets {
             let sites = &plans[&target];
             let Some((_, first)) = sites.first() else {
                 continue;
             };
-            if sites.iter().any(|(_, p)| p.arms != first.arms || p.ty != first.ty) {
+            if sites
+                .iter()
+                .any(|(_, p)| p.arms != first.arms || p.ty != first.ty || p.components != first.components)
+            {
                 trace(target, "call sites disagree on the result");
                 continue;
             }
@@ -331,10 +386,46 @@ impl Pass<HighIr> for ResultPairPass {
                 trace(target, why);
                 continue;
             }
+            // The calls that do not convert it test its tag, and read its
+            // code where the test proves an error.
+            let mut tests: Vec<(FuncId, TestPlan)> = Vec::new();
+            let mut refused = false;
+            if let Some(list) = others.get(&target) {
+                let reading = tag_reading(func, first);
+                for (caller, id, why) in list {
+                    let planned = reading.as_ref().map_err(|e| *e).and_then(|r| {
+                        let f = ir.function(*caller).ok_or("a missing function")?;
+                        plan_test(f, *id, target, r)
+                    });
+                    match planned {
+                        Ok(plan) => {
+                            trace(*caller, &format!("test site v{} -> func_{} ok", id.index(), target.index()));
+                            result.metrics.increment(M_SITES, 1);
+                            tests.push((*caller, plan));
+                        }
+                        Err(as_test) => {
+                            trace(
+                                *caller,
+                                &format!("site v{} -> func_{}: {why}; as a test: {as_test}", id.index(), target.index()),
+                            );
+                            result.metrics.increment(M_SITES_REFUSED, 1);
+                            refused = true;
+                        }
+                    }
+                }
+            }
+            if refused {
+                continue;
+            }
             let (arms, ty) = (first.arms.clone(), first.ty.clone());
             for (caller, plan) in sites {
                 if let Some(func) = ir.function_mut(*caller) {
                     rewrite_site(func, plan);
+                }
+            }
+            for (caller, plan) in &tests {
+                if let Some(func) = ir.function_mut(*caller) {
+                    rewrite_test(func, plan, &ty);
                 }
             }
             if let Some(func) = ir.function_mut(target) {
@@ -1179,6 +1270,9 @@ struct SitePlan {
     arms: Vec<([ValueId; 2], ArmKind)>,
     /// The `Result` type.
     ty: KnownType,
+    /// Which component of the writer's pair is the tag, and which the
+    /// payload.
+    components: (usize, usize),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1268,7 +1362,14 @@ fn plan_site(
     let pairs: Vec<(ValueId, ValueId)> = writer.edges.iter().map(|p| (p[tag_at], p[payload_at])).collect();
     let kinds = edge_arms(writer_func, &pairs, &reading, err_enum)?;
     let arms = writer.edges.iter().copied().zip(kinds).collect();
-    Ok(SitePlan { call, wrap: *wrap, projects: projects.iter().map(|(p, _)| *p).collect(), arms, ty })
+    Ok(SitePlan {
+        call,
+        wrap: *wrap,
+        projects: projects.iter().map(|(p, _)| *p).collect(),
+        arms,
+        ty,
+        components: (tag_at, payload_at),
+    })
 }
 
 /// The `Result<u32, E>` an entrypoint declares for what `func` returns, and
@@ -1397,6 +1498,320 @@ fn retypable(func: &HighFunction, writer: &Writer, arms: &[([ValueId; 2], ArmKin
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------
+// A call that tests the tag
+// ---------------------------------------------------------------------
+
+/// What the converting calls say the writer's pair is: which component is
+/// the tag and which the payload, and the tag constant every `Ok` edge
+/// and every `Err` edge hands over.
+struct TagReading {
+    tag_at: usize,
+    payload_at: usize,
+    ok_tag: Literal,
+    err_tag: Literal,
+    /// Every `Err` edge builds a value of a declared `#[contracterror]`
+    /// enum, whose discriminant is then the payload word.
+    declared_error: bool,
+}
+
+fn tag_reading(func: &HighFunction, plan: &SitePlan) -> Result<TagReading, &'static str> {
+    let (tag_at, payload_at) = plan.components;
+    let mut ok_tags = Vec::new();
+    let mut err_tags = Vec::new();
+    let mut declared_error = true;
+    for (edge, kind) in &plan.arms {
+        let tag = trace_literal(func, edge[tag_at]).ok_or("a tag that is not a constant")?;
+        match kind {
+            ArmKind::Ok(_) => ok_tags.push(tag),
+            ArmKind::Err(spelling) => {
+                declared_error &= !matches!(spelling, ErrSpelling::Code(_));
+                err_tags.push(tag);
+            }
+        }
+    }
+    let one = |tags: &[Literal]| -> Result<Literal, &'static str> {
+        let first = tags.first().ok_or("a side no edge builds")?;
+        if tags.iter().any(|t| t != first) {
+            return Err("one side's edges hand over different tags");
+        }
+        Ok(first.clone())
+    };
+    let (ok_tag, err_tag) = (one(&ok_tags)?, one(&err_tags)?);
+    if ok_tag == err_tag {
+        return Err("both sides hand over one tag");
+    }
+    Ok(TagReading { tag_at, payload_at, ok_tag, err_tag, declared_error })
+}
+
+/// A call of the writer whose pair is not converted but tested: each read
+/// of the tag, each test made only on it, and each read of the payload,
+/// which the tests prove to be on the `Err` side.
+struct TestPlan {
+    call: ValueId,
+    tags: Vec<ValueId>,
+    payloads: Vec<ValueId>,
+    /// Conditions computed from the tag alone, and whether each holds on
+    /// the `Err` side.
+    tests: Vec<(ValueId, bool)>,
+    /// Bindings reading a payload component, where an error is proven.
+    codes: Vec<(ValueId, ValueId)>,
+    reading: (Literal, Literal),
+}
+
+fn as_i128(lit: &Literal) -> Option<i128> {
+    match lit {
+        Literal::I32(n) => Some(i128::from(*n)),
+        Literal::U32(n) => Some(i128::from(*n)),
+        Literal::I64(n) => Some(i128::from(*n)),
+        Literal::U64(n) => Some(i128::from(*n)),
+        Literal::Bool(b) => Some(i128::from(*b)),
+        _ => None,
+    }
+}
+
+fn plan_test(caller: &HighFunction, call: ValueId, target: FuncId, reading: &TagReading) -> Result<TestPlan, &'static str> {
+    if caller.id == target {
+        return Err("the writer calls itself");
+    }
+    let order = emission_order(caller);
+    let mut tags = Vec::new();
+    let mut payloads = Vec::new();
+    for &id in &order {
+        let b = caller.bindings.get(id).ok_or("a missing binding")?;
+        let mut reads = false;
+        b.expr.for_each_value_use(|u| reads |= resolve_use(caller, u) == call);
+        if !reads {
+            continue;
+        }
+        match &b.expr {
+            Expr::Project { value, index } if resolve_use(caller, *value) == call => {
+                if *index as usize == reading.tag_at {
+                    tags.push(id);
+                } else if *index as usize == reading.payload_at {
+                    payloads.push(id);
+                } else {
+                    return Err("a component that is neither the tag nor the payload");
+                }
+            }
+            _ => return Err("the writer's result is read other than by its components"),
+        }
+    }
+    let mut call_in_region = false;
+    caller.region.for_each_value_use(|u| call_in_region |= resolve_use(caller, u) == call);
+    if call_in_region {
+        return Err("the writer's result is read by the control flow");
+    }
+    let ok = as_i128(&reading.ok_tag).ok_or("a tag that is not an integer")?;
+    let err = as_i128(&reading.err_tag).ok_or("a tag that is not an integer")?;
+
+    // Every condition the region tests that is the tag's alone, as a
+    // `bool` the source would test.
+    let mut tests = Vec::new();
+    caller.region.for_each_node(|node| {
+        if let Region::If { cond, .. } = node
+            && !tags.contains(cond)
+            && boolean(caller, *cond)
+            && let (Some(e), Some(o)) = (eval(caller, *cond, &tags, err, 0), eval(caller, *cond, &tags, ok, 0))
+            && (e != 0) != (o != 0)
+            && !tests.iter().any(|(c, _)| c == cond)
+        {
+            tests.push((*cond, e != 0));
+        }
+    });
+
+    // The payload: read only by bindings, where a test proves an error.
+    let mut codes = Vec::new();
+    for &p in &payloads {
+        let mut in_region = false;
+        caller.region.for_each_value_use(|u| in_region |= u == p);
+        if in_region {
+            return Err("the payload is carried by the control flow");
+        }
+        for &id in &order {
+            let b = caller.bindings.get(id).ok_or("a missing binding")?;
+            let mut reads = false;
+            b.expr.for_each_value_use(|u| reads |= u == p);
+            if !reads {
+                continue;
+            }
+            if !reading.declared_error {
+                return Err("the payload is read, and the error is not a declared enum");
+            }
+            if !on_err_side(caller, id, &tags, ok, err) {
+                return Err("the payload is read where no test proves an error");
+            }
+            codes.push((id, p));
+        }
+    }
+    Ok(TestPlan { call, tags, payloads, tests, codes, reading: (reading.ok_tag.clone(), reading.err_tag.clone()) })
+}
+
+/// Whether `value` is computed as a `bool`: a comparison or a negation.
+fn boolean(func: &HighFunction, value: ValueId) -> bool {
+    match func.bindings.get(value).map(|b| &b.expr) {
+        Some(Expr::Unary { op: UnaryOp::Eqz | UnaryOp::Not, .. }) => true,
+        Some(Expr::Binary { op, .. }) => matches!(
+            op,
+            BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::LtU
+                | BinaryOp::Le
+                | BinaryOp::LeU
+                | BinaryOp::Gt
+                | BinaryOp::GtU
+                | BinaryOp::Ge
+                | BinaryOp::GeU
+        ),
+        _ => false,
+    }
+}
+
+/// Whether `user` runs only where a test on `tags` proves the `Err` tag:
+/// inside the arm such a test sends it to, or after an `if` whose `Ok` arm
+/// leaves.
+fn on_err_side(func: &HighFunction, user: ValueId, tags: &[ValueId], ok: i128, err: i128) -> bool {
+    let Some(block) = block_containing(func, user) else {
+        return false;
+    };
+    let Some(path) = path_to(&func.region, block) else {
+        return false;
+    };
+    // `Some(true)` when the test sends the `Err` tag to its `then`.
+    let polarity = |cond: ValueId| -> Option<bool> {
+        let e = eval(func, cond, tags, err, 0)?;
+        let o = eval(func, cond, tags, ok, 0)?;
+        ((e != 0) != (o != 0)).then_some(e != 0)
+    };
+    for (region, child) in &path {
+        match region {
+            Region::If { cond, .. } => {
+                if polarity(*cond).is_some_and(|err_then| err_then == (*child == 0)) {
+                    return true;
+                }
+            }
+            Region::Sequence(items) => {
+                for item in &items[..*child] {
+                    if let Region::If { cond, then_region, else_region: None } = item
+                        && polarity(*cond) == Some(false)
+                        && leaves(then_region)
+                    {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The tested call yields the `Result`; its tag reads become `is_err()`,
+/// and its payload reads the error's code.
+fn rewrite_test(func: &mut HighFunction, plan: &TestPlan, ty: &KnownType) {
+    rewrite(func, plan.call, None, IrType::Inferred(ty.clone()), "the call returns the `Result` its two registers stood for");
+    let is_err = push(func, Expr::IsErr { value: plan.call }, IrType::Known(KnownType::Bool), "whether the call returned an error");
+    insert_at(func, plan.call, is_err, true);
+    let (ok_tag, err_tag) = &plan.reading;
+    let (ok, err) = (as_i128(ok_tag).unwrap_or(0), as_i128(err_tag).unwrap_or(0));
+    let as_bool = |says_err: bool| {
+        if says_err {
+            Expr::Use(is_err)
+        } else {
+            Expr::Unary { op: UnaryOp::Not, value: is_err }
+        }
+    };
+    for &tag in &plan.tags {
+        if cond_only(func, tag) && (ok != 0) != (err != 0) {
+            rewrite(
+                func,
+                tag,
+                Some(as_bool(err != 0)),
+                IrType::Known(KnownType::Bool),
+                "the tag, tested: whether the call returned an error",
+            );
+            continue;
+        }
+        let ty = func.bindings.get(tag).map(|b| b.ty.clone()).unwrap_or_else(|| IrType::Inferred(literal_type(ok_tag)));
+        let e = push(func, Expr::Literal(err_tag.clone()), IrType::Known(literal_type(err_tag)), "the tag of an `Err` edge");
+        let o = push(func, Expr::Literal(ok_tag.clone()), IrType::Known(literal_type(ok_tag)), "the tag of an `Ok` edge");
+        insert_at(func, tag, e, false);
+        insert_at(func, tag, o, false);
+        rewrite(
+            func,
+            tag,
+            Some(Expr::Select { cond: is_err, if_true: e, if_false: o }),
+            ty,
+            "the tag word, read from the returned `Result`",
+        );
+    }
+    for &(cond, says_err) in &plan.tests {
+        rewrite(
+            func,
+            cond,
+            Some(as_bool(says_err)),
+            IrType::Known(KnownType::Bool),
+            "a test of the tag alone: whether the call returned an error",
+        );
+    }
+    for &(user, payload) in &plan.codes {
+        if matches!(func.bindings.get(user).map(|b| &b.expr), Some(Expr::Use(p)) if *p == payload) {
+            rewrite(
+                func,
+                user,
+                Some(Expr::ErrCode { value: plan.call }),
+                IrType::Known(KnownType::U32),
+                "the payload word where a test proves an error: the error's discriminant",
+            );
+            continue;
+        }
+        let code = push(
+            func,
+            Expr::ErrCode { value: plan.call },
+            IrType::Known(KnownType::U32),
+            "the payload word where a test proves an error: the error's discriminant",
+        );
+        insert_at(func, user, code, false);
+        if let Some(b) = func.bindings.get_mut(user) {
+            b.expr.for_each_value_use_mut(|u| {
+                if *u == payload {
+                    *u = code;
+                }
+            });
+        }
+    }
+    for &p in &plan.payloads {
+        rewrite(
+            func,
+            p,
+            Some(Expr::Literal(Literal::Unit)),
+            IrType::Known(KnownType::Unit),
+            "the payload half of the pair, now read from the returned `Result`",
+        );
+    }
+}
+
+fn literal_type(lit: &Literal) -> KnownType {
+    match lit {
+        Literal::I64(_) => KnownType::I64,
+        Literal::U64(_) => KnownType::U64,
+        Literal::U32(_) => KnownType::U32,
+        Literal::Bool(_) => KnownType::Bool,
+        _ => KnownType::I32,
+    }
+}
+
+/// Schedule `new` beside `anchor` in `anchor`'s block, before or after it.
+fn insert_at(func: &mut HighFunction, anchor: ValueId, new: ValueId, after: bool) {
+    let Some(block) = block_containing(func, anchor).and_then(|b| func.blocks.get_mut(b)) else {
+        return;
+    };
+    if let Some(at) = block.bindings.iter().position(|b| *b == anchor) {
+        block.bindings.insert(at + usize::from(after), new);
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -2326,6 +2741,99 @@ mod tests {
         let mut fs = parts(lit(5), -1, 8, sdk_error());
         fs[5] = caller(Some(bin(BinaryOp::Eq, 3, 1)));
         unchanged(ir(fs, 5));
+    }
+
+    /// func_7, another caller of the writer that tests its pair:
+    /// `s = func0(a, 1); if eqz(s.0 & 1) { return 1 } return s.1`, the
+    /// payload read in `b1` after the test (or, `early`, in `b0` before it).
+    fn tester(early: bool) -> HighFunction {
+        let exprs = vec![
+            param(),                                                      // v0 a
+            lit(1),                                                       // v1
+            call(0, &[0, 1]),                                             // v2 s
+            project(2, 0),                                                // v3 tag
+            project(2, 1),                                                // v4 payload
+            lit(1),                                                       // v5
+            bin(BinaryOp::BitAnd, 3, 5),                                  // v6
+            (Expr::Unary { op: UnaryOp::Eqz, value: v(6) }, untyped()),   // v7 the test
+            (Expr::Use(v(4)), IrType::Inferred(KnownType::U32)),          // v8 the code
+        ];
+        let (b0, b1) = if early { ((1..=8).collect(), vec![]) } else { ((1..=7).collect(), vec![8]) };
+        let region = Region::Sequence(vec![
+            Region::Basic(bb(0)),
+            Region::If { cond: v(7), then_region: Box::new(Region::Return { values: vec![v(1)] }), else_region: None },
+            Region::Basic(bb(1)),
+            Region::Return { values: vec![v(8)] },
+        ]);
+        func(7, exprs, vec![b0, b1], region, vec![0])
+    }
+
+    /// func_7 testing the tag only: `s = func0(a, 1); if s.0 { trap }`.
+    fn tag_tester() -> HighFunction {
+        let exprs = vec![param(), lit(1), call(0, &[0, 1]), project(2, 0)];
+        let region = Region::Sequence(vec![
+            Region::Basic(bb(0)),
+            Region::If { cond: v(3), then_region: Box::new(Region::Unreachable), else_region: None },
+            Region::Return { values: vec![] },
+        ]);
+        func(7, exprs, vec![vec![1, 2, 3]], region, vec![0])
+    }
+
+    fn with(extra: HighFunction, err: TypeRef) -> HighIr {
+        let mut fs = parts(lit(5), -1, 8, err);
+        fs.push(extra);
+        ir(fs, 5)
+    }
+
+    fn is_err_of(f: &HighFunction, id: ValueId, call: ValueId) -> bool {
+        matches!(f.bindings.get(id).map(|b| &b.expr), Some(Expr::IsErr { value }) if *value == call)
+    }
+
+    #[test]
+    fn a_call_that_only_tests_the_tag_asks_is_err() {
+        let mut ir = with(tag_tester(), my_error());
+        assert!(ResultPairPass.run(&mut ir).changed);
+        built(ir.function(FuncId::from_index(0)).unwrap());
+        let t = ir.function(FuncId::from_index(7)).unwrap();
+        assert!(matches!(&t.bindings.get(v(2)).unwrap().ty, IrType::Inferred(KnownType::Result(..))));
+        let Expr::Use(asked) = t.bindings.get(v(3)).unwrap().expr else { panic!("{:?}", t.bindings.get(v(3))) };
+        assert!(is_err_of(t, asked, v(2)), "the `Err` tag is 1: `if s.is_err()`");
+        assert!(t.blocks.get(bb(0)).unwrap().bindings.contains(&asked));
+    }
+
+    #[test]
+    fn a_code_read_where_the_test_proves_an_error_is_its_discriminant() {
+        let mut ir = with(tester(false), my_error());
+        assert!(ResultPairPass.run(&mut ir).changed);
+        let t = ir.function(FuncId::from_index(7)).unwrap();
+        // `eqz(s.0 & 1)` holds on the `Ok` tag: `!s.is_err()`.
+        let Expr::Unary { op: UnaryOp::Not, value } = t.bindings.get(v(7)).unwrap().expr else { panic!() };
+        assert!(is_err_of(t, value, v(2)));
+        assert!(matches!(t.bindings.get(v(8)).unwrap().expr, Expr::ErrCode { value } if value == v(2)));
+        assert_eq!(t.bindings.get(v(8)).unwrap().ty, IrType::Known(KnownType::U32));
+        assert!(matches!(t.bindings.get(v(4)).unwrap().expr, Expr::Literal(Literal::Unit)), "the payload half retires");
+        // The tag word, for whatever else reads it, is chosen on the test.
+        assert!(matches!(t.bindings.get(v(3)).unwrap().expr, Expr::Select { cond, .. } if is_err_of(t, cond, v(2))));
+    }
+
+    #[test]
+    fn a_code_read_before_the_test_keeps_the_pair() {
+        unchanged(with(tester(true), my_error()));
+    }
+
+    #[test]
+    fn a_code_read_with_no_declared_error_enum_keeps_the_pair() {
+        let mut ir = with(tester(false), sdk_error());
+        if let Some(f) = ir.soroban_facts.as_mut() {
+            f.types.errors.clear();
+        }
+        unchanged(ir);
+        // The tag alone is still a test the SDK's `Error` answers.
+        let mut ir = with(tag_tester(), sdk_error());
+        if let Some(f) = ir.soroban_facts.as_mut() {
+            f.types.errors.clear();
+        }
+        assert!(ResultPairPass.run(&mut ir).changed);
     }
 
     #[test]
