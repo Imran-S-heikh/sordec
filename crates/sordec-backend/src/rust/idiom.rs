@@ -572,6 +572,16 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
             let lit = syn::LitStr::new(text, proc_macro2::Span::call_site());
             Some(parse_quote!(soroban_sdk::String::from_str(#eb, #lit)))
         }
+        // `Bytes::from_slice` hands the host the slice's bytes with
+        // `bytes_new_from_linear_memory`, and `resolved` holds exactly the
+        // bytes the binary's call reads.
+        KnownOp::BytesNew {
+            resolved: Some(bytes),
+            ..
+        } => {
+            let items = bytes.iter().map(|b| syn::LitInt::new(&format!("{b:#04x}"), proc_macro2::Span::call_site()));
+            Some(parse_quote!(soroban_sdk::Bytes::from_slice(#eb, &[#(#items),*])))
+        }
 
         // Everything else stays an honest hole (later waves).
         _ => None,
@@ -598,7 +608,9 @@ pub(crate) fn known_op_expr(ctx: &FnCtx, op: &KnownOp) -> Option<syn::Expr> {
 pub(crate) fn ignores_operands(op: &KnownOp) -> bool {
     matches!(
         op,
-        KnownOp::SymbolNew { resolved: Some(_), .. } | KnownOp::StringNew { resolved: Some(_), .. }
+        KnownOp::SymbolNew { resolved: Some(_), .. }
+            | KnownOp::StringNew { resolved: Some(_), .. }
+            | KnownOp::BytesNew { resolved: Some(_), .. }
     )
 }
 
