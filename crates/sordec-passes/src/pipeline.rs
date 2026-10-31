@@ -25,7 +25,7 @@ pub struct Pipeline<Ir> {
     fixpoint_groups: Vec<Range<usize>>,
 }
 
-impl<Ir> Pipeline<Ir> {
+impl<Ir: 'static> Pipeline<Ir> {
     /// Build a pipeline.
     ///
     /// # Panics
@@ -130,6 +130,7 @@ impl<Ir> Pipeline<Ir> {
                     for slot in group.clone() {
                         let pass = &self.passes[slot];
                         let result = pass.run(ir);
+                        diag_validate(&*ir, pass.name());
                         if result.changed {
                             any_changed = true;
                         }
@@ -144,6 +145,7 @@ impl<Ir> Pipeline<Ir> {
             } else {
                 let pass = &self.passes[idx];
                 let result = pass.run(ir);
+                diag_validate(&*ir, pass.name());
                 report.per_pass.push((pass.name(), result));
                 idx += 1;
             }
@@ -212,6 +214,26 @@ impl PipelineReport {
         }
         totals
     }
+}
+
+/// Debug builds, with `SORDEC_VALIDATE_EACH` set: validate the HighIr after
+/// every pass, so a broken invariant names the pass that made it rather than
+/// the next refinement pass to check. Release builds compile it out.
+fn diag_validate<Ir: 'static>(ir: &Ir, pass: &'static str) {
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var_os("SORDEC_VALIDATE_EACH").is_none() {
+            return;
+        }
+        if let Some(h) = (ir as &dyn std::any::Any).downcast_ref::<sordec_ir::HighIr>() {
+            use sordec_ir::Validate as _;
+            if let Err(e) = h.validate() {
+                panic!("pass `{pass}` broke an IR invariant: {e:?}");
+            }
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = (ir, pass);
 }
 
 #[cfg(test)]
@@ -385,3 +407,4 @@ mod tests {
         );
     }
 }
+
