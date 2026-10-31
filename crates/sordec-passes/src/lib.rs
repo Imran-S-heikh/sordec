@@ -98,7 +98,7 @@ pub use memory::{
 pub use marshalling::{
     ArgGuardElisionPass, DeadFrameStorePass, FoldedEncodePass, FrameElisionPass, FrameForwardPass, KeyConstructionElisionPass,
     KeyFieldTypePass, MuxedAddressPass, ContractEventPass, StorageValueTypePass, ByteArrayPass, BytesNConvertPass,
-    AuthEntryPass, BoolCodecPass, ClientArgVecPass, MapEntriesPass, VecElementsPass, VecIterPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, TupleStructEncodePass, EnumSelectPass, IndexOfPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
+    AuthEntryPass, BoolCodecPass, ClientArgVecPass, MapEntriesPass, VecElementsPass, VecIterPass, EnumDiscriminantPass, EnumEncodePass, EnumIterPass, EnumMatchPass, DecoderCallPass, FieldTypePass, OptionDefaultPass, OptionIfLetPass, UdtEncodePass, OptionProbePass, OptionSretPass, OptionalOutParamPass, OptionalPairPass, ResultInlinePass, ResultOutParamPass, ResultPairPass, ErrorCodeReturnPass, TupleStructEncodePass, EnumSelectPass, IndexOfPass, OptionUnwrapPass, ResidualProbePass, TupleParamPass, TupleReturnPass, HostLenPass, MaskedEncodePass, WideEncodePass, OptionParamPass, BoolReturnPass, BoolHelperPass, OptionReturnPass, ScalarDecodePass, SpecFromGuardsPass, TypedReadPass, UdtDecodePass, ValDecodeCollapsePass, ValEncodeCollapsePass,
     WideCodecPass, WideInlineDecodePass, WideReturnPass,
     EncodeByRefPass, FromArrayLoopPass, OverwrittenFrameStorePass,
 };
@@ -1023,6 +1023,11 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // typing, which then reads the payloads' declared types, and of
             // the frame clean-ups below, which collect the slots it frees.
             Box::new(EnumMatchPass),
+            // A host-built value's outlined decode (`ContractExecutable`'s,
+            // in `__check_auth`) whose helper returns `Some` on every value
+            // of the type: the call and its trap go. After the enum passes,
+            // on the helpers' settled `Option` returns.
+            Box::new(DecoderCallPass),
             // A vec search's `Void`-or-`U32Val` result, read as the
             // `Option<u32>` the SDK makes of it: its decode the unwrap, its
             // re-encode for `vec_del` the unwrap's encode. Ahead of the
