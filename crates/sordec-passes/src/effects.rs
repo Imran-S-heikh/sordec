@@ -374,6 +374,12 @@ const TRAP_WRITE_MEM: Effects = Effects {
     writes_memory: true,
     ..Effects::PURE
 };
+const TRAP_RW_MEM: Effects = Effects {
+    may_trap: true,
+    reads_memory: true,
+    writes_memory: true,
+    ..Effects::PURE
+};
 
 /// `x` (context) module, 10 functions.
 fn context_effects(name: &str) -> Option<Effects> {
@@ -519,8 +525,9 @@ fn map_kind_effects(kind: MapOpKind) -> Effects {
     match kind {
         // Allocation of an empty immutable map: nothing to validate.
         MapOpKind::New => Effects::PURE,
-        // Writes the unpacked Vals into guest memory.
-        MapOpKind::UnpackToLinearMemory => TRAP_WRITE_MEM,
+        // Reads the key array at `keys_pos` out of guest memory and writes
+        // the selected Vals to `vals_pos`.
+        MapOpKind::UnpackToLinearMemory => TRAP_RW_MEM,
         // Object-argument ops: tag-validate the handle; get/del/key/val
         // additionally trap on missing keys / out-of-range positions.
         // Reading map contents is not a host read (judgment #2).
@@ -1203,6 +1210,8 @@ mod tests {
             ("b", "j"),
             ("b", "m"),
             ("m", "9"),
+            // map_unpack_to_linear_memory reads its key array at `keys_pos`.
+            ("m", "a"),
             ("v", "g"),
             ("x", "_"),
         ];
