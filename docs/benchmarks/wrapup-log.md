@@ -865,3 +865,11 @@ yields to the type its callers agree on; a shifted comparison prints as the inte
 shifts; a gap read only by a storage set or publish is a `Val`, and an i128 gap keeps its
 type. The treasury: `cargo check` errors 34 → 19, gaps 686 → 627, lines 2,949 → 2,588
 (with fa19876's builtins); it does not build yet.
+
+## 2026-10-31 — commit f94ed92 (an unsigned operator on a gap annotated as a machine word rereads it)
+
+The five sets' totals are unchanged (84/86 compile, 9 errors, 7,988 holes; held-out mean
+0.7882). A correctness guard: a memory-read gap printed as `let v: i64 = todo!(..)` is an
+`i64` to Rust, and an unsigned comparison on it was printed bare, which reads it signed —
+wrong for values with the top bit set once the gap is filled. It is now reread unsigned,
+`(v12 as u64) >= (v16 as u64)`: six comparisons in import_ark_bn254's big-integer code.
