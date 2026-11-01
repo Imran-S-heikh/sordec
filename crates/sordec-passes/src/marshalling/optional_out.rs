@@ -1542,6 +1542,14 @@ impl<'ir> Frames<'ir> {
         self.ir
     }
 
+    /// What `target` can touch through parameter `index`, relative to the
+    /// pointer it is handed (`true` for a write), or `None` when that
+    /// cannot be told. Empty when it touches nothing through it.
+    pub(super) fn param_touches(&self, target: FuncId, index: usize) -> Option<Vec<Touch>> {
+        let extent = self.param_extent(target, index)?;
+        Some(extent.reads.map(|r| (r, false)).into_iter().chain(extent.writes.map(|w| (w, true))).collect())
+    }
+
     /// What the call at `binding` can touch in the frame at `base`, or
     /// `None` when it is handed a pointer into it and the extent is not
     /// known. Empty for a call handed nothing of the frame.
@@ -1623,6 +1631,15 @@ impl<'ir> Frames<'ir> {
             }
         }
         let is_address = |v: ValueId| addresses.contains(&resolve_use(func, v));
+        // Where an address derived from the pointer points, as a forward
+        // offset from it. `canon_addr` folds only constants that are `u32`s:
+        // a negative step (`p + (-8)`) leaves the address its own base, and
+        // reading the offset from that base would place the access wrong.
+        // Such an access is not located, so nothing is told.
+        let located = |v: ValueId| -> Option<u32> {
+            let (base, offset) = canon_addr(func, v);
+            (base == param).then_some(offset)
+        };
         let mut extent = Extent::default();
         for &id in &order {
             if addresses.contains(&id) {
@@ -1631,14 +1648,14 @@ impl<'ir> Frames<'ir> {
             let expr = &func.bindings.get(id)?.expr;
             match expr {
                 Expr::Load { addr, offset, width, .. } if is_address(*addr) => {
-                    let (_, o) = canon_addr(func, *addr);
+                    let o = located(*addr)?;
                     extent.reads = Some(cover(extent.reads, Slot { offset: o.checked_add(*offset)?, bytes: width.bytes() }));
                 }
                 Expr::Store { addr, value, offset, width } if is_address(*addr) => {
                     if is_address(*value) {
                         return None;
                     }
-                    let (_, o) = canon_addr(func, *addr);
+                    let o = located(*addr)?;
                     extent.writes = Some(cover(extent.writes, Slot { offset: o.checked_add(*offset)?, bytes: width.bytes() }));
                 }
                 // A bulk copy or fill on the pointer — the instruction, or a
@@ -1669,7 +1686,7 @@ impl<'ir> Frames<'ir> {
                         if !is_address(*arg) {
                             continue;
                         }
-                        let (_, o) = canon_addr(func, *arg);
+                        let o = located(*arg)?;
                         // The function calling itself with this same pointer
                         // in this same place touches, through it, exactly
                         // what this function does: the extent `X` solves

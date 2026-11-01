@@ -76,7 +76,16 @@
 //!   to +8 of its out-pointer and `index + 1` back; its tags are `0` and
 //!   `2` only. The state is set from the value (`v`, `0`, `vec_len(v)`)
 //!   and nothing but these calls and loads of the index and length touches
-//!   those 16 bytes, so the state is the iterator's own.
+//!   those 16 bytes while the decode uses them, so the state is the
+//!   iterator's own. rustc gives the bytes to other locals once the decode
+//!   is done with them (an event's topics, built in the frame): a forward
+//!   walk (`ordered`) proves no decode access may follow another write to
+//!   them on any path, and that no other read may see what the decode left
+//!   there — which only taking the decode away would change, so such a
+//!   read keeps the decode (as proven, see below) rather than refusing it.
+//!   What a helper handed a frame pointer touches is its summary; one that
+//!   computes with the pointer (`p + 8`) is summarised by the bytes its
+//!   loads and stores reach through it (`udt_decode::widened`).
 //! - **Two decodes may take the same 16 bytes in turn.** rustc gives the
 //!   iterator state of a decode nested in another's arm (a payload's own
 //!   field decoded as the enum again) the frame slot the outer decode is
@@ -174,7 +183,11 @@
 //!   of its name).
 //! - The state: three stores of the value, `0` and its `vec_len`, in one
 //!   block with no call between them; nothing else touches its 16 bytes
-//!   but `next` calls handed it and loads of the index and length. When
+//!   but `next` calls handed it and loads of the index and length, except
+//!   after every decode access on every path, with a reach that can be told
+//!   (a load, a store, a summarised helper, a host collection built from
+//!   memory); a pointer into the frame stored or handed on unsummarised
+//!   refuses. When
 //!   several vectors set it, each setting is such a group, the walk over
 //!   the whole region completes, and every call and state load this
 //!   decode takes follows its setting alone on every path.
@@ -196,7 +209,77 @@
 //! Not taken yet: a variant of several components (`X(a, b)`), a payload
 //! of a numeric type other than `u32` (`i64`, `i128`: their two-form
 //! decodes), a tuple payload, and a payload carried out of its arm by a
-//! merge.
+//! merge (but see below).
+//!
+//! # A decode kept: the variant tested again
+//!
+//! ```rust,ignore
+//! pub fn propose(env: Env, action: Action) -> Result<u32, Error> {
+//!     check_action(&action)?;      // match action { Pay(p) if p.amount <= 0 => Err(..), .. }
+//!     let d = action.clone().to_xdr(&env);
+//!     ..
+//! }
+//! ```
+//!
+//! rustc decodes `action` once and carries each variant's payload out of
+//! its arm in registers — merges that take the payload's value on its own
+//! variant and whatever the register held on the others (the vector's
+//! length, a tag word, `0`). Each later `match` on the variant is a switch
+//! on the same position reading those merges. Such a decode is not taken
+//! apart (the merges and the other switches read it), but everything up to
+//! the payloads is proven as above (`Proof`), and two things follow:
+//!
+//! - **A struct payload's element is typed as the struct.** On the arm of
+//!   `X(S)`, element 1 is `S`'s `Val`, and a struct is carried as its own
+//!   `Val`; the payload's derived decoder helper the arm hands it to is then
+//!   that struct's decode (`udt_decode`), and its slot reads become the
+//!   fields.
+//! - **A later switch on the position becomes a `match` on the value.**
+//!   It selects on the same position, so it takes the arm of the value's
+//!   variant. Each merge its arm of variant `k` reads is, there, the value
+//!   the decode's arm `k` gave it: every path to the later switch went
+//!   through the decode's switch, in arm `k`. Where that value was computed
+//!   from the payload alone, the arm binds the payload and recomputes it
+//!   (`Step`): the element becomes the payload for a type carried as its own
+//!   `Val`, `decode(x)` of a `u32` the payload widened, and every pure step
+//!   between (a field, a limb, a narrowing) is cloned. Where it was computed
+//!   before the decode's switch, it is read as it is.
+//!
+//! ## Why it is exact
+//!
+//! - The position is the variant's (proven as for the decode above), and
+//!   the later switch reads the same SSA value, so the arm it takes is the
+//!   arm of `value`'s variant: selecting on `value` takes the same one.
+//! - A merge every input of which comes out of an arm of the decode's
+//!   switch holds, after it, the input of the arm that ran; the later switch
+//!   lies after the decode's switch in its sequence, so every path to it
+//!   ran exactly that arm last, the one of the same position. On arm `k`
+//!   the merge is therefore arm `k`'s input — one value, or the switch is
+//!   left alone.
+//! - The recomputation reads only the payload and constants, through pure
+//!   operations, and the payload the later arm binds is the one the decode
+//!   read: the same value's same variant.
+//! - A default that stands for one variant and reads its payload becomes
+//!   that variant's arm; the rest of the sequence after the switch, which
+//!   only the default reaches (no arm falls out), moves into it, as for the
+//!   decode's own default above.
+//!
+//! ## Gates
+//!
+//! - The decode proven up to its payloads; the later switch a switch on its
+//!   position, after its switch in the same sequence, every case a variant.
+//! - Each merge read: every input out of the decode's switch; on the arm's
+//!   variant one value; that value computed before the switch (read as is)
+//!   or from the arm's payload element alone through pure steps, the leaves
+//!   the element of a type carried as its own `Val` or `decode` of a `u32`.
+//! - An arm needing the payload stands for one variant; a default that
+//!   moves the rest falls into it.
+//!
+//! The merges stay, read by whatever else reads them (the raw stores of a
+//! struct the value is written into). Where only such holes read one, the
+//! backend leaves out the inputs its declared type cannot hold: nothing
+//! that runs reads it (`hole_read_merges`). That hides the merge's mixed
+//! type; it does not recover it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -261,13 +344,18 @@ impl Pass<HighIr> for EnumIterPass {
         // decoders of a payload that write a `Result` into the frame.
         let gated: HashMap<FuncId, Vec<Option<Gated>>> =
             ir.functions.iter().map(|f| (f.id, gated_summary(ir, f, access.get(&f.id)))).collect();
+        // What a call can touch through a pointer it is handed, for the
+        // decode's checks: a helper that computes with its pointer (`p + 8`)
+        // has no exact summary, but the bytes its loads and stores reach
+        // through it are known (`Frames::param_touches`).
+        let access = super::udt_decode::widened(ir, access);
         let memory = ir.memory.clone();
         let mut sdk_used = false;
         for func in &mut ir.functions {
             let mut tried: HashSet<ValueId> = HashSet::new();
             // A site rewrites the region, so the next is planned afresh.
             for _ in 0..16 {
-                let (site, refused) = plan(func, &memory, &types, context, &nexts, &access, &gated, &mut tried);
+                let (site, refused) = plan(func, &memory, &types, context, &nexts, &access, &gated, &mut tried, &mut Vec::new());
                 result.metrics.increment(mc::MARSHALLING_ENUM_ITER_REFUSED, refused);
                 let Some(site) = site else { break };
                 sdk_used |= types.sdk_module(site.union).is_some();
@@ -275,6 +363,31 @@ impl Pass<HighIr> for EnumIterPass {
                 result.metrics.increment(mc::MARSHALLING_ENUM_ITER_SITES, 1);
                 result.metrics.increment(mc::MARSHALLING_ENUM_ITER_PAYLOADS, payloads);
                 result.changed = true;
+            }
+            // Decodes proven but kept: a struct payload's element is typed
+            // as the struct, and a later switch on the variant becomes a
+            // match on the value (see `rematch`). Planned afresh after each
+            // re-match, which rewrites the region.
+            for _ in 0..8 {
+                let mut kept: Vec<Proof> = Vec::new();
+                let _ = plan(func, &memory, &types, context, &nexts, &access, &gated, &mut HashSet::new(), &mut kept);
+                let mut again = false;
+                for proof in &kept {
+                    let typed = type_struct_payloads(func, proof, &types);
+                    if typed > 0 {
+                        result.metrics.increment(mc::MARSHALLING_ENUM_ITER_PAYLOADS, typed);
+                        result.changed = true;
+                    }
+                    if rematch(func, proof, &types) {
+                        result.metrics.increment(mc::MARSHALLING_ENUM_ITER_SITES, 1);
+                        result.changed = true;
+                        again = true;
+                        break;
+                    }
+                }
+                if !again {
+                    break;
+                }
             }
         }
         // The SDK's types join the registry only when a match names them.
@@ -465,6 +578,29 @@ struct Site {
     /// The default arm becomes an explicit arm for this position; with
     /// `true`, the rest of the sequence after the switch moves into it.
     explicit_default: Option<(u32, bool)>,
+}
+
+/// What a decode's analysis proved before deciding whether it can be taken
+/// away: the value is the enum, `decoded` is its variant's position, the
+/// switch on it takes the arm of that position, and an arm's payload
+/// element is that variant's payload's `Val`.
+#[derive(Debug, Clone)]
+struct Proof {
+    value: ValueId,
+    union: TypeId,
+    /// The variant's position, decoded from the lookup.
+    decoded: ValueId,
+    /// The decode's switch's arms that stand for one variant: its
+    /// position, the arm, and the blocks only that arm reaches.
+    arms: Vec<(u32, ArmKey, HashSet<BlockId>)>,
+    /// Every block of the decode's switch.
+    switch_blocks: HashSet<BlockId>,
+    /// The blocks after the switch in the sequence holding it, which run
+    /// only once it is done.
+    after: HashSet<BlockId>,
+    /// Per variant read: its position, its name, its payload's type, and
+    /// the loads of the payload's `Val`.
+    payloads: Vec<(u32, String, KnownType, Vec<ValueId>)>,
 }
 
 /// The default arm's continuation: the default is `break 'inner`, and the
@@ -832,18 +968,37 @@ fn derived_from(func: &HighFunction, v: ValueId, base: ValueId) -> bool {
     false
 }
 
-/// Whether anything but `allowed` may touch the 16 state bytes at
-/// `base + at`: a load, a store, or an operation handed a pointer that may
-/// reach them. Flow-insensitive, so it refuses more than it must.
-fn foreign_touch(
+/// What one operation does to the 16 state bytes, as masks of those bytes
+/// (bit `i` is byte `at + i`): the bytes it may read, may write, and
+/// writes on every path through it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StateTouch {
+    reads: u16,
+    writes: u16,
+    must: u16,
+}
+
+/// The bits of the 16 state bytes at `at` that `[s, s + w)` covers.
+fn state_mask(at: u32, s: u64, w: u64) -> u16 {
+    let (lo, hi) = (u64::from(at), u64::from(at) + 16);
+    let (a, b) = (s.max(lo), (s + w).min(hi));
+    (a..b).fold(0u16, |m, byte| m | (1 << (byte - lo)))
+}
+
+/// What everything but `allowed` does to the 16 state bytes at
+/// `base + at`: a load, a store, or an operation handed a pointer into
+/// the frame, with exactly the bytes it reaches — or the first operation
+/// whose reach cannot be told (a pointer stored or handed on in a way no
+/// summary describes).
+fn foreign_touches(
     func: &HighFunction,
     base: ValueId,
     at: u32,
     allowed: &HashSet<ValueId>,
     access: &HashMap<FuncId, Vec<Option<ParamAccess>>>,
-) -> Option<ValueId> {
-    let (lo, hi) = (u64::from(at), u64::from(at) + 16);
-    let overlaps = |a: u64, b: u64| a < hi && lo < b;
+) -> Result<HashMap<ValueId, StateTouch>, ValueId> {
+    let mask = |s: u64, w: u64| state_mask(at, s, w);
+    let mut out: HashMap<ValueId, StateTouch> = HashMap::new();
     for (_, id) in scheduled(func) {
         if allowed.contains(&id) {
             continue;
@@ -853,62 +1008,164 @@ fn foreign_touch(
         if !effects.reads_memory && !effects.writes_memory {
             continue;
         }
-        let hit = match expr {
+        let mut t = StateTouch::default();
+        match expr {
             Expr::Load { addr: a, offset, width, .. } => {
                 let (b, k) = canon_addr(func, *a);
                 if b == base {
-                    let s = u64::from(k) + u64::from(*offset);
-                    overlaps(s, s + u64::from(width.bytes()))
-                } else {
-                    derived_from(func, *a, base)
+                    t.reads = mask(u64::from(k) + u64::from(*offset), u64::from(width.bytes()));
+                } else if derived_from(func, *a, base) {
+                    return Err(id);
                 }
             }
             Expr::Store { addr: a, value, offset, width } => {
+                if derived_from(func, *value, base) {
+                    return Err(id);
+                }
                 let (b, k) = canon_addr(func, *a);
-                let into = if b == base {
-                    let s = u64::from(k) + u64::from(*offset);
-                    overlaps(s, s + u64::from(width.bytes()))
-                } else {
-                    derived_from(func, *a, base)
-                };
-                into || derived_from(func, *value, base)
+                if b == base {
+                    let m = mask(u64::from(k) + u64::from(*offset), u64::from(width.bytes()));
+                    t.writes = m;
+                    t.must = m;
+                } else if derived_from(func, *a, base) {
+                    return Err(id);
+                }
             }
-            Expr::Call { target, args } => args.iter().enumerate().any(|(k, a)| {
-                if !derived_from(func, *a, base) {
-                    return false;
+            Expr::Call { target, args } => {
+                for (k, a) in args.iter().enumerate() {
+                    if !derived_from(func, *a, base) {
+                        continue;
+                    }
+                    let (b, off) = addr(func, *a);
+                    if b != base {
+                        return Err(id);
+                    }
+                    let off = u64::from(off);
+                    // Another iterator's `next`, or any summarised helper:
+                    // exactly the bytes it touches through this parameter.
+                    if let Some(acc) = access.get(target).and_then(|s| s.get(k)).and_then(Option::as_ref) {
+                        for (o, w) in &acc.reads {
+                            t.reads |= mask(off + u64::from(*o), u64::from(*w));
+                        }
+                        for (o, w) in &acc.writes {
+                            t.writes |= mask(off + u64::from(*o), u64::from(*w));
+                        }
+                        for (o, w) in &acc.must_writes {
+                            t.must |= mask(off + u64::from(*o), u64::from(*w));
+                        }
+                        continue;
+                    }
+                    return Err(id);
                 }
-                let (b, off) = addr(func, *a);
-                if b != base {
-                    return true;
+            }
+            // The host reading `len` `Val`s from linear memory to build a
+            // collection: exactly those bytes.
+            Expr::Semantic(SemanticOp::Known(op @ (KnownOp::VecNew { elements: None, .. } | KnownOp::MapNew { entries: None, .. }))) => {
+                let (positions, len) = match op {
+                    KnownOp::VecNew { vals_pos, len, .. } => (vec![*vals_pos], *len),
+                    KnownOp::MapNew { keys_pos, vals_pos, len, .. } => (vec![*keys_pos, *vals_pos], *len),
+                    _ => unreachable!(),
+                };
+                let mut unknown = false;
+                expr.for_each_value_use(|u| unknown |= !positions.contains(&u) && derived_from(func, u, base));
+                if unknown {
+                    return Err(id);
                 }
-                // Another iterator's `next`, or any summarised helper:
-                // exactly the bytes it touches through this parameter.
-                let summary = access.get(target).and_then(|s| s.get(k)).and_then(Option::as_ref);
-                match summary {
-                    Some(acc) => acc.reads.iter().chain(&acc.writes).any(|(o, w)| {
-                        let s = u64::from(off) + u64::from(*o);
-                        overlaps(s, s + u64::from(*w))
-                    }),
-                    None => u64::from(off) < hi,
+                for pos in positions {
+                    let p = raw_address(func, pos);
+                    if !derived_from(func, p, base) {
+                        continue;
+                    }
+                    let (b, off) = canon_addr(func, p);
+                    let n = trace_u32val(func, len).ok_or(id)?;
+                    if b != base {
+                        return Err(id);
+                    }
+                    t.reads |= mask(u64::from(off), u64::from(n) * 8);
                 }
-            }),
+            }
             other => {
-                let mut hit = false;
+                let mut unknown = false;
                 other.for_each_value_use(|u| {
-                    if hit || !derived_from(func, u, base) {
+                    if unknown || !derived_from(func, u, base) {
                         return;
                     }
                     let (b, off) = addr(func, u);
-                    hit = b != base || u64::from(off) < hi;
+                    unknown = b != base || u64::from(off) < u64::from(at) + 16;
                 });
-                hit
+                if unknown {
+                    return Err(id);
+                }
             }
-        };
-        if hit {
-            return Some(id);
+        }
+        if t != StateTouch::default() {
+            out.insert(id, t);
         }
     }
-    None
+    Ok(out)
+}
+
+/// The forward walk behind [`ordered`]: on each path, the state bytes whose
+/// content may be the decode's, and whether anything else may have written
+/// the state since.
+struct Order<'a> {
+    decode: &'a HashMap<ValueId, u16>,
+    foreign: &'a HashMap<ValueId, StateTouch>,
+    /// A decode access some foreign write may precede.
+    late: Option<ValueId>,
+    /// A foreign read that may see bytes the decode wrote.
+    sees: Option<ValueId>,
+}
+
+impl reach::Flow for Order<'_> {
+    type State = (u16, bool);
+
+    fn join(into: &mut Self::State, other: &Self::State) {
+        into.0 |= other.0;
+        into.1 |= other.1;
+    }
+
+    fn step(&mut self, id: ValueId, state: &mut Self::State) {
+        if let Some(writes) = self.decode.get(&id) {
+            if state.1 {
+                self.late.get_or_insert(id);
+            }
+            state.0 |= *writes;
+        } else if let Some(t) = self.foreign.get(&id) {
+            if t.reads & state.0 != 0 {
+                self.sees.get_or_insert(id);
+            }
+            state.0 &= !t.must;
+            state.1 |= t.writes != 0;
+        }
+    }
+}
+
+/// Whether the foreign touches leave the decode alone, by a forward walk of
+/// the region tree: `Err` when a decode access (a setting store, a `next`
+/// call, a load of the index or length) may run after something else wrote
+/// the state — its bytes are then not the decode's own, and nothing about
+/// it is proven. `Ok(Some(..))` when only a foreign read may see bytes the
+/// decode wrote — the decode is what it is, but taking it away would change
+/// what that read sees. `decode` holds each decode access with the state
+/// bytes it may write.
+fn ordered(
+    func: &HighFunction,
+    decode: &HashMap<ValueId, u16>,
+    foreign: &HashMap<ValueId, StateTouch>,
+) -> Result<Option<String>, String> {
+    if foreign.is_empty() {
+        return Ok(None);
+    }
+    let mut flow = Order { decode, foreign, late: None, sees: None };
+    let walked = reach::walk(func, &mut flow, (0, false));
+    if !walked.complete {
+        return Err("the walk over the state's other users did not settle".into());
+    }
+    if let Some(id) = flow.late {
+        return Err(format!("{id:?} may run after something else wrote the iterator state"));
+    }
+    Ok(flow.sees.map(|id| format!("{id:?} may read what the decode left in the iterator state")))
 }
 
 /// The enum's variant names, if `lookup` is the derived decode's symbol
@@ -1001,6 +1258,7 @@ fn plan(
     access: &HashMap<FuncId, Vec<Option<ParamAccess>>>,
     gated: &HashMap<FuncId, Vec<Option<Gated>>>,
     tried: &mut HashSet<ValueId>,
+    kept: &mut Vec<Proof>,
 ) -> (Option<Site>, i64) {
     let order = scheduled(func);
     let mut refused = 0;
@@ -1017,7 +1275,8 @@ fn plan(
         if !tried.insert(*len) {
             continue;
         }
-        match site(func, memory, types, nexts, access, gated, &order, *len, value, union) {
+        let mut proof = None;
+        match site(func, memory, types, nexts, access, gated, &order, *len, value, union, &mut proof) {
             Ok(mut s) => {
                 s.element = element;
                 return (Some(s), refused);
@@ -1025,13 +1284,16 @@ fn plan(
             Err(why) => {
                 refused += 1;
                 trace(func, &format!("decode of {value:?} refused: {why}"));
+                if let Some(p) = proof {
+                    kept.push(p);
+                }
             }
         }
     }
     (None, refused)
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::cognitive_complexity)]
 fn site(
     func: &HighFunction,
     memory: &sordec_ir::MemoryImage,
@@ -1043,6 +1305,7 @@ fn site(
     len: ValueId,
     value: ValueId,
     union: &UnionDef,
+    proven: &mut Option<Proof>,
 ) -> Result<Site, String> {
     if union.cases.iter().any(|c| c.fields.len() > 1) {
         return Err("a variant with several payload components".into());
@@ -1186,9 +1449,15 @@ fn site(
     allowed.extend(calls.iter().map(|(c, _)| *c));
     allowed.extend(state_loads.iter().copied());
     allowed.extend(others.iter().copied());
-    if let Some(other) = foreign_touch(func, base, at, &allowed, access) {
-        return Err(format!("{other:?} may touch the iterator state"));
-    }
+    // Everything else that touches the state's bytes must run after the
+    // decode is done with them; a read of what the decode left there keeps
+    // the decode, which taking it away would change (`blocked`).
+    let foreign = foreign_touches(func, base, at, &allowed, access)
+        .map_err(|other| format!("{other:?} may touch the iterator state"))?;
+    let mut decode_writes: HashMap<ValueId, u16> = HashMap::from([(*s_vec, 0x00ff), (s_idx, 0x0f00), (s_len, 0xf000)]);
+    decode_writes.extend(calls.iter().map(|(c, _)| (*c, 0x0f00)));
+    decode_writes.extend(state_loads.iter().map(|l| (*l, 0)));
+    let mut blocked: Option<String> = ordered(func, &decode_writes, &foreign)?;
 
     // Each call's slot: its tag and element reads.
     let dummy = StructDef { id: TypeId::new(0), name: String::new(), fields: Vec::new() };
@@ -1257,6 +1526,18 @@ fn site(
     let decoded = *decoded;
     let mut found = Vec::new();
     find_switch(func, &func.region, decoded, &mut found);
+    // Several switches on the position: the decode's is the one whose arms
+    // hold every payload call; the others test the variant again later
+    // (see `rematch`), which keeps the decode.
+    if found.len() > 1 {
+        let payload_blocks: HashSet<BlockId> =
+            calls.iter().filter(|(c, _)| *c != first).filter_map(|(c, _)| block_of.get(c).copied()).collect();
+        found.retain(|(sw, _)| !payload_blocks.is_empty() && blocks_in(sw).is_superset(&payload_blocks));
+        // The decode's switch holds the payload calls; one nested in its arm
+        // would hold them too, so the outermost is the first found.
+        found.truncate(1);
+        blocked.get_or_insert_with(|| "the position is switched on again".into());
+    }
     let [(switch, holder)] = found.as_slice() else {
         return Err(format!("{} switches on the position", found.len()));
     };
@@ -1356,6 +1637,39 @@ fn site(
         if !union.cases[case as usize].fields.is_empty() && !by_arm.contains_key(key) {
             return Err(format!("the arm of `{}` reads no payload", union.cases[case as usize].name));
         }
+    }
+    // Every payload read sits in its arm.
+    for p in &payloads {
+        let bs = &arm_blocks.iter().find(|(k, _)| *k == p.arm).expect("an arm").1;
+        for load in &p.loads {
+            if !block_of.get(load).is_some_and(|b| bs.contains(b)) {
+                return Err(format!("{load:?} reads a payload outside its arm"));
+            }
+        }
+    }
+    // The decode is proven here: the value, its variant's position, the
+    // switch on it and each arm's payload element. What follows decides
+    // only whether it can be taken away.
+    *proven = Some(Proof {
+        value,
+        union: union.id,
+        decoded,
+        arms: arm_blocks
+            .iter()
+            .filter_map(|(key, blocks)| Some((case_of(*key)?, *key, blocks.clone())))
+            .collect(),
+        switch_blocks: blocks_in(switch),
+        after: match holder {
+            Some((items, i)) => items[i + 1..].iter().flat_map(blocks_in).collect(),
+            None => HashSet::new(),
+        },
+        payloads: payloads
+            .iter()
+            .filter_map(|p| Some((case_of(p.arm)?, p.variant.clone(), p.ty.clone(), p.loads.clone())))
+            .collect(),
+    });
+    if let Some(why) = blocked.take() {
+        return Err(why);
     }
 
     // What goes: the length, the state, the calls, their tags, element 0,
@@ -1662,15 +1976,6 @@ fn site(
     let hoist = hoist.filter(|_| {
         by_arm.get(&ArmKey::Default).and_then(|c| block_of.get(c)).is_some_and(|b| !in_default.contains(b))
     });
-    // Every payload read sits in its arm.
-    for p in &payloads {
-        let bs = &arm_blocks.iter().find(|(k, _)| *k == p.arm).expect("an arm").1;
-        for load in &p.loads {
-            if !block_of.get(load).is_some_and(|b| bs.contains(b)) {
-                return Err(format!("{load:?} reads a payload outside its arm"));
-            }
-        }
-    }
     trace(
         func,
         &format!(
@@ -1967,6 +2272,418 @@ fn rewrite_switch(
     }
 }
 
+// ---------------------------------------------------------------------
+// A decode kept: its struct payloads typed, its variant re-matched
+// ---------------------------------------------------------------------
+
+/// The `Val` of a struct payload, typed as the struct the declaration
+/// gives it: the payload element of the variant's arm is that variant's
+/// payload, and a struct is carried as its own `Val`. A decoder helper
+/// the arm hands it to is then that struct's decode at the call
+/// (`udt_decode`). The count typed.
+fn type_struct_payloads(func: &mut HighFunction, proof: &Proof, types: &TypeRegistry) -> i64 {
+    let mut n = 0;
+    for (_, variant, ty, loads) in &proof.payloads {
+        let KnownType::UserDefined(id) = ty else { continue };
+        let Some(def) = types.structs.iter().find(|s| s.id == *id) else { continue };
+        let want = IrType::Known(ty.clone());
+        for load in loads {
+            let Some(b) = func.bindings.get_mut(*load) else { continue };
+            if b.ty == want {
+                continue;
+            }
+            b.ty = want.clone();
+            b.add_provenance(Provenance::new(
+                PASS_NAME,
+                ProvenanceSource::SdkPattern,
+                format!("the payload of `{variant}` read by the enum's derived decode: a `{}` as declared", def.name),
+            ));
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Per arm a re-match opens: the bindings it opens with (the payload, then
+/// what is recomputed from it) and each merge it reads, renamed.
+type Openings = HashMap<ArmKey, (Vec<ValueId>, HashMap<ValueId, ValueId>)>;
+
+/// One step of a payload value's re-derivation: a binding cloned with its
+/// operands renamed, or the payload itself standing for its element.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    /// The element is the payload (a type carried as its own `Val`).
+    Payload(ValueId),
+    /// `decode(element)` of a `u32` payload: the payload widened.
+    Decode(ValueId),
+    /// A pure binding computed from earlier steps and constants.
+    Clone(ValueId),
+}
+
+/// How `v` is computed from the payload element `loads` alone, as the
+/// steps that recompute it in order; `None` when it reads anything else
+/// the decode's switch computed.
+fn derivation(
+    func: &HighFunction,
+    v: ValueId,
+    loads: &[ValueId],
+    ty: &KnownType,
+    types: &TypeRegistry,
+    out: &mut Vec<Step>,
+    seen: &mut HashSet<ValueId>,
+) -> Option<()> {
+    if !seen.insert(v) {
+        return Some(());
+    }
+    if seen.len() > 64 {
+        return None;
+    }
+    if loads.contains(&v) {
+        val_is_value(ty).then_some(())?;
+        out.push(Step::Payload(v));
+        return Some(());
+    }
+    let expr = &func.bindings.get(v)?.expr;
+    match expr {
+        Expr::Semantic(SemanticOp::Known(KnownOp::ValDecodeSmall { value })) => {
+            (loads.contains(&resolve_use(func, *value)) && decodes_as_u32(ty, types)).then_some(())?;
+            out.push(Step::Decode(v));
+            return Some(());
+        }
+        Expr::Literal(_) => {}
+        Expr::Use(_)
+        | Expr::Unary { .. }
+        | Expr::Binary { .. }
+        | Expr::Field { .. }
+        | Expr::WideJoin { .. }
+        | Expr::Select { .. } => {
+            if !matches!(expr, Expr::Use(_)) && !pure(expr) {
+                return None;
+            }
+            let mut operands = Vec::new();
+            expr.for_each_value_use(|u| operands.push(u));
+            for u in operands {
+                derivation(func, u, loads, ty, types, out, seen)?;
+            }
+        }
+        _ => return None,
+    }
+    out.push(Step::Clone(v));
+    Some(())
+}
+
+/// An arm a re-match opens with the payload: the arm, its variant's
+/// position, and each merge it reads with that merge's value there.
+type ArmOpen = (ArmKey, u32, Vec<(ValueId, ValueId)>);
+
+/// A later switch on a kept decode's position, planned: which arms open
+/// with the payload, and the merges each reads re-derived from it.
+#[derive(Debug)]
+struct Rematch {
+    /// The switch's blocks, which name it.
+    blocks: HashSet<BlockId>,
+    /// Per arm reading a merge the decode's arm of its variant computed:
+    /// the arm, its variant's position, and each merge with its value on
+    /// that variant.
+    opens: Vec<ArmOpen>,
+    /// The default stands for one variant and reads its payload: it becomes
+    /// that variant's arm, and with `true` the rest of the sequence after
+    /// the switch, which only it reaches, moves into it.
+    explicit_default: Option<(u32, bool)>,
+}
+
+/// The values a region reads: every scheduled binding's operands in its
+/// blocks, and its own (conditions, selectors, transfer sources).
+fn reads_in(func: &HighFunction, region: &Region, out: &mut BTreeSet<ValueId>) {
+    for b in blocks_in(region) {
+        let Some(block) = func.blocks.get(b) else { continue };
+        for id in &block.bindings {
+            if let Some(binding) = func.bindings.get(*id) {
+                binding.expr.for_each_value_use(|u| {
+                    out.insert(u);
+                });
+            }
+        }
+    }
+    region.for_each_value_use(|u| {
+        out.insert(u);
+    });
+}
+
+/// The next later switch on `proof`'s position worth re-matching on the
+/// value, planned; `None` when none is.
+#[allow(clippy::too_many_lines)]
+fn plan_rematch(func: &HighFunction, proof: &Proof, types: &TypeRegistry) -> Option<Rematch> {
+    let union = types.unions.iter().find(|u| u.id == proof.union)?;
+    let n = union.cases.len() as u32;
+    let case_of_block: HashMap<BlockId, u32> =
+        proof.arms.iter().flat_map(|(c, _, bs)| bs.iter().map(move |b| (*b, *c))).collect();
+    let def_block: HashMap<ValueId, BlockId> = scheduled(func).into_iter().map(|(b, v)| (v, b)).collect();
+    let mut found = Vec::new();
+    find_switch(func, &func.region, proof.decoded, &mut found);
+    'switches: for (sw, holder) in &found {
+        let sw_blocks = blocks_in(sw);
+        // After the decode's switch: every path to it went through that
+        // switch, in the arm of the same position.
+        if sw_blocks.is_empty() || !sw_blocks.is_subset(&proof.after) {
+            continue;
+        }
+        let Region::Switch { arms, default, .. } = sw else { continue };
+        if arms.iter().flat_map(|a| &a.cases).any(|c| *c >= n) {
+            trace(func, "rematch: a case that is no variant");
+            continue;
+        }
+        let named: HashSet<u32> = arms.iter().flat_map(|a| a.cases.iter().copied()).collect();
+        let missing: Vec<u32> = (0..n).filter(|c| !named.contains(c)).collect();
+        // The rest of the sequence, when no arm falls out of the switch:
+        // only the default reaches it.
+        let rest: &[Region] = match holder {
+            Some((items, i)) if !arms.iter().any(|a| falls_through(&a.body)) => &items[i + 1..],
+            _ => &[],
+        };
+        let mut keyed: Vec<(ArmKey, Option<u32>, BTreeSet<ValueId>)> = Vec::new();
+        for (i, arm) in arms.iter().enumerate() {
+            let mut reads = BTreeSet::new();
+            reads_in(func, &arm.body, &mut reads);
+            let case = match arm.cases.as_slice() {
+                [c] => Some(*c),
+                _ => None,
+            };
+            keyed.push((ArmKey::Arm(i), case, reads));
+        }
+        let mut reads = BTreeSet::new();
+        reads_in(func, default, &mut reads);
+        for r in rest {
+            reads_in(func, r, &mut reads);
+        }
+        let default_case = match missing.as_slice() {
+            [c] => Some(*c),
+            _ => None,
+        };
+        keyed.push((ArmKey::Default, default_case, reads));
+
+        let mut opens: Vec<ArmOpen> = Vec::new();
+        for (key, case, reads) in keyed {
+            let mut merges: Vec<(ValueId, ValueId)> = Vec::new();
+            for p in reads {
+                // A merge of the decode's switch: every value it takes comes
+                // out of one of its arms.
+                let Some(Expr::Phi { incoming }) = func.bindings.get(p).map(|b| &b.expr) else { continue };
+                if incoming.is_empty() || !incoming.iter().all(|(b, _)| proof.switch_blocks.contains(b)) {
+                    continue;
+                }
+                let inside = |v: ValueId| def_block.get(&v).is_some_and(|b| proof.switch_blocks.contains(b));
+                let Some(k) = case else {
+                    // Several variants: the merge is read as it is, which is
+                    // its value whatever arm set it.
+                    continue;
+                };
+                let values: BTreeSet<ValueId> = incoming
+                    .iter()
+                    .filter(|(b, _)| case_of_block.get(b) == Some(&k))
+                    .map(|(_, v)| resolve_use(func, *v))
+                    .collect();
+                let [e] = values.iter().copied().collect::<Vec<_>>()[..] else {
+                    trace(func, &format!("rematch: {p:?} takes {} values on variant {k}", values.len()));
+                    continue 'switches;
+                };
+                // Computed before the switch: in scope, and read as it is.
+                if !inside(e) {
+                    continue;
+                }
+                let Some((_, _, ty, loads)) = proof.payloads.iter().find(|(c, ..)| *c == k) else {
+                    trace(func, &format!("rematch: {p:?} is computed on variant {k}, which reads no payload"));
+                    continue 'switches;
+                };
+                let mut steps = Vec::new();
+                if derivation(func, e, loads, ty, types, &mut steps, &mut HashSet::new()).is_none() {
+                    trace(func, &format!("rematch: {p:?} is not computed from the payload alone on variant {k}"));
+                    continue 'switches;
+                }
+                merges.push((p, e));
+            }
+            if merges.is_empty() {
+                continue;
+            }
+            let Some(k) = case else { continue 'switches };
+            opens.push((key, k, merges));
+        }
+        if opens.is_empty() {
+            continue;
+        }
+        let explicit_default =
+            opens.iter().find(|(key, ..)| *key == ArmKey::Default).map(|(_, k, _)| (*k, !rest.is_empty()));
+        if explicit_default.is_some_and(|(_, moves)| moves) && !falls_through(default) {
+            trace(func, "rematch: the default does not fall into the rest");
+            continue;
+        }
+        return Some(Rematch { blocks: sw_blocks, opens, explicit_default });
+    }
+    None
+}
+
+/// Re-match one later switch on a kept decode's position as a `match` on
+/// the value; the merges its arms read become their values recomputed from
+/// the payload the arm binds. Whether one was.
+fn rematch(func: &mut HighFunction, proof: &Proof, types: &TypeRegistry) -> bool {
+    let Some(plan) = plan_rematch(func, proof, types) else { return false };
+    let prov = |note: String| Provenance::new(PASS_NAME, ProvenanceSource::SdkPattern, note);
+    let mut opening: Openings = HashMap::new();
+    for (key, k, merges) in &plan.opens {
+        let Some((_, variant, ty, loads)) = proof.payloads.iter().find(|(c, ..)| c == k) else { return false };
+        let p = ValueId::new(func.bindings.len() as u32);
+        func.bindings.push(sordec_ir::Binding::new(
+            p,
+            IrType::Known(ty.clone()),
+            Expr::VariantPayload { value: proof.value, variant: variant.clone(), index: 0 },
+            prov(format!("the payload of `{variant}`, bound again where the variant is tested again")),
+        ));
+        let mut bindings = vec![p];
+        let mut renamed: HashMap<ValueId, ValueId> = HashMap::new();
+        let mut map: HashMap<ValueId, ValueId> = HashMap::new();
+        for (merge, value) in merges {
+            let mut steps = Vec::new();
+            if derivation(func, *value, loads, ty, types, &mut steps, &mut HashSet::new()).is_none() {
+                return false;
+            }
+            for step in steps {
+                match step {
+                    Step::Payload(v) => {
+                        renamed.insert(v, p);
+                    }
+                    Step::Decode(v) => {
+                        if renamed.contains_key(&v) {
+                            continue;
+                        }
+                        let id = ValueId::new(func.bindings.len() as u32);
+                        func.bindings.push(sordec_ir::Binding::new(
+                            id,
+                            IrType::Inferred(KnownType::I64),
+                            Expr::Unary { op: UnaryOp::ExtendU32, value: p },
+                            prov("the payload's `Val` decoded is its value: the body of a `U32Val`".into()),
+                        ));
+                        bindings.push(id);
+                        renamed.insert(v, id);
+                    }
+                    Step::Clone(v) => {
+                        if renamed.contains_key(&v) {
+                            continue;
+                        }
+                        let Some(orig) = func.bindings.get(v) else { return false };
+                        let mut expr = orig.expr.clone();
+                        let ty = orig.ty.clone();
+                        expr.for_each_value_use_mut(|u| {
+                            if let Some(to) = renamed.get(u) {
+                                *u = *to;
+                            }
+                        });
+                        let id = ValueId::new(func.bindings.len() as u32);
+                        func.bindings.push(sordec_ir::Binding::new(
+                            id,
+                            ty,
+                            expr,
+                            prov(format!(
+                                "{v:?} recomputed from the payload of `{variant}`, which the decode computed it from"
+                            )),
+                        ));
+                        bindings.push(id);
+                        renamed.insert(v, id);
+                    }
+                }
+            }
+            let Some(to) = renamed.get(value).copied() else { return false };
+            map.insert(*merge, to);
+        }
+        opening.insert(*key, (bindings, map));
+    }
+    let region = std::mem::replace(&mut func.region, Region::Unreachable);
+    func.region = rewrite_rematch(func, region, &plan, proof, &mut opening);
+    trace(func, &format!("rematch: a later switch on the variant of {:?}, {} arms opened", proof.value, plan.opens.len()));
+    true
+}
+
+/// `region` with the planned switch selecting on the value: its planned
+/// arms open with the payload and their re-derived merges, the default made
+/// its variant's arm (with the rest moved in) when planned.
+fn rewrite_rematch(
+    func: &mut HighFunction,
+    region: Region,
+    plan: &Rematch,
+    proof: &Proof,
+    opening: &mut Openings,
+) -> Region {
+    let is_ours = |r: &Region| matches!(r, Region::Switch { .. }) && blocks_in(r) == plan.blocks;
+    match region {
+        Region::Sequence(items) => {
+            let mut out: Vec<Region> = Vec::new();
+            let mut it = items.into_iter();
+            while let Some(item) = it.next() {
+                if is_ours(&item) && matches!(plan.explicit_default, Some((_, true))) {
+                    let rest: Vec<Region> = it.by_ref().collect();
+                    let Region::Switch { index, arms, default, dispatch } = item else { unreachable!() };
+                    let default = Region::Sequence(std::iter::once(*default).chain(rest).collect());
+                    let whole = Region::Switch { index, arms, default: Box::new(default), dispatch };
+                    out.push(rewrite_rematch_switch(func, whole, plan, proof, opening));
+                    break;
+                }
+                out.push(rewrite_rematch(func, item, plan, proof, opening));
+            }
+            Region::Sequence(out)
+        }
+        r @ Region::Switch { .. } if is_ours(&r) => rewrite_rematch_switch(func, r, plan, proof, opening),
+        Region::Scope { out, body } => {
+            Region::Scope { out, body: Box::new(rewrite_rematch(func, *body, plan, proof, opening)) }
+        }
+        Region::Loop { header, body, kind } => {
+            Region::Loop { header, body: Box::new(rewrite_rematch(func, *body, plan, proof, opening)), kind }
+        }
+        Region::If { cond, then_region, else_region } => Region::If {
+            cond,
+            then_region: Box::new(rewrite_rematch(func, *then_region, plan, proof, opening)),
+            else_region: else_region.map(|e| Box::new(rewrite_rematch(func, *e, plan, proof, opening))),
+        },
+        Region::Switch { index, arms, default, dispatch } => Region::Switch {
+            index,
+            arms: arms
+                .into_iter()
+                .map(|a| SwitchArm { cases: a.cases, body: rewrite_rematch(func, a.body, plan, proof, opening) })
+                .collect(),
+            default: Box::new(rewrite_rematch(func, *default, plan, proof, opening)),
+            dispatch,
+        },
+        leaf => leaf,
+    }
+}
+
+/// The planned switch itself, rewritten (see [`rewrite_rematch`]).
+fn rewrite_rematch_switch(
+    func: &mut HighFunction,
+    switch: Region,
+    plan: &Rematch,
+    proof: &Proof,
+    opening: &mut Openings,
+) -> Region {
+    let Region::Switch { arms, default, .. } = switch else { return switch };
+    let mut new_arms: Vec<SwitchArm> = Vec::new();
+    for (i, arm) in arms.into_iter().enumerate() {
+        let body = match opening.remove(&ArmKey::Arm(i)) {
+            Some((bindings, map)) => open_arm(func, arm.body, &bindings, &map),
+            None => arm.body,
+        };
+        new_arms.push(SwitchArm { cases: arm.cases, body });
+    }
+    let default = match (plan.explicit_default, opening.remove(&ArmKey::Default)) {
+        (Some((case, _)), Some((bindings, map))) => {
+            let body = open_arm(func, *default, &bindings, &map);
+            new_arms.push(SwitchArm { cases: vec![case], body });
+            new_arms.sort_by_key(|a| a.cases.first().copied());
+            Region::Unreachable
+        }
+        _ => *default,
+    };
+    Region::Switch { index: proof.value, arms: new_arms, default: Box::new(default), dispatch: Some(proof.value) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2025,8 +2742,12 @@ mod tests {
         twice: bool,
         /// The default arm also tests the position (`position == 0`).
         reads_position: bool,
-        /// Something else stores into the iterator's index.
+        /// Something else stores into the iterator's index before the
+        /// payload's `next` call.
         foreign_store: bool,
+        /// Something else reads the iterator's state after the decode (its
+        /// vector word, in `A`'s arm), seeing what the decode left there.
+        reads_index_after: bool,
         /// The payload's code checked by a select chain whose fallback is
         /// this constant (`B(U)` with `enum U { X = 1, Y = 2 }`).
         code: Option<i32>,
@@ -2048,6 +2769,7 @@ mod tests {
         twice: false,
         reads_position: false,
         foreign_store: false,
+        reads_index_after: false,
         code: None,
         looped: false,
         stale_first: false,
@@ -2201,9 +2923,14 @@ mod tests {
             let z = f.lit64(0);
             default_block.extend([z, f.bin(BinaryOp::Eq, decoded, z)]);
         }
+        if shape.reads_index_after {
+            default_block.push(f.load(fp, 0, MemWidth::W8));
+        }
+        // Before the switch, so the payload arm's `next` call follows it.
+        let mut lookup_block = vec![sym, pos, n, lookup, decoded, one64, bound, sel];
         if shape.foreign_store {
             let k = f.lit32(7);
-            default_block.extend([k, f.store(fp, k, 8, MemWidth::W4)]);
+            lookup_block.extend([k, f.store(fp, k, 8, MemWidth::W4)]);
         }
         let first_block = if shape.stale_first {
             vec![len, zero, sixteen, out, c0, s0, s1, s2, t0, z64, t0_bad]
@@ -2213,7 +2940,7 @@ mod tests {
         let blocks = vec![
             prologue,
             first_block,
-            vec![sym, pos, n, lookup, decoded, one64, bound, sel],
+            lookup_block,
             vec![idx, end, left, one32, too_many],
             vec![c1, t1, t1_bad],
             vec![x, not_u32],
@@ -2292,7 +3019,7 @@ mod tests {
         let (access, gated) = summaries();
         let nexts = HashSet::from([FuncId::from_index(NEXT)]);
         let mut tried = HashSet::new();
-        let (site, _) = plan(func, &MemoryImage::empty(), types, None, &nexts, &access, &gated, &mut tried);
+        let (site, _) = plan(func, &MemoryImage::empty(), types, None, &nexts, &access, &gated, &mut tried, &mut Vec::new());
         site.map(|s| apply(func, s)).ok_or(())
     }
 
@@ -2596,7 +3323,7 @@ mod tests {
         let types = types(PrimitiveType::U32);
         let mut tried = HashSet::new();
         let mut sites = 0;
-        while let (Some(site), _) = plan(func, &MemoryImage::empty(), &types, None, &nexts, &access, &gated, &mut tried) {
+        while let (Some(site), _) = plan(func, &MemoryImage::empty(), &types, None, &nexts, &access, &gated, &mut tried, &mut Vec::new()) {
             apply(func, site);
             sites += 1;
         }
@@ -2683,5 +3410,233 @@ mod tests {
     #[test]
     fn a_next_that_skips_an_element_is_not_the_iterator() {
         assert!(!classified(&next_helper(2)));
+    }
+
+    /// Departures from the plain re-match shape below.
+    #[derive(Default)]
+    struct Rem {
+        /// `B`'s merge input is the `next` tag word, not the payload's.
+        not_payload: bool,
+        /// A store into the iterator's index between the two switches.
+        store_between: bool,
+        /// That store before the switch, so `B`'s `next` call follows it.
+        store_before: bool,
+        /// The merge takes a second value from another block of `B`'s arm.
+        two_values: bool,
+        /// The second switch's arm is for case 5, no variant of `E`.
+        bad_case: bool,
+        /// The second switch sits in the decode's switch's default arm, not
+        /// after the switch.
+        nested: bool,
+    }
+
+    /// `enum E { A, B(u32) }` decoded inline; the switch's arms merge a value
+    /// into `m` (`B`: computed from the payload's element; `A`: a constant),
+    /// then a second switch on the position reads `m` in `B`'s arm.
+    fn rematched(shape: &Rem) -> (HighFunction, u32, u32) {
+        let mut f = Builder { b: Arena::new() };
+        let param = f.seed(IrType::Known(KnownType::UserDefined(TypeId::new(0))), Expr::Phi { incoming: vec![] });
+        let fp = f.seed(IrType::Known(KnownType::I32), Expr::Phi { incoming: vec![] });
+        let len = f.known(KnownOp::VecOp { kind: VecOpKind::Len, args: vec![v(param)] });
+        let zero = f.lit32(0);
+        let s0 = f.store(fp, param, 0, MemWidth::W8);
+        let s1 = f.store(fp, zero, 8, MemWidth::W4);
+        let s2 = f.store(fp, len, 12, MemWidth::W4);
+        let sixteen = f.lit32(16);
+        let out = f.bin(BinaryOp::Add, fp, sixteen);
+        let next = Expr::Call { target: FuncId::from_index(NEXT), args: vec![v(out), v(fp)] };
+        let c0 = f.untyped(next.clone());
+        let t0 = f.load(fp, 16, MemWidth::W8);
+        let z64 = f.lit64(0);
+        let t0_bad = f.bin(BinaryOp::Ne, t0, z64);
+        let sym = f.load(fp, 24, MemWidth::W8);
+        let pos = f.lit32(0);
+        let n = f.lit32(2);
+        let lookup = f.known(KnownOp::SymbolDispatch {
+            sym: v(sym),
+            table_pos: v(pos),
+            len: v(n),
+            table: DispatchTable { cases: vec!["A".into(), "B".into()], enum_name: Some("E".into()) },
+        });
+        let decoded = f.known(KnownOp::ValDecodeSmall { value: v(lookup) });
+        let one64 = f.lit64(1);
+        let bound = f.bin(BinaryOp::GtU, decoded, one64);
+        let sel = f.untyped(Expr::Unary { op: UnaryOp::Wrap32, value: v(decoded) });
+        let idx = f.load(fp, 8, MemWidth::W4);
+        let end = f.load(fp, 12, MemWidth::W4);
+        let left = f.bin(BinaryOp::Sub, end, idx);
+        let one32 = f.lit32(1);
+        let too_many = f.bin(BinaryOp::GtU, left, one32);
+        let c1 = f.untyped(next);
+        let t1 = f.load(fp, 16, MemWidth::W8);
+        let t1_bad = f.bin(BinaryOp::Ne, t1, z64);
+        let x = f.load(fp, 24, MemWidth::W8);
+        let not_u32 = f.known(KnownOp::ValTagCheck { value: v(x), tag: 4, negated: true });
+        let body = f.known(KnownOp::ValDecodeSmall { value: v(x) });
+        let word = f.untyped(Expr::Unary { op: UnaryOp::Wrap32, value: v(body) });
+        let junk = f.lit32(0);
+        let carried = if shape.not_payload { t1 } else { word };
+        let mut incoming = vec![(bb(5), v(carried)), (bb(6), v(junk))];
+        if shape.two_values {
+            incoming.push((bb(4), v(x)));
+        }
+        let merge = f.untyped(Expr::Phi { incoming });
+        let seven = f.lit32(7);
+        let clobber = f.store(fp, seven, 8, MemWidth::W4);
+        let read = f.bin(BinaryOp::Add, merge, merge);
+        let between = if shape.store_between { vec![seven, clobber] } else { vec![seven] };
+        let mut lookup_block = vec![sym, pos, n, lookup, decoded, one64, bound, sel];
+        if shape.store_before {
+            lookup_block.extend([seven, clobber]);
+        }
+        let blocks = vec![
+            vec![len, zero, s0, s1, s2, sixteen, out, c0, t0, z64, t0_bad],
+            lookup_block,
+            vec![idx, end, left, one32, too_many],
+            vec![c1, t1, t1_bad],
+            vec![x, not_u32],
+            vec![body, word],
+            vec![junk],
+            between,
+            vec![read],
+        ];
+        let decode_switch = Region::Switch {
+            index: v(sel),
+            arms: vec![SwitchArm {
+                cases: vec![1],
+                body: Region::Sequence(vec![
+                    Region::Basic(bb(2)),
+                    guard(too_many),
+                    Region::Basic(bb(3)),
+                    guard(t1_bad),
+                    Region::Basic(bb(4)),
+                    guard(not_u32),
+                    Region::Basic(bb(5)),
+                    Region::Transfer { target: bb(7), transfer: vec![(v(merge), v(carried))] },
+                ]),
+            }],
+            default: Box::new(Region::Sequence(vec![
+                Region::Basic(bb(6)),
+                Region::Transfer { target: bb(7), transfer: vec![(v(merge), v(junk))] },
+            ])),
+            dispatch: Some(v(lookup)),
+        };
+        let again = Region::Switch {
+            index: v(sel),
+            arms: vec![SwitchArm {
+                cases: vec![if shape.bad_case { 5 } else { 1 }],
+                body: Region::Sequence(vec![Region::Basic(bb(8)), Region::Return { values: vec![v(read)] }]),
+            }],
+            default: Box::new(Region::Return { values: vec![] }),
+            dispatch: None,
+        };
+        let decode_switch = match (shape.nested, decode_switch) {
+            (true, Region::Switch { index, arms, dispatch, .. }) => Region::Switch {
+                index,
+                arms,
+                default: Box::new(Region::Sequence(vec![Region::Basic(bb(6)), again.clone()])),
+                dispatch,
+            },
+            (_, sw) => sw,
+        };
+        let mut items =
+            vec![Region::Basic(bb(0)), guard(t0_bad), Region::Basic(bb(1)), guard(bound), decode_switch, Region::Basic(bb(7))];
+        if !shape.nested {
+            items.push(again);
+        }
+        (f.func(0, blocks, Region::Sequence(items)), merge, read)
+    }
+
+    /// The decode kept, and its later switches re-matched: whether one was.
+    fn rematch_kept(func: &mut HighFunction, types: &TypeRegistry) -> bool {
+        let (access, gated) = summaries();
+        let nexts = HashSet::from([FuncId::from_index(NEXT)]);
+        let mut kept = Vec::new();
+        let (site, _) =
+            plan(func, &MemoryImage::empty(), types, None, &nexts, &access, &gated, &mut HashSet::new(), &mut kept);
+        assert!(site.is_none(), "a variant tested again keeps the decode");
+        kept.iter().any(|p| rematch(func, p, types))
+    }
+
+    /// The second switch, found by the block its `B` arm reads in.
+    fn second_switch(func: &HighFunction) -> (ValueId, Option<ValueId>, Region) {
+        let mut found = None;
+        func.region.for_each_node(|node| {
+            if let Region::Switch { index, arms, dispatch, .. } = node
+                && arms.iter().any(|a| blocks_in(&a.body).contains(&bb(8)))
+            {
+                found = Some((*index, *dispatch, node.clone()));
+            }
+        });
+        found.expect("the second switch")
+    }
+
+    #[test]
+    fn a_later_switch_on_the_variant_reads_the_payload_it_binds() {
+        let (mut func, merge, read) = rematched(&Rem::default());
+        assert!(rematch_kept(&mut func, &types(PrimitiveType::U32)));
+        let (index, dispatch, sw) = second_switch(&func);
+        assert_eq!((index, dispatch), (v(0), Some(v(0))), "the second switch selects on the value");
+        assert!(opens_with_payload(&func, &match sw {
+            Region::Switch { arms, .. } => arms[0].body.clone(),
+            _ => unreachable!(),
+        }, "B"));
+        // The merge's read becomes the payload's value recomputed in the arm.
+        let Expr::Binary { lhs, rhs, .. } = expr(&func, v(read)).clone() else { panic!("the read stays an add") };
+        assert_eq!(lhs, rhs);
+        assert_ne!(lhs, v(merge), "the merge is no longer read in the arm");
+        assert!(matches!(expr(&func, lhs), Expr::Unary { op: UnaryOp::Wrap32, .. }));
+    }
+
+    #[test]
+    fn a_merge_not_computed_from_the_payload_keeps_the_later_switch() {
+        let (mut func, merge, read) = rematched(&Rem { not_payload: true, ..Rem::default() });
+        assert!(!rematch_kept(&mut func, &types(PrimitiveType::U32)));
+        let (index, _, _) = second_switch(&func);
+        assert_ne!(index, v(0));
+        assert!(matches!(expr(&func, v(read)), Expr::Binary { lhs, .. } if *lhs == v(merge)));
+    }
+
+    #[test]
+    fn a_store_into_the_state_after_the_decode_does_not_keep_it_unproven() {
+        // The store into the iterator's index runs after every access the
+        // decode makes: the decode is proven, and re-matched.
+        let (mut func, _, _) = rematched(&Rem { store_between: true, ..Rem::default() });
+        assert!(rematch_kept(&mut func, &types(PrimitiveType::U32)));
+    }
+
+    /// Not re-matched, and the second switch still selects on the position.
+    fn not_rematched(shape: &Rem) {
+        let (mut func, _, _) = rematched(shape);
+        assert!(!rematch_kept(&mut func, &types(PrimitiveType::U32)));
+        let (index, _, _) = second_switch(&func);
+        assert_ne!(index, v(0));
+    }
+
+    #[test]
+    fn a_store_into_the_state_before_a_next_call_leaves_the_decode_unproven() {
+        not_rematched(&Rem { store_before: true, ..Rem::default() });
+    }
+
+    #[test]
+    fn a_merge_two_values_on_one_variant_keeps_the_later_switch() {
+        not_rematched(&Rem { two_values: true, ..Rem::default() });
+    }
+
+    #[test]
+    fn a_later_switch_on_a_case_that_is_no_variant_is_kept() {
+        not_rematched(&Rem { bad_case: true, ..Rem::default() });
+    }
+
+    #[test]
+    fn a_switch_on_the_position_not_after_the_decodes_is_kept() {
+        not_rematched(&Rem { nested: true, ..Rem::default() });
+    }
+
+    #[test]
+    fn a_read_of_what_the_decode_left_in_the_state_keeps_the_decode() {
+        let mut func = entry(&Shape { reads_index_after: true, ..PLAIN });
+        assert!(run(&mut func, PrimitiveType::U32).is_err());
+        assert!(run(&mut entry(&PLAIN), PrimitiveType::U32).is_ok());
     }
 }
