@@ -8,6 +8,15 @@ follow [Semantic Versioning][semver].
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI's Stellar-examples job** builds the examples at the pinned commit
+  (`1f5aeb5`) with the pinned rustc (1.97), as `tools/build_heldout.sh`
+  documents. It cloned the latest examples, which moved to soroban-sdk 28 and
+  no longer build outside `stellar contract build`, so the job scored nothing.
+  `build_heldout.sh` now prints each failure's first error and exits non-zero
+  when no example builds.
+
 ## [0.1.0] — 2026-11-01
 
 ### Reconstruction quality

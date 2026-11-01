@@ -29,6 +29,7 @@ OUT=${2:?output dir}
 export CARGO_TARGET_DIR=${3:-$OUT/../heldout-target}
 mkdir -p "$OUT"
 SKIP=" liquidity_pool timelock token "
+built=0
 for dir in "$EX"/*/; do
   name=$(basename "$dir")
   case "$SKIP" in *" $name "*) continue;; esac
@@ -36,7 +37,7 @@ for dir in "$EX"/*/; do
   if grep -q '^\[workspace\]' "$dir/Cargo.toml"; then echo "skip $name (workspace)"; continue; fi
   pkg=$(grep -m1 '^name' "$dir/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/' | tr - _)
   log=$(mktemp)
-  if (cd "$dir" && cargo build -q --release --target wasm32v1-none >"$log" 2>&1) \
+  if (cd "$dir" && cargo build -q --color never --release --target wasm32v1-none >"$log" 2>&1) \
       && [ -f "$CARGO_TARGET_DIR/wasm32v1-none/release/$pkg.wasm" ]; then
     mkdir -p "$OUT/$name/source"
     cp "$CARGO_TARGET_DIR/wasm32v1-none/release/$pkg.wasm" "$OUT/$name/$name.wasm"
@@ -49,8 +50,15 @@ for dir in "$EX"/*/; do
     # against 0.7620 on the expanded one).
     [ -f "$OUT/$name/source/src/test.rs" ] && : > "$OUT/$name/source/src/test.rs"
     echo "ok   $name"
+    built=$((built + 1))
   else
     echo "FAIL $name: $(grep -m1 '^error' "$log")"
   fi
   rm -f "$log"
 done
+# Nothing built is a broken environment (an unpinned checkout, a missing
+# target), not an empty corpus: say so here rather than in the bench.
+if [ "$built" -eq 0 ]; then
+  echo "no example built; check the pinned commit and toolchain above" >&2
+  exit 1
+fi

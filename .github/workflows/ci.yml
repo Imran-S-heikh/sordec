@@ -132,18 +132,22 @@ jobs:
       # pinned clone, and rebuilding it here keeps the repo from carrying 25
       # more contracts whose only job is to be unfamiliar. `build_heldout.sh`
       # documents the canonical cache path it writes to.
-      # The target is added from *inside* the clone on purpose.
-      # `setup-toolchains.sh` adds `wasm32v1-none` to toolchain 1.89 alone (the
-      # behavior harness it provisions), and `build_heldout.sh` builds each
-      # example under whatever `soroban-examples`' own `rust-toolchain.toml`
-      # selects — which is not ours and not 1.89. Adding it where the build
-      # actually runs is the only placement that covers that.
+      # Both pins from that script's header, because each moves the scores:
+      # the examples at 1f5aeb5 (from 01a9a33 on they are on soroban-sdk 28,
+      # which refuses to build outside `stellar contract build`), and rustc
+      # 1.97, which overrides the examples' own `rust-toolchain.toml`.
+      # `RUSTFLAGS` is cleared for the same reason as above: this builds
+      # someone else's code.
       - name: Build the held-out corpus
         run: |
-          git clone --depth 1 https://github.com/stellar/soroban-examples \
+          git clone https://github.com/stellar/soroban-examples \
             ~/.cache/soroban-examples
-          (cd ~/.cache/soroban-examples && rustup target add wasm32v1-none)
-          bash tools/build_heldout.sh ~/.cache/soroban-examples ~/.cache/sordec-heldout
+          git -C ~/.cache/soroban-examples checkout 1f5aeb5
+          rustup toolchain install 1.97 --profile minimal --target wasm32v1-none
+          RUSTUP_TOOLCHAIN=1.97 bash tools/build_heldout.sh \
+            ~/.cache/soroban-examples ~/.cache/sordec-heldout
+        env:
+          RUSTFLAGS: ""
 
       - name: Score it
         run: |
