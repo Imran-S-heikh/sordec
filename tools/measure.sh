@@ -17,6 +17,7 @@
 #   extra    $SORDEC_EXTRA_DIR    (default ~/.cache/sordec-examples-extra)
 #   unseen   $SORDEC_UNSEEN_DIR   (default ~/.cache/sordec-unseen)
 #   sdk26    $SORDEC_SDK26_DIR    (default ~/.cache/sordec-sdk26)
+#   authored samples/authored    (contracts written for sordec; see its README)
 #
 # Usage:
 #   tools/measure.sh [--sets a,b,..] [--out DIR] [--baseline DIR] [--no-build] [--no-check] [--table]
@@ -47,7 +48,7 @@ set -u
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." &>/dev/null && pwd)"
 
-SETS=corpus,heldout,extra,unseen,sdk26
+SETS=corpus,heldout,extra,unseen,sdk26,authored
 OUT=""
 BASELINE=""
 BUILD=1
@@ -79,6 +80,7 @@ root_of() {
     extra) echo "${SORDEC_EXTRA_DIR:-$HOME/.cache/sordec-examples-extra}" ;;
     unseen) echo "${SORDEC_UNSEEN_DIR:-$HOME/.cache/sordec-unseen}" ;;
     sdk26) echo "${SORDEC_SDK26_DIR:-$HOME/.cache/sordec-sdk26}" ;;
+    authored) echo "$REPO_ROOT/samples/authored" ;;
     *) echo "unknown set: $1" >&2; exit 2 ;;
   esac
 }
