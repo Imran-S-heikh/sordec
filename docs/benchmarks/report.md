@@ -1,20 +1,20 @@
 # Reconstruction accuracy report
 
-Scorer `score-2.2.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored directory-vs-directory against each fixture's vendored source. Compilation is a gate and is not evaluated here. Regenerate with `SORDEC_BENCH_WRITE=1 cargo test -p sordec --test benchmark -- --ignored`.
+Scorer `score-2.2.0`, threshold 0.90. Reconstruction (`sordec decompile`) scored directory-vs-directory against each fixture's vendored source. Compilation is a gate, not a share of the score: each reconstruction is built with `cargo check` as `sordec decompile` writes it, and **7 of 7 build**. Regenerate with `SORDEC_BENCH_WRITE=1 cargo test -p sordec --test benchmark -- --ignored`.
 
 **Two aggregates, and they answer different questions.** The AST-only mean covers interface, structure and semantic; it is the figure comparable with the committed accuracy bands and with every earlier measurement, so it stays the headline. The second adds `behavior` — differential execution of the recompiled reconstruction against the original wasm — which is measured on 6 of 7 fixtures; each fixture's detail below says what was driven, and for any `n/a`, why not. An unmeasurable category is reported `n/a` and renormalises out of that fixture's mean; it is never a zero, since "could not be run" and "does the wrong thing" are different findings.
 
-| fixture | overall (AST) | interface | structure | semantic | behavior |
-|---|---|---|---|---|---|
-| hello-add | 1.0000 | 1.0000 | 0.0000 | 0.0000 | 1.0000 |
-| token-v22 | 0.9415 | 0.9286 | 0.9724 | 0.9286 | 1.0000 |
-| token-v23 | 0.8784 | 0.7500 | 0.9724 | 0.9286 | 1.0000 |
-| token-v23-stripped | 0.8228 | 0.6429 | 0.9119 | 0.9286 | 0.6055 |
-| timelock | 0.9790 | 1.0000 | 0.9286 | 1.0000 | n/a |
-| dex-liquidity-pool | 0.9294 | 1.0000 | 0.7599 | 1.0000 | 1.0000 |
-| attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 |
-| **aggregate (mean, AST)** | **0.9359** | | | | |
-| **aggregate (mean, incl. behaviour)** | **0.9366** | | | | |
+| fixture | overall (AST) | interface | structure | semantic | behavior | builds |
+|---|---|---|---|---|---|---|
+| hello-add | 1.0000 | 1.0000 | 0.0000 | 0.0000 | 1.0000 | yes |
+| token-v22 | 0.9415 | 0.9286 | 0.9724 | 0.9286 | 1.0000 | yes |
+| token-v23 | 0.8784 | 0.7500 | 0.9724 | 0.9286 | 1.0000 | yes |
+| token-v23-stripped | 0.8228 | 0.6429 | 0.9119 | 0.9286 | 0.6055 | yes |
+| timelock | 0.9790 | 1.0000 | 0.9286 | 1.0000 | n/a | yes |
+| dex-liquidity-pool | 0.9294 | 1.0000 | 0.7599 | 1.0000 | 1.0000 | yes |
+| attestation | 1.0000 | 1.0000 | 1.0000 | 1.0000 | 1.0000 | yes |
+| **aggregate (mean, AST)** | **0.9359** | | | | | **7 of 7** |
+| **aggregate (mean, incl. behaviour)** | **0.9366** | | | | | |
 
 ## Per-fixture detail
 

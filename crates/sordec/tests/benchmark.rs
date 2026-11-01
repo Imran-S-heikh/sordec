@@ -64,6 +64,9 @@ fn relative_to_repo(note: &str) -> String {
 struct Measured {
     name: &'static str,
     report: ScoreReport,
+    /// Whether `cargo check` passed on the crate as `sordec decompile` writes
+    /// it, its own manifest included; `None` when the run did not check.
+    builds: Option<bool>,
 }
 
 /// The scoring configuration every measurement here uses, with `behavior`
@@ -160,6 +163,12 @@ fn measure_wasm(
         Some(wasm_path) => sordec::behavior::measure(&tmp, wasm_path),
         None => BehaviorInput::NotRequested,
     };
+    // The report run, which already needs a toolchain for behaviour, also
+    // records whether the crate builds. Checked here rather than through the
+    // scorer's compilation gate: that gate wraps the source in a scratch
+    // crate pinned to one soroban-sdk, and the crate we ship pins the SDK the
+    // contract was built with.
+    let builds = oracle.map(|_| cargo_check(&tmp));
 
     // Whether the module declared its own ABI is a fact about the wasm,
     // and the scorer never reads wasm. Without `contractspecv0` there
@@ -171,7 +180,22 @@ fn measure_wasm(
     let report =
         score_paths(&src, &base.join("source/src"), &opts).map_err(|e| format!("score: {e}"));
     let _ = std::fs::remove_dir_all(&tmp);
-    Ok(Measured { name, report: report? })
+    Ok(Measured { name, report: report?, builds })
+}
+
+/// `cargo check` on the crate at `dir`. The target directory is
+/// `SORDEC_CHECK_TARGET` when set (`tools/measure.sh` shares the same one),
+/// so the SDK is built once rather than once per fixture.
+fn cargo_check(dir: &Path) -> bool {
+    let target = std::env::var_os("SORDEC_CHECK_TARGET")
+        .map_or_else(|| std::env::temp_dir().join("sordec-bench-check-target"), PathBuf::from);
+    std::process::Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["check", "--quiet"])
+        .current_dir(dir)
+        .env("CARGO_TARGET_DIR", target)
+        .env("CARGO_INCREMENTAL", "0")
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Score a fixture on the three AST categories, as the accuracy guard does.
@@ -932,6 +956,8 @@ struct Aggregates {
     /// for the same reason [`sordec_score::Behavior`] refuses to exist without
     /// its denominator: a rate without its coverage is not a result.
     behavior_measured: usize,
+    /// How many reconstructions passed `cargo check`.
+    builds: usize,
     fixtures: usize,
 }
 
@@ -943,6 +969,7 @@ impl Aggregates {
             ast_only: measured.iter().map(|m| ast_only_overall(&m.report)).sum::<f64>() / n,
             with_behavior: measured.iter().map(|m| m.report.overall).sum::<f64>() / n,
             behavior_measured: measured.iter().filter(|m| m.report.behavior.is_some()).count(),
+            builds: measured.iter().filter(|m| m.builds == Some(true)).count(),
             fixtures: measured.len(),
         }
     }
@@ -968,9 +995,13 @@ fn render_markdown(measured: &[Measured], agg: &Aggregates) -> String {
     s.push_str(&format!(
         "Scorer `{}`, threshold 0.90. Reconstruction (`sordec decompile`) scored \
          directory-vs-directory against each fixture's vendored source. \
-         Compilation is a gate and is not evaluated here. Regenerate with \
+         Compilation is a gate, not a share of the score: each reconstruction is \
+         built with `cargo check` as `sordec decompile` writes it, and **{} of {} \
+         build**. Regenerate with \
          `SORDEC_BENCH_WRITE=1 cargo test -p sordec --test benchmark -- --ignored`.\n\n",
-        sordec_score::SCORER_VERSION
+        sordec_score::SCORER_VERSION,
+        agg.builds,
+        agg.fixtures,
     ));
     s.push_str(&format!(
         "**Two aggregates, and they answer different questions.** The AST-only mean \
@@ -984,26 +1015,31 @@ fn render_markdown(measured: &[Measured], agg: &Aggregates) -> String {
          not be run\" and \"does the wrong thing\" are different findings.\n\n",
         agg.behavior_measured, agg.fixtures,
     ));
-    s.push_str("| fixture | overall (AST) | interface | structure | semantic | behavior |\n");
-    s.push_str("|---|---|---|---|---|---|\n");
+    s.push_str("| fixture | overall (AST) | interface | structure | semantic | behavior | builds |\n");
+    s.push_str("|---|---|---|---|---|---|---|\n");
     for m in measured {
         let c = &m.report.categories;
         s.push_str(&format!(
-            "| {} | {:.4} | {:.4} | {:.4} | {:.4} | {} |\n",
+            "| {} | {:.4} | {:.4} | {:.4} | {:.4} | {} | {} |\n",
             m.name,
             ast_only_overall(&m.report),
             c.interface.score,
             c.structure.score,
             c.semantic.score,
             behavior_cell(&m.report),
+            match m.builds {
+                Some(true) => "yes",
+                Some(false) => "**no**",
+                None => "n/a",
+            },
         ));
     }
     s.push_str(&format!(
-        "| **aggregate (mean, AST)** | **{:.4}** | | | | |\n",
-        agg.ast_only
+        "| **aggregate (mean, AST)** | **{:.4}** | | | | | **{} of {}** |\n",
+        agg.ast_only, agg.builds, agg.fixtures
     ));
     s.push_str(&format!(
-        "| **aggregate (mean, incl. behaviour)** | **{:.4}** | | | | |\n\n",
+        "| **aggregate (mean, incl. behaviour)** | **{:.4}** | | | | | |\n\n",
         agg.with_behavior
     ));
     s.push_str("## Per-fixture detail\n\n");
@@ -1086,6 +1122,12 @@ fn render_json(measured: &[Measured], agg: &Aggregates) -> String {
         "aggregate_overall": agg.ast_only,
         "aggregate_overall_with_behavior": agg.with_behavior,
         "behavior_measured_fixtures": agg.behavior_measured,
+        "builds": agg.builds,
+        "builds_of": agg.fixtures,
+        "fixture_builds": measured
+            .iter()
+            .map(|m| (m.name.to_string(), serde_json::json!(m.builds)))
+            .collect::<serde_json::Map<_, _>>(),
         "fixtures": fixtures,
     });
     // Applied to the rendered document rather than to individual notes: this

@@ -140,11 +140,11 @@ nothing either way. So where a reconstruction still contains `todo!()`, a placeh
 that crashes beside an original that also fails goes uncounted: behaviour on such code
 is an upper bound.
 
-**Builds.** All seven pass `cargo check`, run on each decompiled crate by
-[`tools/measure.sh`](../tools/measure.sh) (§6). The committed report does not run that
-gate itself (its header says so); independently, the behaviour harness compiles every
-reconstruction to WASM and runs it, which it could not do for a crate that does not
-build.
+**Builds.** All seven pass `cargo check`, run on each decompiled crate exactly as
+`sordec decompile` writes it, manifest included. The committed report records this in
+its `builds` column, and [`tools/measure.sh`](../tools/measure.sh) (§6) does the same
+for every other set. Independently, the behaviour harness compiles every reconstruction
+to WASM and runs it, which it could not do for a crate that does not build.
 
 ## 4. What else we measured, and why
 

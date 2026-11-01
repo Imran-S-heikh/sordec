@@ -38,7 +38,8 @@ wrap-up week (2026-10-29 to 11-01) took compile errors across these sets from
 through stack frames, `Result`/`Option` plumbing through helpers, sign and width
 of machine words, fixed-size byte arrays, events and auth contexts, protocol 27
 delegated-account calls. Each step is logged with its measurements in
-[`docs/benchmarks/wrapup-log.md`](docs/benchmarks/wrapup-log.md).
+[`docs/benchmarks/wrapup-log.md`](docs/benchmarks/wrapup-log.md). The committed
+benchmark report now records whether each reconstruction builds (7 of 7).
 
 About 0.08 of the corpus rise is the `score-2.1.0` change below; the rest is
 the decompiler. The held-out mean was 0.7570 when last measured (2026-10-08):

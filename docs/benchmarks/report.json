@@ -2,6 +2,17 @@
   "aggregate_overall": 0.9358760330288415,
   "aggregate_overall_with_behavior": 0.9365909748701142,
   "behavior_measured_fixtures": 6,
+  "builds": 7,
+  "builds_of": 7,
+  "fixture_builds": {
+    "attestation": true,
+    "dex-liquidity-pool": true,
+    "hello-add": true,
+    "timelock": true,
+    "token-v22": true,
+    "token-v23": true,
+    "token-v23-stripped": true
+  },
   "fixtures": {
     "attestation": {
       "basis_profile": "rfp-default",
