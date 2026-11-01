@@ -1052,3 +1052,21 @@ held-out mean 0.7911. The treasury: 6 errors, 482 gaps, 2,401 lines.
 sdk26/udt 84 → 26 gaps (`recursive_enum` reads as two `match`es and `router.a`/`router.b`);
 other_custom_types 293 → 288. Holes 5,479 → 5,416; errors 9; corpus byte-identical; held-out
 mean 0.7912.
+
+## 2026-11-01 — commit 358f34d (account and events round 2: decoders that always succeed, protocol 27 delegation, counter indexes, frames on trap paths)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 80 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,165 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 1,290 |
+| third-party | 2 | 1/2 | 8 | 497 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 343 |
+
+- An outlined decoder helper that can never fail is read as the value it decodes.
+- Protocol 27's `custom_account().get_delegated_signers()` and `delegate_auth(&a)` are named.
+- A vector index kept as a word beside its counter reads as the counter.
+- A frame set up on a path that never returns is retired like any other.
+
+account 66 → 45 gaps; modular_account 2 → 0; sdk26/events 2 → 0. Holes 5,416 → 5,375; errors 9;
+corpus byte-identical; held-out mean 0.7915. The treasury: 6 errors, 481 gaps.
