@@ -1032,3 +1032,23 @@ Holes 5,668 → 5,528 (summed); errors unchanged at 9; corpus byte-identical; he
 
 Holes 5,528 → 5,479; errors 9; corpus bands pass (timelock and token-v23-stripped each −2 gaps);
 held-out mean 0.7911. The treasury: 6 errors, 482 gaps, 2,401 lines.
+
+## 2026-11-01 — commit 68f0049 (custom types round 4: shared iterator slot, per-call struct decoders, enum map values)
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 80 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,190 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 1,294 |
+| third-party | 2 | 1/2 | 8 | 505 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 347 |
+
+- Two enum decodes that reuse one frame slot for their iterator are both taken apart, each step
+  credited to the decode that set the slot up on every path to it.
+- A struct-decoder helper that some callers hand a proven struct and others a raw value is read
+  call by call.
+- A value read from a map whose declared values are an enum is that enum.
+
+sdk26/udt 84 → 26 gaps (`recursive_enum` reads as two `match`es and `router.a`/`router.b`);
+other_custom_types 293 → 288. Holes 5,479 → 5,416; errors 9; corpus byte-identical; held-out
+mean 0.7912.
