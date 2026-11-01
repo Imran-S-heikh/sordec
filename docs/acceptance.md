@@ -236,12 +236,12 @@ SORDEC_BENCH_WRITE=1 cargo test --release -p sordec --test benchmark -- --ignore
 ```
 
 **Stellar examples (§4).** [`tools/build_heldout.sh`](../tools/build_heldout.sh) builds
-the 25. Both the examples' commit and rustc 1.97 are pinned; either one moves scores.
+the 25. Both the examples' commit and rustc 1.98.1 are pinned; either one moves scores.
 
 ```bash
 git clone https://github.com/stellar/soroban-examples ~/.cache/soroban-examples
 git -C ~/.cache/soroban-examples checkout 1f5aeb5
-RUSTUP_TOOLCHAIN=1.97 tools/build_heldout.sh ~/.cache/soroban-examples ~/.cache/sordec-heldout
+RUSTUP_TOOLCHAIN=1.98.1 tools/build_heldout.sh ~/.cache/soroban-examples ~/.cache/sordec-heldout
 SORDEC_HELDOUT_DIR=~/.cache/sordec-heldout \
   cargo test --release -p sordec --test heldout_bench -- --ignored --nocapture
 ```

@@ -118,7 +118,7 @@ Measured beyond the corpus (2026-11-01; counts in
 | SDK | Set | Built by |
 |---|---|---|
 | 26.0.1 | the SDK's own 39 test contracts | `tools/build_sdk_tests.sh` (rustc 1.95, pinned) |
-| 27 | 25 + 13 Stellar `soroban-examples` contracts | `tools/build_heldout.sh` (examples `1f5aeb5`, rustc 1.97, pinned) |
+| 27 | 25 + 13 Stellar `soroban-examples` contracts | `tools/build_heldout.sh` (examples `1f5aeb5`, rustc 1.98.1, pinned) |
 | as pinned by each project | two third-party contracts | `tools/build_unseen.sh` |
 | 23.0.1 | the authored treasury | `samples/authored/treasury/build.sh` (rustc 1.89, pinned) |
 

@@ -15,12 +15,14 @@
 #   01a9a33 on, the examples are on soroban-sdk 28, whose build script
 #   refuses to build outside `stellar contract build`, so every example fails.
 #
-#   rustc 1.97. Codegen differs between releases; built with 1.99, `pause`
-#   falls from 1.0000 to 0.7059 and the mean from 0.7620 to 0.7525.
+#   rustc 1.98.1, the compiler every measured example records in its
+#   metadata (`rsver`). Codegen differs between releases: built with 1.99,
+#   `pause` falls from 1.0000 to 0.7059; with 1.97.1, `fuzzing` falls from
+#   0.5500 to 0.5059.
 #
 #   git clone https://github.com/stellar/soroban-examples ~/.cache/soroban-examples
 #   git -C ~/.cache/soroban-examples checkout 1f5aeb5
-#   RUSTUP_TOOLCHAIN=1.97 tools/build_heldout.sh ~/.cache/soroban-examples ~/.cache/sordec-heldout
+#   RUSTUP_TOOLCHAIN=1.98.1 tools/build_heldout.sh ~/.cache/soroban-examples ~/.cache/sordec-heldout
 #
 # Usage: tools/build_heldout.sh <soroban-examples checkout> <out dir> [target dir]
 set -u

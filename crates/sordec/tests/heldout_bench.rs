@@ -22,7 +22,7 @@
 //! ```bash
 //! git clone https://github.com/stellar/soroban-examples ~/.cache/soroban-examples
 //! git -C ~/.cache/soroban-examples checkout 1f5aeb5
-//! RUSTUP_TOOLCHAIN=1.97 tools/build_heldout.sh ~/.cache/soroban-examples ~/.cache/sordec-heldout
+//! RUSTUP_TOOLCHAIN=1.98.1 tools/build_heldout.sh ~/.cache/soroban-examples ~/.cache/sordec-heldout
 //! ```
 //!
 //! Both pins matter — the script's header says why.

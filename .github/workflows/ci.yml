@@ -135,7 +135,8 @@ jobs:
       # Both pins from that script's header, because each moves the scores:
       # the examples at 1f5aeb5 (from 01a9a33 on they are on soroban-sdk 28,
       # which refuses to build outside `stellar contract build`), and rustc
-      # 1.97, which overrides the examples' own `rust-toolchain.toml`.
+      # 1.98.1, the compiler every measured example records in its metadata;
+      # it overrides the examples' own `rust-toolchain.toml`.
       # `RUSTFLAGS` is cleared for the same reason as above: this builds
       # someone else's code.
       - name: Build the held-out corpus
@@ -143,8 +144,8 @@ jobs:
           git clone https://github.com/stellar/soroban-examples \
             ~/.cache/soroban-examples
           git -C ~/.cache/soroban-examples checkout 1f5aeb5
-          rustup toolchain install 1.97 --profile minimal --target wasm32v1-none
-          RUSTUP_TOOLCHAIN=1.97 bash tools/build_heldout.sh \
+          rustup toolchain install 1.98.1 --profile minimal --target wasm32v1-none
+          RUSTUP_TOOLCHAIN=1.98.1 bash tools/build_heldout.sh \
             ~/.cache/soroban-examples ~/.cache/sordec-heldout
         env:
           RUSTFLAGS: ""
