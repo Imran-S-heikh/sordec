@@ -1070,3 +1070,30 @@ mean 0.7912.
 
 account 66 → 45 gaps; modular_account 2 → 0; sdk26/events 2 → 0. Holes 5,416 → 5,375; errors 9;
 corpus byte-identical; held-out mean 0.7915. The treasury: 6 errors, 481 gaps.
+
+## 2026-11-01 — commit 3b78442 (enum parameters re-matched on their value; dead merge inputs left out)
+
+From f4f6e0c the authored treasury (`samples/authored/`) is measured as its own set.
+
+| Set | Contracts | Compile | Errors | Holes |
+|---|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 80 |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,165 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 1,290 |
+| third-party | 2 | 1/2 | 6 | 497 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 343 |
+| authored | 1 | 1/1 | 0 | 441 |
+
+- An enum parameter decoded once and tested again later on the same variant is matched on the
+  value; the later arms read that variant's own payload.
+- A merge whose only readers are unrecovered stores is dead in the code that runs; assignments its
+  type cannot hold are left out. This hides a wrong merge type where nothing runs it; it does not
+  fix the type.
+- A helper's access through a pointer stepped backwards is not located, so the old cautious summary
+  applies.
+
+treasury 6 → 0 errors, 481 → 441 gaps: it compiles. Its behaviour check scores 0 of 16
+entrypoints: the rebuilt constructor starts at an unrecovered stack-pointer setup and traps, so
+nothing can be compared yet. Its overall score is 0.5677; 0.6659 before, when behaviour could not
+be measured and was left out. phoenix-vesting 8 → 6 errors. Errors outside the treasury 9 → 7;
+corpus byte-identical; held-out mean 0.7915.
