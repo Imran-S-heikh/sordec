@@ -714,6 +714,10 @@ pub fn known_op_effects(op: &KnownOp) -> Effects {
         KnownOp::RequireAuth { .. }
         | KnownOp::RequireAuthForArgs { .. }
         | KnownOp::AuthorizeAsCurrContract { .. } => TRAP_RW_HOST,
+        // Custom-account delegation (a.9/a), protocol 27: the rows of
+        // `address_effects`.
+        KnownOp::GetDelegatedSigners => TRAP_READ_HOST,
+        KnownOp::DelegateAuth { .. } => TRAP_RW_HOST,
         KnownOp::AddressConversion { kind, .. } => address_kind_effects(*kind),
         // Cross-contract (d._/0): callee cannot touch caller guest
         // memory — host axes only (see `call_effects`).
@@ -1395,6 +1399,8 @@ mod tests {
             (KnownOp::RequireAuthForArgs { address: v(0), args: vec![v(1)] }, "a", "_"),
             (KnownOp::RequireAuth { address: v(0) }, "a", "0"),
             (KnownOp::AuthorizeAsCurrContract { auth_entries: v(0) }, "a", "3"),
+            (KnownOp::GetDelegatedSigners, "a", "9"),
+            (KnownOp::DelegateAuth { address: v(0) }, "a", "a"),
             (
                 KnownOp::InvokeContract {
                     contract: v(0),

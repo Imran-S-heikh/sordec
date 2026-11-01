@@ -31,12 +31,42 @@
 //! frame size, subtracted on entry and added back on exit. An unbalanced
 //! pair means the function does something to the stack pointer we have
 //! not modelled, so nothing is touched.
+//!
+//! ## A function that never returns has no epilogue
+//!
+//! `panic!` after setting up a frame (an event published, then a failure)
+//! leaves a prologue with no restore anywhere: rustc emits none, because no
+//! path reaches a return. The prologue alone is then the whole bracket.
+//!
+//! ### Why it is exact
+//!
+//! The stack pointer is the module's own bookkeeping, observed only by
+//! code of this instance that reads the global. With `fp` unread, the
+//! function itself stores nothing in its frame; a callee (or an inlined
+//! bracket) that reads the pointer places its own frame from it, and
+//! placing it `size` bytes higher only overlaps those unused bytes — the
+//! same argument that removes a balanced bracket. The one observer the
+//! balanced case needs the epilogue for is whoever runs after this
+//! function returns, and here nothing does: every path ends in a trap,
+//! which ends the contract invocation and rolls back everything it did,
+//! the instance's globals included. So the prologue's write is never
+//! read by anything the source can see.
+//!
+//! ### Gates
+//!
+//! - `fp = global.get - size`, the global read feeding only that.
+//! - No `global.set` of an `fp + size` anywhere, and the prologue's
+//!   `global.set fp` the function's only `global.set`.
+//! - `fp` read by nothing live but that `global.set`.
+//! - The function never returns: no `return` anywhere in its region tree,
+//!   and control cannot fall out of its root (the implicit return of a
+//!   unit function).
 
 use std::collections::HashMap;
 
 use sordec_common::ValueId;
 use sordec_ir::{
-    BinaryOp, Expr, HighFunction, HighIr, IrType, KnownType, Literal, WasmOpcodeKind,
+    BinaryOp, Expr, HighFunction, HighIr, IrType, KnownType, Literal, Region, WasmOpcodeKind,
 };
 
 use super::{apply_elisions, metrics, Elision};
@@ -70,10 +100,14 @@ impl Pass<HighIr> for FrameElisionPass {
                     id,
                     expr: Expr::Literal(Literal::Unit),
                     ty: Some(IrType::Known(KnownType::Unit)),
-                    note: format!(
-                        "shadow-stack bookkeeping ({}-byte frame, no remaining reads)",
-                        frame.size
-                    ),
+                    note: if frame.never_restored {
+                        format!(
+                            "shadow-stack bookkeeping ({}-byte frame, no remaining reads, never restored: every path traps)",
+                            frame.size
+                        )
+                    } else {
+                        format!("shadow-stack bookkeeping ({}-byte frame, no remaining reads)", frame.size)
+                    },
                     metric: metrics::FRAMES_ELIDED,
                 })
                 .collect();
@@ -90,6 +124,9 @@ struct Frame {
     bindings: Vec<ValueId>,
     /// Frame size in bytes, for the audit note.
     size: i128,
+    /// No epilogue exists: the function never returns, so its bracket has
+    /// only the prologue.
+    never_restored: bool,
 }
 
 /// Find `func`'s shadow-stack bracket, if it has one and nothing else
@@ -132,14 +169,18 @@ fn find_unused_frame(func: &HighFunction) -> Option<Frame> {
     };
     let mut prologue_set = None;
     let mut epilogue_add = None;
+    let mut global_sets = 0usize;
     for (id, binding) in func.bindings.iter() {
         if let Expr::Unknown {
             op_kind: WasmOpcodeKind::GlobalSet,
             args,
             ..
         } = &binding.expr
-            && args.len() == 1
         {
+            global_sets += 1;
+            if args.len() != 1 {
+                continue;
+            }
             let arg = resolve_use(func, args[0]);
             if arg == fp {
                 prologue_set = Some(id);
@@ -148,7 +189,21 @@ fn find_unused_frame(func: &HighFunction) -> Option<Frame> {
             }
         }
     }
-    let (prologue_set, epilogue_add) = (prologue_set?, epilogue_add?);
+    let prologue_set = prologue_set?;
+
+    // No restore anywhere: the bracket is dead only when the function
+    // can never return (see the module docs), the prologue's `global.set`
+    // is the function's only one, and nothing but that set reads `fp`.
+    let Some(epilogue_add) = epilogue_add else {
+        if global_sets != 1 || uses.get(&fp).copied().unwrap_or(0) != 1 || !never_returns(&func.region) {
+            return None;
+        }
+        return Some(Frame {
+            bindings: vec![sp, fp, prologue_set],
+            size,
+            never_restored: true,
+        });
+    };
 
     // The restore must be consumed by exactly one `global.set`.
     let epilogue_set = func.bindings.iter().find_map(|(id, binding)| {
@@ -171,7 +226,17 @@ fn find_unused_frame(func: &HighFunction) -> Option<Frame> {
     Some(Frame {
         bindings: vec![sp, fp, prologue_set, epilogue_add, epilogue_set],
         size,
+        never_restored: false,
     })
+}
+
+/// Whether every path through `region` ends in a trap: no `return` anywhere
+/// in it, and control cannot fall out of its bottom (which, at a
+/// function's root, is the implicit return of a unit function).
+fn never_returns(region: &Region) -> bool {
+    let mut returns = false;
+    region.for_each_node(|n| returns |= matches!(n, Region::Return { .. }));
+    !returns && !super::enum_match::falls_through(region)
 }
 
 /// How many times each value is read by the code the backend emits: the
@@ -291,6 +356,81 @@ mod tests {
             find_unused_frame(&func).is_none(),
             "an unbalanced bracket must not be touched"
         );
+    }
+
+    /// A prologue and no restore: `fp = sp - 16; global.set fp`, then the
+    /// body `region`.
+    fn prologue_only(region: Region) -> HighFunction {
+        let mut func = func_with(
+            vec![
+                Expr::GlobalGet { index: 0 },                            // v0 sp
+                Expr::Literal(Literal::I32(16)),                         // v1 size
+                Expr::Binary { op: BinaryOp::Sub, lhs: v(0), rhs: v(1) }, // v2 fp
+                global_set(v(2)),                                        // v3
+            ],
+            vec![],
+            vec![0, 1, 2, 3],
+        );
+        func.region = region;
+        func
+    }
+
+    fn panics_after_block() -> Region {
+        Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::Panic { kind: sordec_ir::PanicKind::Bare },
+        ])
+    }
+
+    #[test]
+    fn a_prologue_on_a_body_that_always_traps_is_elided() {
+        let func = prologue_only(panics_after_block());
+        let frame = find_unused_frame(&func).expect("nothing after the prologue returns");
+        assert_eq!(frame.bindings, vec![v(0), v(2), v(3)]);
+        assert!(frame.never_restored);
+    }
+
+    #[test]
+    fn a_prologue_without_a_restore_on_a_body_that_returns_is_left_alone() {
+        // Falling off the end of a unit function returns.
+        let func = prologue_only(Region::Basic(BlockId::from_index(0)));
+        assert!(find_unused_frame(&func).is_none());
+        // So does an explicit return on one path.
+        let func = prologue_only(Region::Sequence(vec![
+            Region::Basic(BlockId::from_index(0)),
+            Region::If {
+                cond: v(1),
+                then_region: Box::new(Region::Return { values: vec![] }),
+                else_region: None,
+            },
+            Region::Panic { kind: sordec_ir::PanicKind::Bare },
+        ]));
+        assert!(find_unused_frame(&func).is_none());
+    }
+
+    #[test]
+    fn a_trapping_prologue_whose_pointer_is_read_or_set_again_is_left_alone() {
+        // `fp` read by the body.
+        let mut func = prologue_only(panics_after_block());
+        let id = func.bindings.push(sordec_ir::Binding::new(
+            v(4),
+            IrType::Unknown(UnknownReason::InsufficientEvidence),
+            load(v(2), 0),
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        func.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings.push(id);
+        assert!(find_unused_frame(&func).is_none());
+
+        // A second `global.set` the bracket does not explain.
+        let mut func = prologue_only(panics_after_block());
+        let id = func.bindings.push(sordec_ir::Binding::new(
+            v(4),
+            IrType::Unknown(UnknownReason::InsufficientEvidence),
+            global_set(v(1)),
+            Provenance::new("seed", ProvenanceSource::DataFlow, "seed"),
+        ));
+        func.blocks.get_mut(BlockId::from_index(0)).unwrap().bindings.push(id);
+        assert!(find_unused_frame(&func).is_none());
     }
 
     #[test]

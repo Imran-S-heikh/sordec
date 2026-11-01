@@ -1071,6 +1071,8 @@ fn render_known_op(out: &mut impl Write, op: &KnownOp, ctx: &FoldCtx<'_>) -> io:
                 ctx.operand(*auth_entries)
             )
         }
+        KnownOp::GetDelegatedSigners => write!(out, "get_delegated_signers()"),
+        KnownOp::DelegateAuth { address } => write!(out, "delegate_auth({})", ctx.operand(*address)),
         KnownOp::AddressConversion { kind, args } => {
             write!(out, "{}", val_abi::addr_kind_name(*kind))?;
             render_args(out, args, ctx)

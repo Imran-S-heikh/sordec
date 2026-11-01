@@ -13,6 +13,22 @@
 //! contract; turning `host:a:require_auth(v6)` into a first-class
 //! `require_auth(v6)` is the point of this pass.
 //!
+//! ## Custom-account delegation (protocol 27)
+//!
+//! `a::9` (`get_delegated_signers_for_current_auth_check`) and `a::a`
+//! (`delegate_account_auth`) are `env.custom_account().get_delegated_signers()`
+//! and `env.custom_account().delegate_auth(&address)`.
+//!
+//! Why it is exact: SDK 27's `CustomAccount` (`src/custom_account.rs`) is
+//! a wrapper around the env whose two methods are these two host calls and
+//! nothing else — `get_delegated_signers` returns the host's vector as the
+//! `Vec<Address>` the host documents it to be, `delegate_auth` passes
+//! `address.to_object()`. A module importing either is built for protocol
+//! 27, so its SDK has the accessor.
+//!
+//! Gates: the host-function identity, at its ABI arity (none for `a::9`,
+//! one address for `a::a`).
+//!
 //! ## What it does NOT do
 //!
 //! - No admin-gated-auth collapse (`get(Admin) → require_auth`). rustc
@@ -40,6 +56,7 @@ const M_REQUIRE_AUTH: &str = "require_auth";
 const M_REQUIRE_AUTH_FOR_ARGS: &str = "require_auth_for_args";
 const M_AUTHORIZE_AS_CURR: &str = "authorize_as_curr_contract";
 const M_ADDRESS_CONVERSION: &str = "address_conversion";
+const M_DELEGATION: &str = "custom_account_delegation";
 
 /// The C4 auth + address recognizer. Stateless.
 #[derive(Debug, Default, Clone, Copy)]
@@ -130,6 +147,22 @@ fn try_auth(id: ValueId, expr: &Expr) -> Option<Rewrite> {
                 KnownType::Unit,
                 M_AUTHORIZE_AS_CURR,
                 "auth authorize_as_curr_contract".to_string(),
+            ),
+            // Protocol 27's custom-account delegation. The host returns
+            // the delegated signers as a vector of `Address`es (its
+            // documented contract), which is the `Vec<Address>` SDK 27's
+            // `CustomAccount::get_delegated_signers` hands back unchanged.
+            ("9", 0) => (
+                KnownOp::GetDelegatedSigners,
+                KnownType::Vec(Box::new(IrType::Known(KnownType::Address))),
+                M_DELEGATION,
+                "auth get_delegated_signers".to_string(),
+            ),
+            ("a", 1) => (
+                KnownOp::DelegateAuth { address: args[0] },
+                KnownType::Unit,
+                M_DELEGATION,
+                "auth delegate_auth".to_string(),
             ),
             // Address conversions: all arity 1 in the ABI.
             (_, 1) => {
@@ -237,6 +270,31 @@ mod tests {
             other => panic!("expected RequireAuth, got {other:?}"),
         }
         assert_eq!(func.bindings.get(v(1)).unwrap().ty, IrType::Known(KnownType::Unit));
+    }
+
+    #[test]
+    fn delegated_signers_and_delegate_auth_recognized() {
+        // v0 = get_delegated_signers(); v1 = delegate_auth(v0)
+        let mut func = func_with(vec![host_a("9", vec![]), host_a("a", vec![v(0)])]);
+        let (changed, metrics) = run(&mut func);
+        assert!(changed);
+        assert_eq!(metrics.get(M_DELEGATION), Some(2));
+        assert!(matches!(expr_at(&func, v(0)), Expr::Semantic(SemanticOp::Known(KnownOp::GetDelegatedSigners))));
+        assert_eq!(
+            func.bindings.get(v(0)).unwrap().ty,
+            IrType::Known(KnownType::Vec(Box::new(IrType::Known(KnownType::Address))))
+        );
+        match expr_at(&func, v(1)) {
+            Expr::Semantic(SemanticOp::Known(KnownOp::DelegateAuth { address })) => assert_eq!(*address, v(0)),
+            other => panic!("expected DelegateAuth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delegation_at_the_wrong_arity_is_left() {
+        let mut func = func_with(vec![i64c(0), host_a("9", vec![v(0)]), host_a("a", vec![])]);
+        let (changed, _) = run(&mut func);
+        assert!(!changed, "a::9 takes nothing and a::a one address");
     }
 
     #[test]

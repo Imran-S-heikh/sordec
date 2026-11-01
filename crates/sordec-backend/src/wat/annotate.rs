@@ -114,6 +114,8 @@ pub(crate) fn label_known_op(op: &KnownOp) -> String {
         KnownOp::RequireAuth { address } => format!("require_auth({address})"),
         KnownOp::RequireAuthForArgs { address, .. } => format!("require_auth_for_args({address})"),
         KnownOp::AuthorizeAsCurrContract { .. } => "authorize_as_current_contract".to_string(),
+        KnownOp::GetDelegatedSigners => "get_delegated_signers()".to_string(),
+        KnownOp::DelegateAuth { address } => format!("delegate_auth({address})"),
         KnownOp::AddressConversion { kind, .. } => format!("address::{kind:?}"),
         KnownOp::InvokeContract {
             resolved_callee,
