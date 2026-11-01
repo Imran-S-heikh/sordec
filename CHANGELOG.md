@@ -11,12 +11,18 @@ follow [Semantic Versioning][semver].
 ### Fixed
 
 - **CI's Stellar-examples job** builds the examples at the pinned commit
-  (`1f5aeb5`) with rustc 1.98.1. The docs had said 1.97, but every measured
-  example records 1.98.1 in its metadata; 1.97.1 moves `fuzzing` from 0.5500
-  to 0.5059. It cloned the latest examples, which moved to soroban-sdk 28 and
-  no longer build outside `stellar contract build`, so the job scored nothing.
-  `build_heldout.sh` now prints each failure's first error and exits non-zero
-  when no example builds.
+  (`1f5aeb5`). It cloned the latest examples, which moved to soroban-sdk 28
+  and no longer build outside `stellar contract build`, so the job scored
+  nothing.
+- **The pinned rustc for the Stellar examples is 1.98.1**, the version every
+  measured example records in its metadata; the docs had said 1.97.
+- **`fuzzing` was scored on its unexpanded source in CI.** The scorer expands
+  sources offline, and a fresh machine had not fetched that example's
+  dev-dependencies, so it fell back silently (0.5059 instead of 0.5500).
+  `build_heldout.sh` now copies each example's `Cargo.lock` and fetches its
+  dependencies, and the bench fails, naming the contract and the reason,
+  when any contract falls back. The script also prints each build failure's
+  first error and exits non-zero when no example builds.
 
 ## [0.1.0] — 2026-11-01
 

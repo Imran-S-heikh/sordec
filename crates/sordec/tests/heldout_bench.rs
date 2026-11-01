@@ -53,7 +53,10 @@
 //! two-sidedness is actually for on the corpus: a machine that cannot run
 //! `cargo expand` degrades every category to the source basis, which moves
 //! every contract at once and breaches the mean loudly rather than quietly
-//! reporting a different metric.
+//! reporting a different metric. One contract degrading alone would move the
+//! mean too little to notice, so each contract's basis is checked as well:
+//! the run fails naming any contract scored on the source as written, with
+//! the reason expansion gave.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -62,7 +65,17 @@ use sordec_score::{score_paths, ScoreOptions};
 
 /// One contract's outcome.
 enum Outcome {
-    Scored { overall: f64, interface: f64, structure: Option<f64>, semantic: Option<f64>, cf: String, holes: usize },
+    Scored {
+        overall: f64,
+        interface: f64,
+        structure: Option<f64>,
+        semantic: Option<f64>,
+        cf: String,
+        holes: usize,
+        /// The scorer's note when this contract fell back from the
+        /// macro-expanded basis to the source as written.
+        fallback: Option<String>,
+    },
     Failed(String),
 }
 
@@ -104,6 +117,7 @@ fn measure(dir: &Path, name: &str) -> Outcome {
                 semantic: c.semantic.checked.then_some(c.semantic.score),
                 cf: cf_signal(&c.structure.notes),
                 holes: output.rust.matches("todo!(").count(),
+                fallback: r.notes.iter().find(|n| n.contains("pre-expansion")).cloned(),
             }
         }
         Err(e) => Outcome::Failed(format!("score: {e}")),
@@ -195,16 +209,20 @@ fn score_heldout_corpus() {
         "contract", "overall", "iface", "struct", "seman", "holes"
     );
     let mut scored = Vec::new();
+    let mut fell_back = Vec::new();
     let mut failed = 0;
     for name in &names {
         match measure(&root.join(name), name) {
-            Outcome::Scored { overall, interface, structure, semantic, cf, holes } => {
+            Outcome::Scored { overall, interface, structure, semantic, cf, holes, fallback } => {
                 println!(
                     "{name:<22}{overall:>9.4}{interface:>9.4}{:>9}{:>9}{holes:>7}  {cf}",
                     fmt(structure),
                     fmt(semantic)
                 );
                 scored.push((name.clone(), overall, structure, semantic, holes));
+                if let Some(note) = fallback {
+                    fell_back.push(format!("{name}: {note}"));
+                }
             }
             Outcome::Failed(why) => {
                 failed += 1;
@@ -225,6 +243,13 @@ fn score_heldout_corpus() {
 
     // Asserted after the table, so a failing run still prints every number
     // someone needs to decide whether the change was intended.
+    assert!(
+        fell_back.is_empty(),
+        "scored on the source as written, not macro-expanded, so these numbers \
+         are a different metric (expansion runs offline: every dependency, \
+         dev-dependencies included, must already be fetched):\n{}",
+        fell_back.join("\n")
+    );
     for (name, overall, ..) in &scored {
         let floor = heldout_floor(name);
         assert!(

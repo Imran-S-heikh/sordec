@@ -17,8 +17,7 @@
 #
 #   rustc 1.98.1, the compiler every measured example records in its
 #   metadata (`rsver`). Codegen differs between releases: built with 1.99,
-#   `pause` falls from 1.0000 to 0.7059; with 1.97.1, `fuzzing` falls from
-#   0.5500 to 0.5059.
+#   `pause` falls from 1.0000 to 0.7059.
 #
 #   git clone https://github.com/stellar/soroban-examples ~/.cache/soroban-examples
 #   git -C ~/.cache/soroban-examples checkout 1f5aeb5
@@ -45,6 +44,13 @@ for dir in "$EX"/*/; do
     cp "$CARGO_TARGET_DIR/wasm32v1-none/release/$pkg.wasm" "$OUT/$name/$name.wasm"
     cp "$dir/Cargo.toml" "$OUT/$name/source/"
     cp -r "$dir/src" "$OUT/$name/source/"
+    # The scorer expands the source with `cargo expand --offline`, so the
+    # versions the wasm was built with, and every crate they resolve to
+    # (dev-dependencies included), must already be local. Without them it
+    # falls back to the source as written and scores a different metric.
+    [ -f "$dir/Cargo.lock" ] && cp "$dir/Cargo.lock" "$OUT/$name/source/"
+    (cd "$OUT/$name/source" && cargo fetch -q) \
+      || echo "warn $name: cargo fetch failed; scoring will fall back to the source as written"
     # The contract, not its tests, is what the reconstruction is scored
     # against. Emptied rather than deleted: every example declares a bare
     # `mod test;`, and without the file `cargo expand` fails with E0583, so
