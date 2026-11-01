@@ -72,6 +72,10 @@ pub(crate) struct FnCtx<'a> {
     /// [`variant_patterns`]): `p` in `E::X(p) => ..`. Each is the pattern,
     /// not a statement of its own.
     pattern_bound: HashSet<ValueId>,
+    /// Merges nothing the reconstruction runs reads: their only readers are
+    /// raw stores, which print as holes naming them. See
+    /// [`hole_read_merges`].
+    hole_read: HashSet<ValueId>,
 }
 
 /// Emit the body of `func` as a `syn::Block`.
@@ -148,6 +152,7 @@ impl<'a> FnCtx<'a> {
         let escaping = escaping_values(func, &fold);
         let if_lets = if_let_reads(func);
         let pattern_bound = variant_patterns(func, reg);
+        let hole_read = hole_read_merges(func, &fold);
         let mut ctx = Self {
             high,
             func,
@@ -161,6 +166,7 @@ impl<'a> FnCtx<'a> {
             fold,
             if_lets,
             pattern_bound,
+            hole_read,
         };
         ctx.liveness = ctx.settle_liveness();
         // The escape set was taken before liveness settled. A value whose
@@ -1242,22 +1248,49 @@ impl<'a> FnCtx<'a> {
             // while the literal still carries the wasm word it was loaded
             // as (`0i64`). Unsuffixed, it takes the declared type — and
             // only when it fits, so a real disagreement stays visible.
-            let rhs = self
-                .func
-                .bindings
-                .get(phi)
-                .and_then(|b| {
-                    self.result_wrapped(source, &b.ty)
-                        .or_else(|| expr::unsuffixed_against(self, source, &b.ty))
-                        .or_else(|| expr::val_constant(self, source, phi))
-                        .or_else(|| expr::sign_cast(self, source, &b.ty))
-                        .or_else(|| self.val_merge_input(source, phi))
-                        .or_else(|| self.word_merge_input(source, phi).and_then(|_| expr::val_bits(self, source, &b.ty)))
-                        .or_else(|| expr::bool_to_int(self, source, &b.ty))
-                })
-                .unwrap_or_else(|| self.value_ref(source));
+            let adapted = self.func.bindings.get(phi).and_then(|b| {
+                self.result_wrapped(source, &b.ty)
+                    .or_else(|| expr::unsuffixed_against(self, source, &b.ty))
+                    .or_else(|| expr::val_constant(self, source, phi))
+                    .or_else(|| expr::sign_cast(self, source, &b.ty))
+                    .or_else(|| self.val_merge_input(source, phi))
+                    .or_else(|| self.word_merge_input(source, phi).and_then(|_| expr::val_bits(self, source, &b.ty)))
+                    .or_else(|| expr::bool_to_int(self, source, &b.ty))
+            });
+            // A merge only holes read is dead in the code the reconstruction
+            // runs (see `hole_read_merges`): an assignment to it changes
+            // nothing the program does. One that would not compile — its
+            // input's type is not the merge's — is left out rather than
+            // converted. This hides the merge's disagreement with its inputs
+            // (its own type may be the wrong one); it does not resolve it.
+            if adapted.is_none() && self.hole_read.contains(&phi) && self.cannot_hold(phi, source) {
+                continue;
+            }
+            let rhs = adapted.unwrap_or_else(|| self.value_ref(source));
             out.push(parse_quote!(#lhs = #rhs;));
         }
+    }
+
+    /// Whether `source`, as printed, has a recovered type other than the
+    /// merge's as declared: both known, and not the same. Says nothing about
+    /// which of the two is right.
+    fn cannot_hold(&self, phi: ValueId, source: ValueId) -> bool {
+        let known = |v: ValueId| match self.func.bindings.get(v).map(|b| &b.ty) {
+            Some(IrType::Known(k) | IrType::Inferred(k)) => Some(k.clone()),
+            _ => None,
+        };
+        let src = self.fold_target(source);
+        // A hole may print without a type and take the merge's: kept.
+        if self.func.bindings.get(src).is_some_and(|b| Self::is_hole_expr(&expr::binding_expr(self, b))) {
+            return false;
+        }
+        // The merge is declared with its type; an unrecovered one as the
+        // hole policy prints it (`Val`, or the word it knows).
+        let declared = match self.func.bindings.get(phi).map(|b| &b.ty) {
+            Some(IrType::Unknown(reason)) => Some(self.policy.unknown_word(reason).unwrap_or(KnownType::Val)),
+            _ => known(phi),
+        };
+        matches!((declared, known(src)), (Some(a), Some(b)) if a != b)
     }
 
     /// A merge that is the machine word for a reason of its own: another of
@@ -1687,6 +1720,77 @@ fn arm_payloads(func: &HighFunction, body: &Region, value: ValueId) -> Vec<Value
         .collect()
 }
 
+/// The merges nothing the reconstruction runs reads: every read of one —
+/// through any rename of it, which prints as the merge (see [`Fold`]) — is
+/// the value a raw store writes, and a raw store prints as a hole naming
+/// its operands (`todo!("store v6+48 <- v219 width 8")`), which runs none
+/// of them.
+///
+/// Such a merge is dead in the code the reconstruction runs. Leaving out
+/// an assignment to it therefore cannot change what the program computes
+/// or does, and the store's hole still names it. That is the whole
+/// argument, and all [`FnCtx::emit_transfers`] relies on: it leaves out an
+/// input only where printing it would not compile (see
+/// [`FnCtx::cannot_hold`]).
+///
+/// What this does not do is make the merge right. Its own type may be
+/// wrong — a register rustc gave several variants' fields, typed as one of
+/// them or as `Val` — and its inputs then disagree with it. This hides that
+/// disagreement where nothing runs the merge; it fixes nothing about the
+/// merge or the hole that names it, which stays a hole.
+///
+/// Gates: a merge (a phi some transfer assigns); every read of it or of a
+/// rename of it, in the blocks the body emits and the region's own reads,
+/// the value operand of a raw store.
+fn hole_read_merges(func: &HighFunction, fold: &Fold) -> HashSet<ValueId> {
+    let mut merges: HashSet<ValueId> = HashSet::new();
+    func.region.for_each_node(|node| {
+        if let Region::Break { transfer, .. } | Region::Continue { transfer, .. } | Region::Transfer { transfer, .. } =
+            node
+        {
+            merges.extend(transfer.iter().map(|(phi, _)| *phi));
+        }
+    });
+    if merges.is_empty() {
+        return merges;
+    }
+    // What a reference names: the printer's rename target, and through any
+    // rename left of another type, what it renames — so a read of a rename
+    // of the merge is a read of the merge.
+    let named = |u: ValueId| {
+        let mut v = fold.target(u);
+        for _ in 0..16 {
+            match func.bindings.get(v).map(|b| &b.expr) {
+                Some(Expr::Use(next)) => v = fold.target(*next),
+                _ => break,
+            }
+        }
+        v
+    };
+    let mut run: HashSet<ValueId> = HashSet::new();
+    let mut stored: HashSet<ValueId> = HashSet::new();
+    func.region.for_each_node(|node| {
+        let Region::Basic(b) = node else { return };
+        let Some(block) = func.blocks.get(*b) else { return };
+        for id in &block.bindings {
+            let Some(binding) = func.bindings.get(*id) else { continue };
+            if let Expr::Store { addr, value, .. } = &binding.expr {
+                stored.insert(named(*value));
+                run.insert(named(*addr));
+                continue;
+            }
+            binding.expr.for_each_value_use(|u| {
+                run.insert(named(u));
+            });
+        }
+    });
+    func.region.for_each_value_use(|u| {
+        run.insert(named(u));
+    });
+    merges.retain(|m| stored.contains(m) && !run.contains(m));
+    merges
+}
+
 /// The payload bindings a `match` arm's pattern binds: those an arm of one
 /// case opens with, of that case's variant, at a component the variant
 /// declares, on a switch [`FnCtx::variant_match`] prints as a `match`. Any
@@ -1909,6 +2013,19 @@ mod tests {
         returns: Vec<Vec<ValueId>>,
         facts: Option<sordec_ir::SorobanFacts>,
     ) -> String {
+        emitted_scheduling(exprs, tail, reg, returns, facts, &[])
+    }
+
+    /// [`emitted_with_facts`], with the bindings `unscheduled` left out of
+    /// the block (a value no block computes, as a rename the lowering left).
+    fn emitted_scheduling(
+        exprs: Vec<(IrType, Expr)>,
+        tail: Vec<Region>,
+        reg: &TypeRegistry,
+        returns: Vec<Vec<ValueId>>,
+        facts: Option<sordec_ir::SorobanFacts>,
+        unscheduled: &[u32],
+    ) -> String {
         use quote::ToTokens;
         use sordec_common::{Arena, FuncId, Provenance, ProvenanceSource};
         use sordec_ir::{HighBlock, MemoryImage, WasmFacts};
@@ -1921,7 +2038,8 @@ mod tests {
         }
         let mut blocks: Arena<BlockId, HighBlock> = Arena::new();
         let b0 = BlockId::from_index(0);
-        blocks.push(HighBlock { id: b0, bindings: (1..bindings.len() as u32).map(v).collect() });
+        let scheduled = (1..bindings.len() as u32).filter(|i| !unscheduled.contains(i)).map(v).collect();
+        blocks.push(HighBlock { id: b0, bindings: scheduled });
         let region = if tail.is_empty() {
             Region::Basic(b0)
         } else {
@@ -3410,5 +3528,101 @@ mod tests {
     fn a_helpers_merge_not_typed_result_is_not_wrapped() {
         let body = helper_result_merge(IrType::Inferred(KnownType::I128));
         assert!(!body.contains("Ok (") && !body.contains("Err ("), "{body}");
+    }
+
+    /// A merge typed `Address` of an address on one arm and the word `0`
+    /// on the other — two variants' fields one register held — written
+    /// to memory by a raw store; with `read`, also returned.
+    fn merged_fields(read: bool) -> String {
+        let b0 = BlockId::from_index(0);
+        let exprs = vec![
+            (IrType::Known(KnownType::Address), known(KnownOp::GetCurrentContractAddress)),
+            i64_lit(0),
+            (IrType::Inferred(KnownType::Address), Expr::Phi { incoming: vec![(b0, v(1)), (b0, v(2))] }),
+            (IrType::Known(KnownType::Bool), Expr::Literal(sordec_ir::Literal::Bool(true))),
+        ];
+        let mut tail = vec![
+            Region::If {
+                cond: v(4),
+                then_region: Box::new(Region::Transfer { target: b0, transfer: vec![(v(3), v(1))] }),
+                else_region: Some(Box::new(Region::Transfer { target: b0, transfer: vec![(v(3), v(2))] })),
+            },
+        ];
+        let mut exprs = exprs;
+        exprs.push((untyped(), store(3)));
+        if read {
+            tail.push(ret(3));
+        }
+        let returns = if read { vec![vec![v(3)]] } else { vec![] };
+        emitted_returning(exprs, tail, &TypeRegistry::default(), returns)
+    }
+
+    #[test]
+    fn a_merge_only_a_raw_store_reads_takes_no_input_its_type_cannot_hold() {
+        let body = merged_fields(false);
+        assert!(body.contains("v3 = current_contract_address"), "{body}");
+        assert!(!body.contains("v3 = 0"), "{body}");
+        assert!(body.contains("store arg0 <- v3"), "the store still names the merge: {body}");
+    }
+
+    #[test]
+    fn a_merge_code_reads_keeps_every_input() {
+        let body = merged_fields(true);
+        assert!(body.contains("v3 = current_contract_address"), "{body}");
+        assert!(body.contains("v3 = 0i64"), "{body}");
+    }
+
+    /// The same merge, also read by code through a rename no block computes
+    /// (`v6 = v3`, returned): the rename prints as the merge, so the merge
+    /// is read by code that runs.
+    #[test]
+    fn a_merge_code_reads_through_a_rename_keeps_every_input() {
+        let b0 = BlockId::from_index(0);
+        let address = IrType::Known(KnownType::Address);
+        let exprs = vec![
+            (address.clone(), known(KnownOp::GetCurrentContractAddress)),
+            i64_lit(0),
+            (IrType::Inferred(KnownType::Address), Expr::Phi { incoming: vec![(b0, v(1)), (b0, v(2))] }),
+            (IrType::Known(KnownType::Bool), Expr::Literal(sordec_ir::Literal::Bool(true))),
+            (untyped(), store(3)),
+            (address, Expr::Use(v(3))),
+        ];
+        let tail = vec![
+            Region::If {
+                cond: v(4),
+                then_region: Box::new(Region::Transfer { target: b0, transfer: vec![(v(3), v(1))] }),
+                else_region: Some(Box::new(Region::Transfer { target: b0, transfer: vec![(v(3), v(2))] })),
+            },
+            ret(6),
+        ];
+        let body = emitted_scheduling(exprs, tail, &TypeRegistry::default(), vec![vec![v(6)]], None, &[6]);
+        assert!(body.contains("v3 = current_contract_address"), "{body}");
+        assert!(body.contains("v3 = 0i64"), "{body}");
+    }
+
+    /// A merge with no recovered type, which prints as `Val`, only a raw
+    /// store reads: an input of another recovered type (a `u32` sum) is left
+    /// out; a hole input, which takes the merge's type, stays.
+    #[test]
+    fn an_untyped_merge_only_a_raw_store_reads_keeps_its_hole_inputs() {
+        let b0 = BlockId::from_index(0);
+        let u32_ty = IrType::Known(KnownType::U32);
+        let exprs = vec![
+            (u32_ty.clone(), Expr::Literal(sordec_ir::Literal::U32(3))),
+            (u32_ty.clone(), Expr::Binary { op: BinaryOp::Add, lhs: v(0), rhs: v(1) }),
+            (u32_ty, wide_load()),
+            (untyped(), Expr::Phi { incoming: vec![(b0, v(2)), (b0, v(3))] }),
+            (IrType::Known(KnownType::Bool), Expr::Literal(sordec_ir::Literal::Bool(true))),
+            (untyped(), store(4)),
+        ];
+        let tail = vec![Region::If {
+            cond: v(5),
+            then_region: Box::new(Region::Transfer { target: b0, transfer: vec![(v(4), v(2))] }),
+            else_region: Some(Box::new(Region::Transfer { target: b0, transfer: vec![(v(4), v(3))] })),
+        }];
+        let body = emitted_returning(exprs, tail, &TypeRegistry::default(), vec![]);
+        assert!(body.contains("v4 : soroban_sdk :: Val"), "the merge is declared as it prints: {body}");
+        assert!(!body.contains("v4 = v2"), "the sum, a u32, is left out: {body}");
+        assert!(body.contains("v4 = v3"), "the hole input stays: {body}");
     }
 }

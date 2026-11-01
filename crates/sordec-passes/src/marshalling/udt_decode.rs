@@ -191,7 +191,12 @@
 //!   the discriminant and both limbs, as the codec's own collapse holds.
 //!   Anything that may write it only ends the `must` side.
 //! - A call to a helper that uses a parameter only as a load or store
-//!   address touches what it is handed there at exactly those offsets.
+//!   address touches what it is handed there at exactly those offsets. One
+//!   that computes the address from it first (`p + 8`), never storing it
+//!   or handing it to an operation of unknown reach, touches the span its
+//!   loads and stores (and its callees') reach through it, and writes for
+//!   certain the bytes its own stores write on every path it returns by
+//!   (`widened`): the summary covers every byte it touches.
 //!   Any other call or memory operation is taken to read and write from
 //!   the address it is handed upward. Handed an address below the
 //!   decode's bytes, it reads the local that address belongs to, not the
@@ -214,7 +219,7 @@
 //! loaded back is not followed; rustc addresses its frame slots from the
 //! frame pointer.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use sordec_common::{FuncId, IrId, TypeId, UnknownReason, ValueId};
 use sordec_ir::{
@@ -296,6 +301,10 @@ impl Pass<HighIr> for UdtDecodePass {
             .iter()
             .map(|f| (f.id, super::enum_match::gated_summary(ir, f, access.get(&f.id))))
             .collect();
+        // What a call can touch through a pointer it is handed, for the
+        // reach checks: a helper that computes with its pointer (`p + 8`)
+        // summarised by the bytes its loads and stores reach through it.
+        let access = widened(ir, access);
         let by_site =
             specialise(ir, &memory, &structs, &unions, &param_types, &helpers, &scalars, &access, &gated, &wide);
         for func in &mut ir.functions {
@@ -1754,6 +1763,82 @@ pub(super) fn param_accesses(func: &HighFunction) -> Vec<Option<ParamAccess>> {
         }
     }
     access
+}
+
+/// `access` with each helper parameter it cannot summarise exactly — one
+/// the helper computes with (`p + 8`) before loading or storing through
+/// it — summarised by the bytes its loads and stores reach through it,
+/// its own callees' included (`Frames::param_touches`): one span read and
+/// one span written, none of them for certain. A reader of the summary
+/// sees more than the helper touches, never less.
+pub(super) fn widened(ir: &HighIr, mut access: HashMap<FuncId, Vec<Option<ParamAccess>>>) -> HashMap<FuncId, Vec<Option<ParamAccess>>> {
+    let frames = super::optional_out::Frames::new(ir);
+    for (id, params) in &mut access {
+        let Some(func) = ir.functions.iter().find(|f| f.id == *id) else { continue };
+        for (i, slot) in params.iter_mut().enumerate() {
+            if slot.is_some() {
+                continue;
+            }
+            let Some(touches) = frames.param_touches(*id, i) else { continue };
+            let mut acc = ParamAccess::default();
+            for (s, write) in touches {
+                if write {
+                    acc.writes.push((s.offset, s.bytes));
+                } else {
+                    acc.reads.push((s.offset, s.bytes));
+                }
+            }
+            // The bytes its own stores write on every path it returns by.
+            if let Some(&param) = func.params.get(i) {
+                let mut flow = BytesThrough { func, param };
+                let walked = reach::walk(func, &mut flow, BTreeSet::new());
+                if let Some(bytes) = walked.returned
+                    && walked.complete
+                {
+                    acc.must_writes = runs(&bytes);
+                }
+            }
+            *slot = Some(acc);
+        }
+    }
+    access
+}
+
+/// The bytes, relative to a pointer parameter, that the function's own
+/// stores through it (at a constant offset from it) have written on a path.
+struct BytesThrough<'f> {
+    func: &'f HighFunction,
+    param: ValueId,
+}
+
+impl reach::Flow for BytesThrough<'_> {
+    type State = BTreeSet<u32>;
+
+    fn join(into: &mut Self::State, other: &Self::State) {
+        into.retain(|b| other.contains(b));
+    }
+
+    fn step(&mut self, id: ValueId, stored: &mut Self::State) {
+        let Some(Expr::Store { addr, offset, width, .. }) = self.func.bindings.get(id).map(|b| &b.expr) else { return };
+        let (base, k) = canon_addr(self.func, *addr);
+        if base != self.param {
+            return;
+        }
+        let Some(start) = k.checked_add(*offset) else { return };
+        stored.extend((0..width.bytes()).filter_map(|b| start.checked_add(b)));
+    }
+}
+
+/// `bytes` as `(offset, width)` runs of consecutive bytes.
+fn runs(bytes: &BTreeSet<u32>) -> Vec<(u32, u32)> {
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    for &b in bytes {
+        match out.last_mut() {
+            Some((o, w)) if *o + *w == b => *w += 1,
+            _ => out.push((b, 1)),
+        }
+    }
+    out
 }
 
 /// Which reads a decode reaches, by a forward walk of the region tree.
@@ -3866,5 +3951,88 @@ mod tests {
         let mut m = scalar_helper_module(1, PrimitiveType::U64);
         UdtDecodePass.run(&mut m);
         untouched(&m, 0, 2, &[3, 4]);
+    }
+
+    // -----------------------------------------------------------------
+    // A helper that computes with its pointer, summarised for the reach
+    // -----------------------------------------------------------------
+
+    /// How `func_1(out)` departs from the plain helper below.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Writer {
+        /// A store at `out + 0`, and one through `out + 8`.
+        Plain,
+        /// The pointer itself also stored, as a value.
+        Escapes,
+        /// `q = out + (-8)`, then a store through `q + 16`: at `out + 8`.
+        Backwards,
+        /// The store through `out + 8` made on one side of a branch only.
+        OneBranch,
+    }
+
+    fn offset_writer(shape: Writer) -> HighIr {
+        let step = if shape == Writer::Backwards { -8 } else { 8 };
+        let mut exprs = vec![
+            Expr::Phi { incoming: vec![] },  // v0 out
+            Expr::Literal(Literal::I32(step)), // v1
+            Expr::Binary { op: sordec_ir::BinaryOp::Add, lhs: v(0), rhs: v(1) }, // v2 out + step
+            Expr::Literal(Literal::I64(0)),  // v3
+            store(v(0), v(3), 0),            // v4
+            store(v(2), v(3), if shape == Writer::Backwards { 16 } else { 0 }), // v5
+        ];
+        let mut scheduled = vec![1, 2, 3, 4, 5];
+        if shape == Writer::Escapes {
+            exprs.push(store(v(3), v(0), 0)); // v6: the pointer itself stored
+            scheduled.push(6);
+        }
+        let mut f = func_with(exprs, vec![v(0)], scheduled.clone());
+        if shape == Writer::OneBranch {
+            // Block 0 holds all but the second store; block 1, under a
+            // branch on v3, holds it.
+            let b1 = sordec_common::BlockId::from_index(1);
+            f.blocks.get_mut(sordec_common::BlockId::from_index(0)).expect("block 0").bindings.retain(|b| *b != v(5));
+            f.blocks.push(sordec_ir::HighBlock { id: b1, bindings: vec![v(5)] });
+            f.region = sordec_ir::Region::Sequence(vec![
+                sordec_ir::Region::Basic(sordec_common::BlockId::from_index(0)),
+                sordec_ir::Region::If { cond: v(3), then_region: Box::new(sordec_ir::Region::Basic(b1)), else_region: None },
+            ]);
+        }
+        f.id = FuncId::from_index(1);
+        module(vec![f])
+    }
+
+    fn widened_of(shape: Writer) -> Option<ParamAccess> {
+        let m = offset_writer(shape);
+        let access: HashMap<FuncId, Vec<Option<ParamAccess>>> =
+            m.functions.iter().map(|f| (f.id, param_accesses(f))).collect();
+        assert!(access[&FuncId::from_index(1)][0].is_none(), "the exact summary refuses a computed address");
+        widened(&m, access).remove(&FuncId::from_index(1)).and_then(|mut p| p.remove(0))
+    }
+
+    #[test]
+    fn a_helper_storing_through_its_pointer_plus_a_constant_is_summarised() {
+        let acc = widened_of(Writer::Plain).expect("summarised");
+        assert!(acc.reads.is_empty());
+        assert_eq!(acc.writes, vec![(0, 16)]);
+        assert_eq!(acc.must_writes, vec![(0, 16)], "both stores run on every path");
+    }
+
+    #[test]
+    fn a_helper_whose_pointer_escapes_stays_unsummarised() {
+        assert!(widened_of(Writer::Escapes).is_none());
+    }
+
+    #[test]
+    fn a_helper_stepping_its_pointer_backwards_stays_unsummarised() {
+        // `out + (-8) + 16` is `out + 8`; read from the folded base it would
+        // be placed at `out + 16`. Not located, so nothing is told.
+        assert!(widened_of(Writer::Backwards).is_none());
+    }
+
+    #[test]
+    fn a_store_made_on_one_branch_is_not_written_for_certain() {
+        let acc = widened_of(Writer::OneBranch).expect("summarised");
+        assert_eq!(acc.writes, vec![(0, 16)]);
+        assert_eq!(acc.must_writes, vec![(0, 8)], "only the store every path makes");
     }
 }

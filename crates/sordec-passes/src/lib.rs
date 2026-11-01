@@ -297,6 +297,12 @@ pub const UDT_DECODE_AFTER_ENUM_ITER: &str = "udt-decode-after-enum-iter";
 /// value parameter (every caller now hands it a proven struct), and only
 /// a typed helper is read as that struct's decode at its call sites.
 pub const UDT_DECODE_AFTER_HELPER_TYPES: &str = "udt-decode-after-helper-types";
+/// [`WideCodecPass`] between those two runs: a struct decoder helper whose
+/// value parameter the first typed has its map unpack read as fields, and
+/// a 128-bit field's own outlined decode is then of a proven value — the
+/// shape this pass collapses, which the helper must be rid of before the
+/// second run reads it as that struct's decode.
+pub const WIDE_CODEC_AFTER_ENUM_ITER: &str = "wide-codec-after-enum-iter";
 /// [`EnumIterPass`] again once the struct decodes in its arms are taken:
 /// a recovered field typed `Map<K, E>` or `Vec<E>` proves the values read
 /// from it to be the enum, and their own inline decodes are the shape.
@@ -788,6 +794,7 @@ pub fn default_high_pipeline() -> Pipeline<HighIr> {
             // turns its helpers into `Option`s.
             Box::new(VecIterPass),
             Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_ENUM_ITER, &[])),
+            Box::new(pass::Rerun::new(WideCodecPass, WIDE_CODEC_AFTER_ENUM_ITER, &[])),
             Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_HELPER_TYPES, &[])),
             Box::new(pass::Rerun::new(EnumIterPass, ENUM_ITER_AFTER_UDT_DECODE, &[])),
             Box::new(pass::Rerun::new(UdtDecodePass, UDT_DECODE_AFTER_NESTED_ENUM, &[])),
