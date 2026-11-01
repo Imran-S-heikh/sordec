@@ -2,11 +2,10 @@
 
 A WebAssembly decompiler specialized for [Soroban](https://stellar.org/soroban) smart contracts.
 
-> **Status: `v0.1.0-alpha.1`, with substantial unreleased work on `main`.** The
-> pipeline runs end to end on every contract we have tried. On the seven
-> reference contracts it was built against, the Rust it emits compiles and
-> scores 0.94; on contracts it was not built against it is still well short of
-> that. [Where it actually stands](#where-it-actually-stands) gives the
+> **Status: `v0.1.0`.** The pipeline runs end to end on every contract we
+> have tried. On the seven reference contracts it was built against, the Rust
+> it emits compiles and scores 0.94. Across all 87 contracts we measure, 85
+> compile; on contracts it was not built against the scores are lower. [Where it actually stands](#where-it-actually-stands) gives the
 > numbers rather than an adjective.
 >
 > sordec parses a Soroban `.wasm`, lifts it to a typed CFG/SSA IR, recovers the
@@ -54,67 +53,78 @@ isolation — see [Workspace layout](#workspace-layout).
 ## Where it actually stands
 
 A decompiler that overstates itself is worse than useless: you cannot audit a
-contract against a reconstruction you can't calibrate. So here are three
-measurements, scored by [our own published metric](docs/scoring_metric.md)
+contract against a reconstruction you can't calibrate. So here is every set we
+measure, scored by [our own published metric](docs/scoring_metric.md)
 (`score-2.2.0` — four independent categories, fixed weights, stamped into every
-report). Measured 2026-10-28.
+report). Measured 2026-11-01 on the `v0.1.0` code.
 
-| Set | Contracts | Recompile | Overall score |
+| Set | Contracts | Compile | Overall score |
 |---|---|---|---|
 | Reference corpus ([`samples/contracts/`](samples/contracts/)) | 7 | **7 of 7** | **0.94** |
-| Held-out: the Stellar `soroban-examples` contracts | 25 | **22 of 25** | **0.785** |
-| Unseen: third-party contracts built on other libraries | 2 | **0 of 2** | **0.53** |
+| Stellar `soroban-examples`, single-contract | 25 | **25 of 25** | **0.79** |
+| Stellar `soroban-examples`, multi-contract | 13 | **12 of 13** | **0.66** |
+| Third-party contracts built on other libraries | 2 | **1 of 2** | **0.53** |
+| The SDK's own test contracts (soroban-sdk 26.0.1) | 39 | **39 of 39** | not scored |
+| Authored treasury ([`samples/authored/`](samples/authored/)) | 1 | **1 of 1** | 0.57 |
 
-**Read them in reverse order.** The reference corpus is what the decompiler was
-developed against, so it is the most flattering number. The held-out set was
-kept out of development at first and has since been used to find bugs, so it is
-no longer strictly unseen. The two third-party contracts (OpenZeppelin's
-`merkle-voting`, Phoenix's `vesting`) are the closest thing to "a contract you
-hand it today", and **0.53 is the honest figure for that**.
+**Read them from the bottom up.** The reference corpus is what the decompiler
+was developed against, so it is the most flattering number. The Stellar
+examples were kept out of development at first and have since been used to find
+bugs, so they are no longer strictly unseen. The two third-party contracts
+(OpenZeppelin's `merkle-voting`, Phoenix's `vesting`) are the closest thing to
+"a contract you hand it today". The treasury is a 556-line contract we wrote
+from Stellar's documentation to cover the everyday features; it compiles, but
+its constructor does not run yet (below), which is why its score is lowest.
 
 The criterion the project was funded against, how it is measured, and the result
-measured against it, with every caveat above spelled out, are in
-[`docs/acceptance.md`](docs/acceptance.md).
+against it are in [`docs/acceptance.md`](docs/acceptance.md). A comparison with
+the other public Soroban decompiler, under both tools' scorers, is in
+[`docs/benchmarks/comparison.md`](docs/benchmarks/comparison.md).
 
 By category:
 
-| Category | Reference corpus | Held-out 25 |
+| Category | Reference corpus | Stellar examples (25) |
 |---|---|---|
 | Interface — entrypoints, types | 0.90 | 1.00 |
-| Structure — control-flow shape | 0.94 | 0.31 |
-| Semantic — storage, auth, events, panics | 0.96 | 0.84 |
+| Structure — control-flow shape | 0.92 | 0.33 |
+| Semantic — storage, auth, events, panics | 0.96 | 0.85 |
 | Behaviour — differential execution | 0.93, measured on 6 of 7 | not yet run |
 
 And the things a bare score won't tell you:
 
+- **Compiling is not the same as running.** Every reconstruction that still
+  contains a `todo!()` panics when it reaches it. The treasury compiles, but
+  each of its rebuilt functions starts at a stack-pointer setup sordec does not
+  recover yet, so its constructor panics and none of its 16 entrypoints can be
+  compared with the original. Recovering values held in memory as typed values
+  is the main work left (below).
+- **Unprovable values become `todo!()` gaps, never guesses.** There are 5,816
+  across the 87 contracts; 2,073 of them are in one contract,
+  `import_ark_bn254`, which compiles an elliptic-curve library into itself. A
+  gap you can see is the design. A plausible wrong value that compiles is
+  treated as a bug class, because that is the failure mode that gets someone
+  hurt.
+- **Seven compile errors remain:** one in `privacy_pools` and six in Phoenix's
+  `vesting`.
 - **Part of the rise is the ruler, not the decompiler.** The corpus score was
   0.61 at the alpha release. About 0.08 of the rise to 0.94 came from the six
-  rule changes in `score-2.1.0`. Each one stops scoring something the compiler
-  leaves no trace of (authored panic messages, a stripped contract's type and
-  parameter names, how many times a helper was inlined). The held-out score
-  rose from 0.757 to 0.785 since the last measurement, and about 0.011 of that
-  is the two rule changes in `score-2.2.0` (a private key enum's name, which
-  the module never records, and a generated client that was scored as authored
-  code). Another 0.009 is `account`'s storage keys, which the decompiler now
-  recovers but which only score because of the first of those rules. Every
-  rule change is listed with its measured effect in
-  [`docs/scoring_metric.md`](docs/scoring_metric.md) §7. The rest of each rise
-  is decompiler work.
-- **Held-out structure is low for a reason that is mostly not control flow.**
-  Many of those contracts compile library code into the wasm (`alloc`,
+  rule changes in `score-2.1.0`, and about 0.011 of the Stellar examples' rise
+  from the two in `score-2.2.0`. Each one stops scoring something the compiler
+  leaves no trace of. Every rule change is listed with its measured effect in
+  [`docs/scoring_metric.md`](docs/scoring_metric.md) §7.
+- **Stellar-example structure is low for a reason that is mostly not control
+  flow.** Many of those contracts compile library code into the wasm (`alloc`,
   `ark-bn254`, `eth-abi`, OpenZeppelin helpers). We have to emit that code,
   because it is in the binary, but the scorer compares against the contract's
   own source, which never contained it.
-- **Unprovable values become `todo!()` holes, never guesses.** There are 3,898
-  of them across the 25 held-out contracts. A gap you can see is the design. A
-  plausible wrong value that compiles is treated as a bug class, because that
-  is the failure mode that gets someone hurt.
 - **Behaviour is measured on the reference corpus only.** The harness drives
   `Address`, `String`, `Bytes`, struct and enum parameters and constructors,
-  and compares return values, events, auth and storage. It has not yet been run
-  on the held-out or third-party sets.
+  and compares return values, events, auth and storage. The Stellar examples are
+  built for protocol 27 and the harness hosts protocol 23.
 - **Local variable names are gone.** `rustc` deletes them; no decompiler
   recovers them. Bindings get synthesised names.
+- **Output is not yet byte-for-byte reproducible.** On one contract a
+  synthesised variable number can differ between two runs; the code is the same.
 
 Which contracts this actually handles — protocol and SDK coverage, what a
 stripped contract costs you, and what is untested — is
@@ -141,17 +151,18 @@ pipeline. `--quiet` silences the pipeline's warnings without hiding errors, and
 | `sordec coverage <wasm>`    | Text or `--json` | How much of the contract our pipeline understands: control-flow **structuring** coverage (functions structured, loop shapes, labeled-exit tax), per-pattern recognition (storage tiers, enum keys, TTL, client calls, …), a two-number semantic-recovery headline, host-call recognition %, and recogniser-miss diagnostics |
 | `sordec score <reconstructed> <original>` | Text or `--json` | Accuracy of a reconstructed Rust source (file or directory) against the original: four independently-reported categories (interface / structure / semantic / behavior), an overall weighted score, and a pass/fail verdict. `--check-compile` evaluates the compilation *gate* — a real `cargo check`, reported separately: it earns no share of the score but a reconstruction that does not build fails regardless. `--behavior <ORIGINAL_WASM>` measures the behavior category by differential execution against the deployed contract's own wasm; it reports a match rate that always travels with its coverage fraction. Entrypoints it cannot construct arguments for are reported as skipped, with the reason, rather than silently dropped from the denominator. The measuring instrument for the Rust emitter |
 
-What's coming next:
+What comes after `v0.1.0`:
 
-- **Contracts it has never seen.** Neither third-party contract compiles yet
-  (9 and 45 errors), and that is the number that matters most.
-- **The remaining three held-out contracts.** `other_custom_types` 18 errors,
-  `fuzzing` 8, `account` 3.
-- **Values passed between helpers by pointer.** Unoptimised builds pass storage
-  keys and decoded structs through memory, and the decompiler cannot always
-  follow them across a call yet. This is most of what still separates
-  `mint-lock`, `fuzzing` and `account` from their sources.
-- **Behaviour on the held-out and third-party sets**, not just the corpus.
+- **Values held in memory, as typed values.** Unoptimised and outlined code
+  passes structs, enums and keys between helpers through the stack frame.
+  sordec follows many of these shapes one by one; a general model of the frame
+  as typed values is what lets the treasury run, and what clears most remaining
+  gaps.
+- **Types worked out across the whole program**, from the contract's interface
+  description and the host functions' signatures, instead of rule by rule.
+- **The last seven compile errors** (`privacy_pools`, Phoenix's `vesting`).
+- **Behaviour on the Stellar examples and third-party contracts**, which needs
+  a protocol 27 host in the harness.
 
 ## Quick start
 
@@ -357,8 +368,8 @@ cargo doc --workspace --no-deps                               # warning-free
 bash tools/verify-fixtures.sh                                 # 7/7 sha256 OK
 ```
 
-All gates green at every commit on `main`. No CI workflow yet; `tools/gate.sh`
-is the contract — it includes a warnings-as-errors *release* build, which
+All gates green at every commit on `main`. `tools/gate.sh` is the contract, and
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs it — it includes a warnings-as-errors *release* build, which
 catches warnings the dev-profile clippy run cannot see.
 
 ## Phase status
@@ -367,8 +378,8 @@ See [PHASE_1.md](PHASE_1.md), [PHASE_2.md](PHASE_2.md), [PHASE_3.md](PHASE_3.md)
 and [PHASE_4.md](PHASE_4.md) for the per-phase scope, the verification recipe
 (≤ 5 min from a clean clone), and the acceptance evidence.
 
-All four phases are complete on `main` and ship as `v0.1.0-alpha.1`. What
-remains is not a missing phase but output quality — see
+All four phases are complete and ship as `v0.1.0`. What remains is not a
+missing phase but output quality — see
 [Where it actually stands](#where-it-actually-stands) and
 [CHANGELOG.md](CHANGELOG.md).
 

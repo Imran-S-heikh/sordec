@@ -8,20 +8,37 @@ follow [Semantic Versioning][semver].
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-11-01
+
 ### Reconstruction quality
 
-Measured 2026-10-28 with `score-2.2.0`; the alpha's own numbers are kept in
-its section below.
+Measured 2026-11-01 with `score-2.2.0`; the alpha's own numbers are kept in
+its section below. Full write-up: [`docs/acceptance.md`](docs/acceptance.md).
 
-| | alpha.1 | now |
+| | alpha.1 | 0.1.0 |
 |---|---|---|
 | Reference corpus: recompiles | 2 of 7 | **7 of 7** |
-| Reference corpus: overall score | 0.6108 | **0.9389** |
-| Reference corpus: structure | 0.14 | **0.94** |
+| Reference corpus: overall score | 0.6108 | **0.9359** |
+| Reference corpus: structure | 0.14 | **0.92** |
 | Reference corpus: behaviour measured on | 2 of 7 | **6 of 7** (0.93) |
-| Held-out 25 (`soroban-examples`): recompiles | — | **22 of 25** |
-| Held-out 25: overall score | — | **0.7850** |
-| Third-party unseen (2): overall score | — | **0.53** (0 of 2 recompile) |
+| Stellar `soroban-examples`, 25 single-contract: recompile | — | **25 of 25** |
+| Stellar `soroban-examples`, 25 single-contract: overall score | — | **0.7915** |
+| Stellar `soroban-examples`, 13 multi-contract: recompile | — | **12 of 13** (score 0.6643) |
+| Third-party (2): recompile | — | **1 of 2** (score 0.5277) |
+| soroban-sdk 26.0.1's own 39 test contracts: recompile | — | **39 of 39** |
+| Authored treasury: recompiles | — | **yes** (behaviour 0 of 16, see below) |
+| Compile errors across all 87 | — | **7** |
+| `todo!()` gaps across all 87 | — | **5,816** |
+
+The reference score was 0.9389 until 2026-10-31, when a value chosen between two
+others began printing as the `if`/`else` it is; that is the source's own logic,
+but the scorer counts one branch more on `timelock` (1.0000 to 0.9790). The
+wrap-up week (2026-10-29 to 11-01) took compile errors across these sets from
+257 to 7 and gaps from about 10,600 to 5,375 on the 86 contracts measured then: enum and struct codecs moved
+through stack frames, `Result`/`Option` plumbing through helpers, sign and width
+of machine words, fixed-size byte arrays, events and auth contexts, protocol 27
+delegated-account calls. Each step is logged with its measurements in
+[`docs/benchmarks/wrapup-log.md`](docs/benchmarks/wrapup-log.md).
 
 About 0.08 of the corpus rise is the `score-2.1.0` change below; the rest is
 the decompiler. The held-out mean was 0.7570 when last measured (2026-10-08):
@@ -45,6 +62,22 @@ decompiler. The bulk of the work since the alpha:
   parameters and constructors, and found three real output bugs on its first
   full run (event topics, symbol literals, a constructor hole).
 - **Host catalog** re-vendored to `soroban-env-common` 27.0.1 (protocol 27).
+
+### Known limitations
+
+- **Compiling is not running.** A reconstruction that still contains `todo!()`
+  panics when it reaches one. The authored treasury compiles but its rebuilt
+  functions start at a stack-pointer setup sordec does not recover, so its
+  constructor panics and behaviour is 0 of 16 entrypoints.
+- **Values held in memory** (structs, enums and keys passed between helpers
+  through the stack frame) are followed shape by shape, not by a general model;
+  most remaining gaps are here, and in library maths compiled into the binary
+  (`import_ark_bn254` alone has 2,073).
+- **7 compile errors** remain: `privacy_pools` 1, Phoenix `vesting` 6.
+- **Behaviour is measured on the reference corpus only**; the Stellar examples
+  need a protocol 27 host.
+- **Output is not yet byte-for-byte reproducible**: on one contract a
+  synthesised variable number can differ between runs.
 
 ### Scorer: `score-2.2.0`
 
@@ -240,5 +273,6 @@ Stated plainly because the alternative is a tool that looks better than it is.
 - Minimum supported Rust version: **1.91**, set by `soroban-spec` /
   `soroban-meta` 25.3.x rather than by our own code, whose floor is 1.87.
 
-[Unreleased]: https://github.com/Imran-S-heikh/sordec/compare/v0.1.0-alpha.1...HEAD
+[Unreleased]: https://github.com/Imran-S-heikh/sordec/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Imran-S-heikh/sordec/compare/v0.1.0-alpha.1...v0.1.0
 [0.1.0-alpha.1]: https://github.com/Imran-S-heikh/sordec/releases/tag/v0.1.0-alpha.1

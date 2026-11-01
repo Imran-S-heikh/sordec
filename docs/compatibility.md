@@ -111,7 +111,7 @@ Exercised in the corpus:
 One or two minor versions per major. Nothing here establishes behaviour across
 the whole of a major line.
 
-Measured beyond the corpus (2026-10-29; counts in
+Measured beyond the corpus (2026-11-01; counts in
 [`benchmarks/wrapup-log.md`](benchmarks/wrapup-log.md), results in
 [`acceptance.md`](acceptance.md)):
 
@@ -120,11 +120,13 @@ Measured beyond the corpus (2026-10-29; counts in
 | 26.0.1 | the SDK's own 39 test contracts | `tools/build_sdk_tests.sh` (rustc 1.95, pinned) |
 | 27 | 25 + 13 Stellar `soroban-examples` contracts | `tools/build_heldout.sh` (examples `1f5aeb5`, rustc 1.97, pinned) |
 | as pinned by each project | two third-party contracts | `tools/build_unseen.sh` |
+| 23.0.1 | the authored treasury | `samples/authored/treasury/build.sh` (rustc 1.89, pinned) |
 
-The SDK 26 set is the one with the most compile failures (20 of 39 recompile):
-its codec for enums with payloads and for structs moved through a stack frame is
-a shape the marshalling passes do not yet recognise, and it is where that work is
-measured.
+All 39 of the SDK 26 set recompile (17 of 39 on 2026-10-29). Its codec for enums
+with payloads and for structs moved through a stack frame was where that part of
+the wrap-up was measured; 343 `todo!()` gaps remain across the set. Of the 87
+contracts measured, 85 recompile; the two that do not are `privacy_pools` (1
+error) and Phoenix's `vesting` (6).
 
 ```bash
 sordec dump-facts samples/contracts/token-v23/token-v23.wasm \

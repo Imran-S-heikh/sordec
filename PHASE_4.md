@@ -20,6 +20,13 @@
 > third-party contracts score 0.53. The wrap-up toward `v0.1.0` is logged in
 > [`docs/benchmarks/wrapup-log.md`](docs/benchmarks/wrapup-log.md).
 
+> **Update, 2026-11-01 — `v0.1.0`.** The reference corpus scores 0.9359 (0.9366
+> with behaviour) with 7 of 7 recompiling. 85 of the 87 contracts measured now
+> recompile, including all 25 single-contract Stellar examples (0.7915) and the
+> SDK's own 39 test contracts. Results, caveats and a comparison with soroban-ret:
+> [`docs/acceptance.md`](docs/acceptance.md),
+> [`docs/benchmarks/comparison.md`](docs/benchmarks/comparison.md).
+
 This document records what Phase 4 was scoped to deliver, what landed, what
 did **not** reach its target, and how to verify all of it end-to-end from a
 clean clone. It mirrors [PHASE_1.md](PHASE_1.md), [PHASE_2.md](PHASE_2.md) and

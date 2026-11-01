@@ -1097,3 +1097,19 @@ entrypoints: the rebuilt constructor starts at an unrecovered stack-pointer setu
 nothing can be compared yet. Its overall score is 0.5677; 0.6659 before, when behaviour could not
 be measured and was left out. phoenix-vesting 8 → 6 errors. Errors outside the treasury 9 → 7;
 corpus byte-identical; held-out mean 0.7915.
+
+## 2026-11-01 — v0.1.0 (final measurement)
+
+Code as at 3b78442. Scores with `score-2.2.0` (`heldout_bench`, macro-expanded basis):
+
+| Set | Contracts | Compile | Errors | Holes | Score |
+|---|---:|---:|---:|---:|---:|
+| reference corpus | 7 | 7/7 | 0 | 80 | 0.9359 (report.md) |
+| Stellar examples, single-crate | 25 | 25/25 | 0 | 3,165 | 0.7915 |
+| Stellar examples, multi-contract | 13 | 12/13 | 1 | 1,290 | 0.6643 |
+| third-party | 2 | 1/2 | 6 | 497 | 0.5277 |
+| SDK 26 test contracts | 39 | 39/39 | 0 | 343 | not scored |
+| authored | 1 | 1/1 | 0 | 441 | 0.5677 (behaviour 0 of 16) |
+
+Since the wrap-up started (d6e0f94, 86 contracts): compile 55 → 84 of 86, errors 257 → 7, holes
+~10,600 → 5,375. Comparison with soroban-ret: [`comparison.md`](comparison.md).
